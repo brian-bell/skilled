@@ -93,6 +93,7 @@ pub enum UpdateOutcome {
 pub enum Effect {
     PersistSetup { agent_selections: [bool; 3] },
     ResetSetup,
+    RedetectAgents { agent_selections: [bool; 3] },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -128,6 +129,7 @@ impl UpdateResult {
 pub struct SkilledApp {
     view: View,
     store: Store,
+    environment: AppEnvironment,
     agents: [AgentDetection; 3],
     focused_agent: usize,
 }
@@ -149,6 +151,7 @@ impl SkilledApp {
         Ok(Self {
             view,
             store,
+            environment,
             agents,
             focused_agent: 0,
         })
@@ -171,25 +174,25 @@ impl SkilledApp {
     }
 
     pub fn update(&mut self, action: Action) -> UpdateResult {
-        let effect = match action {
-            Action::Continue => self.advance_setup(),
+        let effects = match action {
+            Action::Continue => self.advance_setup().into_iter().collect(),
             Action::Back => return self.back(),
             Action::MoveSelection(delta) => {
                 self.move_selection(delta);
-                None
+                Vec::new()
             }
             Action::ToggleSelection => {
                 self.toggle_selection();
-                None
+                Vec::new()
             }
             Action::OpenSettings => {
                 self.open_settings();
-                None
+                Vec::new()
             }
             Action::RerunSetup => self.rerun_setup(),
             Action::Quit => return UpdateResult::quit(),
         };
-        UpdateResult::continuing(effect.into_iter().collect())
+        UpdateResult::continuing(effects)
     }
 
     pub fn perform_effects(&mut self, effects: &[Effect]) -> Result<()> {
@@ -199,6 +202,13 @@ impl SkilledApp {
                     self.store.complete_setup(*agent_selections)?;
                 }
                 Effect::ResetSetup => self.store.set_setup_complete(false)?,
+                Effect::RedetectAgents { agent_selections } => {
+                    let mut detections = detect_agents(&self.environment);
+                    for (detection, selected) in detections.iter_mut().zip(agent_selections) {
+                        detection.set_selected(*selected);
+                    }
+                    self.agents = detections;
+                }
             }
         }
         Ok(())
@@ -210,12 +220,17 @@ impl SkilledApp {
         }
     }
 
-    fn rerun_setup(&mut self) -> Option<Effect> {
+    fn rerun_setup(&mut self) -> Vec<Effect> {
         if self.view == View::Settings {
             self.view = View::Setup(SetupStep::Welcome);
-            return Some(Effect::ResetSetup);
+            return vec![
+                Effect::ResetSetup,
+                Effect::RedetectAgents {
+                    agent_selections: self.agents.each_ref().map(|agent| agent.selected()),
+                },
+            ];
         }
-        None
+        Vec::new()
     }
 
     fn back(&mut self) -> UpdateResult {

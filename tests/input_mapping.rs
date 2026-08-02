@@ -45,6 +45,13 @@ fn keys_map_to_contextual_actions_without_mutating_application_state() {
     );
 }
 
+#[test]
+fn actions_remain_copyable_values() {
+    fn assert_copy<T: Copy>() {}
+
+    assert_copy::<Action>();
+}
+
 fn key(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)
 }
