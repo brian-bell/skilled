@@ -5,7 +5,7 @@ use skilled::{Action, AppEnvironment, SkilledApp};
 fn first_run_welcome_at_minimum_supported_size() {
     let temporary = tempfile::tempdir().expect("temporary application directory");
     let app = SkilledApp::open(AppEnvironment::new(
-        "/tmp/skilled-test-home",
+        temporary.path().join("home"),
         temporary.path().join("data"),
         "",
     ))
@@ -18,7 +18,7 @@ fn first_run_welcome_at_minimum_supported_size() {
 fn first_run_welcome_at_wide_size() {
     let temporary = tempfile::tempdir().expect("temporary application directory");
     let app = SkilledApp::open(AppEnvironment::new(
-        "/tmp/skilled-test-home",
+        temporary.path().join("home"),
         temporary.path().join("data"),
         "",
     ))
@@ -31,7 +31,7 @@ fn first_run_welcome_at_wide_size() {
 fn undersized_terminal_shows_a_recoverable_notice() {
     let temporary = tempfile::tempdir().expect("temporary application directory");
     let app = SkilledApp::open(AppEnvironment::new(
-        "/tmp/skilled-test-home",
+        temporary.path().join("home"),
         temporary.path().join("data"),
         "",
     ))
@@ -44,7 +44,7 @@ fn undersized_terminal_shows_a_recoverable_notice() {
 fn detected_agents_and_selection_fit_at_minimum_supported_size() {
     let temporary = tempfile::tempdir().expect("temporary application directory");
     let mut app = SkilledApp::open(AppEnvironment::new(
-        "/tmp/skilled-test-home",
+        temporary.path().join("home"),
         temporary.path().join("data"),
         "",
     ))

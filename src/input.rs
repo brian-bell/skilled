@@ -6,24 +6,30 @@ pub fn action_for_key(view: View, key: KeyEvent) -> Option<Action> {
     if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
         return None;
     }
-    if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
-        return Some(Action::Quit);
-    }
-    if key.code == KeyCode::Char('q') && view != View::Settings {
-        return Some(Action::Quit);
-    }
+    let action = if (key.code == KeyCode::Char('c')
+        && key.modifiers.contains(KeyModifiers::CONTROL))
+        || (key.code == KeyCode::Char('q') && view != View::Settings)
+    {
+        Some(Action::Quit)
+    } else {
+        match view {
+            View::Setup(step) => setup_action(step, key.code),
+            View::Inventory => match key.code {
+                KeyCode::Char('s') => Some(Action::OpenSettings),
+                _ => None,
+            },
+            View::Settings => match key.code {
+                KeyCode::Enter => Some(Action::RerunSetup),
+                KeyCode::Esc => Some(Action::Back),
+                _ => None,
+            },
+        }
+    };
 
-    match view {
-        View::Setup(step) => setup_action(step, key.code),
-        View::Inventory => match key.code {
-            KeyCode::Char('s') => Some(Action::OpenSettings),
-            _ => None,
-        },
-        View::Settings => match key.code {
-            KeyCode::Enter => Some(Action::RerunSetup),
-            KeyCode::Esc => Some(Action::Back),
-            _ => None,
-        },
+    match (key.kind, action) {
+        (KeyEventKind::Repeat, Some(Action::MoveSelection(_))) => action,
+        (KeyEventKind::Repeat, _) => None,
+        _ => action,
     }
 }
 
