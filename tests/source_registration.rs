@@ -380,6 +380,41 @@ fn confirmation_rejects_a_source_that_changed_after_preview() {
     assert!(app.sources().is_empty());
 }
 
+#[test]
+fn confirmation_rejects_catalog_changes_when_the_checkout_was_already_dirty() {
+    let temporary = tempfile::tempdir().expect("temporary application directory");
+    let repository = temporary.path().join("source");
+    fs::create_dir_all(repository.join("skills/portable")).expect("create common catalog");
+    let skill_md = repository.join("skills/portable/SKILL.md");
+    fs::write(
+        &skill_md,
+        "---\nname: portable\ndescription: fixture\n---\n# Original\n",
+    )
+    .expect("write skill");
+    initialize_repository(&repository);
+    fs::write(repository.join("dirty.txt"), "already dirty\n").expect("make checkout dirty");
+    let mut app = SkilledApp::open(AppEnvironment::new(
+        temporary.path().join("home"),
+        temporary.path().join("data"),
+        "",
+    ))
+    .expect("open application");
+    let preview = app
+        .preview_source(&repository)
+        .expect("preview dirty source");
+    assert!(preview.inspected().dirty());
+    fs::write(
+        &skill_md,
+        "---\nname: portable\ndescription: fixture\n---\n# Changed\n",
+    )
+    .expect("change catalog after preview");
+
+    let result = app.confirm_source(preview);
+
+    assert!(result.is_err());
+    assert!(app.sources().is_empty());
+}
+
 fn initialize_repository(repository: &Path) {
     git(repository, &["init", "-b", "main"]);
     git(repository, &["config", "user.name", "Skilled Test"]);

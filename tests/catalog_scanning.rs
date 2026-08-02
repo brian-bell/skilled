@@ -80,6 +80,26 @@ fn catalog_candidate_enumeration_has_a_hard_limit() {
     ));
 }
 
+#[test]
+fn skill_document_existence_checks_share_the_scan_budget() {
+    let temporary = tempfile::tempdir().expect("temporary source repository");
+    let repository = temporary.path();
+    write_skill(repository.join("skills/valid/SKILL.md"), "valid");
+    let crowded = repository.join("skills/a-crowded");
+    fs::create_dir_all(&crowded).expect("create crowded candidate");
+    for index in 0..4_097 {
+        fs::write(crowded.join(format!("file-{index}")), "fixture")
+            .expect("write crowded candidate entry");
+    }
+
+    let result = propose_catalogs(repository);
+
+    assert!(matches!(
+        result,
+        Err(skilled::Error::SourceScanLimitExceeded)
+    ));
+}
+
 fn write_skill(path: impl AsRef<std::path::Path>, name: &str) {
     let path = path.as_ref();
     fs::create_dir_all(path.parent().expect("skill parent")).expect("create skill directory");

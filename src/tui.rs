@@ -227,7 +227,7 @@ fn render_sources(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
                 } else {
                     " "
                 },
-                source.label(),
+                terminal_safe(source.label()),
                 if source.dirty() { "dirty" } else { "clean" }
             )));
         }
@@ -251,30 +251,34 @@ fn render_sources(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
     };
     let mut lines = vec![
         Line::styled(
-            source.git_top_level().display().to_string(),
+            terminal_safe(&source.git_top_level().display().to_string()),
             Style::default().add_modifier(Modifier::BOLD),
         ),
         Line::from(format!(
             "{} · {} · {} · scanned {}",
-            source.branch().unwrap_or("detached"),
+            terminal_safe(source.branch().unwrap_or("detached")),
             &source.head()[..source.head().len().min(8)],
             if source.dirty() { "dirty" } else { "clean" },
             source.last_scan_at()
         )),
     ];
     if let Some(remote) = source.remote_url() {
-        lines.push(Line::from(format!("Remote: {remote}")));
+        lines.push(Line::from(format!("Remote: {}", terminal_safe(remote))));
     }
     if let Some(error) = source.source_error() {
         lines.push(Line::styled(
-            format!("× Source unavailable — {error}"),
+            format!("× Source unavailable — {}", terminal_safe(error)),
             Style::default().fg(Color::Red),
         ));
     } else {
         for catalog in source.catalogs() {
             if let Some(error) = catalog.scan_error() {
                 lines.push(Line::styled(
-                    format!("× {} — {error}", catalog.relative_path().display()),
+                    format!(
+                        "× {} — {}",
+                        terminal_safe(&catalog.relative_path().display().to_string()),
+                        terminal_safe(error)
+                    ),
                     Style::default().fg(Color::Red),
                 ));
             }
@@ -309,8 +313,8 @@ fn render_sources(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
             } else {
                 " "
             },
-            candidate.directory_name(),
-            catalog.relative_path().display()
+            terminal_safe(candidate.directory_name()),
+            terminal_safe(&catalog.relative_path().display().to_string())
         )));
     }
     if let Some((catalog, selected)) = variants.get(app.focused_variant()) {
@@ -328,11 +332,11 @@ fn render_sources(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
         )));
         match selected.validation() {
             SkillValidation::Valid { description, .. } => {
-                lines.push(Line::from(description.to_owned()));
+                lines.push(Line::from(terminal_safe(description)));
             }
             SkillValidation::Invalid { message } => {
                 lines.push(Line::styled(
-                    message.to_owned(),
+                    terminal_safe(message),
                     Style::default().fg(Color::Red),
                 ));
             }
@@ -359,7 +363,7 @@ fn render_source_path_entry(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp)
     if let Some(error) = app.source_error() {
         lines.push(Line::default());
         lines.push(Line::styled(
-            error.to_owned(),
+            terminal_safe(error),
             Style::default().fg(Color::Red),
         ));
     }
@@ -397,10 +401,13 @@ fn catalog_confirmation_lines(app: &SkilledApp) -> Vec<Line<'static>> {
     if let Some(preview) = app.pending_source() {
         let source = preview.inspected();
         lines.extend([
-            Line::from(format!("Repository: {}", source.git_top_level().display())),
+            Line::from(format!(
+                "Repository: {}",
+                terminal_safe(&source.git_top_level().display().to_string())
+            )),
             Line::from(format!(
                 "Branch: {}   HEAD: {}   {}",
-                source.branch().unwrap_or("detached"),
+                terminal_safe(source.branch().unwrap_or("detached")),
                 &source.head()[..source.head().len().min(8)],
                 if source.dirty() { "dirty" } else { "clean" }
             )),
@@ -423,7 +430,7 @@ fn catalog_confirmation_lines(app: &SkilledApp) -> Vec<Line<'static>> {
                     " "
                 },
                 if catalog.included() { "x" } else { " " },
-                catalog.relative_path().display(),
+                terminal_safe(&catalog.relative_path().display().to_string()),
                 catalog.classification(),
                 yes_no(catalog.compatibility().claude_code()),
                 yes_no(catalog.compatibility().codex()),
@@ -434,7 +441,7 @@ fn catalog_confirmation_lines(app: &SkilledApp) -> Vec<Line<'static>> {
     if let Some(error) = app.source_error() {
         lines.push(Line::default());
         lines.push(Line::styled(
-            error.to_owned(),
+            terminal_safe(error),
             Style::default().fg(Color::Red),
         ));
     }
@@ -448,6 +455,18 @@ fn catalog_confirmation_lines(app: &SkilledApp) -> Vec<Line<'static>> {
 
 fn yes_no(value: bool) -> &'static str {
     if value { "yes" } else { "no" }
+}
+
+fn terminal_safe(value: &str) -> String {
+    let mut safe = String::with_capacity(value.len());
+    for character in value.chars() {
+        if character.is_control() {
+            safe.extend(character.escape_default());
+        } else {
+            safe.push(character);
+        }
+    }
+    safe
 }
 
 fn render_settings(frame: &mut Frame<'_>, area: Rect) {

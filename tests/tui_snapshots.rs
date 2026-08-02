@@ -191,6 +191,43 @@ fn sources_show_the_persisted_catalog_classification_and_compatibility() {
 }
 
 #[test]
+fn sources_escape_control_characters_from_skill_metadata() {
+    let temporary = tempfile::tempdir().expect("temporary application directory");
+    let repository = temporary.path().join("source");
+    fs::create_dir_all(repository.join("skills/portable")).expect("create skill directory");
+    fs::write(
+        repository.join("skills/portable/SKILL.md"),
+        "---\nname: portable\ndescription: \"fixture\\u001b]8;;https://example.test\"\n---\n# Fixture\n",
+    )
+    .expect("write control-character fixture");
+    git(&repository, &["init", "-b", "main"]);
+    git(&repository, &["config", "user.name", "Skilled Test"]);
+    git(
+        &repository,
+        &["config", "user.email", "skilled@example.test"],
+    );
+    git(&repository, &["add", "."]);
+    git(&repository, &["commit", "-m", "fixture"]);
+    let mut app = SkilledApp::open(AppEnvironment::new(
+        temporary.path().join("home"),
+        temporary.path().join("data"),
+        "",
+    ))
+    .expect("open application");
+    let preview = app.preview_source(&repository).expect("preview source");
+    app.confirm_source(preview).expect("confirm source");
+    for _ in 0..7 {
+        dispatch(&mut app, Action::Continue);
+    }
+    app.update(Action::OpenSources);
+
+    let screen = render(&app, 120, 40);
+
+    assert!(!screen.contains('\u{1b}'));
+    assert!(screen.contains("fixture\\u{1b}]8;;https://example.test"));
+}
+
+#[test]
 fn sources_keeps_a_variant_selection_visible_beyond_the_first_viewport() {
     let temporary = tempfile::tempdir().expect("temporary application directory");
     let repository = temporary.path().join("source");

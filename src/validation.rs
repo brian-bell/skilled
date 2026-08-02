@@ -11,6 +11,7 @@ use serde_yaml_ng::Value;
 use thiserror::Error;
 
 const MAX_SKILL_MD_BYTES: usize = 1024 * 1024;
+const MAX_SKILL_DIRECTORY_ENTRIES: usize = 4_096;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ValidatedSkill {
@@ -52,6 +53,8 @@ pub enum PortableValidationError {
     UnreadableSkillMd(#[source] std::io::Error),
     #[error("SKILL.md exceeds the {max_bytes}-byte inspection limit")]
     SkillMdTooLarge { max_bytes: usize },
+    #[error("skill directory exceeds the {max_entries}-entry inspection limit")]
+    SkillDirectoryTooLarge { max_entries: usize },
     #[error("SKILL.md must begin with YAML frontmatter")]
     MissingFrontmatter,
     #[error("SKILL.md YAML frontmatter is not terminated")]
@@ -138,7 +141,12 @@ fn exact_skill_md(skill_directory: &Path) -> Result<PathBuf, PortableValidationE
             path: skill_directory.to_path_buf(),
             source,
         })?;
-    for entry in entries {
+    for (index, entry) in entries.enumerate() {
+        if index == MAX_SKILL_DIRECTORY_ENTRIES {
+            return Err(PortableValidationError::SkillDirectoryTooLarge {
+                max_entries: MAX_SKILL_DIRECTORY_ENTRIES,
+            });
+        }
         let entry = entry.map_err(|source| PortableValidationError::ReadDirectory {
             path: skill_directory.to_path_buf(),
             source,
