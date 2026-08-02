@@ -9,7 +9,7 @@ pub mod terminal;
 pub mod tui;
 
 pub use agents::{AgentDetection, AgentKind};
-pub use app::{Action, SetupStep, SkilledApp, UpdateOutcome, View};
+pub use app::{Action, Effect, SetupStep, SkilledApp, UpdateOutcome, UpdateResult, View};
 pub use error::{Error, Result};
 pub use paths::AppEnvironment;
 pub use runner::run;

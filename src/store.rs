@@ -58,7 +58,7 @@ impl Store {
         Ok(Some(selections))
     }
 
-    pub(crate) fn set_agent_selections(&mut self, selections: [bool; 3]) -> Result<()> {
+    pub(crate) fn complete_setup(&mut self, selections: [bool; 3]) -> Result<()> {
         let transaction = self.connection.transaction()?;
         for (agent, selected) in ["claude-code", "codex", "opencode"]
             .into_iter()
@@ -70,6 +70,11 @@ impl Store {
                 params![agent, selected],
             )?;
         }
+        transaction.execute(
+            "INSERT INTO settings (key, value) VALUES ('setup_complete', 'true')
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [],
+        )?;
         transaction.commit()?;
         Ok(())
     }
@@ -77,6 +82,12 @@ impl Store {
 
 fn migrate(connection: &mut Connection) -> Result<()> {
     let current_version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    if current_version > SCHEMA_VERSION {
+        return Err(crate::Error::UnsupportedSchema {
+            found: current_version,
+            supported: SCHEMA_VERSION,
+        });
+    }
 
     if current_version < 1 {
         let transaction = connection.transaction()?;

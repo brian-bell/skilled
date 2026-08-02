@@ -1,5 +1,5 @@
 use ratatui::{Terminal, backend::TestBackend, buffer::Buffer};
-use skilled::{AppEnvironment, SkilledApp};
+use skilled::{Action, AppEnvironment, SkilledApp};
 
 #[test]
 fn first_run_welcome_at_minimum_supported_size() {
@@ -38,6 +38,22 @@ fn undersized_terminal_shows_a_recoverable_notice() {
     .expect("open application");
 
     insta::assert_snapshot!(render(&app, 60, 14));
+}
+
+#[test]
+fn detected_agents_and_selection_fit_at_minimum_supported_size() {
+    let temporary = tempfile::tempdir().expect("temporary application directory");
+    let mut app = SkilledApp::open(AppEnvironment::new(
+        "/tmp/skilled-test-home",
+        temporary.path().join("data"),
+        "",
+    ))
+    .expect("open application");
+    app.update(Action::Continue);
+    app.update(Action::MoveSelection(1));
+    app.update(Action::ToggleSelection);
+
+    insta::assert_snapshot!(render(&app, 80, 24));
 }
 
 fn render(app: &SkilledApp, width: u16, height: u16) -> String {

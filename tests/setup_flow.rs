@@ -13,7 +13,7 @@ fn completing_setup_makes_inventory_the_next_startup_view() {
     assert_eq!(first_launch.view(), View::Setup(SetupStep::Welcome));
 
     for _ in 0..7 {
-        first_launch.advance_setup().expect("advance setup");
+        dispatch(&mut first_launch, Action::Continue);
     }
     assert_eq!(first_launch.view(), View::Inventory);
     drop(first_launch);
@@ -32,12 +32,12 @@ fn settings_can_rerun_setup_and_persist_that_choice() {
     );
     let mut app = SkilledApp::open(environment.clone()).expect("open application");
     for _ in 0..7 {
-        app.advance_setup().expect("complete setup");
+        dispatch(&mut app, Action::Continue);
     }
 
-    app.open_settings();
+    dispatch(&mut app, Action::OpenSettings);
     assert_eq!(app.view(), View::Settings);
-    app.rerun_setup().expect("rerun setup");
+    dispatch(&mut app, Action::RerunSetup);
     assert_eq!(app.view(), View::Setup(SetupStep::Welcome));
     drop(app);
 
@@ -55,11 +55,11 @@ fn setup_persists_the_configured_agent_selection() {
     );
     let mut app = SkilledApp::open(environment.clone()).expect("open application");
 
-    app.update(Action::Continue).expect("open agent selection");
-    app.update(Action::MoveSelection(1)).expect("focus Codex");
-    app.update(Action::ToggleSelection).expect("disable Codex");
+    dispatch(&mut app, Action::Continue);
+    dispatch(&mut app, Action::MoveSelection(1));
+    dispatch(&mut app, Action::ToggleSelection);
     for _ in 0..6 {
-        app.update(Action::Continue).expect("complete setup");
+        dispatch(&mut app, Action::Continue);
     }
     drop(app);
 
@@ -67,4 +67,10 @@ fn setup_persists_the_configured_agent_selection() {
     assert!(reopened.agent(AgentKind::ClaudeCode).selected());
     assert!(!reopened.agent(AgentKind::Codex).selected());
     assert!(reopened.agent(AgentKind::OpenCode).selected());
+}
+
+fn dispatch(app: &mut SkilledApp, action: Action) {
+    let update = app.update(action);
+    app.perform_effects(update.effects())
+        .expect("perform effects");
 }

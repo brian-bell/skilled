@@ -8,6 +8,8 @@ pub enum Error {
     Io(#[from] io::Error),
     #[error("application metadata operation failed: {0}")]
     Database(#[from] rusqlite::Error),
+    #[error("application metadata schema {found} is newer than supported schema {supported}")]
+    UnsupportedSchema { found: i64, supported: i64 },
     #[error("the current user's home directory could not be determined")]
     HomeDirectoryUnavailable,
     #[error("the platform application-data directory could not be determined")]

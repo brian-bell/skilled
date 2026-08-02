@@ -1,0 +1,28 @@
+---
+source: tests/tui_snapshots.rs
+expression: "render(&app, 80, 24)"
+---
+ Skilled   Setup · Detect agents
+┌ Step 2 of 7 ─────────────────────────────────────────────────────────────────┐
+│                                                                              │
+│  Detect agents                                                               │
+│                                                                              │
+│  All supported agents are selected by default.                               │
+│                                                                              │
+│    [x] Claude Code  root not found     executable not found                  │
+│  > [ ] Codex        root not found     executable not found                  │
+│    [x] OpenCode     root not found     executable not found                  │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+          j/k Move   Space Toggle   Enter Continue   Esc Back   q Quit

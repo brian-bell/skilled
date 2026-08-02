@@ -25,7 +25,9 @@ pub fn run(environment: AppEnvironment) -> Result<()> {
         let Some(action) = action_for_key(app.view(), key) else {
             continue;
         };
-        if app.update(action)? == UpdateOutcome::Quit {
+        let update = app.update(action);
+        app.perform_effects(update.effects())?;
+        if update.outcome() == UpdateOutcome::Quit {
             break;
         }
     }

@@ -89,6 +89,42 @@ pub enum UpdateOutcome {
     Quit,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Effect {
+    PersistSetup { agent_selections: [bool; 3] },
+    ResetSetup,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UpdateResult {
+    outcome: UpdateOutcome,
+    effects: Vec<Effect>,
+}
+
+impl UpdateResult {
+    fn continuing(effects: Vec<Effect>) -> Self {
+        Self {
+            outcome: UpdateOutcome::Continue,
+            effects,
+        }
+    }
+
+    fn quit() -> Self {
+        Self {
+            outcome: UpdateOutcome::Quit,
+            effects: Vec::new(),
+        }
+    }
+
+    pub fn outcome(&self) -> UpdateOutcome {
+        self.outcome
+    }
+
+    pub fn effects(&self) -> &[Effect] {
+        &self.effects
+    }
+}
+
 pub struct SkilledApp {
     view: View,
     store: Store,
@@ -134,17 +170,38 @@ impl SkilledApp {
         self.focused_agent
     }
 
-    pub fn update(&mut self, action: Action) -> Result<UpdateOutcome> {
-        match action {
-            Action::Continue => self.advance_setup()?,
-            Action::Back => return Ok(self.back()),
-            Action::MoveSelection(delta) => self.move_selection(delta),
-            Action::ToggleSelection => self.toggle_selection(),
-            Action::OpenSettings => self.open_settings(),
-            Action::RerunSetup => self.rerun_setup()?,
-            Action::Quit => return Ok(UpdateOutcome::Quit),
+    pub fn update(&mut self, action: Action) -> UpdateResult {
+        let effect = match action {
+            Action::Continue => self.advance_setup(),
+            Action::Back => return self.back(),
+            Action::MoveSelection(delta) => {
+                self.move_selection(delta);
+                None
+            }
+            Action::ToggleSelection => {
+                self.toggle_selection();
+                None
+            }
+            Action::OpenSettings => {
+                self.open_settings();
+                None
+            }
+            Action::RerunSetup => self.rerun_setup(),
+            Action::Quit => return UpdateResult::quit(),
+        };
+        UpdateResult::continuing(effect.into_iter().collect())
+    }
+
+    pub fn perform_effects(&mut self, effects: &[Effect]) -> Result<()> {
+        for effect in effects {
+            match effect {
+                Effect::PersistSetup { agent_selections } => {
+                    self.store.complete_setup(*agent_selections)?;
+                }
+                Effect::ResetSetup => self.store.set_setup_complete(false)?,
+            }
         }
-        Ok(UpdateOutcome::Continue)
+        Ok(())
     }
 
     pub fn open_settings(&mut self) {
@@ -153,24 +210,24 @@ impl SkilledApp {
         }
     }
 
-    pub fn rerun_setup(&mut self) -> Result<()> {
+    fn rerun_setup(&mut self) -> Option<Effect> {
         if self.view == View::Settings {
-            self.store.set_setup_complete(false)?;
             self.view = View::Setup(SetupStep::Welcome);
+            return Some(Effect::ResetSetup);
         }
-        Ok(())
+        None
     }
 
-    fn back(&mut self) -> UpdateOutcome {
+    fn back(&mut self) -> UpdateResult {
         match self.view {
             View::Setup(step) => match step.previous() {
                 Some(previous) => self.view = View::Setup(previous),
-                None => return UpdateOutcome::Quit,
+                None => return UpdateResult::quit(),
             },
             View::Settings => self.view = View::Inventory,
             View::Inventory => {}
         }
-        UpdateOutcome::Continue
+        UpdateResult::continuing(Vec::new())
     }
 
     fn move_selection(&mut self, delta: i8) {
@@ -187,20 +244,22 @@ impl SkilledApp {
         }
     }
 
-    pub fn advance_setup(&mut self) -> Result<()> {
+    fn advance_setup(&mut self) -> Option<Effect> {
         let View::Setup(step) = self.view else {
-            return Ok(());
+            return None;
         };
 
-        self.view = match step.next() {
-            Some(next) => View::Setup(next),
-            None => {
-                self.store
-                    .set_agent_selections(self.agents.each_ref().map(|agent| agent.selected()))?;
-                self.store.set_setup_complete(true)?;
-                View::Inventory
+        match step.next() {
+            Some(next) => {
+                self.view = View::Setup(next);
+                None
             }
-        };
-        Ok(())
+            None => {
+                self.view = View::Inventory;
+                Some(Effect::PersistSetup {
+                    agent_selections: self.agents.each_ref().map(|agent| agent.selected()),
+                })
+            }
+        }
     }
 }
