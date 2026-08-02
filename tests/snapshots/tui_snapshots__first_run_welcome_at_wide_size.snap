@@ -1,0 +1,44 @@
+---
+source: tests/tui_snapshots.rs
+expression: "render(&app, 120, 40)"
+---
+ Skilled   Setup · Welcome and scope
+┌ Step 1 of 7 ─────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                                                                                                      │
+│  Welcome and scope                                                                                                   │
+│                                                                                                                      │
+│  Skilled manages global skills for Claude Code, Codex, and OpenCode.                                                 │
+│  It inventories local state and previews every filesystem mutation.                                                  │
+│                                                                                                                      │
+│  No coding agent is launched during setup or diagnosis.                                                              │
+│  Existing physical files, directories, and unknown links are never overwritten.                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+                                           Enter Continue   Esc Back   q Quit
