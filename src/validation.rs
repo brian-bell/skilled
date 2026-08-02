@@ -11,7 +11,39 @@ use serde_yaml_ng::Value;
 use thiserror::Error;
 
 const MAX_SKILL_MD_BYTES: usize = 1024 * 1024;
-const MAX_SKILL_DIRECTORY_ENTRIES: usize = 4_096;
+const MAX_SKILL_DIRECTORY_ENTRIES: usize = 1_024;
+const MAX_SOURCE_SCAN_ENTRIES: usize = 16_384;
+const MAX_SOURCE_SCAN_BYTES: usize = 32 * 1024 * 1024;
+
+pub(crate) struct InspectionBudget {
+    remaining_entries: usize,
+    remaining_bytes: usize,
+}
+
+impl InspectionBudget {
+    pub(crate) fn source_scan() -> Self {
+        Self {
+            remaining_entries: MAX_SOURCE_SCAN_ENTRIES,
+            remaining_bytes: MAX_SOURCE_SCAN_BYTES,
+        }
+    }
+
+    pub(crate) fn consume_entry(&mut self) -> bool {
+        if self.remaining_entries == 0 {
+            return false;
+        }
+        self.remaining_entries -= 1;
+        true
+    }
+
+    pub(crate) fn consume_bytes(&mut self, bytes: usize) -> bool {
+        let Some(remaining) = self.remaining_bytes.checked_sub(bytes) else {
+            return false;
+        };
+        self.remaining_bytes = remaining;
+        true
+    }
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ValidatedSkill {
@@ -55,6 +87,8 @@ pub enum PortableValidationError {
     SkillMdTooLarge { max_bytes: usize },
     #[error("skill directory exceeds the {max_entries}-entry inspection limit")]
     SkillDirectoryTooLarge { max_entries: usize },
+    #[error("source inspection exceeded its aggregate entry or byte limit")]
+    SourceInspectionLimitExceeded,
     #[error("SKILL.md must begin with YAML frontmatter")]
     MissingFrontmatter,
     #[error("SKILL.md YAML frontmatter is not terminated")]
@@ -82,7 +116,15 @@ struct Frontmatter {
 pub fn validate_portable_skill(
     skill_directory: &Path,
 ) -> Result<ValidatedSkill, PortableValidationError> {
-    let skill_md = exact_skill_md(skill_directory)?;
+    let mut budget = InspectionBudget::source_scan();
+    validate_portable_skill_with_budget(skill_directory, &mut budget)
+}
+
+pub(crate) fn validate_portable_skill_with_budget(
+    skill_directory: &Path,
+    budget: &mut InspectionBudget,
+) -> Result<ValidatedSkill, PortableValidationError> {
+    let skill_md = exact_skill_md(skill_directory, budget)?;
     let canonical_directory = skill_directory
         .canonicalize()
         .map_err(PortableValidationError::UnreadableSkillMd)?;
@@ -92,7 +134,7 @@ pub fn validate_portable_skill(
     if !canonical_skill_md.starts_with(&canonical_directory) {
         return Err(PortableValidationError::MissingSkillMd);
     }
-    let content = read_bounded_skill_md(&canonical_skill_md)?;
+    let content = read_bounded_skill_md(&canonical_skill_md, budget)?;
     let (frontmatter, body) = split_frontmatter(&content)?;
     let frontmatter: Frontmatter = serde_yaml_ng::from_str(frontmatter)?;
     let name = frontmatter
@@ -135,7 +177,10 @@ fn valid_name(name: &str) -> bool {
         })
 }
 
-fn exact_skill_md(skill_directory: &Path) -> Result<PathBuf, PortableValidationError> {
+fn exact_skill_md(
+    skill_directory: &Path,
+    budget: &mut InspectionBudget,
+) -> Result<PathBuf, PortableValidationError> {
     let entries =
         fs::read_dir(skill_directory).map_err(|source| PortableValidationError::ReadDirectory {
             path: skill_directory.to_path_buf(),
@@ -146,6 +191,9 @@ fn exact_skill_md(skill_directory: &Path) -> Result<PathBuf, PortableValidationE
             return Err(PortableValidationError::SkillDirectoryTooLarge {
                 max_entries: MAX_SKILL_DIRECTORY_ENTRIES,
             });
+        }
+        if !budget.consume_entry() {
+            return Err(PortableValidationError::SourceInspectionLimitExceeded);
         }
         let entry = entry.map_err(|source| PortableValidationError::ReadDirectory {
             path: skill_directory.to_path_buf(),
@@ -162,12 +210,18 @@ fn exact_skill_md(skill_directory: &Path) -> Result<PathBuf, PortableValidationE
     Err(PortableValidationError::MissingSkillMd)
 }
 
-fn read_bounded_skill_md(path: &Path) -> Result<String, PortableValidationError> {
+fn read_bounded_skill_md(
+    path: &Path,
+    budget: &mut InspectionBudget,
+) -> Result<String, PortableValidationError> {
     let file = File::open(path).map_err(PortableValidationError::UnreadableSkillMd)?;
     let mut bytes = Vec::new();
     file.take((MAX_SKILL_MD_BYTES + 1) as u64)
         .read_to_end(&mut bytes)
         .map_err(PortableValidationError::UnreadableSkillMd)?;
+    if !budget.consume_bytes(bytes.len()) {
+        return Err(PortableValidationError::SourceInspectionLimitExceeded);
+    }
     if bytes.len() > MAX_SKILL_MD_BYTES {
         return Err(PortableValidationError::SkillMdTooLarge {
             max_bytes: MAX_SKILL_MD_BYTES,

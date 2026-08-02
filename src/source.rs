@@ -8,11 +8,11 @@ use std::{
 use crate::{
     Error, Result,
     agents::AgentKind,
-    validation::{PortableValidationError, validate_portable_skill},
+    validation::{InspectionBudget, PortableValidationError, validate_portable_skill_with_budget},
 };
 
 const MAX_SCAN_DEPTH: usize = 12;
-const MAX_SCANNED_ENTRIES: usize = 4_096;
+const MAX_CATALOG_CANDIDATES: usize = 4_096;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CatalogClassification {
@@ -49,6 +49,18 @@ impl Compatibility {
     const OPENCODE: Self = Self {
         claude_code: false,
         codex: false,
+        opencode: true,
+    };
+
+    const CLAUDE_CODE_AND_OPENCODE: Self = Self {
+        claude_code: true,
+        codex: false,
+        opencode: true,
+    };
+
+    const CODEX_AND_OPENCODE: Self = Self {
+        claude_code: false,
+        codex: true,
         opencode: true,
     };
 
@@ -445,10 +457,10 @@ impl InspectedSource {
 
 pub fn propose_catalogs(git_top_level: &Path) -> Result<Vec<CatalogProposal>> {
     let git_top_level = git_top_level.canonicalize()?;
-    let mut root_entries = MAX_SCANNED_ENTRIES;
-    if exact_skill_md_exists(&git_top_level, &mut root_entries)? {
+    let mut budget = InspectionBudget::source_scan();
+    if exact_skill_md_exists(&git_top_level, &mut budget)? {
         let directory_name = path_file_name(&git_top_level)?;
-        let (validation, has_exact_skill_md) = validation_for(&git_top_level);
+        let (validation, has_exact_skill_md) = validation_for(&git_top_level, &mut budget)?;
         return Ok(vec![CatalogProposal {
             relative_path: PathBuf::from("."),
             classification: CatalogClassification::Common,
@@ -457,7 +469,7 @@ pub fn propose_catalogs(git_top_level: &Path) -> Result<Vec<CatalogProposal>> {
                 directory_name,
                 relative_path: PathBuf::from("."),
                 validation,
-                content_fingerprint: skill_document_fingerprint(&git_top_level),
+                content_fingerprint: skill_document_fingerprint(&git_top_level, &mut budget)?,
                 has_exact_skill_md,
             }],
             included: true,
@@ -467,13 +479,12 @@ pub fn propose_catalogs(git_top_level: &Path) -> Result<Vec<CatalogProposal>> {
 
     let mut proposals = Vec::new();
     let mut pending = vec![(git_top_level.clone(), 0_usize)];
-    let mut remaining_entries = MAX_SCANNED_ENTRIES;
     while let Some((directory, depth)) = pending.pop() {
         if depth > MAX_SCAN_DEPTH {
             continue;
         }
 
-        let mut children = child_directories(&directory, &mut remaining_entries)?;
+        let mut children = child_directories(&directory, &mut budget, None)?;
         children.sort();
         children.reverse();
         for child in children {
@@ -483,7 +494,7 @@ pub fn propose_catalogs(git_top_level: &Path) -> Result<Vec<CatalogProposal>> {
             if let Some((classification, compatibility)) = catalog_defaults(&git_top_level, &child)
             {
                 let candidates =
-                    catalog_candidates_with_budget(&git_top_level, &child, &mut remaining_entries)?;
+                    catalog_candidates_with_budget(&git_top_level, &child, &mut budget)?;
                 if candidates
                     .iter()
                     .any(|candidate| candidate.has_exact_skill_md)
@@ -520,11 +531,19 @@ fn catalog_defaults(
         return Some((CatalogClassification::Common, Compatibility::ALL));
     }
     match candidate.parent()?.file_name()?.to_str()? {
-        "claude" | "claude-code" | ".claude" => Some((
+        "claude" | "claude-code" => Some((
             CatalogClassification::AgentSpecific,
             Compatibility::CLAUDE_CODE,
         )),
-        "codex" | ".agents" => Some((CatalogClassification::AgentSpecific, Compatibility::CODEX)),
+        ".claude" => Some((
+            CatalogClassification::AgentSpecific,
+            Compatibility::CLAUDE_CODE_AND_OPENCODE,
+        )),
+        "codex" => Some((CatalogClassification::AgentSpecific, Compatibility::CODEX)),
+        ".agents" => Some((
+            CatalogClassification::AgentSpecific,
+            Compatibility::CODEX_AND_OPENCODE,
+        )),
         "opencode" => Some((
             CatalogClassification::AgentSpecific,
             Compatibility::OPENCODE,
@@ -534,18 +553,18 @@ fn catalog_defaults(
 }
 
 fn catalog_candidates(git_top_level: &Path, catalog: &Path) -> Result<Vec<SkillCandidate>> {
-    let mut remaining_entries = MAX_SCANNED_ENTRIES;
-    catalog_candidates_with_budget(git_top_level, catalog, &mut remaining_entries)
+    let mut budget = InspectionBudget::source_scan();
+    catalog_candidates_with_budget(git_top_level, catalog, &mut budget)
 }
 
 fn catalog_candidates_with_budget(
     git_top_level: &Path,
     catalog: &Path,
-    remaining_entries: &mut usize,
+    budget: &mut InspectionBudget,
 ) -> Result<Vec<SkillCandidate>> {
-    let mut candidates = child_directories(catalog, remaining_entries)?
+    let mut candidates = child_directories(catalog, budget, Some(MAX_CATALOG_CANDIDATES))?
         .into_iter()
-        .map(|path| skill_candidate(git_top_level, &path))
+        .map(|path| skill_candidate(git_top_level, &path, budget))
         .collect::<Result<Vec<_>>>()?;
     candidates.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
     Ok(candidates)
@@ -568,8 +587,9 @@ fn confirmed_catalog_candidates(
     }
 
     let canonical_source = git_top_level.canonicalize()?;
+    let mut budget = InspectionBudget::source_scan();
     if relative_path == Path::new(".") {
-        let (validation, has_exact_skill_md) = validation_for(&canonical_source);
+        let (validation, has_exact_skill_md) = validation_for(&canonical_source, &mut budget)?;
         return Ok(vec![SkillCandidate {
             directory_name: canonical_source
                 .file_name()
@@ -577,7 +597,7 @@ fn confirmed_catalog_candidates(
                 .unwrap_or_else(|| ".".to_owned()),
             relative_path: PathBuf::from("."),
             validation,
-            content_fingerprint: skill_document_fingerprint(&canonical_source),
+            content_fingerprint: skill_document_fingerprint(&canonical_source, &mut budget)?,
             has_exact_skill_md,
         }]);
     }
@@ -593,8 +613,12 @@ fn confirmed_catalog_candidates(
     catalog_candidates(&canonical_source, &canonical_catalog)
 }
 
-fn skill_candidate(git_top_level: &Path, path: &Path) -> Result<SkillCandidate> {
-    let (validation, has_exact_skill_md) = validation_for(path);
+fn skill_candidate(
+    git_top_level: &Path,
+    path: &Path,
+    budget: &mut InspectionBudget,
+) -> Result<SkillCandidate> {
+    let (validation, has_exact_skill_md) = validation_for(path, budget)?;
     Ok(SkillCandidate {
         directory_name: path_file_name(path)?,
         relative_path: path
@@ -602,58 +626,66 @@ fn skill_candidate(git_top_level: &Path, path: &Path) -> Result<SkillCandidate> 
             .expect("candidate beneath source root")
             .to_path_buf(),
         validation,
-        content_fingerprint: skill_document_fingerprint(path),
+        content_fingerprint: skill_document_fingerprint(path, budget)?,
         has_exact_skill_md,
     })
 }
 
-fn validation_for(path: &Path) -> (SkillValidation, bool) {
-    match validate_portable_skill(path) {
-        Ok(validated) => (
+fn validation_for(path: &Path, budget: &mut InspectionBudget) -> Result<(SkillValidation, bool)> {
+    match validate_portable_skill_with_budget(path, budget) {
+        Ok(validated) => Ok((
             SkillValidation::Valid {
                 name: validated.name().to_owned(),
                 description: validated.description().to_owned(),
             },
             true,
-        ),
+        )),
+        Err(PortableValidationError::SourceInspectionLimitExceeded) => {
+            Err(Error::SourceScanLimitExceeded)
+        }
         Err(error) => {
             let has_exact_skill_md = !matches!(
                 error,
                 PortableValidationError::MissingSkillMd
                     | PortableValidationError::ReadDirectory { .. }
             );
-            (
+            Ok((
                 SkillValidation::Invalid {
                     message: error.to_string(),
                 },
                 has_exact_skill_md,
-            )
+            ))
         }
     }
 }
 
-fn child_directories(directory: &Path, remaining_entries: &mut usize) -> Result<Vec<PathBuf>> {
+fn child_directories(
+    directory: &Path,
+    budget: &mut InspectionBudget,
+    max_directories: Option<usize>,
+) -> Result<Vec<PathBuf>> {
     let mut directories = Vec::new();
     for entry in fs::read_dir(directory)? {
-        if *remaining_entries == 0 {
+        if !budget.consume_entry() {
             return Err(Error::SourceScanLimitExceeded);
         }
-        *remaining_entries -= 1;
         let entry = entry?;
         let file_type = entry.file_type()?;
         if file_type.is_dir() && !file_type.is_symlink() {
+            if max_directories.is_some_and(|limit| directories.len() == limit) {
+                return Err(Error::SourceScanLimitExceeded);
+            }
             directories.push(entry.path());
         }
     }
     Ok(directories)
 }
 
-fn exact_skill_md_exists(directory: &Path, remaining_entries: &mut usize) -> Result<bool> {
+fn exact_skill_md_exists(directory: &Path, budget: &mut InspectionBudget) -> Result<bool> {
     for entry in fs::read_dir(directory)? {
-        if *remaining_entries == 0 {
+        if !budget.consume_entry() {
             return Err(Error::SourceScanLimitExceeded);
         }
-        *remaining_entries -= 1;
         let entry = entry?;
         if entry.file_name() == OsStr::new("SKILL.md") {
             return Ok(entry.file_type()?.is_file());
@@ -662,7 +694,10 @@ fn exact_skill_md_exists(directory: &Path, remaining_entries: &mut usize) -> Res
     Ok(false)
 }
 
-fn skill_document_fingerprint(directory: &Path) -> Option<u64> {
+fn skill_document_fingerprint(
+    directory: &Path,
+    budget: &mut InspectionBudget,
+) -> Result<Option<u64>> {
     use std::io::Read;
 
     const MAX_FINGERPRINT_BYTES: u64 = 1024 * 1024 + 1;
@@ -670,24 +705,34 @@ fn skill_document_fingerprint(directory: &Path) -> Option<u64> {
     const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 
     let path = directory.join("SKILL.md");
-    let metadata = fs::symlink_metadata(&path).ok()?;
+    let Ok(metadata) = fs::symlink_metadata(&path) else {
+        return Ok(None);
+    };
     if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
-        return None;
+        return Ok(None);
     }
-    let canonical_directory = directory.canonicalize().ok()?;
-    let canonical_path = path.canonicalize().ok()?;
+    let Ok(canonical_directory) = directory.canonicalize() else {
+        return Ok(None);
+    };
+    let Ok(canonical_path) = path.canonicalize() else {
+        return Ok(None);
+    };
     if !canonical_path.starts_with(canonical_directory) {
-        return None;
+        return Ok(None);
     }
     let mut bytes = Vec::new();
-    fs::File::open(canonical_path)
-        .ok()?
-        .take(MAX_FINGERPRINT_BYTES)
+    let Ok(file) = fs::File::open(canonical_path) else {
+        return Ok(None);
+    };
+    file.take(MAX_FINGERPRINT_BYTES)
         .read_to_end(&mut bytes)
-        .ok()?;
-    Some(bytes.into_iter().fold(FNV_OFFSET, |hash, byte| {
+        .map_err(Error::Io)?;
+    if !budget.consume_bytes(bytes.len()) {
+        return Err(Error::SourceScanLimitExceeded);
+    }
+    Ok(Some(bytes.into_iter().fold(FNV_OFFSET, |hash, byte| {
         (hash ^ u64::from(byte)).wrapping_mul(FNV_PRIME)
-    }))
+    })))
 }
 
 fn sanitize_remote_url(value: &str) -> String {

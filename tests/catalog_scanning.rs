@@ -145,6 +145,57 @@ fn a_large_valid_catalog_is_not_counted_twice() {
     assert_eq!(catalogs[0].candidates().len(), 2_050);
 }
 
+#[test]
+fn shared_agent_roots_include_opencode_in_their_defaults() {
+    let temporary = tempfile::tempdir().expect("temporary source repository");
+    let repository = temporary.path();
+    write_skill(
+        repository.join(".agents/skills/codex-shared/SKILL.md"),
+        "codex-shared",
+    );
+    write_skill(
+        repository.join(".claude/skills/claude-shared/SKILL.md"),
+        "claude-shared",
+    );
+
+    let catalogs = propose_catalogs(repository).expect("scan shared agent roots");
+    let agents = catalogs
+        .iter()
+        .find(|catalog| catalog.relative_path() == std::path::Path::new(".agents/skills"))
+        .expect(".agents catalog");
+    assert!(agents.compatibility().codex());
+    assert!(agents.compatibility().opencode());
+    let claude = catalogs
+        .iter()
+        .find(|catalog| catalog.relative_path() == std::path::Path::new(".claude/skills"))
+        .expect(".claude catalog");
+    assert!(claude.compatibility().claude_code());
+    assert!(claude.compatibility().opencode());
+}
+
+#[test]
+fn skill_document_reads_share_an_aggregate_byte_budget() {
+    let temporary = tempfile::tempdir().expect("temporary source repository");
+    let repository = temporary.path();
+    for index in 0..17 {
+        let name = format!("large-{index}");
+        let prefix = format!("---\nname: {name}\ndescription: fixture\n---\n");
+        let mut content = prefix.into_bytes();
+        content.resize(1_000_000, b'x');
+        let path = repository.join("skills").join(&name).join("SKILL.md");
+        fs::create_dir_all(path.parent().expect("skill parent"))
+            .expect("create large skill directory");
+        fs::write(path, content).expect("write large skill document");
+    }
+
+    let result = propose_catalogs(repository);
+
+    assert!(matches!(
+        result,
+        Err(skilled::Error::SourceScanLimitExceeded)
+    ));
+}
+
 fn write_skill(path: impl AsRef<std::path::Path>, name: &str) {
     let path = path.as_ref();
     fs::create_dir_all(path.parent().expect("skill parent")).expect("create skill directory");
