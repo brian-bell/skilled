@@ -11,6 +11,8 @@ crossterm = "0.29.0"
 directories = "6.0.0"
 ratatui = "0.30.2"
 rusqlite = { version = "0.40.1", features = ["bundled"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_yaml_ng = "0.10.0"
 thiserror = "2.0.19"
 
 [dev-dependencies]

@@ -73,3 +73,34 @@ fn back_is_a_no_op_on_the_first_setup_step() {
     assert!(update.effects().is_empty());
     assert_eq!(app.view(), View::Setup(SetupStep::Welcome));
 }
+
+#[test]
+fn sources_add_flow_collects_a_path_before_requesting_inspection() {
+    let temporary = tempfile::tempdir().expect("temporary application directory");
+    let mut app = SkilledApp::open(AppEnvironment::new(
+        temporary.path().join("home"),
+        temporary.path().join("data"),
+        "",
+    ))
+    .expect("open application");
+    for _ in 0..7 {
+        let update = app.update(Action::Continue);
+        app.perform_effects(update.effects()).unwrap();
+    }
+
+    app.update(Action::OpenSources);
+    app.update(Action::BeginAddSource);
+    for character in "/tmp/source".chars() {
+        app.update(Action::AppendSourcePath(character));
+    }
+    let update = app.update(Action::SubmitSourcePath);
+
+    assert_eq!(app.view(), View::Sources);
+    assert!(app.source_path_input_active());
+    assert_eq!(
+        update.effects(),
+        [Effect::InspectSource {
+            path: "/tmp/source".into()
+        }]
+    );
+}

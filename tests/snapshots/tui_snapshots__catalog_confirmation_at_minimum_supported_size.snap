@@ -1,0 +1,28 @@
+---
+source: tests/tui_snapshots.rs
+expression: "render(&app, 80, 24)"
+---
+ Skilled   Sources
+┌ Sources ─────────────────────────────────────────────────────────────────────┐
+│                                                                              │
+│  Registered repositories                                                     │
+│ ┌ Confirm catalogs ────────────────────────────────────────────────────────┐ │
+│ │                                                                          │ │
+│ │  Confirm roots, classification, and compatible agents.                   │ │
+│ │                                                                          │ │
+│ │  > [x] skills  Common  C:yes X:yes O:yes                                 │ │
+│ │                                                                          │ │
+│ │  Space include · c classification · 1/2/3 compatibility                  │ │
+│ │  Enter registers metadata only · Esc cancels                             │ │
+│ │                                                                          │ │
+│ │                                                                          │ │
+│ │                                                                          │ │
+│ │                                                                          │ │
+│ │                                                                          │ │
+│ │                                                                          │ │
+│ │                                                                          │ │
+│ └──────────────────────────────────────────────────────────────────────────┘ │
+│                                                                              │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+ j/k Move   Space Include   c Class   1/2/3 Agents   Enter Register   Esc Cancel

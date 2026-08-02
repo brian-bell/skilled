@@ -5,7 +5,7 @@ use ratatui::{Terminal, backend::CrosstermBackend};
 
 use crate::{
     AppEnvironment, Result, SkilledApp, UpdateOutcome,
-    input::action_for_key,
+    input::action_for_app_key,
     terminal::{CrosstermControl, TerminalSession, install_panic_restore_hook},
     tui,
 };
@@ -22,7 +22,7 @@ pub fn run(environment: AppEnvironment) -> Result<()> {
         let Event::Key(key) = event::read()? else {
             continue;
         };
-        let Some(action) = action_for_key(app.view(), key) else {
+        let Some(action) = action_for_app_key(&app, key) else {
             continue;
         };
         let update = app.update(action);

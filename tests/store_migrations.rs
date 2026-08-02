@@ -22,7 +22,7 @@ fn a_database_from_a_newer_skilled_version_is_rejected_before_use() {
         result,
         Err(Error::UnsupportedSchema {
             found: 99,
-            supported: 2
+            supported: 3
         })
     ));
 }
