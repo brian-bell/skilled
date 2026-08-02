@@ -26,6 +26,38 @@ fn a_path_inside_a_checkout_resolves_to_its_canonical_git_top_level() {
     assert!(!source.dirty());
 }
 
+#[test]
+fn inspection_removes_credentials_from_remote_metadata() {
+    let temporary = tempfile::tempdir().expect("temporary source repository");
+    let repository = temporary.path().join("catalog");
+    fs::create_dir_all(&repository).expect("create repository");
+    git(&repository, &["init", "-b", "main"]);
+    git(&repository, &["config", "user.name", "Skilled Test"]);
+    git(
+        &repository,
+        &["config", "user.email", "skilled@example.test"],
+    );
+    fs::write(repository.join("README.md"), "fixture\n").expect("write fixture");
+    git(&repository, &["add", "README.md"]);
+    git(&repository, &["commit", "-m", "fixture"]);
+    git(
+        &repository,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://user:secret@example.test/owner/catalog.git",
+        ],
+    );
+
+    let source = inspect_local_source(&repository).expect("inspect checkout");
+
+    assert_eq!(
+        source.remote_url(),
+        Some("https://example.test/owner/catalog.git")
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn inspection_preserves_path_whitespace_and_does_not_invoke_fsmonitor() {

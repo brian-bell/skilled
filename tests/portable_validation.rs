@@ -115,6 +115,42 @@ fn portable_validation_rejects_wrong_filenames_frontmatter_and_unreadable_text()
     ));
 }
 
+#[cfg(unix)]
+#[test]
+fn portable_validation_rejects_a_symlinked_skill_document() {
+    use std::os::unix::fs::symlink;
+
+    let temporary = tempfile::tempdir().expect("temporary skill directory");
+    let skill = temporary.path().join("portable");
+    fs::create_dir(&skill).expect("create skill directory");
+    let outside = temporary.path().join("outside.md");
+    fs::write(
+        &outside,
+        "---\nname: portable\ndescription: Outside fixture\n---\n# Outside\n",
+    )
+    .expect("write outside document");
+    symlink(&outside, skill.join("SKILL.md")).expect("symlink skill document");
+
+    assert!(matches!(
+        validate_portable_skill(&skill),
+        Err(PortableValidationError::MissingSkillMd)
+    ));
+}
+
+#[test]
+fn portable_validation_bounds_the_skill_document_size() {
+    let temporary = tempfile::tempdir().expect("temporary skill directory");
+    let skill = temporary.path().join("portable");
+    fs::create_dir(&skill).expect("create skill directory");
+    fs::write(skill.join("SKILL.md"), vec![b'a'; 1_048_577])
+        .expect("write oversized skill document");
+
+    assert!(matches!(
+        validate_portable_skill(&skill),
+        Err(PortableValidationError::SkillMdTooLarge { .. })
+    ));
+}
+
 fn write_skill(directory: &std::path::Path, name: &str, description: &str) {
     fs::write(
         directory.join("SKILL.md"),

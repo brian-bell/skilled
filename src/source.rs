@@ -354,7 +354,8 @@ pub fn inspect_local_source(path: &Path) -> Result<InspectedSource> {
         &git_top_level,
         &["symbolic-ref", "--quiet", "--short", "HEAD"],
     )?;
-    let remote_url = optional_git_output(&git_top_level, &["remote", "get-url", "origin"])?;
+    let remote_url = optional_git_output(&git_top_level, &["remote", "get-url", "origin"])?
+        .map(|url| sanitize_remote_url(&url));
     let status = required_git_output(
         &git_top_level,
         &["status", "--porcelain=v1", "--untracked-files=normal"],
@@ -427,7 +428,7 @@ impl InspectedSource {
             git_top_level,
             branch,
             head,
-            remote_url,
+            remote_url: remote_url.map(|url| sanitize_remote_url(&url)),
             dirty,
         }
     }
@@ -614,10 +615,28 @@ fn exact_skill_md_exists(directory: &Path) -> Result<bool> {
     for entry in fs::read_dir(directory)? {
         let entry = entry?;
         if entry.file_name() == OsStr::new("SKILL.md") {
-            return Ok(entry.metadata()?.is_file());
+            return Ok(entry.file_type()?.is_file());
         }
     }
     Ok(false)
+}
+
+fn sanitize_remote_url(value: &str) -> String {
+    let value = value.split_once(['?', '#']).map_or(value, |(base, _)| base);
+    if let Some((scheme, remainder)) = value.split_once("://") {
+        let authority_end = remainder.find('/').unwrap_or(remainder.len());
+        let (authority, path) = remainder.split_at(authority_end);
+        let host = authority
+            .rsplit_once('@')
+            .map_or(authority, |(_, host)| host);
+        return format!("{scheme}://{host}{path}");
+    }
+    if let Some((userinfo, remote)) = value.split_once('@')
+        && !userinfo.contains(['/', '\\'])
+    {
+        return remote.to_owned();
+    }
+    value.to_owned()
 }
 
 fn path_file_name(path: &Path) -> Result<String> {
