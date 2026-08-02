@@ -3,12 +3,12 @@ source: tests/tui_snapshots.rs
 expression: "render(&app, 80, 24)"
 ---
  Skilled   Sources
-┌ Sources ─────────────────────────────────────────────────────────────────────┐
-│                                                                              │
-│  Registered repositories                                                     │
-│                                                                              │
-│  No registered sources.                                                      │
-│  Press a to add an explicit local Git checkout.                              │
+┌ Repositories ───────────┐ ┌ Available variants ──────────────────────────────┐
+│ No registered sources.  │ │ Select Add Source to begin.                      │
+│ Press a to add one.     │ │                                                  │
+│                         │ │                                                  │
+│                         │ │                                                  │
+│                         │ │                                                  │
 │     ┌ Add source ──────────────────────────────────────────────────────┐     │
 │     │                                                                  │     │
 │     │  Enter a path inside a local Git checkout:                       │     │
@@ -18,11 +18,11 @@ expression: "render(&app, 80, 24)"
 │     │                                                                  │     │
 │     │                                                                  │     │
 │     └──────────────────────────────────────────────────────────────────┘     │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-└──────────────────────────────────────────────────────────────────────────────┘
+│                         │ │                                                  │
+│                         │ │                                                  │
+│                         │ │                                                  │
+│                         │ │                                                  │
+│                         │ │                                                  │
+│                         │ │                                                  │
+└─────────────────────────┘ └──────────────────────────────────────────────────┘
               Type path   Enter Inspect   Esc Cancel   Ctrl-C Quit

@@ -90,7 +90,7 @@ fn sources_add_flow_collects_a_path_before_requesting_inspection() {
 
     app.update(Action::OpenSources);
     app.update(Action::BeginAddSource);
-    for character in "/tmp/source".chars() {
+    for character in "/tmp/source ".chars() {
         app.update(Action::AppendSourcePath(character));
     }
     let update = app.update(Action::SubmitSourcePath);
@@ -100,7 +100,7 @@ fn sources_add_flow_collects_a_path_before_requesting_inspection() {
     assert_eq!(
         update.effects(),
         [Effect::InspectSource {
-            path: "/tmp/source".into()
+            path: "/tmp/source ".into()
         }]
     );
 }

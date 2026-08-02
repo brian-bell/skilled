@@ -1,7 +1,7 @@
 use std::{
-    ffi::OsStr,
+    ffi::{OsStr, OsString},
     fs,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     process::{Command, Output},
 };
 
@@ -128,6 +128,7 @@ pub struct CatalogProposal {
     compatibility: Compatibility,
     candidates: Vec<SkillCandidate>,
     included: bool,
+    scan_error: Option<String>,
 }
 
 impl CatalogProposal {
@@ -151,6 +152,10 @@ impl CatalogProposal {
         self.included
     }
 
+    pub fn scan_error(&self) -> Option<&str> {
+        self.scan_error.as_deref()
+    }
+
     pub(crate) fn toggle_included(&mut self) {
         self.included = !self.included;
     }
@@ -171,23 +176,36 @@ impl CatalogProposal {
         relative_path: PathBuf,
         classification: CatalogClassification,
         compatibility: Compatibility,
-    ) -> Result<Self> {
-        let candidates = if relative_path == Path::new(".") {
-            vec![SkillCandidate {
-                directory_name: path_file_name(git_top_level)?,
-                relative_path: PathBuf::from("."),
-                validation: validation_for(git_top_level),
-            }]
-        } else {
-            catalog_candidates(git_top_level, &git_top_level.join(&relative_path))?
-        };
-        Ok(Self {
+    ) -> Self {
+        let (candidates, scan_error) =
+            match confirmed_catalog_candidates(git_top_level, &relative_path) {
+                Ok(candidates) => (candidates, None),
+                Err(error) => (Vec::new(), Some(error.to_string())),
+            };
+        Self {
             relative_path,
             classification,
             compatibility,
             candidates,
             included: true,
-        })
+            scan_error,
+        }
+    }
+
+    pub(crate) fn from_unavailable(
+        relative_path: PathBuf,
+        classification: CatalogClassification,
+        compatibility: Compatibility,
+        error: &str,
+    ) -> Self {
+        Self {
+            relative_path,
+            classification,
+            compatibility,
+            candidates: Vec::new(),
+            included: true,
+            scan_error: Some(error.to_owned()),
+        }
     }
 }
 
@@ -222,6 +240,7 @@ pub struct RegisteredSource {
     inspected: InspectedSource,
     catalogs: Vec<CatalogProposal>,
     last_scan_at: i64,
+    source_error: Option<String>,
 }
 
 impl RegisteredSource {
@@ -261,12 +280,17 @@ impl RegisteredSource {
         self.last_scan_at
     }
 
+    pub fn source_error(&self) -> Option<&str> {
+        self.source_error.as_deref()
+    }
+
     pub(crate) fn new(
         id: i64,
         label: String,
         inspected: InspectedSource,
         catalogs: Vec<CatalogProposal>,
         last_scan_at: i64,
+        source_error: Option<String>,
     ) -> Self {
         Self {
             id,
@@ -274,6 +298,7 @@ impl RegisteredSource {
             inspected,
             catalogs,
             last_scan_at,
+            source_error,
         }
     }
 }
@@ -315,8 +340,8 @@ pub fn inspect_local_source(path: &Path) -> Result<InspectedSource> {
         return Err(Error::SourcePathNotDirectory(input));
     }
 
-    let top_level = required_git_output(&input, &["rev-parse", "--show-toplevel"])?;
-    let git_top_level = PathBuf::from(top_level.trim()).canonicalize()?;
+    let top_level = required_git_bytes(&input, &["rev-parse", "--show-toplevel"])?;
+    let git_top_level = git_path_from_output(top_level)?.canonicalize()?;
     if !input.starts_with(&git_top_level) {
         return Err(Error::SourceOutsideGitTopLevel {
             path: input,
@@ -338,10 +363,17 @@ pub fn inspect_local_source(path: &Path) -> Result<InspectedSource> {
     Ok(InspectedSource {
         git_top_level,
         branch,
-        head: head.trim().to_owned(),
+        head: strip_record_terminator(&head).to_owned(),
         remote_url,
         dirty: !status.is_empty(),
     })
+}
+
+pub(crate) fn contains_revision(repository: &Path, revision: &str) -> Result<bool> {
+    let commit = format!("{revision}^{{commit}}");
+    Ok(run_git(repository, &["cat-file", "-e", &commit])?
+        .status
+        .success())
 }
 
 pub fn preview_local_source(path: &Path) -> Result<SourcePreview> {
@@ -349,6 +381,36 @@ pub fn preview_local_source(path: &Path) -> Result<SourcePreview> {
     let catalogs = propose_catalogs(inspected.git_top_level())?;
     Ok(SourcePreview {
         inspected,
+        catalogs,
+    })
+}
+
+pub fn revalidate_source_preview(preview: &SourcePreview) -> Result<SourcePreview> {
+    let current = preview_local_source(preview.inspected.git_top_level())?;
+    if current.inspected != preview.inspected {
+        return Err(Error::SourceChangedAfterPreview);
+    }
+
+    let mut catalogs = Vec::new();
+    for selected in preview.catalogs.iter().filter(|catalog| catalog.included) {
+        let Some(current_catalog) = current
+            .catalogs
+            .iter()
+            .find(|catalog| catalog.relative_path == selected.relative_path)
+        else {
+            return Err(Error::SourceChangedAfterPreview);
+        };
+        let mut confirmed = current_catalog.clone();
+        confirmed.classification = selected.classification;
+        confirmed.compatibility = selected.compatibility;
+        confirmed.included = true;
+        catalogs.push(confirmed);
+    }
+    if catalogs.is_empty() {
+        return Err(Error::NoCatalogsSelected);
+    }
+    Ok(SourcePreview {
+        inspected: current.inspected,
         catalogs,
     })
 }
@@ -385,6 +447,7 @@ pub fn propose_catalogs(git_top_level: &Path) -> Result<Vec<CatalogProposal>> {
                 validation: validation_for(&git_top_level),
             }],
             included: true,
+            scan_error: None,
         }]);
     }
 
@@ -425,6 +488,7 @@ pub fn propose_catalogs(git_top_level: &Path) -> Result<Vec<CatalogProposal>> {
                         compatibility,
                         candidates,
                         included: true,
+                        scan_error: None,
                     });
                     continue;
                 }
@@ -467,6 +531,45 @@ fn catalog_candidates(git_top_level: &Path, catalog: &Path) -> Result<Vec<SkillC
         .collect::<Result<Vec<_>>>()?;
     candidates.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
     Ok(candidates)
+}
+
+fn confirmed_catalog_candidates(
+    git_top_level: &Path,
+    relative_path: &Path,
+) -> Result<Vec<SkillCandidate>> {
+    if relative_path.as_os_str().is_empty()
+        || relative_path.is_absolute()
+        || relative_path.components().any(|component| {
+            matches!(
+                component,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        })
+    {
+        return Err(Error::UnsafeCatalogPath(relative_path.to_path_buf()));
+    }
+
+    let canonical_source = git_top_level.canonicalize()?;
+    if relative_path == Path::new(".") {
+        return Ok(vec![SkillCandidate {
+            directory_name: canonical_source
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| ".".to_owned()),
+            relative_path: PathBuf::from("."),
+            validation: validation_for(&canonical_source),
+        }]);
+    }
+
+    let catalog = canonical_source.join(relative_path);
+    if fs::symlink_metadata(&catalog)?.file_type().is_symlink() {
+        return Err(Error::CatalogRootSymlink(catalog));
+    }
+    let canonical_catalog = catalog.canonicalize()?;
+    if !canonical_catalog.starts_with(&canonical_source) {
+        return Err(Error::CatalogOutsideSource(canonical_catalog));
+    }
+    catalog_candidates(&canonical_source, &canonical_catalog)
 }
 
 fn skill_candidate(git_top_level: &Path, path: &Path) -> Result<SkillCandidate> {
@@ -525,11 +628,16 @@ fn path_file_name(path: &Path) -> Result<String> {
 }
 
 fn required_git_output(repository: &Path, arguments: &[&str]) -> Result<String> {
+    String::from_utf8(required_git_bytes(repository, arguments)?)
+        .map_err(|_| Error::InvalidGitOutput)
+}
+
+fn required_git_bytes(repository: &Path, arguments: &[&str]) -> Result<Vec<u8>> {
     let output = run_git(repository, arguments)?;
     if !output.status.success() {
         return Err(git_error(repository, arguments, &output));
     }
-    String::from_utf8(output.stdout).map_err(|_| Error::InvalidGitOutput)
+    Ok(output.stdout)
 }
 
 fn optional_git_output(repository: &Path, arguments: &[&str]) -> Result<Option<String>> {
@@ -538,17 +646,49 @@ fn optional_git_output(repository: &Path, arguments: &[&str]) -> Result<Option<S
         return Ok(None);
     }
     let value = String::from_utf8(output.stdout).map_err(|_| Error::InvalidGitOutput)?;
-    let value = value.trim();
+    let value = strip_record_terminator(&value);
     Ok((!value.is_empty()).then(|| value.to_owned()))
 }
 
 fn run_git(repository: &Path, arguments: &[&str]) -> Result<Output> {
     Command::new("git")
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .args([
+            "-c",
+            "core.fsmonitor=false",
+            "-c",
+            "core.untrackedCache=false",
+        ])
         .arg("-C")
         .arg(repository)
         .args(arguments)
         .output()
         .map_err(Error::GitUnavailable)
+}
+
+fn strip_record_terminator(value: &str) -> &str {
+    value
+        .strip_suffix("\r\n")
+        .or_else(|| value.strip_suffix('\n'))
+        .unwrap_or(value)
+}
+
+#[cfg(unix)]
+fn git_path_from_output(mut value: Vec<u8>) -> Result<PathBuf> {
+    use std::os::unix::ffi::OsStringExt;
+
+    if value.ends_with(b"\r\n") {
+        value.truncate(value.len() - 2);
+    } else if value.ends_with(b"\n") {
+        value.pop();
+    }
+    Ok(PathBuf::from(OsString::from_vec(value)))
+}
+
+#[cfg(not(unix))]
+fn git_path_from_output(value: Vec<u8>) -> Result<PathBuf> {
+    let value = String::from_utf8(value).map_err(|_| Error::InvalidGitOutput)?;
+    Ok(PathBuf::from(strip_record_terminator(&value)))
 }
 
 fn git_error(repository: &Path, arguments: &[&str], output: &Output) -> Error {

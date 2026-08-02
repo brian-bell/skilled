@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use crate::{
     AgentDetection, AgentKind, AppEnvironment, Result,
     agents::{detect_agents, detection_at},
-    source::{RegisteredSource, SourcePreview, preview_local_source},
+    source::{RegisteredSource, SourcePreview, preview_local_source, revalidate_source_preview},
     store::Store,
 };
 
@@ -77,6 +77,12 @@ pub enum View {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SourcesPane {
+    Repositories,
+    Variants,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Action {
     Continue,
     Back,
@@ -95,6 +101,8 @@ pub enum Action {
     ToggleCatalogClassification,
     ToggleCatalogCompatibility(AgentKind),
     ConfirmPendingSource,
+    ToggleSourcesPane,
+    MoveSourcesSelection(i8),
     RerunSetup,
     Quit,
 }
@@ -156,6 +164,9 @@ pub struct SkilledApp {
     pending_source: Option<SourcePreview>,
     source_error: Option<String>,
     focused_catalog: usize,
+    sources_pane: SourcesPane,
+    focused_source: usize,
+    focused_variant: usize,
 }
 
 impl SkilledApp {
@@ -185,6 +196,9 @@ impl SkilledApp {
             pending_source: None,
             source_error: None,
             focused_catalog: 0,
+            sources_pane: SourcesPane::Repositories,
+            focused_source: 0,
+            focused_variant: 0,
         })
     }
 
@@ -228,6 +242,22 @@ impl SkilledApp {
         self.focused_catalog
     }
 
+    pub fn sources_pane(&self) -> SourcesPane {
+        self.sources_pane
+    }
+
+    pub fn focused_source(&self) -> usize {
+        self.focused_source
+    }
+
+    pub fn focused_variant(&self) -> usize {
+        self.focused_variant
+    }
+
+    pub fn selected_source(&self) -> Option<&RegisteredSource> {
+        self.sources.get(self.focused_source)
+    }
+
     pub fn preview_source(&self, path: &Path) -> Result<SourcePreview> {
         let resolved = match path.strip_prefix("~") {
             Ok(relative) => self.environment.home_dir.join(relative),
@@ -237,8 +267,10 @@ impl SkilledApp {
     }
 
     pub fn confirm_source(&mut self, preview: SourcePreview) -> Result<()> {
+        let preview = revalidate_source_preview(&preview)?;
         self.store.register_source(&preview)?;
         self.sources = self.store.registered_sources()?;
+        self.focus_registered_source(preview.inspected().git_top_level());
         Ok(())
     }
 
@@ -345,6 +377,19 @@ impl SkilledApp {
                 Vec::new()
             }
             Action::ConfirmPendingSource => self.register_pending_source(),
+            Action::ToggleSourcesPane => {
+                if self.view == View::Sources {
+                    self.sources_pane = match self.sources_pane {
+                        SourcesPane::Repositories => SourcesPane::Variants,
+                        SourcesPane::Variants => SourcesPane::Repositories,
+                    };
+                }
+                Vec::new()
+            }
+            Action::MoveSourcesSelection(delta) => {
+                self.move_sources_selection(delta);
+                Vec::new()
+            }
             Action::RerunSetup => self.rerun_setup(),
             Action::Quit => return UpdateResult::quit(),
         };
@@ -388,11 +433,19 @@ impl SkilledApp {
                     }
                 },
                 Effect::RegisterSource { preview } => {
-                    if let Err(error) = self.store.register_source(preview) {
+                    let preview = match revalidate_source_preview(preview) {
+                        Ok(preview) => preview,
+                        Err(error) => {
+                            self.source_error = Some(error.to_string());
+                            continue;
+                        }
+                    };
+                    if let Err(error) = self.store.register_source(&preview) {
                         self.source_error = Some(error.to_string());
                         continue;
                     }
                     self.sources = self.store.registered_sources()?;
+                    self.focus_registered_source(preview.inspected().git_top_level());
                     self.pending_source = None;
                     self.source_path.clear();
                     self.source_path_input_active = false;
@@ -489,7 +542,7 @@ impl SkilledApp {
             return Vec::new();
         }
         vec![Effect::InspectSource {
-            path: PathBuf::from(self.source_path.trim()),
+            path: PathBuf::from(&self.source_path),
         }]
     }
 
@@ -502,5 +555,42 @@ impl SkilledApp {
             return Vec::new();
         }
         vec![Effect::RegisterSource { preview }]
+    }
+
+    fn move_sources_selection(&mut self, delta: i8) {
+        if self.view != View::Sources {
+            return;
+        }
+        match self.sources_pane {
+            SourcesPane::Repositories if !self.sources.is_empty() => {
+                self.focused_source = (self.focused_source as i16 + i16::from(delta))
+                    .rem_euclid(self.sources.len() as i16)
+                    as usize;
+                self.focused_variant = 0;
+            }
+            SourcesPane::Variants => {
+                let count = self
+                    .selected_source()
+                    .into_iter()
+                    .flat_map(RegisteredSource::catalogs)
+                    .map(|catalog| catalog.candidates().len())
+                    .sum::<usize>();
+                if count > 0 {
+                    self.focused_variant = (self.focused_variant as i16 + i16::from(delta))
+                        .rem_euclid(count as i16)
+                        as usize;
+                }
+            }
+            SourcesPane::Repositories => {}
+        }
+    }
+
+    fn focus_registered_source(&mut self, path: &Path) {
+        self.focused_source = self
+            .sources
+            .iter()
+            .position(|source| source.git_top_level() == path)
+            .unwrap_or(0);
+        self.focused_variant = 0;
     }
 }

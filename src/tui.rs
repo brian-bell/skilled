@@ -6,7 +6,10 @@ use ratatui::{
     widgets::{Block, Borders, Clear, Padding, Paragraph, Wrap},
 };
 
-use crate::{SetupStep, SkilledApp, View, source::SkillValidation};
+use crate::{
+    SetupStep, SkilledApp, SourcesPane, View,
+    source::{CatalogClassification, SkillValidation},
+};
 
 pub const MINIMUM_WIDTH: u16 = 80;
 pub const MINIMUM_HEIGHT: u16 = 24;
@@ -190,63 +193,159 @@ fn render_inventory(frame: &mut Frame<'_>, area: Rect) {
 }
 
 fn render_sources(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
-    let mut lines = vec![Line::styled(
-        "Registered repositories",
-        Style::default().add_modifier(Modifier::BOLD),
-    )];
-    lines.push(Line::default());
+    let [repositories, _, details] = Layout::horizontal([
+        Constraint::Percentage(34),
+        Constraint::Length(1),
+        Constraint::Min(1),
+    ])
+    .areas(area);
+    let repository_block = Block::default()
+        .title(" Repositories ")
+        .borders(Borders::ALL)
+        .border_style(if app.sources_pane() == SourcesPane::Repositories {
+            Style::default().fg(Color::Cyan)
+        } else {
+            Style::default()
+        })
+        .padding(Padding::horizontal(1));
+    let repository_inner = repository_block.inner(repositories);
+    frame.render_widget(repository_block, repositories);
+    let mut repository_lines = Vec::new();
     if app.sources().is_empty() {
-        lines.push(Line::from("No registered sources."));
-        lines.push(Line::from("Press a to add an explicit local Git checkout."));
+        repository_lines.extend([
+            Line::from("No registered sources."),
+            Line::from("Press a to add one."),
+        ]);
+    } else {
+        let capacity = usize::from(repository_inner.height.max(1));
+        let start = visible_window_start(app.focused_source(), capacity);
+        for (index, source) in app.sources().iter().enumerate().skip(start).take(capacity) {
+            repository_lines.push(Line::from(format!(
+                "{} {}  {}",
+                if index == app.focused_source() {
+                    ">"
+                } else {
+                    " "
+                },
+                source.label(),
+                if source.dirty() { "dirty" } else { "clean" }
+            )));
+        }
     }
-    for source in app.sources() {
-        lines.push(Line::from(format!(
-            "{}  {}  {}  {}  {} catalog(s)  scanned {}",
-            source.label(),
+    frame.render_widget(Paragraph::new(repository_lines), repository_inner);
+
+    let detail_block = Block::default()
+        .title(" Available variants ")
+        .borders(Borders::ALL)
+        .border_style(if app.sources_pane() == SourcesPane::Variants {
+            Style::default().fg(Color::Cyan)
+        } else {
+            Style::default()
+        })
+        .padding(Padding::horizontal(1));
+    let detail_inner = detail_block.inner(details);
+    frame.render_widget(detail_block, details);
+    let Some(source) = app.selected_source() else {
+        frame.render_widget(Paragraph::new("Select Add Source to begin."), detail_inner);
+        return;
+    };
+    let mut lines = vec![
+        Line::styled(
+            source.git_top_level().display().to_string(),
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
+        Line::from(format!(
+            "{} · {} · {} · scanned {}",
             source.branch().unwrap_or("detached"),
             &source.head()[..source.head().len().min(8)],
             if source.dirty() { "dirty" } else { "clean" },
-            source.catalogs().len(),
             source.last_scan_at()
-        )));
-        lines.push(Line::from(format!(
-            "  {}",
-            source.git_top_level().display()
-        )));
+        )),
+    ];
+    if let Some(remote) = source.remote_url() {
+        lines.push(Line::from(format!("Remote: {remote}")));
+    }
+    if let Some(error) = source.source_error() {
+        lines.push(Line::styled(
+            format!("× Source unavailable — {error}"),
+            Style::default().fg(Color::Red),
+        ));
+    } else {
         for catalog in source.catalogs() {
-            lines.push(Line::from(format!(
-                "    {}  {:?}  C:{} X:{} O:{}",
-                catalog.relative_path().display(),
-                catalog.classification(),
-                yes_no(catalog.compatibility().claude_code()),
-                yes_no(catalog.compatibility().codex()),
-                yes_no(catalog.compatibility().opencode())
-            )));
-            for candidate in catalog.candidates() {
-                match candidate.validation() {
-                    SkillValidation::Valid { description, .. } => lines.push(Line::from(format!(
-                        "      ✓ {} — {}",
-                        candidate.directory_name(),
-                        description
-                    ))),
-                    SkillValidation::Invalid { message } => lines.push(Line::from(format!(
-                        "      × {} — {}",
-                        candidate.directory_name(),
-                        message
-                    ))),
-                }
+            if let Some(error) = catalog.scan_error() {
+                lines.push(Line::styled(
+                    format!("× {} — {error}", catalog.relative_path().display()),
+                    Style::default().fg(Color::Red),
+                ));
+            }
+        }
+    }
+    lines.push(Line::default());
+    let variants = source
+        .catalogs()
+        .iter()
+        .flat_map(|catalog| {
+            catalog
+                .candidates()
+                .iter()
+                .map(move |candidate| (catalog, candidate))
+        })
+        .collect::<Vec<_>>();
+    let reserved = lines.len().saturating_add(4);
+    let capacity = usize::from(detail_inner.height)
+        .saturating_sub(reserved)
+        .max(1);
+    let start = visible_window_start(app.focused_variant(), capacity);
+    for (index, (catalog, candidate)) in variants.iter().enumerate().skip(start).take(capacity) {
+        let status = if candidate.validation().is_valid() {
+            "✓"
+        } else {
+            "×"
+        };
+        lines.push(Line::from(format!(
+            "{} {status} {}  ({})",
+            if index == app.focused_variant() {
+                ">"
+            } else {
+                " "
+            },
+            candidate.directory_name(),
+            catalog.relative_path().display()
+        )));
+    }
+    if let Some((catalog, selected)) = variants.get(app.focused_variant()) {
+        lines.push(Line::default());
+        lines.push(Line::from(match catalog.classification() {
+            CatalogClassification::Common => "Common catalog".to_owned(),
+            CatalogClassification::AgentSpecific => "Agent-specific catalog".to_owned(),
+        }));
+        let compatibility = catalog.compatibility();
+        lines.push(Line::from(format!(
+            "Claude: {} · Codex: {} · OpenCode: {}",
+            yes_no(compatibility.claude_code()),
+            yes_no(compatibility.codex()),
+            yes_no(compatibility.opencode())
+        )));
+        match selected.validation() {
+            SkillValidation::Valid { description, .. } => {
+                lines.push(Line::from(description.to_owned()));
+            }
+            SkillValidation::Invalid { message } => {
+                lines.push(Line::styled(
+                    message.to_owned(),
+                    Style::default().fg(Color::Red),
+                ));
             }
         }
     }
     frame.render_widget(
-        Paragraph::new(lines).wrap(Wrap { trim: false }).block(
-            Block::default()
-                .title(" Sources ")
-                .borders(Borders::ALL)
-                .padding(Padding::new(2, 2, 1, 1)),
-        ),
-        area,
+        Paragraph::new(lines).wrap(Wrap { trim: false }),
+        detail_inner,
     );
+}
+
+fn visible_window_start(focused: usize, capacity: usize) -> usize {
+    focused.saturating_add(1).saturating_sub(capacity)
 }
 
 fn render_source_path_entry(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
@@ -292,12 +391,30 @@ fn render_catalog_confirmation(frame: &mut Frame<'_>, area: Rect, app: &SkilledA
 }
 
 fn catalog_confirmation_lines(app: &SkilledApp) -> Vec<Line<'static>> {
-    let mut lines = vec![
-        Line::from("Confirm roots, classification, and compatible agents."),
-        Line::default(),
-    ];
+    let mut lines = vec![Line::from(
+        "Confirm the resolved repository, roots, and compatible agents.",
+    )];
     if let Some(preview) = app.pending_source() {
-        for (index, catalog) in preview.catalogs().iter().enumerate() {
+        let source = preview.inspected();
+        lines.extend([
+            Line::from(format!("Repository: {}", source.git_top_level().display())),
+            Line::from(format!(
+                "Branch: {}   HEAD: {}   {}",
+                source.branch().unwrap_or("detached"),
+                &source.head()[..source.head().len().min(8)],
+                if source.dirty() { "dirty" } else { "clean" }
+            )),
+            Line::default(),
+        ]);
+        let capacity = 2;
+        let start = visible_window_start(app.focused_catalog(), capacity);
+        for (index, catalog) in preview
+            .catalogs()
+            .iter()
+            .enumerate()
+            .skip(start)
+            .take(capacity)
+        {
             lines.push(Line::from(format!(
                 "{} [{}] {}  {:?}  C:{} X:{} O:{}",
                 if index == app.focused_catalog() {
@@ -372,7 +489,7 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
             }
             View::Setup(_) => " Enter Continue   Esc Back   q Quit ",
             View::Inventory => " 2 Sources   s Settings   ? Help   q Quit ",
-            View::Sources => " 1 Inventory   a Add source   q Quit ",
+            View::Sources => " Tab Pane   j/k Move   a Add source   1 Inventory   q Quit ",
             View::Settings => " Enter Rerun setup   Esc Close ",
         }
     };

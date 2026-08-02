@@ -172,6 +172,214 @@ fn a_one_skill_repository_round_trips_as_a_root_catalog() {
     assert!(catalog.candidates()[0].validation().is_valid());
 }
 
+#[test]
+fn a_missing_registered_checkout_remains_browseable_as_a_source_error() {
+    let temporary = tempfile::tempdir().expect("temporary application directory");
+    let repository = temporary.path().join("source");
+    fs::create_dir_all(repository.join("skills/portable")).expect("create common catalog");
+    fs::write(
+        repository.join("skills/portable/SKILL.md"),
+        "---\nname: portable\ndescription: fixture\n---\n# Portable\n",
+    )
+    .expect("write skill");
+    initialize_repository(&repository);
+    let environment = AppEnvironment::new(
+        temporary.path().join("home"),
+        temporary.path().join("data"),
+        "",
+    );
+    let mut app = SkilledApp::open(environment.clone()).expect("open application");
+    let preview = app.preview_source(&repository).expect("preview source");
+    app.confirm_source(preview).expect("confirm source");
+    drop(app);
+    fs::rename(&repository, temporary.path().join("moved-source")).expect("move source fixture");
+
+    let reopened = SkilledApp::open(environment).expect("reopen with missing source");
+
+    assert_eq!(reopened.sources().len(), 1);
+    assert!(reopened.sources()[0].source_error().is_some());
+    assert!(reopened.sources()[0].catalogs()[0].candidates().is_empty());
+}
+
+#[test]
+fn reopening_refreshes_the_current_head_and_dirty_state() {
+    let temporary = tempfile::tempdir().expect("temporary application directory");
+    let repository = temporary.path().join("source");
+    fs::create_dir_all(repository.join("skills/portable")).expect("create common catalog");
+    fs::write(
+        repository.join("skills/portable/SKILL.md"),
+        "---\nname: portable\ndescription: fixture\n---\n# Portable\n",
+    )
+    .expect("write skill");
+    initialize_repository(&repository);
+    let environment = AppEnvironment::new(
+        temporary.path().join("home"),
+        temporary.path().join("data"),
+        "",
+    );
+    let mut app = SkilledApp::open(environment.clone()).expect("open application");
+    let preview = app.preview_source(&repository).expect("preview source");
+    let registered_head = preview.inspected().head().to_owned();
+    app.confirm_source(preview).expect("confirm source");
+    drop(app);
+    fs::write(repository.join("README.md"), "new revision\n").expect("write committed change");
+    git(&repository, &["add", "README.md"]);
+    git(&repository, &["commit", "-m", "new revision"]);
+
+    let reopened = SkilledApp::open(environment.clone()).expect("reopen at new revision");
+    assert_ne!(reopened.sources()[0].head(), registered_head);
+    assert!(!reopened.sources()[0].dirty());
+    assert!(reopened.sources()[0].source_error().is_none());
+    drop(reopened);
+    fs::write(repository.join("README.md"), "dirty change\n").expect("write dirty change");
+
+    let dirty = SkilledApp::open(environment).expect("reopen dirty source");
+    assert!(dirty.sources()[0].dirty());
+    assert!(dirty.sources()[0].source_error().is_none());
+}
+
+#[test]
+fn a_replacement_checkout_at_the_same_path_is_a_recoverable_source_error() {
+    let temporary = tempfile::tempdir().expect("temporary application directory");
+    let repository = temporary.path().join("source");
+    fs::create_dir_all(repository.join("skills/portable")).expect("create common catalog");
+    fs::write(
+        repository.join("skills/portable/SKILL.md"),
+        "---\nname: portable\ndescription: fixture\n---\n# Portable\n",
+    )
+    .expect("write skill");
+    initialize_repository(&repository);
+    let environment = AppEnvironment::new(
+        temporary.path().join("home"),
+        temporary.path().join("data"),
+        "",
+    );
+    let mut app = SkilledApp::open(environment.clone()).expect("open application");
+    let preview = app.preview_source(&repository).expect("preview source");
+    app.confirm_source(preview).expect("confirm source");
+    drop(app);
+    fs::remove_dir_all(repository.join(".git")).expect("remove original Git metadata");
+    git(&repository, &["init", "-b", "main"]);
+    git(&repository, &["config", "user.name", "Skilled Test"]);
+    git(
+        &repository,
+        &["config", "user.email", "skilled@example.test"],
+    );
+    git(&repository, &["add", "."]);
+    git(&repository, &["commit", "-m", "replacement checkout"]);
+
+    let reopened = SkilledApp::open(environment).expect("reopen replacement checkout");
+
+    assert!(reopened.sources()[0].source_error().is_some());
+    assert!(reopened.sources()[0].catalogs()[0].candidates().is_empty());
+}
+
+#[test]
+fn an_unsafe_stored_catalog_path_is_a_recoverable_catalog_error() {
+    let temporary = tempfile::tempdir().expect("temporary application directory");
+    let repository = temporary.path().join("source");
+    fs::create_dir_all(repository.join("skills/portable")).expect("create common catalog");
+    fs::write(
+        repository.join("skills/portable/SKILL.md"),
+        "---\nname: portable\ndescription: fixture\n---\n# Portable\n",
+    )
+    .expect("write skill");
+    initialize_repository(&repository);
+    let data = temporary.path().join("data");
+    let environment = AppEnvironment::new(temporary.path().join("home"), &data, "");
+    let mut app = SkilledApp::open(environment.clone()).expect("open application");
+    let preview = app.preview_source(&repository).expect("preview source");
+    app.confirm_source(preview).expect("confirm source");
+    drop(app);
+    let connection = rusqlite::Connection::open(data.join("skilled.sqlite3"))
+        .expect("open application database");
+    connection
+        .execute("UPDATE catalog_roots SET relative_path = '../outside'", [])
+        .expect("corrupt catalog path fixture");
+    drop(connection);
+
+    let reopened = SkilledApp::open(environment).expect("reopen unsafe catalog path");
+    let catalog = &reopened.sources()[0].catalogs()[0];
+
+    assert!(catalog.candidates().is_empty());
+    assert!(
+        catalog
+            .scan_error()
+            .is_some_and(|error| error.contains("relative"))
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_catalog_root_replaced_by_a_symlink_is_a_recoverable_catalog_error() {
+    use std::os::unix::fs::symlink;
+
+    let temporary = tempfile::tempdir().expect("temporary application directory");
+    let repository = temporary.path().join("source");
+    fs::create_dir_all(repository.join("skills/portable")).expect("create common catalog");
+    fs::write(
+        repository.join("skills/portable/SKILL.md"),
+        "---\nname: portable\ndescription: fixture\n---\n# Portable\n",
+    )
+    .expect("write skill");
+    initialize_repository(&repository);
+    let environment = AppEnvironment::new(
+        temporary.path().join("home"),
+        temporary.path().join("data"),
+        "",
+    );
+    let mut app = SkilledApp::open(environment.clone()).expect("open application");
+    let preview = app.preview_source(&repository).expect("preview source");
+    app.confirm_source(preview).expect("confirm source");
+    drop(app);
+    let outside = temporary.path().join("outside");
+    fs::create_dir_all(outside.join("foreign")).expect("create outside catalog");
+    fs::rename(
+        repository.join("skills"),
+        repository.join("original-skills"),
+    )
+    .expect("move registered catalog");
+    symlink(&outside, repository.join("skills")).expect("replace catalog with symlink");
+
+    let reopened = SkilledApp::open(environment).expect("reopen symlinked catalog");
+    let catalog = &reopened.sources()[0].catalogs()[0];
+
+    assert!(catalog.candidates().is_empty());
+    assert!(
+        catalog
+            .scan_error()
+            .is_some_and(|error| error.contains("symbolic link"))
+    );
+}
+
+#[test]
+fn confirmation_rejects_a_source_that_changed_after_preview() {
+    let temporary = tempfile::tempdir().expect("temporary application directory");
+    let repository = temporary.path().join("source");
+    fs::create_dir_all(repository.join("skills/portable")).expect("create common catalog");
+    fs::write(
+        repository.join("skills/portable/SKILL.md"),
+        "---\nname: portable\ndescription: fixture\n---\n# Portable\n",
+    )
+    .expect("write skill");
+    initialize_repository(&repository);
+    let mut app = SkilledApp::open(AppEnvironment::new(
+        temporary.path().join("home"),
+        temporary.path().join("data"),
+        "",
+    ))
+    .expect("open application");
+    let preview = app.preview_source(&repository).expect("preview source");
+    fs::write(repository.join("README.md"), "changed after preview\n").expect("change source");
+    git(&repository, &["add", "README.md"]);
+    git(&repository, &["commit", "-m", "change source"]);
+
+    let result = app.confirm_source(preview);
+
+    assert!(result.is_err());
+    assert!(app.sources().is_empty());
+}
+
 fn initialize_repository(repository: &Path) {
     git(repository, &["init", "-b", "main"]);
     git(repository, &["config", "user.name", "Skilled Test"]);

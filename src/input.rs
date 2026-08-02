@@ -66,6 +66,9 @@ pub fn action_for_key(view: View, key: KeyEvent) -> Option<Action> {
             View::Sources => match key.code {
                 KeyCode::Char('1') => Some(Action::OpenInventory),
                 KeyCode::Char('a') => Some(Action::BeginAddSource),
+                KeyCode::Tab | KeyCode::BackTab => Some(Action::ToggleSourcesPane),
+                KeyCode::Up | KeyCode::Char('k') => Some(Action::MoveSourcesSelection(-1)),
+                KeyCode::Down | KeyCode::Char('j') => Some(Action::MoveSourcesSelection(1)),
                 KeyCode::Esc => Some(Action::Back),
                 _ => None,
             },

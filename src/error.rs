@@ -22,6 +22,16 @@ pub enum Error {
     SourceScanLimitExceeded,
     #[error("stored catalog classification is invalid: {0}")]
     InvalidCatalogClassification(String),
+    #[error("stored catalog path must be repository-relative: {0:?}")]
+    UnsafeCatalogPath(PathBuf),
+    #[error("stored catalog root must not be a symbolic link: {0:?}")]
+    CatalogRootSymlink(PathBuf),
+    #[error("stored catalog root resolves outside its source repository: {0:?}")]
+    CatalogOutsideSource(PathBuf),
+    #[error("source changed after it was previewed; inspect it again before registering")]
+    SourceChangedAfterPreview,
+    #[error("select at least one catalog root before registering the source")]
+    NoCatalogsSelected,
     #[error("source path {path} is outside its resolved Git top level {top_level}")]
     SourceOutsideGitTopLevel { path: PathBuf, top_level: PathBuf },
     #[error("the installed git executable could not be invoked: {0}")]

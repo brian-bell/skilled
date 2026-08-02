@@ -1,7 +1,7 @@
 use std::{fs, path::Path, process::Command};
 
 use ratatui::{Terminal, backend::TestBackend, buffer::Buffer};
-use skilled::{Action, AppEnvironment, SkilledApp};
+use skilled::{Action, AgentKind, AppEnvironment, SkilledApp};
 
 #[test]
 fn first_run_welcome_at_minimum_supported_size() {
@@ -82,7 +82,10 @@ fn add_source_path_entry_at_minimum_supported_size() {
 
 #[test]
 fn catalog_confirmation_at_minimum_supported_size() {
-    let temporary = tempfile::tempdir().expect("temporary application directory");
+    let temporary = tempfile::Builder::new()
+        .prefix("skilled-")
+        .tempdir_in("/tmp")
+        .expect("temporary application directory");
     let repository = temporary.path().join("source");
     create_source_fixture(&repository);
     let mut app = SkilledApp::open(AppEnvironment::new(
@@ -96,12 +99,24 @@ fn catalog_confirmation_at_minimum_supported_size() {
     }
     app.update(Action::OpenSources);
     app.update(Action::BeginAddSource);
-    for character in repository.to_string_lossy().chars() {
+    for character in repository.join("skills/portable").to_string_lossy().chars() {
         app.update(Action::AppendSourcePath(character));
     }
     dispatch(&mut app, Action::SubmitSourcePath);
 
-    insta::assert_snapshot!(render(&app, 80, 24));
+    let preview = app.pending_source().expect("pending source preview");
+    let rendered = render(&app, 80, 24)
+        .replace(
+            temporary
+                .path()
+                .canonicalize()
+                .expect("canonical temporary directory")
+                .to_string_lossy()
+                .as_ref(),
+            "[TEMP]",
+        )
+        .replace(&preview.inspected().head()[..8], "[HEAD]");
+    insta::assert_snapshot!(rendered);
 }
 
 #[test]
@@ -136,11 +151,137 @@ fn sources_browse_valid_and_invalid_immediate_variants_without_nested_examples()
 
     let screen = render(&app, 120, 40);
 
-    assert!(screen.contains("✓ portable — Portable fixture"));
-    assert!(
-        screen.contains("× broken — skill does not contain a readable file named exactly SKILL.md")
-    );
+    assert!(screen.contains("✓ portable"));
+    assert!(screen.contains("× broken"));
     assert!(!screen.contains("Nested example"));
+}
+
+#[test]
+fn sources_show_the_persisted_catalog_classification_and_compatibility() {
+    let temporary = tempfile::tempdir().expect("temporary application directory");
+    let repository = temporary.path().join("source");
+    create_source_fixture(&repository);
+    let environment = AppEnvironment::new(
+        temporary.path().join("home"),
+        temporary.path().join("data"),
+        "",
+    );
+    let mut app = SkilledApp::open(environment.clone()).expect("open application");
+    for _ in 0..3 {
+        dispatch(&mut app, Action::Continue);
+    }
+    app.update(Action::BeginAddSource);
+    for character in repository.to_string_lossy().chars() {
+        app.update(Action::AppendSourcePath(character));
+    }
+    dispatch(&mut app, Action::SubmitSourcePath);
+    app.update(Action::ToggleCatalogClassification);
+    app.update(Action::ToggleCatalogCompatibility(AgentKind::OpenCode));
+    dispatch(&mut app, Action::ConfirmPendingSource);
+    dispatch(&mut app, Action::Continue);
+    dispatch(&mut app, Action::Continue);
+    drop(app);
+
+    let mut reopened = SkilledApp::open(environment).expect("reopen application");
+    reopened.update(Action::OpenSources);
+    let screen = render(&reopened, 120, 40);
+
+    assert!(screen.contains("Agent-specific"));
+    assert!(screen.contains("Claude: yes · Codex: yes · OpenCode: no"));
+}
+
+#[test]
+fn sources_keeps_a_variant_selection_visible_beyond_the_first_viewport() {
+    let temporary = tempfile::tempdir().expect("temporary application directory");
+    let repository = temporary.path().join("source");
+    create_source_fixture(&repository);
+    for index in 0..30 {
+        let name = format!("skill-{index:02}");
+        fs::create_dir_all(repository.join("skills").join(&name)).expect("create skill");
+        fs::write(
+            repository.join("skills").join(&name).join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: Fixture {index}\n---\n# Fixture\n"),
+        )
+        .expect("write skill");
+    }
+    git(&repository, &["add", "."]);
+    git(&repository, &["commit", "-m", "add many skills"]);
+    let mut app = SkilledApp::open(AppEnvironment::new(
+        temporary.path().join("home"),
+        temporary.path().join("data"),
+        "",
+    ))
+    .expect("open application");
+    let preview = app.preview_source(&repository).expect("preview source");
+    app.confirm_source(preview).expect("confirm source");
+    for _ in 0..7 {
+        dispatch(&mut app, Action::Continue);
+    }
+    app.update(Action::OpenSources);
+    app.update(Action::ToggleSourcesPane);
+    for _ in 0..25 {
+        app.update(Action::MoveSourcesSelection(1));
+    }
+    let expected = app.sources()[0].catalogs()[0].candidates()[25]
+        .directory_name()
+        .to_owned();
+
+    let screen = render(&app, 80, 24);
+
+    assert_eq!(app.focused_variant(), 25);
+    assert!(screen.contains(&format!("> ✓ {expected}")));
+}
+
+#[test]
+fn catalog_confirmation_keeps_the_focused_root_visible() {
+    let temporary = tempfile::tempdir().expect("temporary application directory");
+    let repository = temporary.path().join("source");
+    for index in 0..8 {
+        let name = format!("skill-{index}");
+        let directory = repository
+            .join("catalogs")
+            .join(format!("set-{index}"))
+            .join("claude-code/skills")
+            .join(&name);
+        fs::create_dir_all(&directory).expect("create catalog fixture");
+        fs::write(
+            directory.join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: Fixture\n---\n# Fixture\n"),
+        )
+        .expect("write skill");
+    }
+    git(&repository, &["init", "-b", "main"]);
+    git(&repository, &["config", "user.name", "Skilled Test"]);
+    git(
+        &repository,
+        &["config", "user.email", "skilled@example.test"],
+    );
+    git(&repository, &["add", "."]);
+    git(&repository, &["commit", "-m", "fixture"]);
+    let mut app = SkilledApp::open(AppEnvironment::new(
+        temporary.path().join("home"),
+        temporary.path().join("data"),
+        "",
+    ))
+    .expect("open application");
+    for _ in 0..7 {
+        dispatch(&mut app, Action::Continue);
+    }
+    app.update(Action::OpenSources);
+    app.update(Action::BeginAddSource);
+    for character in repository.to_string_lossy().chars() {
+        app.update(Action::AppendSourcePath(character));
+    }
+    dispatch(&mut app, Action::SubmitSourcePath);
+    for _ in 0..7 {
+        app.update(Action::MoveCatalogSelection(1));
+    }
+
+    let screen = render(&app, 80, 24);
+
+    assert_eq!(app.focused_catalog(), 7);
+    assert!(screen.contains("set-7"));
+    assert!(!screen.contains("set-0"));
 }
 
 fn render(app: &SkilledApp, width: u16, height: u16) -> String {

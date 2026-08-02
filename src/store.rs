@@ -10,7 +10,7 @@ use crate::{
     Error, Result,
     source::{
         CatalogClassification, CatalogProposal, Compatibility, InspectedSource, RegisteredSource,
-        SourcePreview,
+        SourcePreview, contains_revision, inspect_local_source,
     },
 };
 
@@ -181,6 +181,31 @@ impl Store {
         let mut sources = Vec::with_capacity(stored.len());
         for (id, label, path, remote_url, branch, head, dirty, last_scan_at) in stored {
             let git_top_level = PathBuf::from(path);
+            let stored_inspected = InspectedSource::from_stored(
+                git_top_level.clone(),
+                branch,
+                head,
+                remote_url,
+                dirty,
+            );
+            let (inspected, source_error) = match inspect_local_source(&git_top_level) {
+                Ok(current) if current.git_top_level() != git_top_level => (
+                    stored_inspected.clone(),
+                    Some(format!(
+                        "source now resolves to a different Git checkout: {}",
+                        current.git_top_level().display()
+                    )),
+                ),
+                Ok(current) => match contains_revision(&git_top_level, stored_inspected.head()) {
+                    Ok(true) => (current, None),
+                    Ok(false) => (
+                        stored_inspected.clone(),
+                        Some("source path now contains a different Git checkout".to_owned()),
+                    ),
+                    Err(error) => (stored_inspected.clone(), Some(error.to_string())),
+                },
+                Err(error) => (stored_inspected.clone(), Some(error.to_string())),
+            };
             let mut catalog_statement = self.connection.prepare(
                 "SELECT relative_path, classification, claude_code, codex, opencode
                  FROM catalog_roots WHERE source_id = ?1 ORDER BY relative_path",
@@ -202,19 +227,30 @@ impl Store {
                     "agent-specific" => CatalogClassification::AgentSpecific,
                     value => return Err(Error::InvalidCatalogClassification(value.to_owned())),
                 };
-                catalogs.push(CatalogProposal::from_confirmed(
-                    &git_top_level,
-                    PathBuf::from(relative_path),
-                    classification,
-                    Compatibility::from_flags(claude_code, codex, opencode),
-                )?);
+                let relative_path = PathBuf::from(relative_path);
+                let compatibility = Compatibility::from_flags(claude_code, codex, opencode);
+                catalogs.push(match &source_error {
+                    Some(error) => CatalogProposal::from_unavailable(
+                        relative_path,
+                        classification,
+                        compatibility,
+                        error,
+                    ),
+                    None => CatalogProposal::from_confirmed(
+                        &git_top_level,
+                        relative_path,
+                        classification,
+                        compatibility,
+                    ),
+                });
             }
             sources.push(RegisteredSource::new(
                 id,
                 label,
-                InspectedSource::from_stored(git_top_level, branch, head, remote_url, dirty),
+                inspected,
                 catalogs,
                 last_scan_at,
+                source_error,
             ));
         }
         Ok(sources)
