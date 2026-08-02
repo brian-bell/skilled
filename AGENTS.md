@@ -13,6 +13,58 @@ This project uses **bd** (beads) for issue tracking. Run `bd prime` for full wor
 > source of truth; don't `bd import` during normal operation; don't
 > reach for third-party Dolt hosting before trying the default).
 
+## Project Status
+
+Skilled is an early Rust 2024 and Ratatui terminal application for inspecting
+and eventually managing global coding-agent skills. The current implementation
+covers the first vertical slice only: first-run setup, agent detection and
+selection, SQLite-backed setup persistence, an empty Inventory view, Settings
+setup reset, responsive size handling, and guarded terminal restoration.
+
+Source registration, installation inventory, Doctor findings, and all
+filesystem or Git mutation workflows are not implemented yet. Do not turn the
+current wizard placeholders into behavior unless the active Beads issue places
+that work in scope. `spec/SPEC.md` is the product and technical source of truth.
+
+## Build and Test
+
+The project requires stable Rust 1.97 or newer.
+
+```bash
+cargo run
+cargo build --release
+cargo test --all-targets
+cargo fmt --check
+cargo clippy --all-targets --all-features -- -D warnings
+```
+
+Tests use temporary homes and application-data directories. Never point a test
+at the real user home or real agent skill roots. Ratatui layouts are verified
+with Insta snapshots under `tests/snapshots/`.
+
+## Application Architecture
+
+- `src/app.rs`: application state, actions, pure reducer transitions, and typed
+  persistence effects.
+- `src/agents.rs`: Claude Code, Codex, and OpenCode adapters plus non-executing
+  root and executable detection. Agent path conventions and documentation
+  snapshots belong here.
+- `src/store.rs`: private versioned SQLite metadata and migrations. Newer
+  unknown schemas fail closed.
+- `src/tui.rs`: pure Ratatui rendering; it does not access SQLite, the
+  filesystem, or the terminal event source.
+- `src/input.rs`: contextual key-event to action mapping.
+- `src/runner.rs`: terminal event loop and effect execution boundary.
+- `src/terminal.rs`: Crossterm raw-mode/alternate-screen ownership and
+  restoration guards.
+- `src/paths.rs`: injectable home, application-data, and executable search
+  paths.
+
+Keep `update` free of filesystem and database work. New external work should be
+represented as typed effects and performed outside the reducer. Keep agent
+conventions behind adapters rather than spreading paths or enablement rules
+through UI and scanner code. Production dependencies require explicit review.
+
 ## Quick Reference
 
 ```bash
