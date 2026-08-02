@@ -110,6 +110,24 @@ fn crowded_skill_directories_are_bounded_invalid_candidates() {
 }
 
 #[test]
+fn a_bounded_indeterminate_candidate_keeps_its_catalog_visible() {
+    let temporary = tempfile::tempdir().expect("temporary source repository");
+    let repository = temporary.path();
+    let crowded = repository.join("skills/crowded");
+    fs::create_dir_all(&crowded).expect("create crowded candidate");
+    for index in 0..4_097 {
+        fs::write(crowded.join(format!("file-{index}")), "fixture")
+            .expect("write crowded candidate entry");
+    }
+
+    let catalogs = propose_catalogs(repository).expect("scan bounded crowded catalog");
+
+    assert_eq!(catalogs.len(), 1);
+    assert_eq!(catalogs[0].candidates().len(), 1);
+    assert!(!catalogs[0].candidates()[0].validation().is_valid());
+}
+
+#[test]
 fn a_large_valid_catalog_is_not_counted_twice() {
     let temporary = tempfile::tempdir().expect("temporary source repository");
     let repository = temporary.path();

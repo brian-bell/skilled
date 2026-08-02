@@ -621,7 +621,6 @@ fn validation_for(path: &Path) -> (SkillValidation, bool) {
                 error,
                 PortableValidationError::MissingSkillMd
                     | PortableValidationError::ReadDirectory { .. }
-                    | PortableValidationError::SkillDirectoryTooLarge { .. }
             );
             (
                 SkillValidation::Invalid {
