@@ -21,6 +21,22 @@ fn a_portable_skill_accepts_parseable_frontmatter_and_unknown_fields() {
 }
 
 #[test]
+fn portable_frontmatter_may_close_at_end_of_file() {
+    let temporary = tempfile::tempdir().expect("temporary skill directory");
+    let skill = temporary.path().join("portable");
+    fs::create_dir(&skill).expect("create skill directory");
+    fs::write(
+        skill.join("SKILL.md"),
+        "---\nname: portable\ndescription: A portable fixture\n---",
+    )
+    .expect("write skill");
+
+    let validated = validate_portable_skill(&skill).expect("validate portable skill");
+
+    assert_eq!(validated.body(), "");
+}
+
+#[test]
 fn portable_names_obey_length_separator_and_directory_match_rules() {
     let temporary = tempfile::tempdir().expect("temporary skill directory");
     let skill = temporary.path().join("portable");

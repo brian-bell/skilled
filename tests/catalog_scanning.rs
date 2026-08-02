@@ -63,6 +63,23 @@ fn an_exact_skill_filename_is_proposed_even_when_portable_metadata_is_invalid() 
     assert!(!catalogs[0].candidates()[0].validation().is_valid());
 }
 
+#[test]
+fn catalog_candidate_enumeration_has_a_hard_limit() {
+    let temporary = tempfile::tempdir().expect("temporary source repository");
+    let repository = temporary.path();
+    for index in 0..4_097 {
+        fs::create_dir_all(repository.join("skills").join(format!("candidate-{index}")))
+            .expect("create candidate directory");
+    }
+
+    let result = propose_catalogs(repository);
+
+    assert!(matches!(
+        result,
+        Err(skilled::Error::SourceScanLimitExceeded)
+    ));
+}
+
 fn write_skill(path: impl AsRef<std::path::Path>, name: &str) {
     let path = path.as_ref();
     fs::create_dir_all(path.parent().expect("skill parent")).expect("create skill directory");

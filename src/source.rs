@@ -8,7 +8,7 @@ use std::{
 use crate::{Error, Result, agents::AgentKind, validation::validate_portable_skill};
 
 const MAX_SCAN_DEPTH: usize = 12;
-const MAX_SCANNED_DIRECTORIES: usize = 50_000;
+const MAX_SCANNED_ENTRIES: usize = 4_096;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CatalogClassification {
@@ -454,17 +454,13 @@ pub fn propose_catalogs(git_top_level: &Path) -> Result<Vec<CatalogProposal>> {
 
     let mut proposals = Vec::new();
     let mut pending = vec![(git_top_level.clone(), 0_usize)];
-    let mut scanned_directories = 0_usize;
+    let mut remaining_entries = MAX_SCANNED_ENTRIES;
     while let Some((directory, depth)) = pending.pop() {
-        scanned_directories += 1;
-        if scanned_directories > MAX_SCANNED_DIRECTORIES {
-            return Err(Error::SourceScanLimitExceeded);
-        }
         if depth > MAX_SCAN_DEPTH {
             continue;
         }
 
-        let mut children = child_directories(&directory)?;
+        let mut children = child_directories(&directory, &mut remaining_entries)?;
         children.sort();
         children.reverse();
         for child in children {
@@ -473,7 +469,8 @@ pub fn propose_catalogs(git_top_level: &Path) -> Result<Vec<CatalogProposal>> {
             }
             if let Some((classification, compatibility)) = catalog_defaults(&git_top_level, &child)
             {
-                let candidates = catalog_candidates(&git_top_level, &child)?;
+                let candidates =
+                    catalog_candidates_with_budget(&git_top_level, &child, &mut remaining_entries)?;
                 let mut has_exact_skill_md = false;
                 for candidate in &candidates {
                     has_exact_skill_md |=
@@ -526,7 +523,16 @@ fn catalog_defaults(
 }
 
 fn catalog_candidates(git_top_level: &Path, catalog: &Path) -> Result<Vec<SkillCandidate>> {
-    let mut candidates = child_directories(catalog)?
+    let mut remaining_entries = MAX_SCANNED_ENTRIES;
+    catalog_candidates_with_budget(git_top_level, catalog, &mut remaining_entries)
+}
+
+fn catalog_candidates_with_budget(
+    git_top_level: &Path,
+    catalog: &Path,
+    remaining_entries: &mut usize,
+) -> Result<Vec<SkillCandidate>> {
+    let mut candidates = child_directories(catalog, remaining_entries)?
         .into_iter()
         .map(|path| skill_candidate(git_top_level, &path))
         .collect::<Result<Vec<_>>>()?;
@@ -596,19 +602,20 @@ fn validation_for(path: &Path) -> SkillValidation {
     }
 }
 
-fn child_directories(directory: &Path) -> Result<Vec<PathBuf>> {
-    fs::read_dir(directory)?
-        .filter_map(|entry| match entry {
-            Ok(entry) => match entry.file_type() {
-                Ok(file_type) if file_type.is_dir() && !file_type.is_symlink() => {
-                    Some(Ok(entry.path()))
-                }
-                Ok(_) => None,
-                Err(error) => Some(Err(error.into())),
-            },
-            Err(error) => Some(Err(error.into())),
-        })
-        .collect()
+fn child_directories(directory: &Path, remaining_entries: &mut usize) -> Result<Vec<PathBuf>> {
+    let mut directories = Vec::new();
+    for entry in fs::read_dir(directory)? {
+        if *remaining_entries == 0 {
+            return Err(Error::SourceScanLimitExceeded);
+        }
+        *remaining_entries -= 1;
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() && !file_type.is_symlink() {
+            directories.push(entry.path());
+        }
+    }
+    Ok(directories)
 }
 
 fn exact_skill_md_exists(directory: &Path) -> Result<bool> {

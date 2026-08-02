@@ -178,9 +178,15 @@ fn split_frontmatter(content: &str) -> Result<(&str, &str), PortableValidationEr
         .strip_prefix("---\n")
         .or_else(|| content.strip_prefix("---\r\n"))
         .ok_or(PortableValidationError::MissingFrontmatter)?;
-    let (frontmatter, body) = remainder
+    if let Some((frontmatter, body)) = remainder
         .split_once("\n---\n")
         .or_else(|| remainder.split_once("\r\n---\r\n"))
-        .ok_or(PortableValidationError::UnterminatedFrontmatter)?;
-    Ok((frontmatter, body))
+    {
+        return Ok((frontmatter, body));
+    }
+    remainder
+        .strip_suffix("\n---")
+        .or_else(|| remainder.strip_suffix("\r\n---"))
+        .map(|frontmatter| (frontmatter, ""))
+        .ok_or(PortableValidationError::UnterminatedFrontmatter)
 }
