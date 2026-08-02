@@ -56,3 +56,20 @@ fn finishing_setup_returns_a_persistence_effect_without_writing_metadata() {
         View::Setup(SetupStep::Welcome)
     );
 }
+
+#[test]
+fn back_is_a_no_op_on_the_first_setup_step() {
+    let temporary = tempfile::tempdir().expect("temporary application directory");
+    let mut app = SkilledApp::open(AppEnvironment::new(
+        temporary.path().join("home"),
+        temporary.path().join("data"),
+        "",
+    ))
+    .expect("open application");
+
+    let update = app.update(Action::Back);
+
+    assert_eq!(update.outcome(), UpdateOutcome::Continue);
+    assert!(update.effects().is_empty());
+    assert_eq!(app.view(), View::Setup(SetupStep::Welcome));
+}

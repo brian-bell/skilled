@@ -235,10 +235,11 @@ impl SkilledApp {
 
     fn back(&mut self) -> UpdateResult {
         match self.view {
-            View::Setup(step) => match step.previous() {
-                Some(previous) => self.view = View::Setup(previous),
-                None => return UpdateResult::quit(),
-            },
+            View::Setup(step) => {
+                if let Some(previous) = step.previous() {
+                    self.view = View::Setup(previous);
+                }
+            }
             View::Settings => self.view = View::Inventory,
             View::Inventory => {}
         }
