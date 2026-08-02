@@ -103,7 +103,6 @@ pub struct SkillCandidate {
     relative_path: PathBuf,
     validation: SkillValidation,
     content_fingerprint: Option<u64>,
-    has_exact_skill_md: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -460,7 +459,7 @@ pub fn propose_catalogs(git_top_level: &Path) -> Result<Vec<CatalogProposal>> {
     let mut budget = InspectionBudget::source_scan();
     if exact_skill_md_exists(&git_top_level, &mut budget)? {
         let directory_name = path_file_name(&git_top_level)?;
-        let (validation, has_exact_skill_md) = validation_for(&git_top_level, &mut budget)?;
+        let validation = validation_for(&git_top_level, &mut budget)?;
         return Ok(vec![CatalogProposal {
             relative_path: PathBuf::from("."),
             classification: CatalogClassification::Common,
@@ -470,7 +469,6 @@ pub fn propose_catalogs(git_top_level: &Path) -> Result<Vec<CatalogProposal>> {
                 relative_path: PathBuf::from("."),
                 validation,
                 content_fingerprint: skill_document_fingerprint(&git_top_level, &mut budget)?,
-                has_exact_skill_md,
             }],
             included: true,
             scan_error: None,
@@ -495,23 +493,18 @@ pub fn propose_catalogs(git_top_level: &Path) -> Result<Vec<CatalogProposal>> {
             {
                 let candidates =
                     catalog_candidates_with_budget(&git_top_level, &child, &mut budget)?;
-                if candidates
-                    .iter()
-                    .any(|candidate| candidate.has_exact_skill_md)
-                {
-                    proposals.push(CatalogProposal {
-                        relative_path: child
-                            .strip_prefix(&git_top_level)
-                            .expect("catalog beneath source root")
-                            .to_path_buf(),
-                        classification,
-                        compatibility,
-                        candidates,
-                        included: true,
-                        scan_error: None,
-                    });
-                    continue;
-                }
+                proposals.push(CatalogProposal {
+                    relative_path: child
+                        .strip_prefix(&git_top_level)
+                        .expect("catalog beneath source root")
+                        .to_path_buf(),
+                    classification,
+                    compatibility,
+                    candidates,
+                    included: true,
+                    scan_error: None,
+                });
+                continue;
             }
             pending.push((child, depth + 1));
         }
@@ -589,7 +582,7 @@ fn confirmed_catalog_candidates(
     let canonical_source = git_top_level.canonicalize()?;
     let mut budget = InspectionBudget::source_scan();
     if relative_path == Path::new(".") {
-        let (validation, has_exact_skill_md) = validation_for(&canonical_source, &mut budget)?;
+        let validation = validation_for(&canonical_source, &mut budget)?;
         return Ok(vec![SkillCandidate {
             directory_name: canonical_source
                 .file_name()
@@ -598,7 +591,6 @@ fn confirmed_catalog_candidates(
             relative_path: PathBuf::from("."),
             validation,
             content_fingerprint: skill_document_fingerprint(&canonical_source, &mut budget)?,
-            has_exact_skill_md,
         }]);
     }
 
@@ -618,7 +610,7 @@ fn skill_candidate(
     path: &Path,
     budget: &mut InspectionBudget,
 ) -> Result<SkillCandidate> {
-    let (validation, has_exact_skill_md) = validation_for(path, budget)?;
+    let validation = validation_for(path, budget)?;
     Ok(SkillCandidate {
         directory_name: path_file_name(path)?,
         relative_path: path
@@ -627,35 +619,21 @@ fn skill_candidate(
             .to_path_buf(),
         validation,
         content_fingerprint: skill_document_fingerprint(path, budget)?,
-        has_exact_skill_md,
     })
 }
 
-fn validation_for(path: &Path, budget: &mut InspectionBudget) -> Result<(SkillValidation, bool)> {
+fn validation_for(path: &Path, budget: &mut InspectionBudget) -> Result<SkillValidation> {
     match validate_portable_skill_with_budget(path, budget) {
-        Ok(validated) => Ok((
-            SkillValidation::Valid {
-                name: validated.name().to_owned(),
-                description: validated.description().to_owned(),
-            },
-            true,
-        )),
+        Ok(validated) => Ok(SkillValidation::Valid {
+            name: validated.name().to_owned(),
+            description: validated.description().to_owned(),
+        }),
         Err(PortableValidationError::SourceInspectionLimitExceeded) => {
             Err(Error::SourceScanLimitExceeded)
         }
-        Err(error) => {
-            let has_exact_skill_md = !matches!(
-                error,
-                PortableValidationError::MissingSkillMd
-                    | PortableValidationError::ReadDirectory { .. }
-            );
-            Ok((
-                SkillValidation::Invalid {
-                    message: error.to_string(),
-                },
-                has_exact_skill_md,
-            ))
-        }
+        Err(error) => Ok(SkillValidation::Invalid {
+            message: error.to_string(),
+        }),
     }
 }
 

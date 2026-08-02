@@ -64,6 +64,26 @@ fn an_exact_skill_filename_is_proposed_even_when_portable_metadata_is_invalid() 
 }
 
 #[test]
+fn recognized_catalogs_remain_visible_when_empty_or_entirely_invalid() {
+    let temporary = tempfile::tempdir().expect("temporary source repository");
+    let repository = temporary.path();
+    fs::create_dir_all(repository.join("skills/wrong-case")).expect("create invalid candidate");
+    fs::write(
+        repository.join("skills/wrong-case/skill.md"),
+        "wrong filename",
+    )
+    .expect("write invalid candidate");
+    fs::create_dir_all(repository.join(".agents/skills")).expect("create empty catalog");
+
+    let catalogs = propose_catalogs(repository).expect("scan recognized catalogs");
+
+    assert_eq!(catalogs.len(), 2);
+    assert!(catalogs[0].candidates().is_empty());
+    assert_eq!(catalogs[1].candidates().len(), 1);
+    assert!(!catalogs[1].candidates()[0].validation().is_valid());
+}
+
+#[test]
 fn catalog_candidate_enumeration_has_a_hard_limit() {
     let temporary = tempfile::tempdir().expect("temporary source repository");
     let repository = temporary.path();
