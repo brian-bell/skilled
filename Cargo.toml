@@ -1,0 +1,18 @@
+[package]
+name = "skilled"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97"
+description = "Inspect and safely manage global coding-agent skills"
+license = "MIT"
+
+[dependencies]
+crossterm = "0.29.0"
+directories = "6.0.0"
+ratatui = "0.30.2"
+rusqlite = { version = "0.40.1", features = ["bundled"] }
+thiserror = "2.0.19"
+
+[dev-dependencies]
+insta = "1.48.0"
+tempfile = "3.27.0"

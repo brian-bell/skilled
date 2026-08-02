@@ -6,3 +6,5 @@ spec/
 *.db
 .beads-credential-key
 .beads/proxieddb/
+/target/
+*.snap.new

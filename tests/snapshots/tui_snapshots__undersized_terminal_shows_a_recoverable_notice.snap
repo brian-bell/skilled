@@ -1,0 +1,18 @@
+---
+source: tests/tui_snapshots.rs
+expression: "render(&app, 60, 14)"
+---
+┌ Terminal too small ──────────────────────────────────────┐
+│    Skilled needs at least 80×24. Current size: 60×14.    │
+│             Resize the terminal to continue.             │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+└──────────────────────────────────────────────────────────┘
