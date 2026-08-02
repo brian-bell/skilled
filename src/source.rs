@@ -1,8 +1,9 @@
 use std::{
     ffi::{OsStr, OsString},
     fs,
+    io::Read,
     path::{Component, Path, PathBuf},
-    process::{Command, Output},
+    process::{Command, Output, Stdio},
 };
 
 use crate::{
@@ -373,17 +374,14 @@ pub fn inspect_local_source(path: &Path) -> Result<InspectedSource> {
     )?;
     let remote_url = optional_git_output(&git_top_level, &["remote", "get-url", "origin"])?
         .map(|url| sanitize_remote_url(&url));
-    let status = required_git_output(
-        &git_top_level,
-        &["status", "--porcelain=v1", "--untracked-files=normal"],
-    )?;
+    let dirty = git_status_dirty(&git_top_level)?;
 
     Ok(InspectedSource {
         git_top_level,
         branch,
         head: strip_record_terminator(&head).to_owned(),
         remote_url,
-        dirty: !status.is_empty(),
+        dirty,
     })
 }
 
@@ -723,7 +721,15 @@ fn sanitize_remote_url(value: &str) -> String {
             .map_or(authority, |(_, host)| host);
         return format!("{scheme}://{host}{path}");
     }
-    if let Some((_, remote)) = value.rsplit_once('@') {
+    if !Path::new(value).is_absolute()
+        && !value.starts_with("./")
+        && !value.starts_with("../")
+        && let Some((_, remote)) = value.rsplit_once('@')
+        && let Some((host, path)) = remote.split_once(':')
+        && !host.is_empty()
+        && !path.is_empty()
+        && !host.contains(['/', '\\'])
+    {
         return remote.to_owned();
     }
     value.to_owned()
@@ -759,8 +765,42 @@ fn optional_git_output(repository: &Path, arguments: &[&str]) -> Result<Option<S
     Ok((!value.is_empty()).then(|| value.to_owned()))
 }
 
+fn git_status_dirty(repository: &Path) -> Result<bool> {
+    let arguments = ["status", "--porcelain=v1", "--untracked-files=normal"];
+    let mut child = git_command(repository, &arguments)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(Error::GitUnavailable)?;
+    let mut stdout = child.stdout.take().expect("Git status stdout is piped");
+    let mut first_byte = [0_u8; 1];
+    let has_output = stdout.read(&mut first_byte)? != 0;
+    drop(stdout);
+    if has_output {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Ok(true);
+    }
+    let status = child.wait()?;
+    if !status.success() {
+        return Err(Error::GitCommand {
+            repository: repository.to_path_buf(),
+            arguments: arguments.iter().map(|value| (*value).to_owned()).collect(),
+            stderr: "git status failed before producing output".to_owned(),
+        });
+    }
+    Ok(false)
+}
+
 fn run_git(repository: &Path, arguments: &[&str]) -> Result<Output> {
-    Command::new("git")
+    git_command(repository, arguments)
+        .output()
+        .map_err(Error::GitUnavailable)
+}
+
+fn git_command(repository: &Path, arguments: &[&str]) -> Command {
+    let mut command = Command::new("git");
+    command
         .env("GIT_OPTIONAL_LOCKS", "0")
         .args([
             "-c",
@@ -770,9 +810,8 @@ fn run_git(repository: &Path, arguments: &[&str]) -> Result<Output> {
         ])
         .arg("-C")
         .arg(repository)
-        .args(arguments)
-        .output()
-        .map_err(Error::GitUnavailable)
+        .args(arguments);
+    command
 }
 
 fn strip_record_terminator(value: &str) -> &str {

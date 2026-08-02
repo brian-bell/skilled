@@ -68,6 +68,13 @@ fn inspection_removes_credentials_from_remote_metadata() {
     );
     let scp_style = inspect_local_source(&repository).expect("inspect scp-style remote");
     assert_eq!(scp_style.remote_url(), Some("example.test:catalog.git"));
+
+    git(
+        &repository,
+        &["remote", "set-url", "origin", "/tmp/catalog@backup.git"],
+    );
+    let local_path = inspect_local_source(&repository).expect("inspect local-path remote");
+    assert_eq!(local_path.remote_url(), Some("/tmp/catalog@backup.git"));
 }
 
 #[cfg(unix)]
