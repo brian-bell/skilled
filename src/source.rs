@@ -5,7 +5,11 @@ use std::{
     process::{Command, Output},
 };
 
-use crate::{Error, Result, agents::AgentKind, validation::validate_portable_skill};
+use crate::{
+    Error, Result,
+    agents::AgentKind,
+    validation::{PortableValidationError, validate_portable_skill},
+};
 
 const MAX_SCAN_DEPTH: usize = 12;
 const MAX_SCANNED_ENTRIES: usize = 4_096;
@@ -87,6 +91,7 @@ pub struct SkillCandidate {
     relative_path: PathBuf,
     validation: SkillValidation,
     content_fingerprint: Option<u64>,
+    has_exact_skill_md: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -440,9 +445,10 @@ impl InspectedSource {
 
 pub fn propose_catalogs(git_top_level: &Path) -> Result<Vec<CatalogProposal>> {
     let git_top_level = git_top_level.canonicalize()?;
-    let mut remaining_entries = MAX_SCANNED_ENTRIES;
-    if exact_skill_md_exists(&git_top_level, &mut remaining_entries)? {
+    let mut root_entries = MAX_SCANNED_ENTRIES;
+    if exact_skill_md_exists(&git_top_level, &mut root_entries)? {
         let directory_name = path_file_name(&git_top_level)?;
+        let (validation, has_exact_skill_md) = validation_for(&git_top_level);
         return Ok(vec![CatalogProposal {
             relative_path: PathBuf::from("."),
             classification: CatalogClassification::Common,
@@ -450,8 +456,9 @@ pub fn propose_catalogs(git_top_level: &Path) -> Result<Vec<CatalogProposal>> {
             candidates: vec![SkillCandidate {
                 directory_name,
                 relative_path: PathBuf::from("."),
-                validation: validation_for(&git_top_level),
+                validation,
                 content_fingerprint: skill_document_fingerprint(&git_top_level),
+                has_exact_skill_md,
             }],
             included: true,
             scan_error: None,
@@ -460,6 +467,7 @@ pub fn propose_catalogs(git_top_level: &Path) -> Result<Vec<CatalogProposal>> {
 
     let mut proposals = Vec::new();
     let mut pending = vec![(git_top_level.clone(), 0_usize)];
+    let mut remaining_entries = MAX_SCANNED_ENTRIES;
     while let Some((directory, depth)) = pending.pop() {
         if depth > MAX_SCAN_DEPTH {
             continue;
@@ -476,14 +484,10 @@ pub fn propose_catalogs(git_top_level: &Path) -> Result<Vec<CatalogProposal>> {
             {
                 let candidates =
                     catalog_candidates_with_budget(&git_top_level, &child, &mut remaining_entries)?;
-                let mut has_exact_skill_md = false;
-                for candidate in &candidates {
-                    has_exact_skill_md |= exact_skill_md_exists(
-                        &git_top_level.join(candidate.relative_path()),
-                        &mut remaining_entries,
-                    )?;
-                }
-                if has_exact_skill_md {
+                if candidates
+                    .iter()
+                    .any(|candidate| candidate.has_exact_skill_md)
+                {
                     proposals.push(CatalogProposal {
                         relative_path: child
                             .strip_prefix(&git_top_level)
@@ -565,14 +569,16 @@ fn confirmed_catalog_candidates(
 
     let canonical_source = git_top_level.canonicalize()?;
     if relative_path == Path::new(".") {
+        let (validation, has_exact_skill_md) = validation_for(&canonical_source);
         return Ok(vec![SkillCandidate {
             directory_name: canonical_source
                 .file_name()
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_else(|| ".".to_owned()),
             relative_path: PathBuf::from("."),
-            validation: validation_for(&canonical_source),
+            validation,
             content_fingerprint: skill_document_fingerprint(&canonical_source),
+            has_exact_skill_md,
         }]);
     }
 
@@ -588,26 +594,42 @@ fn confirmed_catalog_candidates(
 }
 
 fn skill_candidate(git_top_level: &Path, path: &Path) -> Result<SkillCandidate> {
+    let (validation, has_exact_skill_md) = validation_for(path);
     Ok(SkillCandidate {
         directory_name: path_file_name(path)?,
         relative_path: path
             .strip_prefix(git_top_level)
             .expect("candidate beneath source root")
             .to_path_buf(),
-        validation: validation_for(path),
+        validation,
         content_fingerprint: skill_document_fingerprint(path),
+        has_exact_skill_md,
     })
 }
 
-fn validation_for(path: &Path) -> SkillValidation {
+fn validation_for(path: &Path) -> (SkillValidation, bool) {
     match validate_portable_skill(path) {
-        Ok(validated) => SkillValidation::Valid {
-            name: validated.name().to_owned(),
-            description: validated.description().to_owned(),
-        },
-        Err(error) => SkillValidation::Invalid {
-            message: error.to_string(),
-        },
+        Ok(validated) => (
+            SkillValidation::Valid {
+                name: validated.name().to_owned(),
+                description: validated.description().to_owned(),
+            },
+            true,
+        ),
+        Err(error) => {
+            let has_exact_skill_md = !matches!(
+                error,
+                PortableValidationError::MissingSkillMd
+                    | PortableValidationError::ReadDirectory { .. }
+                    | PortableValidationError::SkillDirectoryTooLarge { .. }
+            );
+            (
+                SkillValidation::Invalid {
+                    message: error.to_string(),
+                },
+                has_exact_skill_md,
+            )
+        }
     }
 }
 
@@ -679,9 +701,7 @@ fn sanitize_remote_url(value: &str) -> String {
             .map_or(authority, |(_, host)| host);
         return format!("{scheme}://{host}{path}");
     }
-    if let Some((userinfo, remote)) = value.split_once('@')
-        && !userinfo.contains(['/', '\\'])
-    {
+    if let Some((_, remote)) = value.rsplit_once('@') {
         return remote.to_owned();
     }
     value.to_owned()

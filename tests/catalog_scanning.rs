@@ -81,7 +81,7 @@ fn catalog_candidate_enumeration_has_a_hard_limit() {
 }
 
 #[test]
-fn skill_document_existence_checks_share_the_scan_budget() {
+fn crowded_skill_directories_are_bounded_invalid_candidates() {
     let temporary = tempfile::tempdir().expect("temporary source repository");
     let repository = temporary.path();
     write_skill(repository.join("skills/valid/SKILL.md"), "valid");
@@ -92,12 +92,39 @@ fn skill_document_existence_checks_share_the_scan_budget() {
             .expect("write crowded candidate entry");
     }
 
-    let result = propose_catalogs(repository);
+    let catalogs = propose_catalogs(repository).expect("scan bounded crowded candidate");
 
-    assert!(matches!(
-        result,
-        Err(skilled::Error::SourceScanLimitExceeded)
-    ));
+    assert_eq!(catalogs.len(), 1);
+    let crowded = catalogs[0]
+        .candidates()
+        .iter()
+        .find(|candidate| candidate.directory_name() == "a-crowded")
+        .expect("crowded candidate");
+    assert!(!crowded.validation().is_valid());
+    assert!(
+        crowded
+            .validation()
+            .message()
+            .is_some_and(|message| message.contains("entry inspection limit"))
+    );
+}
+
+#[test]
+fn a_large_valid_catalog_is_not_counted_twice() {
+    let temporary = tempfile::tempdir().expect("temporary source repository");
+    let repository = temporary.path();
+    for index in 0..2_050 {
+        let name = format!("candidate-{index}");
+        write_skill(
+            repository.join("skills").join(&name).join("SKILL.md"),
+            &name,
+        );
+    }
+
+    let catalogs = propose_catalogs(repository).expect("scan large valid catalog");
+
+    assert_eq!(catalogs.len(), 1);
+    assert_eq!(catalogs[0].candidates().len(), 2_050);
 }
 
 fn write_skill(path: impl AsRef<std::path::Path>, name: &str) {

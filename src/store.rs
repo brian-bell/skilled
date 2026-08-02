@@ -98,10 +98,7 @@ impl Store {
             .file_name()
             .and_then(|name| name.to_str())
             .ok_or_else(|| Error::InvalidSourcePath(source.git_top_level().to_path_buf()))?;
-        let scanned_at = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs() as i64;
+        let scanned_at = current_timestamp();
         let transaction = self.connection.transaction()?;
         transaction.execute(
             "INSERT INTO source_repositories
@@ -188,23 +185,54 @@ impl Store {
                 remote_url,
                 dirty,
             );
-            let (inspected, source_error) = match inspect_local_source(&git_top_level) {
+            let (inspected, source_error, refreshed_at) = match inspect_local_source(&git_top_level)
+            {
                 Ok(current) if current.git_top_level() != git_top_level => (
                     stored_inspected.clone(),
                     Some(format!(
                         "source now resolves to a different Git checkout: {}",
                         current.git_top_level().display()
                     )),
+                    last_scan_at,
                 ),
                 Ok(current) => match contains_revision(&git_top_level, stored_inspected.head()) {
-                    Ok(true) => (current, None),
+                    Ok(true) => {
+                        let refreshed_at = current_timestamp();
+                        self.connection.execute(
+                            "UPDATE source_repositories SET
+                                remote_url = ?1,
+                                branch = ?2,
+                                head_revision = ?3,
+                                dirty = ?4,
+                                last_scan_at = ?5
+                             WHERE id = ?6",
+                            params![
+                                current.remote_url(),
+                                current.branch(),
+                                current.head(),
+                                current.dirty(),
+                                refreshed_at,
+                                id,
+                            ],
+                        )?;
+                        (current, None, refreshed_at)
+                    }
                     Ok(false) => (
                         stored_inspected.clone(),
                         Some("source path now contains a different Git checkout".to_owned()),
+                        last_scan_at,
                     ),
-                    Err(error) => (stored_inspected.clone(), Some(error.to_string())),
+                    Err(error) => (
+                        stored_inspected.clone(),
+                        Some(error.to_string()),
+                        last_scan_at,
+                    ),
                 },
-                Err(error) => (stored_inspected.clone(), Some(error.to_string())),
+                Err(error) => (
+                    stored_inspected.clone(),
+                    Some(error.to_string()),
+                    last_scan_at,
+                ),
             };
             let mut catalog_statement = self.connection.prepare(
                 "SELECT relative_path, classification, claude_code, codex, opencode
@@ -249,7 +277,7 @@ impl Store {
                 label,
                 inspected,
                 catalogs,
-                last_scan_at,
+                refreshed_at,
                 source_error,
             ));
         }
@@ -261,6 +289,13 @@ fn path_text(path: &Path) -> Result<String> {
     path.to_str()
         .map(str::to_owned)
         .ok_or_else(|| Error::InvalidSourcePath(path.to_path_buf()))
+}
+
+fn current_timestamp() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
 }
 
 fn migrate(connection: &mut Connection) -> Result<()> {

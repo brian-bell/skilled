@@ -212,11 +212,8 @@ fn reopening_refreshes_the_current_head_and_dirty_state() {
     )
     .expect("write skill");
     initialize_repository(&repository);
-    let environment = AppEnvironment::new(
-        temporary.path().join("home"),
-        temporary.path().join("data"),
-        "",
-    );
+    let data = temporary.path().join("data");
+    let environment = AppEnvironment::new(temporary.path().join("home"), &data, "");
     let mut app = SkilledApp::open(environment.clone()).expect("open application");
     let preview = app.preview_source(&repository).expect("preview source");
     let registered_head = preview.inspected().head().to_owned();
@@ -225,11 +222,28 @@ fn reopening_refreshes_the_current_head_and_dirty_state() {
     fs::write(repository.join("README.md"), "new revision\n").expect("write committed change");
     git(&repository, &["add", "README.md"]);
     git(&repository, &["commit", "-m", "new revision"]);
+    let current_head = git_output(&repository, &["rev-parse", "HEAD"]);
+    let connection = rusqlite::Connection::open(data.join("skilled.sqlite3"))
+        .expect("open application database");
+    connection
+        .execute("UPDATE source_repositories SET last_scan_at = 1", [])
+        .expect("set stale scan time");
+    drop(connection);
 
     let reopened = SkilledApp::open(environment.clone()).expect("reopen at new revision");
     assert_ne!(reopened.sources()[0].head(), registered_head);
     assert!(!reopened.sources()[0].dirty());
     assert!(reopened.sources()[0].source_error().is_none());
+    assert!(reopened.sources()[0].last_scan_at() > 1);
+    let connection = rusqlite::Connection::open(data.join("skilled.sqlite3"))
+        .expect("reopen application database");
+    let persisted_head: String = connection
+        .query_row("SELECT head_revision FROM source_repositories", [], |row| {
+            row.get(0)
+        })
+        .expect("read refreshed source revision");
+    assert_eq!(persisted_head, current_head);
+    drop(connection);
     drop(reopened);
     fs::write(repository.join("README.md"), "dirty change\n").expect("write dirty change");
 
@@ -438,6 +452,20 @@ fn git(repository: &Path, arguments: &[&str]) {
         "git {arguments:?} failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+fn git_output(repository: &Path, arguments: &[&str]) -> String {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repository)
+        .args(arguments)
+        .output()
+        .expect("run Git fixture command");
+    assert!(output.status.success());
+    String::from_utf8(output.stdout)
+        .expect("Git text output")
+        .trim_end()
+        .to_owned()
 }
 
 fn dispatch(app: &mut SkilledApp, action: Action) {
