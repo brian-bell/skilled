@@ -30,6 +30,39 @@ fn first_run_welcome_at_wide_size() {
 }
 
 #[test]
+fn contextual_help_at_minimum_supported_size() {
+    let temporary = tempfile::tempdir().expect("temporary application directory");
+    let mut app = SkilledApp::open(AppEnvironment::new(
+        temporary.path().join("home"),
+        temporary.path().join("data"),
+        "",
+    ))
+    .expect("open application");
+    app.update(Action::Continue);
+    app.update(Action::OpenHelp);
+
+    insta::assert_snapshot!(render(&app, 80, 24));
+}
+
+#[test]
+fn contextual_help_at_wide_size() {
+    let temporary = tempfile::tempdir().expect("temporary application directory");
+    let mut app = SkilledApp::open(AppEnvironment::new(
+        temporary.path().join("home"),
+        temporary.path().join("data"),
+        "",
+    ))
+    .expect("open application");
+    for _ in 0..7 {
+        dispatch(&mut app, Action::Continue);
+    }
+    app.update(Action::OpenSources);
+    app.update(Action::OpenHelp);
+
+    insta::assert_snapshot!(render(&app, 120, 40));
+}
+
+#[test]
 fn inventory_empty_state_at_minimum_supported_size() {
     let temporary = tempfile::tempdir().expect("temporary application directory");
     let mut app = SkilledApp::open(AppEnvironment::new(

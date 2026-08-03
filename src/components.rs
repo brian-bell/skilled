@@ -5,7 +5,7 @@
 //! terminal.
 
 use ratatui::{
-    layout::{Alignment, Rect},
+    layout::{Alignment, Constraint, Layout, Rect},
     text::{Line, Span},
     widgets::{Block, Borders, Padding, Paragraph, Wrap},
 };
@@ -217,6 +217,36 @@ pub(crate) fn dialog_frame(title: &str, scope: &str) -> Block<'static> {
         .padding(Padding::new(2, 2, 1, 1))
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct DialogRegions {
+    pub(crate) body: Rect,
+    pub(crate) divider: Rect,
+    pub(crate) status: Rect,
+    pub(crate) actions: Rect,
+}
+
+/// Divide a dialog interior into a wrapped body and an explicit footer.
+pub(crate) fn dialog_regions(inner: Rect, action_width: u16) -> DialogRegions {
+    let [body, divider, footer] = Layout::vertical([
+        Constraint::Min(0),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .areas(inner);
+    let [status, actions] = Layout::horizontal([
+        Constraint::Min(0),
+        Constraint::Length(action_width.min(footer.width)),
+    ])
+    .areas(footer);
+
+    DialogRegions {
+        body,
+        divider,
+        status,
+        actions,
+    }
+}
+
 /// The marker that identifies the focused row in a list.
 pub(crate) const FOCUS_MARKER: &str = "▌";
 
@@ -344,6 +374,21 @@ mod tests {
         unique.sort_unstable();
         unique.dedup();
         assert_eq!(unique.len(), glyphs.len(), "glyphs must be distinguishable");
+    }
+
+    #[test]
+    fn dialog_regions_are_bounded_and_non_overlapping() {
+        let inner = Rect::new(10, 5, 30, 10);
+
+        let regions = dialog_regions(inner, 11);
+
+        assert_eq!(regions.body, Rect::new(10, 5, 30, 8));
+        assert_eq!(regions.divider, Rect::new(10, 13, 30, 1));
+        assert_eq!(regions.status, Rect::new(10, 14, 19, 1));
+        assert_eq!(regions.actions, Rect::new(29, 14, 11, 1));
+        assert_eq!(regions.status.width + regions.actions.width, inner.width);
+        assert_eq!(regions.actions.right(), inner.right());
+        assert_eq!(regions.actions.bottom(), inner.bottom());
     }
 
     #[test]

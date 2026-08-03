@@ -1,6 +1,5 @@
 ---
 source: tests/tui_snapshots.rs
-assertion_line: 45
 expression: "render(&app, 80, 24)"
 ---
  ◆ skilled   global                              ● ready · 0 sources registered
@@ -26,4 +25,4 @@ Global inventory  not scanned
 
 
 
- 2 Sources   s Settings   q Quit
+ 2 Sources   s Settings   ? Help   q Quit

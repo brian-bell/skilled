@@ -1,3 +1,4 @@
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     Terminal,
     backend::TestBackend,
@@ -6,7 +7,7 @@ use ratatui::{
 };
 use std::{fs, path::Path, process::Command};
 
-use skilled::{Action, AppEnvironment, SkilledApp};
+use skilled::{Action, AgentKind, AppEnvironment, SkilledApp};
 
 #[test]
 fn the_shell_frames_inventory_with_product_navigation_and_key_hints() {
@@ -88,6 +89,46 @@ fn an_open_dialog_takes_the_navigation_row_with_it() {
         .perform_effects(update.effects())
         .expect("inspect source");
     assert!(confirming.pending_source().is_some());
+    for (code, expected) in [
+        (KeyCode::Enter, Action::ConfirmPendingSource),
+        (KeyCode::Esc, Action::CancelSourceFlow),
+        (KeyCode::Up, Action::MoveCatalogSelection(-1)),
+        (KeyCode::Char('k'), Action::MoveCatalogSelection(-1)),
+        (KeyCode::Down, Action::MoveCatalogSelection(1)),
+        (KeyCode::Char('j'), Action::MoveCatalogSelection(1)),
+        (KeyCode::Char(' '), Action::ToggleCatalogIncluded),
+        (KeyCode::Char('c'), Action::ToggleCatalogClassification),
+        (
+            KeyCode::Char('1'),
+            Action::ToggleCatalogCompatibility(AgentKind::ClaudeCode),
+        ),
+        (
+            KeyCode::Char('2'),
+            Action::ToggleCatalogCompatibility(AgentKind::Codex),
+        ),
+        (
+            KeyCode::Char('3'),
+            Action::ToggleCatalogCompatibility(AgentKind::OpenCode),
+        ),
+    ] {
+        assert_eq!(
+            skilled::input::action_for_app_key(
+                &confirming,
+                KeyEvent::new(code, KeyModifiers::NONE),
+            ),
+            Some(expected),
+            "catalog confirmation key {code:?}"
+        );
+    }
+    assert_eq!(
+        skilled::input::action_for_app_key(
+            &confirming,
+            KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE),
+        ),
+        None
+    );
+    confirming.update(Action::OpenHelp);
+    assert_eq!(confirming.help_context(), None);
     let row = row_text(&buffer(&confirming, 80, 24), 1);
     assert!(row.contains("Confirm catalogs"), "{row}");
     assert!(!row.contains("Sources  "), "{row}");
@@ -363,12 +404,239 @@ fn key_hints_advertise_only_commands_this_release_implements() {
 
     assert!(hints.contains("2 Sources"), "{hints}");
     assert!(hints.contains("s Settings"), "{hints}");
+    assert!(hints.contains("? Help"), "{hints}");
     assert!(hints.contains("q Quit"), "{hints}");
-    // Contextual help arrives with a later slice; nothing may promise it yet.
-    assert!(!hints.contains("Help"), "{hints}");
-    for absent in ["Install", "Uninstall", "Repair", "Update", "Filter"] {
+    for absent in [
+        "Install",
+        "Uninstall",
+        "Forget",
+        "Repair",
+        "Update",
+        "Filter",
+    ] {
         assert!(!hints.contains(absent), "{absent} in {hints}");
     }
+}
+
+#[test]
+fn contextual_help_names_its_context_and_exit() {
+    let harness = Harness::new();
+    let mut app = harness.first_run();
+    app.update(Action::OpenHelp);
+
+    let rendered = text(&buffer(&app, 80, 24));
+
+    assert!(rendered.contains("Keyboard reference"), "{rendered}");
+    assert!(rendered.contains("Setup · Welcome and scope"), "{rendered}");
+    assert!(rendered.contains("Esc Close"), "{rendered}");
+}
+
+#[test]
+fn contextual_help_has_a_semantic_modal_footer() {
+    let harness = Harness::new();
+    let mut app = harness.completed_setup();
+    app.update(Action::OpenHelp);
+
+    let screen = buffer(&app, 80, 24);
+    let rendered = text(&screen);
+
+    assert!(
+        row_text(&screen, 1).contains("Keyboard reference"),
+        "{rendered}"
+    );
+    assert!(
+        row_text(&screen, 1).contains("navigation is locked"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("Commands for Inventory"), "{rendered}");
+    assert!(rendered.matches("Esc Close").count() >= 2, "{rendered}");
+    assert!(rendered.contains("┌ Keyboard reference"), "{rendered}");
+    assert!(rendered.contains("└"), "{rendered}");
+}
+
+#[test]
+fn inventory_help_lists_only_implemented_inventory_commands() {
+    let harness = Harness::new();
+    let mut app = harness.completed_setup();
+    app.update(Action::OpenHelp);
+
+    let rendered = text(&buffer(&app, 80, 24));
+
+    for command in ["2 Sources", "s Settings", "? Help", "q Quit"] {
+        assert!(
+            rendered.contains(command),
+            "missing {command:?} in\n{rendered}"
+        );
+    }
+    for unavailable in [
+        "Install",
+        "Update",
+        "Repair",
+        "Uninstall",
+        "Forget",
+        "Filter",
+        "Doctor",
+    ] {
+        assert!(
+            !rendered.contains(unavailable),
+            "unexpected {unavailable:?} in\n{rendered}"
+        );
+    }
+}
+
+#[test]
+fn setup_help_changes_with_the_active_step() {
+    let harness = Harness::new();
+    let mut app = harness.first_run();
+    app.update(Action::OpenHelp);
+
+    let welcome = text(&buffer(&app, 80, 24));
+    assert!(welcome.contains("Enter Continue"), "{welcome}");
+    assert!(!welcome.contains("Esc Back"), "{welcome}");
+    assert!(!welcome.contains("j/k Move"), "{welcome}");
+    assert!(!welcome.contains("Space Toggle"), "{welcome}");
+
+    app.update(Action::CloseHelp);
+    app.update(Action::Continue);
+    app.update(Action::OpenHelp);
+
+    let detect_agents = text(&buffer(&app, 80, 24));
+    assert!(detect_agents.contains("j/k Move"), "{detect_agents}");
+    assert!(detect_agents.contains("Space Toggle"), "{detect_agents}");
+    assert!(detect_agents.contains("Esc Back"), "{detect_agents}");
+}
+
+#[test]
+fn sources_and_settings_help_match_their_active_bindings() {
+    let harness = Harness::new();
+    let mut sources = harness.completed_setup();
+    sources.update(Action::OpenSources);
+    sources.update(Action::OpenHelp);
+
+    let sources_help = text(&buffer(&sources, 120, 40));
+    for command in [
+        "Tab / Shift-Tab Pane",
+        "j/k Move",
+        "a Add source",
+        "1 Inventory",
+        "Esc Back",
+        "? Help",
+        "q Quit",
+    ] {
+        assert!(
+            sources_help.contains(command),
+            "missing {command:?} in\n{sources_help}"
+        );
+    }
+
+    let mut settings = harness.completed_setup();
+    settings.update(Action::OpenSettings);
+    settings.update(Action::OpenHelp);
+
+    let settings_help = text(&buffer(&settings, 80, 24));
+    for command in ["Enter Rerun setup", "Esc Close Settings", "? Help"] {
+        assert!(
+            settings_help.contains(command),
+            "missing {command:?} in\n{settings_help}"
+        );
+    }
+    assert!(!settings_help.contains("q Quit"), "{settings_help}");
+}
+
+#[test]
+fn wide_help_balances_commands_across_two_columns() {
+    let harness = Harness::new();
+    let mut app = harness.completed_setup();
+    app.update(Action::OpenSources);
+    app.update(Action::OpenHelp);
+
+    let screen = buffer(&app, 120, 40);
+    let first_command_row = row_containing(&screen, "Tab / Shift-Tab");
+    let row = row_text(&screen, first_command_row);
+
+    assert!(row.contains("Esc Back"), "{row}\n{}", text(&screen));
+}
+
+#[test]
+fn complete_key_hints_render_at_compact_and_wide_sizes() {
+    let harness = Harness::new();
+    let mut setup = harness.first_run();
+    setup.update(Action::Continue);
+    let inventory = harness.completed_setup();
+    let mut sources = harness.completed_setup();
+    sources.update(Action::OpenSources);
+    let mut settings = harness.completed_setup();
+    settings.update(Action::OpenSettings);
+
+    let contexts: [(&SkilledApp, &str); 4] = [
+        (
+            &setup,
+            " j/k Move   Space Toggle   Enter Continue   Esc Back   ? Help   q Quit",
+        ),
+        (&inventory, " 2 Sources   s Settings   ? Help   q Quit"),
+        (
+            &sources,
+            " Tab Pane   j/k Move   a Add source   1 Inventory   ? Help   q Quit",
+        ),
+        (&settings, " Enter Rerun setup   ? Help   Esc Close"),
+    ];
+
+    for (width, height) in [(80, 24), (120, 40)] {
+        for (app, expected) in contexts {
+            let screen = buffer(app, width, height);
+            let footer = row_text(&screen, height - 1);
+            assert_eq!(footer, expected, "unexpected hints at {width}x{height}");
+        }
+    }
+}
+
+#[test]
+fn every_help_context_omits_unavailable_commands_and_owns_the_footer() {
+    let harness = Harness::new();
+    let mut app = harness.first_run();
+    let assert_truthful_help = |app: &SkilledApp| {
+        let screen = buffer(app, 80, 24);
+        let rendered = text(&screen);
+        for unavailable in [
+            "Install",
+            "Update",
+            "Repair",
+            "Uninstall",
+            "Forget",
+            "Filter",
+            "Updates",
+            "Doctor",
+        ] {
+            assert!(
+                !rendered.contains(unavailable),
+                "unexpected {unavailable:?} in\n{rendered}"
+            );
+        }
+        assert_eq!(
+            row_text(&screen, 23),
+            " Esc Close   Ctrl-C Quit",
+            "help must hide q and every underlying command"
+        );
+    };
+
+    for _ in 0..7 {
+        app.update(Action::OpenHelp);
+        assert_truthful_help(&app);
+        app.update(Action::CloseHelp);
+        app.update(Action::Continue);
+    }
+
+    app.update(Action::OpenHelp);
+    assert_truthful_help(&app);
+    app.update(Action::CloseHelp);
+    app.update(Action::OpenSources);
+    app.update(Action::OpenHelp);
+    assert_truthful_help(&app);
+    app.update(Action::CloseHelp);
+    app.update(Action::Back);
+    app.update(Action::OpenSettings);
+    app.update(Action::OpenHelp);
+    assert_truthful_help(&app);
 }
 
 #[test]

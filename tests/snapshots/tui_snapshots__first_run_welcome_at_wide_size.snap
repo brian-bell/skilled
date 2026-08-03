@@ -1,6 +1,5 @@
 ---
 source: tests/tui_snapshots.rs
-assertion_line: 29
 expression: "render(&app, 120, 40)"
 ---
  ◆ skilled   global                                                                                 ● setup in progress
@@ -42,4 +41,4 @@ expression: "render(&app, 120, 40)"
 │                                                                                                                      │
 │                                                                                                                      │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
- Enter Continue   q Quit
+ Enter Continue   ? Help   q Quit

@@ -50,6 +50,9 @@ pub fn render(frame: &mut Frame<'_>, app: &SkilledApp) {
     } else if app.pending_source().is_some() && app.view() == View::Sources {
         render_catalog_confirmation(frame, area, app);
     }
+    if let Some(context) = app.help_context() {
+        render_help(frame, area, context);
+    }
     render_footer(frame, key_hints, app);
 }
 
@@ -194,6 +197,10 @@ fn render_navigation(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
 fn keyboard_owner(app: &SkilledApp) -> Option<(String, &'static str)> {
     const SETUP_NOTE: &str = "navigation is locked during setup";
     const DIALOG_NOTE: &str = "navigation is locked while this dialog is open";
+
+    if app.help_context().is_some() {
+        return Some(("Keyboard reference".to_owned(), DIALOG_NOTE));
+    }
 
     let in_setup = matches!(app.view(), View::Setup(_));
     let note = if in_setup { SETUP_NOTE } else { DIALOG_NOTE };
@@ -910,6 +917,243 @@ fn render_settings(frame: &mut Frame<'_>, area: Rect) {
     );
 }
 
+fn render_help(frame: &mut Frame<'_>, area: Rect, context: View) {
+    let viewport = viewport::classify(area);
+    let (width, height) = match viewport {
+        viewport::Viewport::Compact => (76, 18),
+        viewport::Viewport::Wide => (96, 20),
+    };
+    let popup = centered_rect(width, height, area);
+    frame.render_widget(Clear, popup);
+    let scope = help_scope(context);
+    let block = components::dialog_frame("Keyboard reference", &scope);
+    let regions = components::dialog_regions(block.inner(popup), 11);
+    frame.render_widget(block, popup);
+    let commands = help_commands(context);
+    match viewport {
+        viewport::Viewport::Compact => {
+            let mut lines = vec![
+                Line::from("Only commands available in this context are listed."),
+                Line::default(),
+            ];
+            lines.extend(commands.iter().map(help_command_line));
+            frame.render_widget(
+                Paragraph::new(lines).wrap(Wrap { trim: false }),
+                regions.body,
+            );
+        }
+        viewport::Viewport::Wide => {
+            let [intro, command_area] =
+                Layout::vertical([Constraint::Length(2), Constraint::Min(0)]).areas(regions.body);
+            frame.render_widget(
+                Paragraph::new("Only commands available in this context are listed."),
+                intro,
+            );
+            let [left, right] =
+                Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
+                    .spacing(2)
+                    .areas(command_area);
+            let midpoint = commands.len().div_ceil(2);
+            frame.render_widget(
+                Paragraph::new(
+                    commands[..midpoint]
+                        .iter()
+                        .map(help_command_line)
+                        .collect::<Vec<_>>(),
+                )
+                .wrap(Wrap { trim: false }),
+                left,
+            );
+            frame.render_widget(
+                Paragraph::new(
+                    commands[midpoint..]
+                        .iter()
+                        .map(help_command_line)
+                        .collect::<Vec<_>>(),
+                )
+                .wrap(Wrap { trim: false }),
+                right,
+            );
+        }
+    }
+    frame.render_widget(
+        Paragraph::new(components::rule(regions.divider.width)),
+        regions.divider,
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            format!("Commands for {scope}"),
+            theme::key_label(),
+        ))),
+        regions.status,
+    );
+    frame.render_widget(
+        Paragraph::new(
+            Line::from(vec![
+                Span::styled("Esc", theme::key_cap()),
+                Span::raw(" "),
+                Span::styled("Close", theme::key_label()),
+            ])
+            .right_aligned(),
+        ),
+        regions.actions,
+    );
+}
+
+fn help_command_line(command: &HelpCommand) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(command.key, theme::key_cap()),
+        Span::raw(" "),
+        Span::styled(command.label, theme::key_label()),
+        Span::raw(format!(" — {}", command.description)),
+    ])
+}
+
+struct HelpCommand {
+    key: &'static str,
+    label: &'static str,
+    description: &'static str,
+}
+
+fn help_commands(context: View) -> Vec<HelpCommand> {
+    match context {
+        View::Setup(step) => {
+            let mut commands = Vec::new();
+            if step == SetupStep::DetectAgents {
+                commands.extend([
+                    HelpCommand {
+                        key: "Up/Down or j/k",
+                        label: "Move",
+                        description: "move the focused agent",
+                    },
+                    HelpCommand {
+                        key: "Space",
+                        label: "Toggle",
+                        description: "toggle the focused agent",
+                    },
+                ]);
+            }
+            if step == SetupStep::DiscoverSources {
+                commands.push(HelpCommand {
+                    key: "a",
+                    label: "Add source",
+                    description: "inspect a local Git checkout",
+                });
+            }
+            commands.push(HelpCommand {
+                key: "Enter",
+                label: "Continue",
+                description: "advance the setup flow",
+            });
+            if step != SetupStep::Welcome {
+                commands.push(HelpCommand {
+                    key: "Esc",
+                    label: "Back",
+                    description: "return to the previous setup step",
+                });
+            }
+            commands.extend([
+                HelpCommand {
+                    key: "?",
+                    label: "Help",
+                    description: "open this keyboard reference",
+                },
+                HelpCommand {
+                    key: "q",
+                    label: "Quit",
+                    description: "quit when no dialog is open",
+                },
+            ]);
+            commands
+        }
+        View::Inventory => vec![
+            HelpCommand {
+                key: "2",
+                label: "Sources",
+                description: "open registered sources",
+            },
+            HelpCommand {
+                key: "s",
+                label: "Settings",
+                description: "open global settings",
+            },
+            HelpCommand {
+                key: "?",
+                label: "Help",
+                description: "open this keyboard reference",
+            },
+            HelpCommand {
+                key: "q",
+                label: "Quit",
+                description: "quit when no dialog is open",
+            },
+        ],
+        View::Sources => vec![
+            HelpCommand {
+                key: "Tab / Shift-Tab",
+                label: "Pane",
+                description: "switch panes",
+            },
+            HelpCommand {
+                key: "Up/Down or j/k",
+                label: "Move",
+                description: "move selection",
+            },
+            HelpCommand {
+                key: "a",
+                label: "Add source",
+                description: "inspect a local checkout",
+            },
+            HelpCommand {
+                key: "1",
+                label: "Inventory",
+                description: "return to Inventory",
+            },
+            HelpCommand {
+                key: "Esc",
+                label: "Back",
+                description: "return to Inventory",
+            },
+            HelpCommand {
+                key: "?",
+                label: "Help",
+                description: "open this keyboard reference",
+            },
+            HelpCommand {
+                key: "q",
+                label: "Quit",
+                description: "quit when no dialog is open",
+            },
+        ],
+        View::Settings => vec![
+            HelpCommand {
+                key: "Enter",
+                label: "Rerun setup",
+                description: "reset setup and start again",
+            },
+            HelpCommand {
+                key: "Esc",
+                label: "Close Settings",
+                description: "return to Inventory after help closes",
+            },
+            HelpCommand {
+                key: "?",
+                label: "Help",
+                description: "open this keyboard reference",
+            },
+        ],
+    }
+}
+
+fn help_scope(context: View) -> String {
+    match context {
+        View::Setup(step) => format!("Setup · {}", step.title()),
+        View::Inventory => "Inventory".to_owned(),
+        View::Sources => "Sources".to_owned(),
+        View::Settings => "Settings".to_owned(),
+    }
+}
+
 fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
     frame.render_widget(
         Paragraph::new(components::key_hint_line(&key_hints(app), area.width))
@@ -921,9 +1165,16 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
 /// The commands the active context actually handles.
 ///
 /// This mirrors [`crate::input`]. A hint that is not backed by a key mapping is
-/// a promise the application cannot keep, so unimplemented commands — help,
-/// installation, updates, repair, and filtering — are absent by construction.
+/// a promise the application cannot keep, so unimplemented commands —
+/// installation, updates, repair, uninstall, forget, and filtering — are absent
+/// by construction.
 fn key_hints(app: &SkilledApp) -> Vec<KeyHint> {
+    if app.help_context().is_some() {
+        return vec![
+            KeyHint::essential("Esc", "Close"),
+            KeyHint::new("Ctrl-C", "Quit"),
+        ];
+    }
     if app.source_path_input_active() {
         return vec![
             KeyHint::essential("Enter", "Inspect"),
@@ -956,12 +1207,14 @@ fn key_hints(app: &SkilledApp) -> Vec<KeyHint> {
             if step != SetupStep::Welcome {
                 hints.push(KeyHint::essential("Esc", "Back"));
             }
+            hints.push(KeyHint::new("?", "Help"));
             hints.push(KeyHint::new("q", "Quit"));
             hints
         }
         View::Inventory => vec![
             KeyHint::new("2", "Sources"),
             KeyHint::new("s", "Settings"),
+            KeyHint::new("?", "Help"),
             KeyHint::new("q", "Quit"),
         ],
         View::Sources => vec![
@@ -969,10 +1222,12 @@ fn key_hints(app: &SkilledApp) -> Vec<KeyHint> {
             KeyHint::new("j/k", "Move"),
             KeyHint::new("a", "Add source"),
             KeyHint::new("1", "Inventory"),
+            KeyHint::new("?", "Help"),
             KeyHint::new("q", "Quit"),
         ],
         View::Settings => vec![
             KeyHint::essential("Enter", "Rerun setup"),
+            KeyHint::new("?", "Help"),
             KeyHint::essential("Esc", "Close"),
         ],
     }

@@ -41,6 +41,9 @@ install, repair, update, or uninstall skills.
   visual prototype. Destinations without an implementation are shown as
   explicitly unavailable rather than offered, and key hints advertise only
   commands the active context handles.
+- Contextual keyboard help from Setup, Inventory, Sources, and Settings. Help is
+  modal, lists only commands implemented in the underlying context, and closes
+  before Esc changes that context.
 - Ratatui layouts at 80×24 and wider, with a second detail region at 100
   columns or more, plus a recoverable notice for smaller terminals.
 - Terminal restoration on normal exit, startup failure, panic unwinding, and
@@ -70,6 +73,10 @@ supports:
 - Space to toggle the focused agent.
 - Esc to go back.
 - `q` or Ctrl-C to quit.
+
+Press `?` in Setup or any implemented top-level view to open its contextual
+keyboard reference. Press Esc to close help; ordinary `q` does not bypass an
+open dialog.
 
 After setup, press `s` to open Settings and rerun the wizard.
 
@@ -116,7 +123,7 @@ under `tests/snapshots/` and cell-level style assertions in
   names a colour.
 - `src/viewport.rs` classifies terminal width and lays out workspace regions.
 - `src/components.rs` provides the shared badge, row, header, empty-state,
-  dialog, and key-hint primitives.
+  dialog frame and footer regions, and key-hint primitives.
 - `src/agents.rs` isolates agent discovery conventions and their documentation
   snapshots.
 - `src/store.rs` owns versioned SQLite metadata and migrations.

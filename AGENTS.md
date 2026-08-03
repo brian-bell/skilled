@@ -20,14 +20,14 @@ and eventually managing global coding-agent skills. Implemented so far:
 first-run setup, agent detection and selection, SQLite-backed setup
 persistence, local Git source registration with catalog confirmation, Sources
 browsing of registered sources and their skill variants, an empty Inventory
-view, Settings setup reset, responsive size handling, and guarded terminal
-restoration.
+view, Settings setup reset, reducer-owned contextual help, responsive size
+handling, and guarded terminal restoration.
 
-Installation inventory, Doctor findings, Updates, contextual help, and every
-filesystem or network mutation beyond the private metadata database are not
-implemented yet. Do not turn the current placeholders into behavior unless the
-active Beads issue places that work in scope, and do not display a count,
-finding, status, or key hint the code cannot currently produce.
+Installation inventory, Doctor findings, Updates, and every filesystem or
+network mutation beyond the private metadata database are not implemented yet.
+Do not turn the current placeholders into behavior unless the active Beads
+issue places that work in scope, and do not display a count, finding, status,
+or key hint the code cannot currently produce.
 [GitHub issue #3](https://github.com/brian-bell/skilled/issues/3) is the
 product and technical source of truth. The tracked `spec/tui-prototype.html` is
 the visual design reference.
@@ -71,10 +71,11 @@ not an acceptable cue.
   Screens ask whether the terminal is `Compact` or `Wide` instead of comparing
   raw widths.
 - `src/components.rs`: pure shared primitives — status badges, list rows, pane
-  headers, empty states, the modal dialog frame, and the key-hint bar.
+  headers, empty states, the modal dialog frame and footer regions, and the
+  key-hint bar.
 - `src/tui.rs`: composes the persistent shell (title bar, navigation, session
-  status, workspace, key hints) from those primitives. Pure: it does not access
-  SQLite, the filesystem, or the terminal event source.
+  status, workspace, contextual help, key hints) from those primitives. Pure:
+  it does not access SQLite, the filesystem, or the terminal event source.
 - `src/input.rs`: contextual key-event to action mapping.
 - `src/runner.rs`: terminal event loop and effect execution boundary.
 - `src/terminal.rs`: Crossterm raw-mode/alternate-screen ownership and
