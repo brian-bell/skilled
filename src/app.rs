@@ -1,6 +1,9 @@
+use std::path::{Path, PathBuf};
+
 use crate::{
     AgentDetection, AgentKind, AppEnvironment, Result,
     agents::{detect_agents, detection_at},
+    source::{RegisteredSource, SourcePreview, preview_local_source, revalidate_source_preview},
     store::Store,
 };
 
@@ -69,7 +72,14 @@ impl SetupStep {
 pub enum View {
     Setup(SetupStep),
     Inventory,
+    Sources,
     Settings,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SourcesPane {
+    Repositories,
+    Variants,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -79,6 +89,20 @@ pub enum Action {
     MoveSelection(i8),
     ToggleSelection,
     OpenSettings,
+    OpenInventory,
+    OpenSources,
+    BeginAddSource,
+    AppendSourcePath(char),
+    DeleteSourcePathCharacter,
+    SubmitSourcePath,
+    CancelSourceFlow,
+    MoveCatalogSelection(i8),
+    ToggleCatalogIncluded,
+    ToggleCatalogClassification,
+    ToggleCatalogCompatibility(AgentKind),
+    ConfirmPendingSource,
+    ToggleSourcesPane,
+    MoveSourcesSelection(i8),
     RerunSetup,
     Quit,
 }
@@ -89,11 +113,13 @@ pub enum UpdateOutcome {
     Quit,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Effect {
     PersistSetup { agent_selections: [bool; 3] },
     ResetSetup,
     RedetectAgents { agent_selections: [bool; 3] },
+    InspectSource { path: PathBuf },
+    RegisterSource { preview: SourcePreview },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -132,6 +158,15 @@ pub struct SkilledApp {
     environment: AppEnvironment,
     agents: [AgentDetection; 3],
     focused_agent: usize,
+    sources: Vec<RegisteredSource>,
+    source_path: String,
+    source_path_input_active: bool,
+    pending_source: Option<SourcePreview>,
+    source_error: Option<String>,
+    focused_catalog: usize,
+    sources_pane: SourcesPane,
+    focused_source: usize,
+    focused_variant: usize,
 }
 
 impl SkilledApp {
@@ -148,12 +183,22 @@ impl SkilledApp {
                 agent.set_selected(selected);
             }
         }
+        let sources = store.registered_sources()?;
         Ok(Self {
             view,
             store,
             environment,
             agents,
             focused_agent: 0,
+            sources,
+            source_path: String::new(),
+            source_path_input_active: false,
+            pending_source: None,
+            source_error: None,
+            focused_catalog: 0,
+            sources_pane: SourcesPane::Repositories,
+            focused_source: 0,
+            focused_variant: 0,
         })
     }
 
@@ -173,6 +218,62 @@ impl SkilledApp {
         self.focused_agent
     }
 
+    pub fn sources(&self) -> &[RegisteredSource] {
+        &self.sources
+    }
+
+    pub fn source_path(&self) -> &str {
+        &self.source_path
+    }
+
+    pub fn source_path_input_active(&self) -> bool {
+        self.source_path_input_active
+    }
+
+    pub fn pending_source(&self) -> Option<&SourcePreview> {
+        self.pending_source.as_ref()
+    }
+
+    pub fn source_error(&self) -> Option<&str> {
+        self.source_error.as_deref()
+    }
+
+    pub fn focused_catalog(&self) -> usize {
+        self.focused_catalog
+    }
+
+    pub fn sources_pane(&self) -> SourcesPane {
+        self.sources_pane
+    }
+
+    pub fn focused_source(&self) -> usize {
+        self.focused_source
+    }
+
+    pub fn focused_variant(&self) -> usize {
+        self.focused_variant
+    }
+
+    pub fn selected_source(&self) -> Option<&RegisteredSource> {
+        self.sources.get(self.focused_source)
+    }
+
+    pub fn preview_source(&self, path: &Path) -> Result<SourcePreview> {
+        let resolved = match path.strip_prefix("~") {
+            Ok(relative) => self.environment.home_dir.join(relative),
+            Err(_) => path.to_path_buf(),
+        };
+        preview_local_source(&resolved)
+    }
+
+    pub fn confirm_source(&mut self, preview: SourcePreview) -> Result<()> {
+        let preview = revalidate_source_preview(&preview)?;
+        self.store.register_source(&preview)?;
+        self.sources = self.store.registered_sources()?;
+        self.focus_registered_source(preview.inspected().git_top_level());
+        Ok(())
+    }
+
     pub fn update(&mut self, action: Action) -> UpdateResult {
         let effects = match action {
             Action::Continue => self.advance_setup().into_iter().collect(),
@@ -187,6 +288,106 @@ impl SkilledApp {
             }
             Action::OpenSettings => {
                 self.open_settings();
+                Vec::new()
+            }
+            Action::OpenInventory => {
+                if matches!(self.view, View::Inventory | View::Sources) {
+                    self.view = View::Inventory;
+                }
+                Vec::new()
+            }
+            Action::OpenSources => {
+                if matches!(self.view, View::Inventory | View::Sources) {
+                    self.view = View::Sources;
+                }
+                Vec::new()
+            }
+            Action::BeginAddSource => {
+                if self.view == View::Sources
+                    || self.view == View::Setup(SetupStep::DiscoverSources)
+                {
+                    self.source_path.clear();
+                    self.source_error = None;
+                    self.pending_source = None;
+                    self.source_path_input_active = true;
+                }
+                Vec::new()
+            }
+            Action::AppendSourcePath(character) => {
+                if self.source_path_input_active && !character.is_control() {
+                    self.source_path.push(character);
+                }
+                Vec::new()
+            }
+            Action::DeleteSourcePathCharacter => {
+                if self.source_path_input_active {
+                    self.source_path.pop();
+                }
+                Vec::new()
+            }
+            Action::SubmitSourcePath => self.submit_source_path(),
+            Action::CancelSourceFlow => {
+                if self.view == View::Setup(SetupStep::ConfirmCatalogs) {
+                    self.view = View::Setup(SetupStep::DiscoverSources);
+                }
+                self.source_path_input_active = false;
+                self.source_path.clear();
+                self.source_error = None;
+                self.pending_source = None;
+                Vec::new()
+            }
+            Action::MoveCatalogSelection(delta) => {
+                if let Some(preview) = &self.pending_source
+                    && !preview.catalogs().is_empty()
+                {
+                    self.focused_catalog = (self.focused_catalog as i16 + i16::from(delta))
+                        .rem_euclid(preview.catalogs().len() as i16)
+                        as usize;
+                }
+                Vec::new()
+            }
+            Action::ToggleCatalogIncluded => {
+                if let Some(catalog) = self
+                    .pending_source
+                    .as_mut()
+                    .and_then(|preview| preview.catalog_mut(self.focused_catalog))
+                {
+                    catalog.toggle_included();
+                }
+                Vec::new()
+            }
+            Action::ToggleCatalogClassification => {
+                if let Some(catalog) = self
+                    .pending_source
+                    .as_mut()
+                    .and_then(|preview| preview.catalog_mut(self.focused_catalog))
+                {
+                    catalog.toggle_classification();
+                }
+                Vec::new()
+            }
+            Action::ToggleCatalogCompatibility(agent) => {
+                if let Some(catalog) = self
+                    .pending_source
+                    .as_mut()
+                    .and_then(|preview| preview.catalog_mut(self.focused_catalog))
+                {
+                    catalog.toggle_compatibility(agent);
+                }
+                Vec::new()
+            }
+            Action::ConfirmPendingSource => self.register_pending_source(),
+            Action::ToggleSourcesPane => {
+                if self.view == View::Sources {
+                    self.sources_pane = match self.sources_pane {
+                        SourcesPane::Repositories => SourcesPane::Variants,
+                        SourcesPane::Variants => SourcesPane::Repositories,
+                    };
+                }
+                Vec::new()
+            }
+            Action::MoveSourcesSelection(delta) => {
+                self.move_sources_selection(delta);
                 Vec::new()
             }
             Action::RerunSetup => self.rerun_setup(),
@@ -208,6 +409,51 @@ impl SkilledApp {
                         detection.set_selected(*selected);
                     }
                     self.agents = detections;
+                }
+                Effect::InspectSource { path } => match self.preview_source(path) {
+                    Ok(preview) if preview.catalogs().is_empty() => {
+                        self.source_error = Some(
+                            "No supported skill catalog roots were found in this checkout."
+                                .to_owned(),
+                        );
+                        self.source_path_input_active = true;
+                    }
+                    Ok(preview) => {
+                        self.pending_source = Some(preview);
+                        self.source_path_input_active = false;
+                        self.source_error = None;
+                        self.focused_catalog = 0;
+                        if self.view == View::Setup(SetupStep::DiscoverSources) {
+                            self.view = View::Setup(SetupStep::ConfirmCatalogs);
+                        }
+                    }
+                    Err(error) => {
+                        self.source_error = Some(error.to_string());
+                        self.source_path_input_active = true;
+                    }
+                },
+                Effect::RegisterSource { preview } => {
+                    let preview = match revalidate_source_preview(preview) {
+                        Ok(preview) => preview,
+                        Err(error) => {
+                            self.source_error = Some(error.to_string());
+                            continue;
+                        }
+                    };
+                    if let Err(error) = self.store.register_source(&preview) {
+                        self.source_error = Some(error.to_string());
+                        continue;
+                    }
+                    self.sources = self.store.registered_sources()?;
+                    self.focus_registered_source(preview.inspected().git_top_level());
+                    self.pending_source = None;
+                    self.source_path.clear();
+                    self.source_path_input_active = false;
+                    self.source_error = None;
+                    self.focused_catalog = 0;
+                    if self.view == View::Setup(SetupStep::ConfirmCatalogs) {
+                        self.view = View::Setup(SetupStep::ScanInstallations);
+                    }
                 }
             }
         }
@@ -234,6 +480,13 @@ impl SkilledApp {
     }
 
     fn back(&mut self) -> UpdateResult {
+        if self.source_path_input_active || self.pending_source.is_some() {
+            self.source_path_input_active = false;
+            self.source_path.clear();
+            self.source_error = None;
+            self.pending_source = None;
+            return UpdateResult::continuing(Vec::new());
+        }
         match self.view {
             View::Setup(step) => {
                 if let Some(previous) = step.previous() {
@@ -241,6 +494,7 @@ impl SkilledApp {
                 }
             }
             View::Settings => self.view = View::Inventory,
+            View::Sources => self.view = View::Inventory,
             View::Inventory => {}
         }
         UpdateResult::continuing(Vec::new())
@@ -265,6 +519,10 @@ impl SkilledApp {
             return None;
         };
 
+        if step == SetupStep::ConfirmCatalogs && self.pending_source.is_some() {
+            return self.register_pending_source().into_iter().next();
+        }
+
         match step.next() {
             Some(next) => {
                 self.view = View::Setup(next);
@@ -277,5 +535,62 @@ impl SkilledApp {
                 })
             }
         }
+    }
+
+    fn submit_source_path(&self) -> Vec<Effect> {
+        if !self.source_path_input_active || self.source_path.trim().is_empty() {
+            return Vec::new();
+        }
+        vec![Effect::InspectSource {
+            path: PathBuf::from(&self.source_path),
+        }]
+    }
+
+    fn register_pending_source(&mut self) -> Vec<Effect> {
+        let Some(preview) = self.pending_source.clone() else {
+            return Vec::new();
+        };
+        if !preview.has_included_catalog() {
+            self.source_error = Some("Select at least one catalog root to register.".to_owned());
+            return Vec::new();
+        }
+        vec![Effect::RegisterSource { preview }]
+    }
+
+    fn move_sources_selection(&mut self, delta: i8) {
+        if self.view != View::Sources {
+            return;
+        }
+        match self.sources_pane {
+            SourcesPane::Repositories if !self.sources.is_empty() => {
+                self.focused_source = (self.focused_source as i16 + i16::from(delta))
+                    .rem_euclid(self.sources.len() as i16)
+                    as usize;
+                self.focused_variant = 0;
+            }
+            SourcesPane::Variants => {
+                let count = self
+                    .selected_source()
+                    .into_iter()
+                    .flat_map(RegisteredSource::catalogs)
+                    .map(|catalog| catalog.candidates().len())
+                    .sum::<usize>();
+                if count > 0 {
+                    self.focused_variant = (self.focused_variant as i16 + i16::from(delta))
+                        .rem_euclid(count as i16)
+                        as usize;
+                }
+            }
+            SourcesPane::Repositories => {}
+        }
+    }
+
+    fn focus_registered_source(&mut self, path: &Path) {
+        self.focused_source = self
+            .sources
+            .iter()
+            .position(|source| source.git_top_level() == path)
+            .unwrap_or(0);
+        self.focused_variant = 0;
     }
 }

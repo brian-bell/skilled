@@ -1,0 +1,28 @@
+---
+source: tests/tui_snapshots.rs
+expression: "render(&app, 80, 24)"
+---
+ Skilled   Sources
+┌ Repositories ───────────┐ ┌ Available variants ──────────────────────────────┐
+│ No registered sources.  │ │ Select Add Source to begin.                      │
+│ Press a to add one.     │ │                                                  │
+│                         │ │                                                  │
+│                         │ │                                                  │
+│                         │ │                                                  │
+│     ┌ Add source ──────────────────────────────────────────────────────┐     │
+│     │                                                                  │     │
+│     │  Enter a path inside a local Git checkout:                       │     │
+│     │                                                                  │     │
+│     │  > /Users/example/dev/skills                                     │     │
+│     │                                                                  │     │
+│     │                                                                  │     │
+│     │                                                                  │     │
+│     └──────────────────────────────────────────────────────────────────┘     │
+│                         │ │                                                  │
+│                         │ │                                                  │
+│                         │ │                                                  │
+│                         │ │                                                  │
+│                         │ │                                                  │
+│                         │ │                                                  │
+└─────────────────────────┘ └──────────────────────────────────────────────────┘
+              Type path   Enter Inspect   Esc Cancel   Ctrl-C Quit
