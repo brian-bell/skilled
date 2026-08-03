@@ -1,8 +1,10 @@
 ---
 source: tests/tui_snapshots.rs
+assertion_line: 90
 expression: "render(&app, 80, 24)"
 ---
- Skilled   Setup · Detect agents
+ ◆ skilled   global                                         ● setup in progress
+ Setup · Detect agents   navigation is locked during setup
 ┌ Step 2 of 7 ─────────────────────────────────────────────────────────────────┐
 │                                                                              │
 │  Detect agents                                                               │
@@ -23,6 +25,5 @@ expression: "render(&app, 80, 24)"
 │                                                                              │
 │                                                                              │
 │                                                                              │
-│                                                                              │
 └──────────────────────────────────────────────────────────────────────────────┘
-          j/k Move   Space Toggle   Enter Continue   Esc Back   q Quit
+ j/k Move   Space Toggle   Enter Continue   Esc Back   q Quit

@@ -1,14 +1,16 @@
 use ratatui::{
     Frame,
-    layout::{Alignment, Constraint, Layout, Rect},
-    style::{Color, Modifier, Style},
+    layout::{Alignment, Constraint, Layout, Margin, Rect},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Padding, Paragraph, Wrap},
 };
 
 use crate::{
     SetupStep, SkilledApp, SourcesPane, View,
+    components::{self, KeyHint},
     source::{CatalogClassification, SkillValidation},
+    theme::{self, Tone},
+    viewport,
 };
 
 pub const MINIMUM_WIDTH: u16 = 80;
@@ -21,14 +23,19 @@ pub fn render(frame: &mut Frame<'_>, app: &SkilledApp) {
         return;
     }
 
-    let [header, body, footer] = Layout::vertical([
+    frame.render_widget(Block::new().style(theme::app_surface()), area);
+
+    let [title_bar, navigation, workspace, key_hints] = Layout::vertical([
+        Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Min(1),
         Constraint::Length(1),
     ])
     .areas(area);
 
-    render_header(frame, header, app.view());
+    render_title_bar(frame, title_bar, app);
+    render_navigation(frame, navigation, app);
+    let body = workspace;
     match app.view() {
         View::Setup(step) => render_setup(frame, body, app, step),
         View::Inventory => render_inventory(frame, body),
@@ -43,30 +50,213 @@ pub fn render(frame: &mut Frame<'_>, app: &SkilledApp) {
     } else if app.pending_source().is_some() && app.view() == View::Sources {
         render_catalog_confirmation(frame, area, app);
     }
-    render_footer(frame, footer, app);
+    render_footer(frame, key_hints, app);
 }
 
-fn render_header(frame: &mut Frame<'_>, area: Rect, view: View) {
-    let section = match view {
-        View::Setup(step) => format!("Setup · {}", step.title()),
-        View::Inventory => "Inventory".to_owned(),
-        View::Sources => "Sources".to_owned(),
-        View::Settings => "Inventory · Settings".to_owned(),
-    };
+fn render_title_bar(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
+    // The prototype places session state beside the navigation tabs. At eighty
+    // columns the tab strip already fills that row, so the status shares the
+    // title bar instead of competing with navigation for space.
+    //
+    // The two halves get their own rectangles because a Paragraph repaints its
+    // whole area before drawing: rendering the status across the full row would
+    // silently flatten the product mark and wordmark to the status colour.
+    let status = SessionStatus::of(app);
+    let label = status.label();
+    let status_width = u16::try_from(Span::raw(&label).width() + 3)
+        .unwrap_or(u16::MAX)
+        .min(area.width);
+    let [product, session] =
+        Layout::horizontal([Constraint::Min(0), Constraint::Length(status_width)]).areas(area);
+
     frame.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled(
-                " Skilled ",
-                Style::default()
-                    .fg(Color::Black)
-                    .bg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("  "),
-            Span::styled(section, Style::default().add_modifier(Modifier::BOLD)),
+            Span::styled(" ◆ ", theme::product_mark()),
+            Span::styled("skilled", theme::product_name()),
+            Span::styled("   global", theme::chrome()),
         ])),
-        area,
+        product,
     );
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("● ", theme::tone_style(status.tone())),
+            Span::styled(label, theme::chrome()),
+            Span::raw(" "),
+        ]))
+        .alignment(Alignment::Right),
+        session,
+    );
+}
+
+/// What the application can honestly say about the current session.
+///
+/// Skilled performs no installation scan and no network access in this release,
+/// so the status may only describe setup progress and registered-source counts.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SessionStatus {
+    SetupInProgress,
+    Ready { sources: usize },
+}
+
+impl SessionStatus {
+    fn of(app: &SkilledApp) -> Self {
+        match app.view() {
+            View::Setup(_) => Self::SetupInProgress,
+            _ => Self::Ready {
+                sources: app.sources().len(),
+            },
+        }
+    }
+
+    fn tone(self) -> Tone {
+        match self {
+            Self::SetupInProgress => Tone::Warning,
+            Self::Ready { .. } => Tone::Healthy,
+        }
+    }
+
+    fn label(self) -> String {
+        match self {
+            Self::SetupInProgress => "setup in progress".to_owned(),
+            Self::Ready { sources: 1 } => "ready · 1 source registered".to_owned(),
+            Self::Ready { sources } => format!("ready · {sources} sources registered"),
+        }
+    }
+}
+
+fn render_navigation(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
+    frame.render_widget(Block::new().style(theme::nav_surface()), area);
+
+    if let Some((owner, note)) = keyboard_owner(app) {
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(format!(" {owner} "), theme::nav_active()),
+                Span::styled(format!("  {note}"), theme::nav_disabled()),
+            ])),
+            area,
+        );
+        return;
+    }
+
+    let mut spans = Vec::new();
+    for destination in Destination::ALL {
+        let active = destination.is_active(app.view());
+        let style = match (destination.is_available(), active) {
+            (false, _) => theme::nav_disabled(),
+            (true, true) => theme::nav_active(),
+            (true, false) => theme::nav_inactive(),
+        };
+        spans.push(Span::styled(
+            if active {
+                components::FOCUS_MARKER
+            } else {
+                " "
+            },
+            style,
+        ));
+        // The digit is the route, so it appears only where pressing it works:
+        // never for a destination this release cannot open, and never for the
+        // view already on screen.
+        let key = match (destination.is_available(), active) {
+            (true, false) => format!("{} ", destination.key()),
+            _ => String::new(),
+        };
+        spans.push(Span::styled(
+            format!(
+                "{key}{}{} ",
+                destination.title(),
+                if destination.is_available() {
+                    ""
+                } else {
+                    " (soon)"
+                }
+            ),
+            style,
+        ));
+    }
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+/// The context that currently owns the keyboard, if it is not the tab strip.
+///
+/// Setup and every dialog rebind or ignore the destination keys, so the strip
+/// would advertise routes that do not work — while a catalog confirmation is
+/// open, for instance, `1` and `2` toggle agent compatibility. The row names
+/// the owner instead.
+///
+/// The label must match what is actually on screen, and a pending source
+/// outside the Sources view is rendered inline rather than as a dialog.
+///
+/// The note states the present fact rather than predicting when the lock
+/// lifts. Confirming a path opens the catalog confirmation and confirming
+/// Settings starts setup, so "unlocks when this dialog closes" would be a
+/// promise the next transition breaks.
+fn keyboard_owner(app: &SkilledApp) -> Option<(String, &'static str)> {
+    const SETUP_NOTE: &str = "navigation is locked during setup";
+    const DIALOG_NOTE: &str = "navigation is locked while this dialog is open";
+
+    let in_setup = matches!(app.view(), View::Setup(_));
+    let note = if in_setup { SETUP_NOTE } else { DIALOG_NOTE };
+
+    if app.source_path_input_active() {
+        return Some(("Add source".to_owned(), note));
+    }
+    // Mirrors the render gate: the confirmation is only a dialog in Sources.
+    if app.pending_source().is_some() && app.view() == View::Sources {
+        return Some(("Confirm catalogs".to_owned(), note));
+    }
+    match app.view() {
+        View::Setup(step) => Some((format!("Setup · {}", step.title()), note)),
+        View::Settings => Some(("Settings".to_owned(), note)),
+        View::Inventory | View::Sources => None,
+    }
+}
+
+/// A primary destination in the persistent navigation bar.
+///
+/// Destinations without an implementation in this release are still listed so
+/// the navigation model is honest about what the product will offer, but they
+/// carry no count, no route, and no key binding.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Destination {
+    Inventory,
+    Sources,
+    Updates,
+    Doctor,
+}
+
+impl Destination {
+    const ALL: [Self; 4] = [Self::Inventory, Self::Sources, Self::Updates, Self::Doctor];
+
+    fn key(self) -> char {
+        match self {
+            Self::Inventory => '1',
+            Self::Sources => '2',
+            Self::Updates => '3',
+            Self::Doctor => '4',
+        }
+    }
+
+    fn title(self) -> &'static str {
+        match self {
+            Self::Inventory => "Inventory",
+            Self::Sources => "Sources",
+            Self::Updates => "Updates",
+            Self::Doctor => "Doctor",
+        }
+    }
+
+    fn is_available(self) -> bool {
+        matches!(self, Self::Inventory | Self::Sources)
+    }
+
+    fn is_active(self, view: View) -> bool {
+        match self {
+            Self::Inventory => matches!(view, View::Inventory | View::Settings),
+            Self::Sources => view == View::Sources,
+            Self::Updates | Self::Doctor => false,
+        }
+    }
 }
 
 fn render_setup(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp, step: SetupStep) {
@@ -82,12 +272,7 @@ fn render_setup(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp, step: Setup
 }
 
 fn setup_lines(app: &SkilledApp, step: SetupStep) -> Vec<Line<'static>> {
-    let title = Line::styled(
-        step.title(),
-        Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD),
-    );
+    let title = Line::styled(step.title(), theme::section_title());
     let mut lines = vec![title, Line::default()];
     match step {
         SetupStep::Welcome => {
@@ -156,7 +341,7 @@ fn setup_lines(app: &SkilledApp, step: SetupStep) -> Vec<Line<'static>> {
                 app.agents().iter().filter(|agent| agent.selected()).count()
             )),
             Line::from(format!(
-                "Sources: {}   Skills: {}   Installations: 0   Doctor findings: 0",
+                "Sources: {}   Skills: {}",
                 app.sources().len(),
                 app.sources()
                     .iter()
@@ -172,23 +357,79 @@ fn setup_lines(app: &SkilledApp, step: SetupStep) -> Vec<Line<'static>> {
 }
 
 fn render_inventory(frame: &mut Frame<'_>, area: Rect) {
-    let block = Block::default()
-        .title(" Inventory ")
-        .borders(Borders::ALL)
-        .padding(Padding::new(2, 2, 1, 1));
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
+    let (primary, detail) = viewport::workspace_regions(area);
+    if let Some(detail) = detail {
+        render_inventory_detail(frame, detail);
+    }
+
+    let [header, body] =
+        Layout::vertical([Constraint::Length(2), Constraint::Min(1)]).areas(primary);
     frame.render_widget(
         Paragraph::new(vec![
-            Line::styled(
-                "Installed skills",
-                Style::default().add_modifier(Modifier::BOLD),
-            ),
-            Line::default(),
-            Line::from("No installed skills found."),
-            Line::from("Doctor findings: 0"),
+            components::pane_header("Global inventory", "not scanned"),
+            components::rule(header.width),
         ]),
-        inner,
+        header,
+    );
+
+    // Nothing scans installation roots yet, so the only truthful inventory is
+    // an empty one. The copy points at the work the release does support.
+    let body = body.inner(Margin {
+        horizontal: 2,
+        vertical: 0,
+    });
+    frame.render_widget(
+        components::empty_state(
+            "⌕",
+            "Installation roots have not been scanned",
+            "Skilled has not looked at any installation root yet, so it cannot \
+             say what is installed. Register a local source in Sources to \
+             prepare for installation in a later release.",
+            body,
+        ),
+        body,
+    );
+}
+
+/// The detail region beside a wide Inventory.
+///
+/// There is nothing to select yet, so the region explains what it will show
+/// rather than standing empty or inventing a subject.
+fn render_inventory_detail(frame: &mut Frame<'_>, area: Rect) {
+    let [separator, region] =
+        Layout::horizontal([Constraint::Length(1), Constraint::Min(1)]).areas(area);
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(Span::styled("│", theme::rule()));
+            usize::from(separator.height)
+        ]),
+        separator,
+    );
+
+    // The header mirrors the primary pane's so both regions measure their
+    // centred content against the same remaining height.
+    let region = region.inner(Margin {
+        horizontal: 1,
+        vertical: 0,
+    });
+    let [header, body] =
+        Layout::vertical([Constraint::Length(2), Constraint::Min(1)]).areas(region);
+    frame.render_widget(
+        Paragraph::new(vec![
+            components::pane_header("Details", "no selection"),
+            components::rule(header.width),
+        ]),
+        header,
+    );
+    frame.render_widget(
+        components::empty_state(
+            "·",
+            "Nothing to show",
+            "Identity, provenance, and installation paths appear here once \
+             installation inventory exists.",
+            body,
+        ),
+        body,
     );
 }
 
@@ -202,11 +443,9 @@ fn render_sources(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
     let repository_block = Block::default()
         .title(" Repositories ")
         .borders(Borders::ALL)
-        .border_style(if app.sources_pane() == SourcesPane::Repositories {
-            Style::default().fg(Color::Cyan)
-        } else {
-            Style::default()
-        })
+        .border_style(theme::pane_border(
+            app.sources_pane() == SourcesPane::Repositories,
+        ))
         .padding(Padding::horizontal(1));
     let repository_inner = repository_block.inner(repositories);
     frame.render_widget(repository_block, repositories);
@@ -220,16 +459,14 @@ fn render_sources(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
         let capacity = usize::from(repository_inner.height.max(1));
         let start = visible_window_start(app.focused_source(), capacity);
         for (index, source) in app.sources().iter().enumerate().skip(start).take(capacity) {
-            repository_lines.push(Line::from(format!(
-                "{} {}  {}",
-                if index == app.focused_source() {
-                    ">"
-                } else {
-                    " "
-                },
-                terminal_safe(source.label()),
-                dirty_label(source.dirty())
-            )));
+            repository_lines.push(components::list_row(
+                vec![
+                    Span::raw(format!("{}  ", terminal_safe(source.label()))),
+                    worktree_badge(source.dirty()),
+                ],
+                index == app.focused_source(),
+                repository_inner.width,
+            ));
         }
     }
     frame.render_widget(Paragraph::new(repository_lines), repository_inner);
@@ -237,11 +474,9 @@ fn render_sources(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
     let detail_block = Block::default()
         .title(" Available variants ")
         .borders(Borders::ALL)
-        .border_style(if app.sources_pane() == SourcesPane::Variants {
-            Style::default().fg(Color::Cyan)
-        } else {
-            Style::default()
-        })
+        .border_style(theme::pane_border(
+            app.sources_pane() == SourcesPane::Variants,
+        ))
         .padding(Padding::horizontal(1));
     let detail_inner = detail_block.inner(details);
     frame.render_widget(detail_block, details);
@@ -252,35 +487,37 @@ fn render_sources(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
     let mut metadata_lines = vec![
         Line::styled(
             terminal_safe(&source.git_top_level().display().to_string()),
-            Style::default().add_modifier(Modifier::BOLD),
+            theme::emphasis(),
         ),
-        Line::from(format!(
-            "{} · {} · {} · scanned {}",
-            terminal_safe(source.branch().unwrap_or("detached")),
-            &source.head()[..source.head().len().min(8)],
-            dirty_label(source.dirty()),
-            source.last_scan_at()
-        )),
+        Line::from(vec![
+            Span::raw(format!(
+                "{} · {} · ",
+                terminal_safe(source.branch().unwrap_or("detached")),
+                &source.head()[..source.head().len().min(8)]
+            )),
+            worktree_badge(source.dirty()),
+            Span::raw(format!(" · scanned {}", source.last_scan_at())),
+        ]),
     ];
     if let Some(remote) = source.remote_url() {
         metadata_lines.push(Line::from(format!("Remote: {}", terminal_safe(remote))));
     }
     if let Some(error) = source.source_error() {
-        metadata_lines.push(Line::styled(
-            format!("× Source unavailable — {}", terminal_safe(error)),
-            Style::default().fg(Color::Red),
-        ));
+        metadata_lines.push(Line::from(components::badge(
+            Tone::Critical,
+            &format!("Source unavailable — {}", terminal_safe(error)),
+        )));
     } else {
         for catalog in source.catalogs() {
             if let Some(error) = catalog.scan_error() {
-                metadata_lines.push(Line::styled(
-                    format!(
-                        "× {} — {}",
+                metadata_lines.push(Line::from(components::badge(
+                    Tone::Critical,
+                    &format!(
+                        "{} — {}",
                         terminal_safe(&catalog.relative_path().display().to_string()),
                         terminal_safe(error)
                     ),
-                    Style::default().fg(Color::Red),
-                ));
+                )));
             }
         }
     }
@@ -317,10 +554,10 @@ fn render_sources(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
                     details.push(Line::from(terminal_safe(description)));
                 }
                 SkillValidation::Invalid { message } => {
-                    details.push(Line::styled(
-                        terminal_safe(message),
-                        Style::default().fg(Color::Red),
-                    ));
+                    details.push(Line::from(components::badge(
+                        Tone::Critical,
+                        &terminal_safe(message),
+                    )));
                 }
             }
             details
@@ -331,21 +568,22 @@ fn render_sources(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
         .iter()
         .enumerate()
         .map(|(index, (catalog, candidate))| {
-            let status = if candidate.validation().is_valid() {
-                "✓"
+            let tone = if candidate.validation().is_valid() {
+                Tone::Healthy
             } else {
-                "×"
+                Tone::Critical
             };
-            Line::from(format!(
-                "{} {status} {}  ({})",
-                if index == app.focused_variant() {
-                    ">"
-                } else {
-                    " "
-                },
-                terminal_safe(candidate.directory_name()),
-                terminal_safe(&catalog.relative_path().display().to_string())
-            ))
+            components::list_row(
+                vec![
+                    components::badge(tone, &terminal_safe(candidate.directory_name())),
+                    Span::raw(format!(
+                        "  ({})",
+                        terminal_safe(&catalog.relative_path().display().to_string())
+                    )),
+                ],
+                index == app.focused_variant(),
+                detail_inner.width,
+            )
         })
         .collect::<Vec<_>>();
     let viewport_height = usize::from(detail_inner.height);
@@ -448,18 +686,15 @@ fn render_source_path_entry(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp)
     ];
     if let Some(error) = app.source_error() {
         lines.push(Line::default());
-        lines.push(Line::styled(
-            terminal_safe(error),
-            Style::default().fg(Color::Red),
-        ));
+        lines.push(Line::from(components::badge(
+            Tone::Critical,
+            &terminal_safe(error),
+        )));
     }
     frame.render_widget(
-        Paragraph::new(lines).wrap(Wrap { trim: false }).block(
-            Block::default()
-                .title(" Add source ")
-                .borders(Borders::ALL)
-                .padding(Padding::new(2, 2, 1, 1)),
-        ),
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(components::dialog_frame("Add source", "local Git checkout")),
         popup,
     );
 }
@@ -467,10 +702,7 @@ fn render_source_path_entry(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp)
 fn render_catalog_confirmation(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
     let popup = centered_rect(76, 16, area);
     frame.render_widget(Clear, popup);
-    let block = Block::default()
-        .title(" Confirm catalogs ")
-        .borders(Borders::ALL)
-        .padding(Padding::new(2, 2, 1, 1));
+    let block = components::dialog_frame("Confirm catalogs", "registration only");
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
 
@@ -578,12 +810,14 @@ fn catalog_confirmation_sections(
                 "Repository: {}",
                 terminal_safe(&source.git_top_level().display().to_string())
             )),
-            Line::from(format!(
-                "Branch: {}   HEAD: {}   {}",
-                terminal_safe(source.branch().unwrap_or("detached")),
-                &source.head()[..source.head().len().min(8)],
-                dirty_label(source.dirty())
-            )),
+            Line::from(vec![
+                Span::raw(format!(
+                    "Branch: {}   HEAD: {}   ",
+                    terminal_safe(source.branch().unwrap_or("detached")),
+                    &source.head()[..source.head().len().min(8)]
+                )),
+                worktree_badge(source.dirty()),
+            ]),
         ]);
         for (index, catalog) in preview.catalogs().iter().enumerate() {
             catalogs.push(Line::from(format!(
@@ -604,10 +838,10 @@ fn catalog_confirmation_sections(
     }
     let mut error = Vec::new();
     if let Some(message) = app.source_error() {
-        error.push(Line::styled(
-            terminal_safe(message),
-            Style::default().fg(Color::Red),
-        ));
+        error.push(Line::from(components::badge(
+            Tone::Critical,
+            &terminal_safe(message),
+        )));
     }
     let footer = vec![
         Line::from("Space include · c classification · 1/2/3 compatibility"),
@@ -638,11 +872,15 @@ fn yes_no(value: bool) -> &'static str {
     if value { "yes" } else { "no" }
 }
 
-fn dirty_label(dirty: Option<bool>) -> &'static str {
+/// The worktree state of a registered source.
+///
+/// An unavailable status is its own tone: Skilled did not observe a clean tree,
+/// and must not imply that it did.
+fn worktree_badge(dirty: Option<bool>) -> Span<'static> {
     match dirty {
-        Some(true) => "dirty",
-        Some(false) => "clean",
-        None => "status unavailable",
+        Some(true) => components::badge(Tone::Warning, "dirty"),
+        Some(false) => components::badge(Tone::Healthy, "clean"),
+        None => components::badge(Tone::Inactive, "status unavailable"),
     }
 }
 
@@ -663,53 +901,85 @@ fn render_settings(frame: &mut Frame<'_>, area: Rect) {
     frame.render_widget(Clear, popup);
     frame.render_widget(
         Paragraph::new(vec![
-            Line::styled("Settings", Style::default().add_modifier(Modifier::BOLD)),
-            Line::default(),
-            Line::from("> Rerun setup"),
+            components::list_row(vec![Span::raw("Rerun setup")], true, 46),
             Line::default(),
             Line::from("Enter confirms · Esc closes"),
         ])
-        .block(
-            Block::default()
-                .title(" Settings ")
-                .borders(Borders::ALL)
-                .padding(Padding::new(2, 2, 1, 1)),
-        ),
+        .block(components::dialog_frame("Settings", "global scope")),
         popup,
     );
 }
 
 fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
-    let hints = if app.source_path_input_active() {
-        " Type path   Enter Inspect   Esc Cancel   Ctrl-C Quit "
-    } else if app.pending_source().is_some() {
-        " j/k Move   Space Include   c Class   1/2/3 Agents   Enter Register   Esc Cancel "
-    } else {
-        match app.view() {
-            View::Setup(SetupStep::DetectAgents) => {
-                " j/k Move   Space Toggle   Enter Continue   Esc Back   q Quit "
-            }
-            View::Setup(SetupStep::DiscoverSources) => {
-                " a Add source   Enter Continue   Esc Back   q Quit "
-            }
-            View::Setup(SetupStep::ConfirmCatalogs) => {
-                " j/k Move   Space Include   c Class   1/2/3 Agents   Enter Register "
-            }
-            View::Setup(_) => " Enter Continue   Esc Back   q Quit ",
-            View::Inventory => " 2 Sources   s Settings   ? Help   q Quit ",
-            View::Sources => " Tab Pane   j/k Move   a Add source   1 Inventory   q Quit ",
-            View::Settings => " Enter Rerun setup   Esc Close ",
-        }
-    };
     frame.render_widget(
-        Paragraph::new(hints)
-            .alignment(Alignment::Center)
-            .style(Style::default().fg(Color::DarkGray)),
+        Paragraph::new(components::key_hint_line(&key_hints(app), area.width))
+            .style(theme::chrome()),
         area,
     );
 }
 
+/// The commands the active context actually handles.
+///
+/// This mirrors [`crate::input`]. A hint that is not backed by a key mapping is
+/// a promise the application cannot keep, so unimplemented commands — help,
+/// installation, updates, repair, and filtering — are absent by construction.
+fn key_hints(app: &SkilledApp) -> Vec<KeyHint> {
+    if app.source_path_input_active() {
+        return vec![
+            KeyHint::essential("Enter", "Inspect"),
+            KeyHint::essential("Esc", "Cancel"),
+            KeyHint::new("Ctrl-C", "Quit"),
+        ];
+    }
+    if app.pending_source().is_some() {
+        return vec![
+            KeyHint::new("j/k", "Move"),
+            KeyHint::new("Space", "Include"),
+            KeyHint::new("c", "Class"),
+            KeyHint::new("1/2/3", "Agents"),
+            KeyHint::essential("Enter", "Register"),
+            KeyHint::essential("Esc", "Cancel"),
+        ];
+    }
+    match app.view() {
+        View::Setup(step) => {
+            let mut hints = Vec::new();
+            if step == SetupStep::DetectAgents {
+                hints.push(KeyHint::new("j/k", "Move"));
+                hints.push(KeyHint::new("Space", "Toggle"));
+            }
+            if step == SetupStep::DiscoverSources {
+                hints.push(KeyHint::new("a", "Add source"));
+            }
+            hints.push(KeyHint::essential("Enter", "Continue"));
+            // Step one has nowhere to go back to.
+            if step != SetupStep::Welcome {
+                hints.push(KeyHint::essential("Esc", "Back"));
+            }
+            hints.push(KeyHint::new("q", "Quit"));
+            hints
+        }
+        View::Inventory => vec![
+            KeyHint::new("2", "Sources"),
+            KeyHint::new("s", "Settings"),
+            KeyHint::new("q", "Quit"),
+        ],
+        View::Sources => vec![
+            KeyHint::new("Tab", "Pane"),
+            KeyHint::new("j/k", "Move"),
+            KeyHint::new("a", "Add source"),
+            KeyHint::new("1", "Inventory"),
+            KeyHint::new("q", "Quit"),
+        ],
+        View::Settings => vec![
+            KeyHint::essential("Enter", "Rerun setup"),
+            KeyHint::essential("Esc", "Close"),
+        ],
+    }
+}
+
 fn render_size_notice(frame: &mut Frame<'_>, area: Rect) {
+    frame.render_widget(Block::new().style(theme::app_surface()), area);
     let message = format!(
         "Skilled needs at least {MINIMUM_WIDTH}×{MINIMUM_HEIGHT}. Current size: {}×{}. Resize the terminal to continue.",
         area.width, area.height

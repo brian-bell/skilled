@@ -1,0 +1,45 @@
+---
+source: tests/tui_snapshots.rs
+assertion_line: 61
+expression: "render(&app, 120, 40)"
+---
+ ◆ skilled   global                                                                      ● ready · 0 sources registered
+▌Inventory  2 Sources  Updates (soon)  Doctor (soon)
+Global inventory  not scanned                                                   │ Details  no selection
+────────────────────────────────────────────────────────────────────────────────│ ─────────────────────────────────────
+                                                                                │
+                                                                                │
+                                                                                │
+                                                                                │
+                                                                                │
+                                                                                │
+                                                                                │
+                                                                                │
+                                                                                │
+                                                                                │
+                                                                                │
+                                                                                │
+                                                                                │
+                                                                                │
+                                        ⌕                                       │                   ·
+                                                                                │
+                    Installation roots have not been scanned                    │            Nothing to show
+                                                                                │
+   Skilled has not looked at any installation root yet, so it cannot say what   │       Identity, provenance, and
+  is installed. Register a local source in Sources to prepare for installation  │  installation paths appear here once
+                               in a later release.                              │    installation inventory exists.
+                                                                                │
+                                                                                │
+                                                                                │
+                                                                                │
+                                                                                │
+                                                                                │
+                                                                                │
+                                                                                │
+                                                                                │
+                                                                                │
+                                                                                │
+                                                                                │
+                                                                                │
+                                                                                │
+ 2 Sources   s Settings   q Quit

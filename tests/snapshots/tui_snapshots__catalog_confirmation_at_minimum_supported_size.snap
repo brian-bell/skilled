@@ -1,16 +1,17 @@
 ---
 source: tests/tui_snapshots.rs
+assertion_line: 151
 expression: rendered
 ---
- Skilled   Sources
+ ◆ skilled   global                              ● ready · 0 sources registered
+ Confirm catalogs   navigation is locked while this dialog is open
 ┌ Repositories ───────────┐ ┌ Available variants ──────────────────────────────┐
 │ No registered sources.  │ │ Select Add Source to begin.                      │
-│ Press a to add one.     │ │                                                  │
-│ ┌ Confirm catalogs ────────────────────────────────────────────────────────┐ │
+│ ┌ Confirm catalogs ───────────────────────────────────── registration only ┐ │
 │ │                                                                          │ │
 │ │  Confirm the resolved repository, roots, and compatible agents.          │ │
 │ │  Repository: [TEMP]/source                          │ │
-│ │  Branch: main   HEAD: [HEAD]   clean                                   │ │
+│ │  Branch: main   HEAD: [HEAD]   ✓ clean                                 │ │
 │ │                                                                          │ │
 │ │  > [x] skills  Common  C:yes X:yes O:yes                                 │ │
 │ │                                                                          │ │

@@ -30,6 +30,38 @@ fn first_run_welcome_at_wide_size() {
 }
 
 #[test]
+fn inventory_empty_state_at_minimum_supported_size() {
+    let temporary = tempfile::tempdir().expect("temporary application directory");
+    let mut app = SkilledApp::open(AppEnvironment::new(
+        temporary.path().join("home"),
+        temporary.path().join("data"),
+        "",
+    ))
+    .expect("open application");
+    for _ in 0..7 {
+        dispatch(&mut app, Action::Continue);
+    }
+
+    insta::assert_snapshot!(render(&app, 80, 24));
+}
+
+#[test]
+fn inventory_empty_state_at_wide_size() {
+    let temporary = tempfile::tempdir().expect("temporary application directory");
+    let mut app = SkilledApp::open(AppEnvironment::new(
+        temporary.path().join("home"),
+        temporary.path().join("data"),
+        "",
+    ))
+    .expect("open application");
+    for _ in 0..7 {
+        dispatch(&mut app, Action::Continue);
+    }
+
+    insta::assert_snapshot!(render(&app, 120, 40));
+}
+
+#[test]
 fn undersized_terminal_shows_a_recoverable_notice() {
     let temporary = tempfile::tempdir().expect("temporary application directory");
     let app = SkilledApp::open(AppEnvironment::new(
@@ -272,7 +304,7 @@ fn sources_keeps_a_variant_selection_and_details_visible_beyond_the_first_viewpo
     let screen = render(&app, 80, 24);
 
     assert_eq!(app.focused_variant(), 25);
-    assert!(screen.contains(&format!("> ✓ {expected}")));
+    assert!(screen.contains(&format!("▌ ✓ {expected}")));
     assert!(screen.contains("(skills)"), "{screen}");
     assert!(screen.contains(expected_description), "{screen}");
 }

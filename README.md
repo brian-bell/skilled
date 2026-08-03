@@ -36,8 +36,13 @@ install, repair, update, or uninstall skills.
   and confirmed catalog roots.
 - Direct startup into Inventory after setup is complete.
 - A Settings action for rerunning setup.
-- Ratatui layouts at 80×24 and wider, plus a recoverable notice for smaller
-  terminals.
+- A persistent application frame — product title bar, primary navigation,
+  session status, workspace, and contextual key hints — drawn from the tracked
+  visual prototype. Destinations without an implementation are shown as
+  explicitly unavailable rather than offered, and key hints advertise only
+  commands the active context handles.
+- Ratatui layouts at 80×24 and wider, with a second detail region at 100
+  columns or more, plus a recoverable notice for smaller terminals.
 - Terminal restoration on normal exit, startup failure, panic unwinding, and
   the Ctrl-C key path used in raw mode.
 
@@ -97,14 +102,21 @@ cargo clippy --all-targets --all-features -- -D warnings
 ```
 
 Tests use temporary homes and repositories; they do not inspect or mutate real
-agent skill directories. Ratatui behavior is covered by snapshots under
-`tests/snapshots/`.
+agent skill directories. Ratatui behavior is covered two ways: text snapshots
+under `tests/snapshots/` and cell-level style assertions in
+`tests/tui_shell.rs`.
 
 ## Architecture
 
 - `src/app.rs` owns state transitions and emits typed effects.
 - `src/runner.rs` owns the terminal loop and executes effects.
-- `src/tui.rs` renders state without external side effects.
+- `src/tui.rs` composes the application shell and screens without external side
+  effects.
+- `src/theme.rs` defines every colour as a semantic token; no other module
+  names a colour.
+- `src/viewport.rs` classifies terminal width and lays out workspace regions.
+- `src/components.rs` provides the shared badge, row, header, empty-state,
+  dialog, and key-hint primitives.
 - `src/agents.rs` isolates agent discovery conventions and their documentation
   snapshots.
 - `src/store.rs` owns versioned SQLite metadata and migrations.
