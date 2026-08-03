@@ -88,6 +88,8 @@ pub enum Action {
     Back,
     MoveSelection(i8),
     ToggleSelection,
+    OpenHelp,
+    CloseHelp,
     OpenSettings,
     OpenInventory,
     OpenSources,
@@ -167,6 +169,7 @@ pub struct SkilledApp {
     sources_pane: SourcesPane,
     focused_source: usize,
     focused_variant: usize,
+    help_context: Option<View>,
 }
 
 impl SkilledApp {
@@ -199,6 +202,7 @@ impl SkilledApp {
             sources_pane: SourcesPane::Repositories,
             focused_source: 0,
             focused_variant: 0,
+            help_context: None,
         })
     }
 
@@ -254,6 +258,10 @@ impl SkilledApp {
         self.focused_variant
     }
 
+    pub fn help_context(&self) -> Option<View> {
+        self.help_context
+    }
+
     pub fn selected_source(&self) -> Option<&RegisteredSource> {
         self.sources.get(self.focused_source)
     }
@@ -275,6 +283,17 @@ impl SkilledApp {
     }
 
     pub fn update(&mut self, action: Action) -> UpdateResult {
+        if self.help_context.is_some() {
+            return match action {
+                Action::CloseHelp => {
+                    self.help_context = None;
+                    UpdateResult::continuing(Vec::new())
+                }
+                Action::Quit => UpdateResult::quit(),
+                _ => UpdateResult::continuing(Vec::new()),
+            };
+        }
+
         let effects = match action {
             Action::Continue => self.advance_setup().into_iter().collect(),
             Action::Back => return self.back(),
@@ -284,6 +303,16 @@ impl SkilledApp {
             }
             Action::ToggleSelection => {
                 self.toggle_selection();
+                Vec::new()
+            }
+            Action::OpenHelp => {
+                if !self.source_path_input_active && self.pending_source.is_none() {
+                    self.help_context = Some(self.view);
+                }
+                Vec::new()
+            }
+            Action::CloseHelp => {
+                self.help_context = None;
                 Vec::new()
             }
             Action::OpenSettings => {

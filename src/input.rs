@@ -9,6 +9,10 @@ pub fn action_for_app_key(app: &SkilledApp, key: KeyEvent) -> Option<Action> {
     if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
         return (key.kind == KeyEventKind::Press).then_some(Action::Quit);
     }
+    if app.help_context().is_some() {
+        return (key.kind == KeyEventKind::Press && key.code == KeyCode::Esc)
+            .then_some(Action::CloseHelp);
+    }
     if app.source_path_input_active() {
         let action = match key.code {
             KeyCode::Enter => Some(Action::SubmitSourcePath),
@@ -55,6 +59,8 @@ pub fn action_for_key(view: View, key: KeyEvent) -> Option<Action> {
         || (key.code == KeyCode::Char('q') && view != View::Settings)
     {
         Some(Action::Quit)
+    } else if key.code == KeyCode::Char('?') {
+        Some(Action::OpenHelp)
     } else {
         match view {
             View::Setup(step) => setup_action(step, key.code),
