@@ -228,16 +228,21 @@ fn sources_escape_control_characters_from_skill_metadata() {
 }
 
 #[test]
-fn sources_keeps_a_variant_selection_visible_beyond_the_first_viewport() {
+fn sources_keeps_a_variant_selection_and_details_visible_beyond_the_first_viewport() {
     let temporary = tempfile::tempdir().expect("temporary application directory");
     let repository = temporary.path().join("source");
     create_source_fixture(&repository);
     for index in 0..30 {
-        let name = format!("skill-{index:02}");
+        let name = format!("skill-{index:02}-with-a-long-directory-name");
+        let description = if index == 24 {
+            format!("Fixture {index} {}", "detail".repeat(150))
+        } else {
+            format!("Fixture {index}")
+        };
         fs::create_dir_all(repository.join("skills").join(&name)).expect("create skill");
         fs::write(
             repository.join("skills").join(&name).join("SKILL.md"),
-            format!("---\nname: {name}\ndescription: Fixture {index}\n---\n# Fixture\n"),
+            format!("---\nname: {name}\ndescription: {description}\n---\n# Fixture\n"),
         )
         .expect("write skill");
     }
@@ -262,11 +267,14 @@ fn sources_keeps_a_variant_selection_visible_beyond_the_first_viewport() {
     let expected = app.sources()[0].catalogs()[0].candidates()[25]
         .directory_name()
         .to_owned();
+    let expected_description = "Fixture 24";
 
     let screen = render(&app, 80, 24);
 
     assert_eq!(app.focused_variant(), 25);
     assert!(screen.contains(&format!("> ✓ {expected}")));
+    assert!(screen.contains("(skills)"), "{screen}");
+    assert!(screen.contains(expected_description), "{screen}");
 }
 
 #[test]

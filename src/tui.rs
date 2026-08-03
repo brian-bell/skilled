@@ -249,7 +249,7 @@ fn render_sources(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
         frame.render_widget(Paragraph::new("Select Add Source to begin."), detail_inner);
         return;
     };
-    let mut lines = vec![
+    let mut metadata_lines = vec![
         Line::styled(
             terminal_safe(&source.git_top_level().display().to_string()),
             Style::default().add_modifier(Modifier::BOLD),
@@ -263,17 +263,17 @@ fn render_sources(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
         )),
     ];
     if let Some(remote) = source.remote_url() {
-        lines.push(Line::from(format!("Remote: {}", terminal_safe(remote))));
+        metadata_lines.push(Line::from(format!("Remote: {}", terminal_safe(remote))));
     }
     if let Some(error) = source.source_error() {
-        lines.push(Line::styled(
+        metadata_lines.push(Line::styled(
             format!("× Source unavailable — {}", terminal_safe(error)),
             Style::default().fg(Color::Red),
         ));
     } else {
         for catalog in source.catalogs() {
             if let Some(error) = catalog.scan_error() {
-                lines.push(Line::styled(
+                metadata_lines.push(Line::styled(
                     format!(
                         "× {} — {}",
                         terminal_safe(&catalog.relative_path().display().to_string()),
@@ -284,7 +284,7 @@ fn render_sources(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
             }
         }
     }
-    lines.push(Line::default());
+    metadata_lines.push(Line::default());
     let variants = source
         .catalogs()
         .iter()
@@ -295,57 +295,143 @@ fn render_sources(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
                 .map(move |candidate| (catalog, candidate))
         })
         .collect::<Vec<_>>();
-    let reserved = lines.len().saturating_add(4);
-    let capacity = usize::from(detail_inner.height)
-        .saturating_sub(reserved)
-        .max(1);
-    let start = visible_window_start(app.focused_variant(), capacity);
-    for (index, (catalog, candidate)) in variants.iter().enumerate().skip(start).take(capacity) {
-        let status = if candidate.validation().is_valid() {
-            "✓"
-        } else {
-            "×"
-        };
-        lines.push(Line::from(format!(
-            "{} {status} {}  ({})",
-            if index == app.focused_variant() {
-                ">"
+    let selected_details = variants
+        .get(app.focused_variant())
+        .map(|(catalog, selected)| {
+            let mut details = vec![
+                Line::default(),
+                Line::from(match catalog.classification() {
+                    CatalogClassification::Common => "Common catalog".to_owned(),
+                    CatalogClassification::AgentSpecific => "Agent-specific catalog".to_owned(),
+                }),
+            ];
+            let compatibility = catalog.compatibility();
+            details.push(Line::from(format!(
+                "Claude: {} · Codex: {} · OpenCode: {}",
+                yes_no(compatibility.claude_code()),
+                yes_no(compatibility.codex()),
+                yes_no(compatibility.opencode())
+            )));
+            match selected.validation() {
+                SkillValidation::Valid { description, .. } => {
+                    details.push(Line::from(terminal_safe(description)));
+                }
+                SkillValidation::Invalid { message } => {
+                    details.push(Line::styled(
+                        terminal_safe(message),
+                        Style::default().fg(Color::Red),
+                    ));
+                }
+            }
+            details
+        })
+        .unwrap_or_default();
+    let wrap = Wrap { trim: false };
+    let variant_lines = variants
+        .iter()
+        .enumerate()
+        .map(|(index, (catalog, candidate))| {
+            let status = if candidate.validation().is_valid() {
+                "✓"
             } else {
-                " "
-            },
-            terminal_safe(candidate.directory_name()),
-            terminal_safe(&catalog.relative_path().display().to_string())
-        )));
+                "×"
+            };
+            Line::from(format!(
+                "{} {status} {}  ({})",
+                if index == app.focused_variant() {
+                    ">"
+                } else {
+                    " "
+                },
+                terminal_safe(candidate.directory_name()),
+                terminal_safe(&catalog.relative_path().display().to_string())
+            ))
+        })
+        .collect::<Vec<_>>();
+    let viewport_height = usize::from(detail_inner.height);
+    // Keep the complete focused row and then its details visible before giving wrapped metadata
+    // the remaining rows. Oversized sections are clipped within their own viewport.
+    let focused_variant_height = variant_lines
+        .get(app.focused_variant())
+        .map(|line| wrapped_line_count(line, detail_inner.width))
+        .unwrap_or(0)
+        .min(viewport_height);
+    let selected_details_height = Paragraph::new(selected_details.clone())
+        .wrap(wrap)
+        .line_count(detail_inner.width)
+        .min(viewport_height.saturating_sub(focused_variant_height));
+    let height_after_details = viewport_height
+        .saturating_sub(focused_variant_height)
+        .saturating_sub(selected_details_height);
+    let metadata_height = Paragraph::new(metadata_lines.clone())
+        .wrap(wrap)
+        .line_count(detail_inner.width)
+        .min(height_after_details);
+    let variants_height = viewport_height
+        .saturating_sub(metadata_height)
+        .saturating_sub(selected_details_height);
+    let visible_variants = visible_wrapped_lines(
+        &variant_lines,
+        app.focused_variant(),
+        detail_inner.width,
+        variants_height,
+    );
+    let [metadata_area, variants_area, selected_details_area] = Layout::vertical([
+        Constraint::Length(metadata_height as u16),
+        Constraint::Length(variants_height as u16),
+        Constraint::Length(selected_details_height as u16),
+    ])
+    .areas(detail_inner);
+    frame.render_widget(Paragraph::new(metadata_lines).wrap(wrap), metadata_area);
+    frame.render_widget(Paragraph::new(visible_variants).wrap(wrap), variants_area);
+    frame.render_widget(
+        Paragraph::new(selected_details).wrap(wrap),
+        selected_details_area,
+    );
+}
+
+fn wrapped_line_count(line: &Line<'_>, width: u16) -> usize {
+    Paragraph::new(line.clone())
+        .wrap(Wrap { trim: false })
+        .line_count(width)
+}
+
+fn visible_wrapped_lines(
+    lines: &[Line<'static>],
+    focused: usize,
+    width: u16,
+    height: usize,
+) -> Vec<Line<'static>> {
+    let Some(focused_line) = lines.get(focused) else {
+        return Vec::new();
+    };
+    if width == 0 || height == 0 {
+        return Vec::new();
     }
-    if let Some((catalog, selected)) = variants.get(app.focused_variant()) {
-        lines.push(Line::default());
-        lines.push(Line::from(match catalog.classification() {
-            CatalogClassification::Common => "Common catalog".to_owned(),
-            CatalogClassification::AgentSpecific => "Agent-specific catalog".to_owned(),
-        }));
-        let compatibility = catalog.compatibility();
-        lines.push(Line::from(format!(
-            "Claude: {} · Codex: {} · OpenCode: {}",
-            yes_no(compatibility.claude_code()),
-            yes_no(compatibility.codex()),
-            yes_no(compatibility.opencode())
-        )));
-        match selected.validation() {
-            SkillValidation::Valid { description, .. } => {
-                lines.push(Line::from(terminal_safe(description)));
-            }
-            SkillValidation::Invalid { message } => {
-                lines.push(Line::styled(
-                    terminal_safe(message),
-                    Style::default().fg(Color::Red),
-                ));
-            }
+    let mut start = focused;
+    let mut used_rows = wrapped_line_count(focused_line, width);
+    while start > 0 {
+        let previous_rows = wrapped_line_count(&lines[start - 1], width);
+        if used_rows.saturating_add(previous_rows) > height {
+            break;
+        }
+        start -= 1;
+        used_rows = used_rows.saturating_add(previous_rows);
+    }
+    let mut visible = Vec::new();
+    let mut used_rows = 0_usize;
+    for line in &lines[start..] {
+        let rows = wrapped_line_count(line, width);
+        if !visible.is_empty() && used_rows.saturating_add(rows) > height {
+            break;
+        }
+        visible.push(line.clone());
+        used_rows = used_rows.saturating_add(rows);
+        if used_rows >= height {
+            break;
         }
     }
-    frame.render_widget(
-        Paragraph::new(lines).wrap(Wrap { trim: false }),
-        detail_inner,
-    );
+    visible
 }
 
 fn visible_window_start(focused: usize, capacity: usize) -> usize {

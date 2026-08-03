@@ -9,7 +9,7 @@ license = "MIT"
 [dependencies]
 crossterm = "0.29.0"
 directories = "6.0.0"
-ratatui = "0.30.2"
+ratatui = { version = "0.30.2", features = ["unstable-rendered-line-info"] }
 rusqlite = { version = "0.40.1", features = ["bundled"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_yaml_ng = "0.10.0"
