@@ -732,7 +732,13 @@ fn optional_git_output(repository: &Path, arguments: &[&str]) -> Result<Option<S
 }
 
 fn git_status_dirty(repository: &Path) -> Result<Option<bool>> {
-    let arguments = ["status", "--porcelain=v1", "-z", "--untracked-files=normal"];
+    let arguments = [
+        "status",
+        "--porcelain=v1",
+        "-z",
+        "--untracked-files=normal",
+        "--ignore-submodules=dirty",
+    ];
     let filter_settings = configured_filter_settings(repository)?;
     let inherited_config_count = env::var("GIT_CONFIG_COUNT")
         .ok()
