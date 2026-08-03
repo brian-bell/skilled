@@ -5,8 +5,8 @@ expression: "render(&app, 120, 40)"
 ---
  ◆ skilled   global                                                                      ● ready · 0 sources registered
 ▌1 Inventory  2 Sources  3 Updates (soon)  4 Doctor (soon)
-Global inventory  0 skills                                                      │
-────────────────────────────────────────────────────────────────────────────────│
+Global inventory  not scanned                                                   │ Details  no selection
+────────────────────────────────────────────────────────────────────────────────│ ─────────────────────────────────────
                                                                                 │
                                                                                 │
                                                                                 │
@@ -20,14 +20,14 @@ Global inventory  0 skills                                                      
                                                                                 │
                                                                                 │
                                                                                 │
-                                                                                │                   ·
-                                        ⌕                                       │
-                                                                                │             No selection
-                            No installed skills found                           │
-                                                                                │    Select a skill to see identity,
-               Skilled has not scanned any installation root yet.               │  provenance, and installation paths.
-                Register a local source in Sources to prepare for               │
-                        installation in a later release.                        │
+                                                                                │
+                                        ⌕                                       │                   ·
+                                                                                │
+                            No installed skills found                           │            Nothing to show
+                                                                                │
+   Skilled has not scanned any installation root yet. Register a local source   │       Identity, provenance, and
+           in Sources to prepare for installation in a later release.           │  installation paths appear here once
+                                                                                │    installation inventory exists.
                                                                                 │
                                                                                 │
                                                                                 │

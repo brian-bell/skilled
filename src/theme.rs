@@ -10,6 +10,7 @@ use ratatui::style::{Color, Modifier, Style};
 pub(crate) const TERMINAL: Color = Color::Rgb(0x0b, 0x0f, 0x14);
 pub(crate) const SURFACE: Color = Color::Rgb(0x0f, 0x15, 0x1d);
 pub(crate) const SURFACE_2: Color = Color::Rgb(0x12, 0x1a, 0x24);
+pub(crate) const SURFACE_3: Color = Color::Rgb(0x17, 0x21, 0x2c);
 pub(crate) const TEXT_STRONG: Color = Color::Rgb(0xf2, 0xf6, 0xfa);
 pub(crate) const MUTED: Color = Color::Rgb(0x84, 0x91, 0xa1);
 pub(crate) const FAINT: Color = Color::Rgb(0x53, 0x61, 0x71);
@@ -54,25 +55,39 @@ pub(crate) fn tone_style(tone: Tone) -> Style {
         Tone::Unmanaged => VIOLET,
         Tone::Inactive => FAINT,
     };
-    Style::default().fg(colour).bg(TERMINAL)
+    Style::default().fg(colour)
+}
+
+/// The canvas the whole application is painted on.
+///
+/// Skilled owns the full screen, so it paints one surface and lets every other
+/// token inherit it. Tokens below carry a background only where it is
+/// deliberate local emphasis; otherwise chrome and workspace would disagree on
+/// any terminal whose own background is not this colour.
+pub(crate) fn app_surface() -> Style {
+    Style::default().fg(TEXT).bg(TERMINAL)
 }
 
 /// Persistent chrome rows: title bar, navigation, and key hints.
 pub(crate) fn chrome() -> Style {
-    Style::default().fg(MUTED).bg(TERMINAL)
+    Style::default().fg(MUTED)
 }
 
 /// The product mark in the title bar.
 pub(crate) fn product_mark() -> Style {
-    Style::default().fg(GREEN).bg(TERMINAL)
+    Style::default().fg(GREEN)
 }
 
 /// The product name in the title bar.
 pub(crate) fn product_name() -> Style {
     Style::default()
         .fg(TEXT_STRONG)
-        .bg(TERMINAL)
         .add_modifier(Modifier::BOLD)
+}
+
+/// The band the navigation strip sits on.
+pub(crate) fn nav_surface() -> Style {
+    Style::default().bg(SURFACE)
 }
 
 /// The navigation entry for the view currently on screen.
@@ -86,6 +101,11 @@ pub(crate) fn nav_active() -> Style {
 /// A navigation entry the user can reach but is not currently viewing.
 pub(crate) fn nav_inactive() -> Style {
     Style::default().fg(MUTED).bg(SURFACE)
+}
+
+/// The surface behind the focused row of a list.
+pub(crate) fn selected_row() -> Style {
+    Style::default().bg(SURFACE_3).add_modifier(Modifier::BOLD)
 }
 
 /// The marker on the focused row of a list.
@@ -133,6 +153,13 @@ pub(crate) fn dialog_surface() -> Style {
     Style::default().fg(TEXT).bg(SURFACE)
 }
 
+/// Emphasised body text.
+pub(crate) fn emphasis() -> Style {
+    Style::default()
+        .fg(TEXT_STRONG)
+        .add_modifier(Modifier::BOLD)
+}
+
 /// The title of a workspace pane.
 pub(crate) fn pane_heading() -> Style {
     Style::default()
@@ -175,13 +202,14 @@ pub(crate) fn key_cap() -> Style {
 
 /// The description beside a key cap.
 pub(crate) fn key_label() -> Style {
-    Style::default().fg(MUTED).bg(TERMINAL)
+    Style::default().fg(MUTED)
 }
 
-/// A navigation entry for a destination this release cannot open.
+/// A navigation entry the user cannot open right now.
+///
+/// The faint colour is the only style cue; stacking `DIM` on top pushes the
+/// text towards illegibility. The unavailability is spelled out in words
+/// beside the entry, so nothing depends on this colour being perceived.
 pub(crate) fn nav_disabled() -> Style {
-    Style::default()
-        .fg(FAINT)
-        .bg(SURFACE)
-        .add_modifier(Modifier::DIM)
+    Style::default().fg(FAINT).bg(SURFACE)
 }

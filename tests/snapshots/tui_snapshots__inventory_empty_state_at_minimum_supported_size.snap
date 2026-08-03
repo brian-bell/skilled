@@ -5,7 +5,7 @@ expression: "render(&app, 80, 24)"
 ---
  ◆ skilled   global                              ● ready · 0 sources registered
 ▌1 Inventory  2 Sources  3 Updates (soon)  4 Doctor (soon)
-Global inventory  0 skills
+Global inventory  not scanned
 ────────────────────────────────────────────────────────────────────────────────
 
 
@@ -17,9 +17,9 @@ Global inventory  0 skills
 
                             No installed skills found
 
-               Skilled has not scanned any installation root yet.
-                Register a local source in Sources to prepare for
-                        installation in a later release.
+   Skilled has not scanned any installation root yet. Register a local source
+           in Sources to prepare for installation in a later release.
+
 
 
 

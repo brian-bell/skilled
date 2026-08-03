@@ -5,8 +5,9 @@
 //! terminal.
 
 use ratatui::{
+    layout::{Alignment, Rect},
     text::{Line, Span},
-    widgets::{Block, Borders, Padding},
+    widgets::{Block, Borders, Padding, Paragraph, Wrap},
 };
 
 use crate::theme::{self, Tone};
@@ -17,74 +18,157 @@ use crate::theme::{self, Tone};
 /// handles; the bar is a contract with the user, not decoration.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct KeyHint {
-    pub(crate) key: &'static str,
-    pub(crate) label: &'static str,
+    key: &'static str,
+    label: &'static str,
+    essential: bool,
 }
 
 impl KeyHint {
+    /// A hint that may be dropped when the row runs out of room.
     pub(crate) const fn new(key: &'static str, label: &'static str) -> Self {
-        Self { key, label }
+        Self {
+            key,
+            label,
+            essential: false,
+        }
+    }
+
+    /// A hint that survives truncation.
+    ///
+    /// Reserved for the commands a user needs in order to leave or complete
+    /// the current context. Losing the way out of a dialog to a narrow
+    /// terminal would be worse than losing any other hint.
+    pub(crate) const fn essential(key: &'static str, label: &'static str) -> Self {
+        Self {
+            key,
+            label,
+            essential: true,
+        }
     }
 
     fn width(self) -> usize {
-        self.key.chars().count() + 1 + self.label.chars().count()
+        character_width(self.key) + 1 + character_width(self.label)
     }
 }
 
+/// Widths are counted in characters throughout, never bytes.
+fn character_width(value: &str) -> usize {
+    value.chars().count()
+}
+
 const HINT_SEPARATOR: &str = "   ";
-const OVERFLOW_MARK: &str = "…";
+const OVERFLOW_MARK: &str = " …";
 
 /// Lay out as many complete hints as fit.
 ///
-/// Hints are dropped whole. A clipped hint would advertise a command the user
-/// cannot read, so the bar ends with an overflow mark instead.
+/// Hints are dropped whole: a clipped hint would advertise a command the user
+/// cannot read, so the row ends with an overflow mark instead. Essential hints
+/// are kept in preference to any others, and the surviving hints stay in their
+/// declared order so the row does not reshuffle as the terminal resizes.
 pub(crate) fn key_hint_line(hints: &[KeyHint], width: u16) -> Line<'static> {
-    let width = usize::from(width);
     if width == 0 {
         return Line::default();
     }
 
-    const LEADING: usize = 1;
-    let required = LEADING
-        + hints
-            .iter()
-            .enumerate()
-            .map(|(index, hint)| hint.width() + if index == 0 { 0 } else { HINT_SEPARATOR.len() })
-            .sum::<usize>();
-    let complete = required <= width;
-    // When something must be dropped, keep a column free for the mark.
-    let budget = if complete {
-        width
-    } else {
-        width.saturating_sub(OVERFLOW_MARK.chars().count())
-    };
+    let kept = fitting_hints(hints, width);
+    let dropped = kept.len() < hints.len();
 
     let mut spans = vec![Span::styled(" ", theme::chrome())];
-    let mut used = LEADING;
-    for (index, hint) in hints.iter().enumerate() {
-        let separator = if index == 0 { 0 } else { HINT_SEPARATOR.len() };
-        if used + separator + hint.width() > budget {
-            break;
-        }
-        if index > 0 {
+    let mut used = 1;
+    for (position, index) in kept.iter().enumerate() {
+        if position > 0 {
             spans.push(Span::styled(HINT_SEPARATOR, theme::chrome()));
         }
-        spans.push(Span::styled(hint.key, theme::key_cap()));
+        spans.push(Span::styled(hints[*index].key, theme::key_cap()));
         spans.push(Span::styled(" ", theme::chrome()));
-        spans.push(Span::styled(hint.label, theme::key_label()));
-        used += separator + hint.width();
+        spans.push(Span::styled(hints[*index].label, theme::key_label()));
+        used += hints[*index].width()
+            + if position > 0 {
+                character_width(HINT_SEPARATOR)
+            } else {
+                0
+            };
     }
-
-    if !complete && used + OVERFLOW_MARK.chars().count() <= width {
+    // A row too narrow even for the mark says nothing rather than overflowing.
+    if dropped && used + character_width(OVERFLOW_MARK) <= usize::from(width) {
         spans.push(Span::styled(OVERFLOW_MARK, theme::key_label()));
     }
     Line::from(spans)
 }
 
+/// Choose the indices that fit, preferring essential hints.
+fn fitting_hints(hints: &[KeyHint], width: u16) -> Vec<usize> {
+    let width = usize::from(width);
+    // One leading column, plus room for the mark once anything is dropped.
+    let laid_out = |kept: &[usize], truncated: bool| {
+        let content: usize = kept
+            .iter()
+            .enumerate()
+            .map(|(position, index)| {
+                hints[*index].width()
+                    + if position == 0 {
+                        0
+                    } else {
+                        character_width(HINT_SEPARATOR)
+                    }
+            })
+            .sum();
+        1 + content
+            + if truncated {
+                character_width(OVERFLOW_MARK)
+            } else {
+                0
+            }
+    };
+
+    let everything: Vec<usize> = (0..hints.len()).collect();
+    if laid_out(&everything, false) <= width {
+        return everything;
+    }
+
+    // Essentials first, then ordinary hints in order while the row still fits.
+    let mut kept: Vec<usize> = hints
+        .iter()
+        .enumerate()
+        .filter(|(_, hint)| hint.essential)
+        .map(|(index, _)| index)
+        .collect();
+    let essentials = kept.len();
+    // Essentials are declared in the order they are read, and the way out is
+    // declared last, so trim from the front to keep it.
+    while !kept.is_empty() && laid_out(&kept, true) > width {
+        kept.remove(0);
+    }
+    if kept.len() < essentials {
+        // The row cannot even hold the commands the user needs to leave. Show
+        // as many of those as fit rather than filling the gap with hints that
+        // matter less.
+        return kept;
+    }
+    // Ordinary hints fill from the left and stop at the first that does not
+    // fit. Skipping one to squeeze in a later hint would leave a gap the user
+    // cannot see, since the overflow mark only appears at the end of the row.
+    for (index, hint) in hints.iter().enumerate() {
+        if hint.essential {
+            continue;
+        }
+        let mut candidate = kept.clone();
+        candidate.push(index);
+        candidate.sort_unstable();
+        if laid_out(&candidate, true) > width {
+            break;
+        }
+        kept = candidate;
+    }
+    kept
+}
+
 /// The glyph that carries a tone's meaning without colour.
 ///
-/// Glyphs avoid East-Asian-ambiguous width so a status column keeps its
-/// alignment across terminals.
+/// These are single scalars, but several are East-Asian-ambiguous width and so
+/// occupy two cells in a terminal configured for CJK. Alignment is therefore
+/// best-effort; the label beside the glyph, not the column, carries the
+/// meaning.
 pub(crate) fn tone_glyph(tone: Tone) -> &'static str {
     match tone {
         Tone::Healthy => "✓",
@@ -129,28 +213,36 @@ pub(crate) fn dialog_frame(title: &str, scope: &str) -> Block<'static> {
 }
 
 /// The marker that identifies the focused row in a list.
-const FOCUS_MARKER: &str = "▌";
+pub(crate) const FOCUS_MARKER: &str = "▌";
 
 /// A selectable row in a list.
 ///
 /// The prototype signals selection with a tinted background and an inset
 /// accent bar. A terminal cannot rely on either alone, so focus is carried by a
 /// leading marker and bold text as well.
-pub(crate) fn list_row(content: Vec<Span<'static>>, selected: bool) -> Line<'static> {
+pub(crate) fn list_row(content: Vec<Span<'static>>, selected: bool, width: u16) -> Line<'static> {
     let mut spans = vec![Span::styled(
         if selected { FOCUS_MARKER } else { " " },
         theme::focus_marker(),
     )];
     spans.push(Span::raw(" "));
-    spans.extend(content.into_iter().map(|span| {
-        if selected {
-            let style = span.style.add_modifier(ratatui::style::Modifier::BOLD);
-            span.patch_style(style)
-        } else {
-            span
-        }
-    }));
-    Line::from(spans)
+    spans.extend(content);
+
+    if !selected {
+        return Line::from(spans);
+    }
+
+    // Pad to the region width so the tint reads as a band across the row
+    // rather than stopping at the end of the label.
+    let used: usize = spans
+        .iter()
+        .map(|span| character_width(span.content.as_ref()))
+        .sum();
+    let padding = usize::from(width).saturating_sub(used);
+    if padding > 0 {
+        spans.push(Span::raw(" ".repeat(padding)));
+    }
+    Line::from(spans).style(theme::selected_row())
 }
 
 /// A pane heading with a subtitle that quantifies what the pane contains.
@@ -161,33 +253,47 @@ pub(crate) fn pane_header(heading: &str, subtitle: &str) -> Line<'static> {
     ])
 }
 
+/// A horizontal rule spanning a region.
+pub(crate) fn rule(width: u16) -> Line<'static> {
+    Line::from(Span::styled("─".repeat(usize::from(width)), theme::rule()))
+}
+
 /// A centred explanation of why a region has nothing to show.
 ///
 /// The headline states the observed fact and the body explains what the user
 /// can do about it. Neither may describe capability the release lacks.
+///
+/// `body` is one string: the caller must not hand-break it, because the
+/// paragraph is wrapped to whatever width the region turns out to have.
 pub(crate) fn empty_state(
     glyph: &str,
     headline: &str,
-    body: &[&str],
-    height: u16,
-) -> Vec<Line<'static>> {
+    body: &str,
+    area: Rect,
+) -> Paragraph<'static> {
     let mut lines = vec![
-        Line::from(Span::styled(glyph.to_owned(), theme::empty_glyph())).centered(),
+        Line::from(Span::styled(glyph.to_owned(), theme::empty_glyph())),
         Line::default(),
-        Line::from(Span::styled(headline.to_owned(), theme::empty_headline())).centered(),
+        Line::from(Span::styled(headline.to_owned(), theme::empty_headline())),
         Line::default(),
+        Line::from(Span::styled(body.to_owned(), theme::empty_body())),
     ];
-    lines.extend(
-        body.iter().map(|line| {
-            Line::from(Span::styled((*line).to_owned(), theme::empty_body())).centered()
-        }),
-    );
 
-    // Centre the block vertically without pushing it off a short viewport.
-    let leading = usize::from(height).saturating_sub(lines.len()) / 2;
-    let mut centred = vec![Line::default(); leading];
-    centred.extend(lines);
-    centred
+    // Centre the block vertically against the region it will occupy, without
+    // pushing it off a viewport too short to hold it. The measuring paragraph
+    // is configured exactly like the rendered one, because wrapping behaviour
+    // depends on alignment.
+    let paragraph = |lines: Vec<Line<'static>>| {
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: true })
+            .alignment(Alignment::Center)
+    };
+    let height = paragraph(lines.clone()).line_count(area.width);
+    let leading = usize::from(area.height).saturating_sub(height) / 2;
+    for _ in 0..leading {
+        lines.insert(0, Line::default());
+    }
+    paragraph(lines)
 }
 
 #[cfg(test)]
@@ -198,6 +304,12 @@ mod tests {
         KeyHint::new("j/k", "Move"),
         KeyHint::new("Enter", "Register"),
         KeyHint::new("Esc", "Cancel"),
+    ];
+
+    const WITH_ESSENTIAL: [KeyHint; 3] = [
+        KeyHint::new("j/k", "Move"),
+        KeyHint::new("Space", "Include"),
+        KeyHint::essential("Esc", "Cancel"),
     ];
 
     fn rendered(hints: &[KeyHint], width: u16) -> String {
@@ -232,7 +344,7 @@ mod tests {
     }
 
     #[test]
-    fn tone_glyphs_occupy_one_column() {
+    fn every_tone_glyph_is_a_single_scalar() {
         for tone in [
             Tone::Healthy,
             Tone::Warning,
@@ -254,25 +366,77 @@ mod tests {
 
     #[test]
     fn hints_that_do_not_fit_are_dropped_whole() {
-        // Thirty columns hold the first two hints but not the third.
-        assert_eq!(rendered(&HINTS, 30), " j/k Move   Enter Register…");
-        // Twenty-four hold only the first.
-        assert_eq!(rendered(&HINTS, 24), " j/k Move…");
+        assert_eq!(rendered(&HINTS, 30), " j/k Move   Enter Register …");
+        assert_eq!(rendered(&HINTS, 24), " j/k Move …");
     }
 
     #[test]
     fn a_row_narrower_than_one_hint_shows_only_the_overflow_mark() {
-        assert_eq!(rendered(&HINTS, 4), " …");
+        assert_eq!(rendered(&HINTS, 4), "  …");
+    }
+
+    #[test]
+    fn essential_hints_are_never_traded_for_ordinary_ones() {
+        // Too narrow even for the escape route: show what fits of it rather
+        // than filling the row with hints that matter less.
+        let line = rendered(&WITH_ESSENTIAL, 12);
+        assert!(!line.contains("j/k"), "{line:?}");
+    }
+
+    #[test]
+    fn the_last_declared_escape_survives_when_essentials_compete() {
+        const TWO_WAYS_OUT: [KeyHint; 2] = [
+            KeyHint::essential("Enter", "Inspect"),
+            KeyHint::essential("Esc", "Cancel"),
+        ];
+
+        // Room for one of the two: keep the way out, not the way onward.
+        let line = rendered(&TWO_WAYS_OUT, 16);
+        assert!(line.contains("Esc Cancel"), "{line:?}");
+        assert!(!line.contains("Enter"), "{line:?}");
+    }
+
+    #[test]
+    fn the_way_out_survives_truncation() {
+        // Wide enough for everything.
+        assert_eq!(
+            rendered(&WITH_ESSENTIAL, 45),
+            " j/k Move   Space Include   Esc Cancel"
+        );
+        // Too narrow: the ordinary hints go, the escape route stays, and the
+        // surviving hints keep their declared order.
+        assert_eq!(rendered(&WITH_ESSENTIAL, 25), " j/k Move   Esc Cancel …");
+        assert_eq!(rendered(&WITH_ESSENTIAL, 16), " Esc Cancel …");
     }
 
     #[test]
     fn the_rendered_row_never_exceeds_the_available_width() {
-        for width in 1..=60_u16 {
-            let line = rendered(&HINTS, width);
-            assert!(
-                line.chars().count() <= usize::from(width),
-                "width {width} produced {line:?}"
-            );
+        for hints in [HINTS.as_slice(), WITH_ESSENTIAL.as_slice(), [].as_slice()] {
+            for width in 1..=60_u16 {
+                let line = rendered(hints, width);
+                assert!(
+                    line.chars().count() <= usize::from(width),
+                    "width {width} produced {line:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn no_surviving_hint_is_ever_shown_in_part() {
+        for hints in [HINTS.as_slice(), WITH_ESSENTIAL.as_slice()] {
+            for width in 1..=60_u16 {
+                let line = rendered(hints, width);
+                let body = line.trim_start().trim_end_matches('…').trim_end();
+                for segment in body.split(HINT_SEPARATOR).filter(|part| !part.is_empty()) {
+                    assert!(
+                        hints
+                            .iter()
+                            .any(|hint| segment == format!("{} {}", hint.key, hint.label)),
+                        "width {width} produced partial hint {segment:?} in {line:?}"
+                    );
+                }
+            }
         }
     }
 

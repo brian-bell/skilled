@@ -4,7 +4,7 @@ assertion_line: 151
 expression: rendered
 ---
  ◆ skilled   global                              ● ready · 0 sources registered
- 1 Inventory ▌2 Sources  3 Updates (soon)  4 Doctor (soon)
+ Confirm catalogs   navigation unlocks when this dialog closes
 ┌ Repositories ───────────┐ ┌ Available variants ──────────────────────────────┐
 │ No registered sources.  │ │ Select Add Source to begin.                      │
 │ ┌ Confirm catalogs ───────────────────────────────────── registration only ┐ │

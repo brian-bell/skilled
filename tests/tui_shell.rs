@@ -34,6 +34,239 @@ fn the_shell_frames_inventory_with_product_navigation_and_key_hints() {
 }
 
 #[test]
+fn the_title_bar_keeps_its_own_colours_beside_the_session_status() {
+    let harness = Harness::new();
+    let screen = buffer(&harness.completed_setup(), 80, 24);
+
+    // The status is right-aligned on the same row. Rendering it across the
+    // whole row would repaint the product mark and wordmark; these assertions
+    // are the regression guard for that.
+    assert_eq!(
+        style_in_row(&screen, 0, "◆").fg,
+        Some(Color::Rgb(0x8b, 0xd4, 0x9c))
+    );
+    let wordmark = style_in_row(&screen, 0, "skilled");
+    assert_eq!(wordmark.fg, Some(Color::Rgb(0xf2, 0xf6, 0xfa)));
+    assert!(wordmark.add_modifier.contains(Modifier::BOLD));
+    assert_eq!(
+        style_in_row(&screen, 0, "●").fg,
+        Some(Color::Rgb(0x8b, 0xd4, 0x9c))
+    );
+}
+
+#[test]
+fn an_open_dialog_takes_the_navigation_row_with_it() {
+    let harness = Harness::new();
+    let repository = harness.directory.path().join("source");
+    create_source_fixture(&repository);
+
+    // Settings: 1 and 2 are unmapped.
+    let mut settings = harness.completed_setup();
+    settings.update(Action::OpenSettings);
+    let row = row_text(&buffer(&settings, 80, 24), 1);
+    assert!(row.contains("Settings"), "{row}");
+    assert!(row.contains("navigation unlocks"), "{row}");
+    assert!(!row.contains("1 Inventory"), "{row}");
+
+    // Add source: 1 and 2 type characters into the path.
+    let mut adding = harness.completed_setup();
+    adding.update(Action::OpenSources);
+    adding.update(Action::BeginAddSource);
+    let row = row_text(&buffer(&adding, 80, 24), 1);
+    assert!(row.contains("Add source"), "{row}");
+    assert!(!row.contains("2 Sources"), "{row}");
+
+    // Confirm catalogs from Sources: 1, 2 and 3 toggle agent compatibility.
+    let mut confirming = harness.completed_setup();
+    confirming.update(Action::OpenSources);
+    confirming.update(Action::BeginAddSource);
+    for character in repository.to_string_lossy().chars() {
+        confirming.update(Action::AppendSourcePath(character));
+    }
+    let update = confirming.update(Action::SubmitSourcePath);
+    confirming
+        .perform_effects(update.effects())
+        .expect("inspect source");
+    assert!(confirming.pending_source().is_some());
+    let row = row_text(&buffer(&confirming, 80, 24), 1);
+    assert!(row.contains("Confirm catalogs"), "{row}");
+    assert!(!row.contains("2 Sources"), "{row}");
+}
+
+#[test]
+fn setup_says_navigation_waits_for_setup_not_for_a_dialog() {
+    let harness = Harness::new();
+    let repository = harness.directory.path().join("source");
+    create_source_fixture(&repository);
+    let mut app = harness.first_run();
+    // Reach "Discover sources" and register a source from inside setup.
+    for _ in 0..3 {
+        let update = app.update(Action::Continue);
+        app.perform_effects(update.effects())
+            .expect("setup effects");
+    }
+    app.update(Action::BeginAddSource);
+
+    // The dialog is on screen, but navigation is waiting on setup, not on it.
+    let row = row_text(&buffer(&app, 80, 24), 1);
+    assert!(row.contains("Add source"), "{row}");
+    assert!(row.contains("unlocks after setup"), "{row}");
+    assert!(!row.contains("when this dialog closes"), "{row}");
+
+    for character in repository.to_string_lossy().chars() {
+        app.update(Action::AppendSourcePath(character));
+    }
+    let update = app.update(Action::SubmitSourcePath);
+    app.perform_effects(update.effects())
+        .expect("inspect source");
+    assert!(app.pending_source().is_some());
+
+    // A pending source inside setup is shown inline, so the row must not claim
+    // a dialog is open.
+    let screen = buffer(&app, 80, 24);
+    let row = row_text(&screen, 1);
+    assert!(row.contains("Setup · Confirm catalogs"), "{row}");
+    assert!(row.contains("unlocks after setup"), "{row}");
+    assert!(!row.contains("when this dialog closes"), "{row}");
+}
+
+#[test]
+fn the_empty_state_styles_its_glyph_headline_and_body_distinctly() {
+    let harness = Harness::new();
+    let screen = buffer(&harness.completed_setup(), 80, 24);
+
+    assert_eq!(
+        style_at(&screen, "⌕").fg,
+        Some(Color::Rgb(0x53, 0x61, 0x71))
+    );
+    let headline = style_at(&screen, "No installed skills found");
+    assert_eq!(headline.fg, Some(Color::Rgb(0xd7, 0xde, 0xe7)));
+    assert!(headline.add_modifier.contains(Modifier::BOLD));
+
+    let body = style_at(&screen, "Skilled has not scanned");
+    assert_eq!(body.fg, Some(Color::Rgb(0x84, 0x91, 0xa1)));
+    assert!(!body.add_modifier.contains(Modifier::BOLD));
+}
+
+#[test]
+fn surfaces_are_painted_where_the_design_calls_for_them() {
+    // The background layering is what keeps chrome and workspace from
+    // disagreeing, and what makes a badge legible inside a dialog. Without
+    // these assertions the layering can regress silently.
+    let harness = Harness::new();
+    let repository = harness.directory.path().join("source");
+    create_source_fixture(&repository);
+    let mut app = harness.completed_setup();
+    let preview = app.preview_source(&repository).expect("preview source");
+    app.confirm_source(preview).expect("register source");
+    app.update(Action::OpenSources);
+    let screen = buffer(&app, 120, 40);
+
+    const TERMINAL: Color = Color::Rgb(0x0b, 0x0f, 0x14);
+    const SURFACE: Color = Color::Rgb(0x0f, 0x15, 0x1d);
+    const SURFACE_2: Color = Color::Rgb(0x12, 0x1a, 0x24);
+    const SURFACE_3: Color = Color::Rgb(0x17, 0x21, 0x2c);
+
+    // One canvas under everything, chrome and workspace alike.
+    assert_eq!(style_in_row(&screen, 0, "skilled").bg, Some(TERMINAL));
+    assert_eq!(
+        style_in_row(&screen, row_containing(&screen, "Repositories"), "┌").bg,
+        Some(TERMINAL)
+    );
+
+    // The navigation strip is its own band, with the active tab lifted.
+    // Sources is the active tab here, so Inventory is the inactive probe.
+    assert_eq!(style_in_row(&screen, 1, "1 Inventory").bg, Some(SURFACE));
+    assert_eq!(style_in_row(&screen, 1, "▌2 Sources").bg, Some(SURFACE_2));
+
+    // The focused row is tinted across the pane, not just behind its label.
+    let focused = row_containing(&screen, "▌ source");
+    assert_eq!(style_in_row(&screen, focused, "source").bg, Some(SURFACE_3));
+    // The band must reach the end of the pane's text area, which is what
+    // distinguishes it from a label-length smear. The pane keeps one column of
+    // padding inside its border, so the last text cell is two columns in.
+    let row = row_text(&screen, focused);
+    let right_border = row
+        .char_indices()
+        .filter(|(_, character)| *character == '│')
+        .nth(1)
+        .map(|(index, _)| u16::try_from(row[..index].chars().count()).expect("column"))
+        .expect("Repositories pane right border");
+    assert_eq!(
+        screen[(right_border - 2, focused)].style().bg,
+        Some(SURFACE_3),
+        "the tint should reach the end of the pane, not stop at the label"
+    );
+
+    // A badge inside a dialog must not stamp the canvas colour over the
+    // dialog's own surface.
+    let mut dialog = harness.completed_setup();
+    dialog.update(Action::OpenSources);
+    dialog.update(Action::BeginAddSource);
+    for character in repository.to_string_lossy().chars() {
+        dialog.update(Action::AppendSourcePath(character));
+    }
+    let update = dialog.update(Action::SubmitSourcePath);
+    dialog
+        .perform_effects(update.effects())
+        .expect("inspect source");
+    let screen = buffer(&dialog, 120, 40);
+    let branch = row_containing(&screen, "Branch:");
+    assert_eq!(style_in_row(&screen, branch, "Branch:").bg, Some(SURFACE));
+    assert_eq!(
+        style_in_row(&screen, branch, "✓ clean").bg,
+        Some(SURFACE),
+        "a badge should inherit the dialog surface, not repaint it"
+    );
+}
+
+#[test]
+fn the_setup_summary_counts_only_what_exists() {
+    let harness = Harness::new();
+    let mut app = harness.first_run();
+    for _ in 0..6 {
+        let update = app.update(Action::Continue);
+        app.perform_effects(update.effects())
+            .expect("setup effects");
+    }
+
+    let screen = text(&buffer(&app, 80, 24));
+
+    assert!(screen.contains("Setup is ready to finish."), "{screen}");
+    assert!(screen.contains("Sources: 0"), "{screen}");
+    // Nothing scans installations and nothing produces findings yet.
+    assert!(!screen.contains("Installations:"), "{screen}");
+    assert!(!screen.contains("Doctor findings"), "{screen}");
+}
+
+#[test]
+fn colours_are_defined_only_by_the_theme() {
+    // The theme is the single place a palette decision can be made. Without
+    // this guard the rule silently decays the next time a screen needs a hue.
+    let mut pending = vec![Path::new(env!("CARGO_MANIFEST_DIR")).join("src")];
+    while let Some(directory) = pending.pop() {
+        for entry in fs::read_dir(&directory).expect("read source directory") {
+            let path = entry.expect("source entry").path();
+            if path.is_dir() {
+                pending.push(path);
+                continue;
+            }
+            if path.extension().is_none_or(|extension| extension != "rs")
+                || path.file_name().is_some_and(|name| name == "theme.rs")
+            {
+                continue;
+            }
+            let contents = fs::read_to_string(&path).expect("read source file");
+            assert!(
+                !contents.contains("Color::"),
+                "{} names a colour directly; add a semantic token to theme.rs instead",
+                path.display()
+            );
+        }
+    }
+}
+
+#[test]
 fn navigation_separates_active_reachable_and_unavailable_destinations() {
     let harness = Harness::new();
     let app = harness.completed_setup();
@@ -59,9 +292,11 @@ fn navigation_separates_active_reachable_and_unavailable_destinations() {
     assert!(navigation.contains("3 Updates (soon)"), "{navigation}");
     assert!(navigation.contains("4 Doctor (soon)"), "{navigation}");
 
+    // One de-emphasis mechanism, plus the word "(soon)" for anyone who cannot
+    // perceive it.
     let unavailable = style_at(&screen, "3 Updates");
     assert_eq!(unavailable.fg, Some(Color::Rgb(0x53, 0x61, 0x71)));
-    assert!(unavailable.add_modifier.contains(Modifier::DIM));
+    assert!(!unavailable.add_modifier.contains(Modifier::DIM));
 }
 
 #[test]
@@ -152,8 +387,10 @@ fn empty_inventory_states_what_is_known_without_inventing_data() {
     let screen = text(&buffer(&app, 80, 24));
 
     assert!(screen.contains("Global inventory"), "{screen}");
-    assert!(screen.contains("0 skills"), "{screen}");
+    assert!(screen.contains("not scanned"), "{screen}");
     assert!(screen.contains("No installed skills found"), "{screen}");
+    // A zero count would itself be a scan result, and no scan has run.
+    assert!(!screen.contains("0 skills"), "{screen}");
     assert!(
         screen.contains("Skilled has not scanned any installation root yet."),
         "{screen}"
@@ -180,17 +417,16 @@ fn wide_terminals_gain_a_detail_region_and_compact_ones_do_not() {
     let app = harness.completed_setup();
 
     let wide = text(&buffer(&app, 120, 40));
-    assert!(wide.contains("No selection"), "{wide}");
-    assert!(wide.contains("Select a skill to see identity,"), "{wide}");
-    assert!(
-        wide.contains("provenance, and installation paths."),
-        "{wide}"
-    );
+    assert!(wide.contains("Details"), "{wide}");
+    assert!(wide.contains("Nothing to show"), "{wide}");
+    assert!(wide.contains("Identity, provenance, and"), "{wide}");
+    // Nothing is selectable yet, so the region must not imply that it is.
+    assert!(!wide.contains("Select a skill"), "{wide}");
     // Both regions are present, so the primary empty state still reads.
     assert!(wide.contains("No installed skills found"), "{wide}");
 
     let compact = text(&buffer(&app, 80, 24));
-    assert!(!compact.contains("No selection"), "{compact}");
+    assert!(!compact.contains("Nothing to show"), "{compact}");
     assert!(compact.contains("No installed skills found"), "{compact}");
 }
 
@@ -241,20 +477,18 @@ fn dialogs_share_a_modal_frame_that_names_itself_and_its_exit() {
     let rendered = text(&screen);
 
     // The frame is drawn, not merely tinted, so modality survives without colour.
-    assert!(rendered.contains("┌"), "{rendered}");
+    let border = row_containing(&screen, "┌ Settings");
     assert!(rendered.contains("┘"), "{rendered}");
-    let border = row_containing(&screen, "Settings");
     assert_eq!(
         style_in_row(&screen, border, "┌").fg,
         Some(Color::Rgb(0x43, 0x52, 0x64))
     );
 
     // The header names the dialog and its scope; the body states the way out.
-    assert!(rendered.contains("Settings"), "{rendered}");
     assert!(rendered.contains("global scope"), "{rendered}");
     assert!(rendered.contains("Esc closes"), "{rendered}");
 
-    let title = style_at(&screen, "Settings");
+    let title = style_in_row(&screen, border, "Settings");
     assert!(title.add_modifier.contains(Modifier::BOLD));
     assert_eq!(title.fg, Some(Color::Rgb(0xf2, 0xf6, 0xfa)));
 }
@@ -269,9 +503,8 @@ fn the_source_dialogs_use_the_same_frame_as_settings() {
     let screen = buffer(&app, 80, 24);
     let rendered = text(&screen);
 
-    assert!(rendered.contains("Add source"), "{rendered}");
     assert!(rendered.contains("local Git checkout"), "{rendered}");
-    let border = row_containing(&screen, "Add source");
+    let border = row_containing(&screen, "┌ Add source");
     assert_eq!(
         style_in_row(&screen, border, "┌").fg,
         Some(Color::Rgb(0x43, 0x52, 0x64))

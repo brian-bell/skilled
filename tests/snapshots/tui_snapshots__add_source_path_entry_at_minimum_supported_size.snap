@@ -4,7 +4,7 @@ assertion_line: 112
 expression: "render(&app, 80, 24)"
 ---
  ◆ skilled   global                              ● ready · 0 sources registered
- 1 Inventory ▌2 Sources  3 Updates (soon)  4 Doctor (soon)
+ Add source   navigation unlocks when this dialog closes
 ┌ Repositories ───────────┐ ┌ Available variants ──────────────────────────────┐
 │ No registered sources.  │ │ Select Add Source to begin.                      │
 │ Press a to add one.     │ │                                                  │

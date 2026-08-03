@@ -1,7 +1,6 @@
 use ratatui::{
     Frame,
-    layout::{Alignment, Constraint, Layout, Rect},
-    style::{Modifier, Style},
+    layout::{Alignment, Constraint, Layout, Margin, Rect},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Padding, Paragraph, Wrap},
 };
@@ -23,6 +22,8 @@ pub fn render(frame: &mut Frame<'_>, app: &SkilledApp) {
         render_size_notice(frame, area);
         return;
     }
+
+    frame.render_widget(Block::new().style(theme::app_surface()), area);
 
     let [title_bar, navigation, workspace, key_hints] = Layout::vertical([
         Constraint::Length(1),
@@ -53,29 +54,37 @@ pub fn render(frame: &mut Frame<'_>, app: &SkilledApp) {
 }
 
 fn render_title_bar(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
+    // The prototype places session state beside the navigation tabs. At eighty
+    // columns the tab strip already fills that row, so the status shares the
+    // title bar instead of competing with navigation for space.
+    //
+    // The two halves get their own rectangles because a Paragraph repaints its
+    // whole area before drawing: rendering the status across the full row would
+    // silently flatten the product mark and wordmark to the status colour.
+    let status = SessionStatus::of(app);
+    let label = status.label();
+    let status_width = u16::try_from(label.chars().count() + 3)
+        .unwrap_or(u16::MAX)
+        .min(area.width);
+    let [product, session] =
+        Layout::horizontal([Constraint::Min(0), Constraint::Length(status_width)]).areas(area);
+
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(" ◆ ", theme::product_mark()),
             Span::styled("skilled", theme::product_name()),
             Span::styled("   global", theme::chrome()),
-        ]))
-        .style(theme::chrome()),
-        area,
+        ])),
+        product,
     );
-
-    // The prototype places session state beside the navigation tabs. At eighty
-    // columns the tab strip already fills that row, so the status shares the
-    // title bar instead of competing with navigation for space.
-    let status = SessionStatus::of(app);
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled("● ", theme::tone_style(status.tone())),
-            Span::styled(status.label(), theme::chrome()),
+            Span::styled(label, theme::chrome()),
             Span::raw(" "),
         ]))
-        .alignment(Alignment::Right)
-        .style(theme::chrome()),
-        area,
+        .alignment(Alignment::Right),
+        session,
     );
 }
 
@@ -116,16 +125,14 @@ impl SessionStatus {
 }
 
 fn render_navigation(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
-    // Setup owns the whole interaction, so the tab strip would advertise routes
-    // the key map refuses. The row keeps its place in the frame by naming the
-    // current step instead.
-    if let View::Setup(step) = app.view() {
+    frame.render_widget(Block::new().style(theme::nav_surface()), area);
+
+    if let Some((owner, note)) = keyboard_owner(app) {
         frame.render_widget(
             Paragraph::new(Line::from(vec![
-                Span::styled(format!(" Setup · {} ", step.title()), theme::nav_active()),
-                Span::styled("  navigation unlocks after setup", theme::nav_disabled()),
-            ]))
-            .style(Style::default().bg(theme::SURFACE)),
+                Span::styled(format!(" {owner} "), theme::nav_active()),
+                Span::styled(format!("  {note}"), theme::nav_disabled()),
+            ])),
             area,
         );
         return;
@@ -139,22 +146,61 @@ fn render_navigation(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
             (true, true) => theme::nav_active(),
             (true, false) => theme::nav_inactive(),
         };
-        spans.push(Span::styled(if active { "▌" } else { " " }, style));
         spans.push(Span::styled(
-            format!("{} {}{} ", destination.key(), destination.title(), {
+            if active {
+                components::FOCUS_MARKER
+            } else {
+                " "
+            },
+            style,
+        ));
+        spans.push(Span::styled(
+            format!(
+                "{} {}{} ",
+                destination.key(),
+                destination.title(),
                 if destination.is_available() {
                     ""
                 } else {
                     " (soon)"
                 }
-            }),
+            ),
             style,
         ));
     }
-    frame.render_widget(
-        Paragraph::new(Line::from(spans)).style(Style::default().bg(theme::SURFACE)),
-        area,
-    );
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+/// The context that currently owns the keyboard, if it is not the tab strip.
+///
+/// Setup and every dialog rebind or ignore the destination keys, so the strip
+/// would advertise routes that do not work — while a catalog confirmation is
+/// open, for instance, `1` and `2` toggle agent compatibility. The row names
+/// the owner instead.
+///
+/// The label must match what is actually on screen and the note must match how
+/// the lock is actually released: during setup navigation waits for setup to
+/// finish, not for a dialog to close, and a pending source outside the Sources
+/// view is rendered inline rather than as a dialog.
+fn keyboard_owner(app: &SkilledApp) -> Option<(String, &'static str)> {
+    const SETUP_NOTE: &str = "navigation unlocks after setup";
+    const DIALOG_NOTE: &str = "navigation unlocks when this dialog closes";
+
+    let in_setup = matches!(app.view(), View::Setup(_));
+    let note = if in_setup { SETUP_NOTE } else { DIALOG_NOTE };
+
+    if app.source_path_input_active() {
+        return Some(("Add source".to_owned(), note));
+    }
+    // Mirrors the render gate: the confirmation is only a dialog in Sources.
+    if app.pending_source().is_some() && app.view() == View::Sources {
+        return Some(("Confirm catalogs".to_owned(), note));
+    }
+    match app.view() {
+        View::Setup(step) => Some((format!("Setup · {}", step.title()), note)),
+        View::Settings => Some(("Settings".to_owned(), note)),
+        View::Inventory | View::Sources => None,
+    }
 }
 
 /// A primary destination in the persistent navigation bar.
@@ -286,7 +332,7 @@ fn setup_lines(app: &SkilledApp, step: SetupStep) -> Vec<Line<'static>> {
                 app.agents().iter().filter(|agent| agent.selected()).count()
             )),
             Line::from(format!(
-                "Sources: {}   Skills: {}   Installations: 0   Doctor findings: 0",
+                "Sources: {}   Skills: {}",
                 app.sources().len(),
                 app.sources()
                     .iter()
@@ -309,32 +355,29 @@ fn render_inventory(frame: &mut Frame<'_>, area: Rect) {
 
     let [header, body] =
         Layout::vertical([Constraint::Length(2), Constraint::Min(1)]).areas(primary);
-    let area = primary;
     frame.render_widget(
         Paragraph::new(vec![
-            components::pane_header("Global inventory", "0 skills"),
-            Line::from(Span::styled(
-                "─".repeat(usize::from(area.width)),
-                theme::rule(),
-            )),
+            components::pane_header("Global inventory", "not scanned"),
+            components::rule(header.width),
         ]),
         header,
     );
 
     // Nothing scans installation roots yet, so the only truthful inventory is
     // an empty one. The copy points at the work the release does support.
+    let body = body.inner(Margin {
+        horizontal: 2,
+        vertical: 0,
+    });
     frame.render_widget(
-        Paragraph::new(components::empty_state(
+        components::empty_state(
             "⌕",
             "No installed skills found",
-            &[
-                "Skilled has not scanned any installation root yet.",
-                "Register a local source in Sources to prepare for",
-                "installation in a later release.",
-            ],
-            body.height,
-        ))
-        .wrap(Wrap { trim: false }),
+            "Skilled has not scanned any installation root yet. Register a \
+             local source in Sources to prepare for installation in a later \
+             release.",
+            body,
+        ),
         body,
     );
 }
@@ -344,7 +387,7 @@ fn render_inventory(frame: &mut Frame<'_>, area: Rect) {
 /// There is nothing to select yet, so the region explains what it will show
 /// rather than standing empty or inventing a subject.
 fn render_inventory_detail(frame: &mut Frame<'_>, area: Rect) {
-    let [separator, body] =
+    let [separator, region] =
         Layout::horizontal([Constraint::Length(1), Constraint::Min(1)]).areas(area);
     frame.render_widget(
         Paragraph::new(vec![
@@ -353,17 +396,30 @@ fn render_inventory_detail(frame: &mut Frame<'_>, area: Rect) {
         ]),
         separator,
     );
+
+    // The header mirrors the primary pane's so both regions measure their
+    // centred content against the same remaining height.
+    let region = region.inner(Margin {
+        horizontal: 1,
+        vertical: 0,
+    });
+    let [header, body] =
+        Layout::vertical([Constraint::Length(2), Constraint::Min(1)]).areas(region);
     frame.render_widget(
-        Paragraph::new(components::empty_state(
+        Paragraph::new(vec![
+            components::pane_header("Details", "no selection"),
+            components::rule(header.width),
+        ]),
+        header,
+    );
+    frame.render_widget(
+        components::empty_state(
             "·",
-            "No selection",
-            &[
-                "Select a skill to see identity,",
-                "provenance, and installation paths.",
-            ],
-            body.height,
-        ))
-        .wrap(Wrap { trim: false }),
+            "Nothing to show",
+            "Identity, provenance, and installation paths appear here once \
+             installation inventory exists.",
+            body,
+        ),
         body,
     );
 }
@@ -400,6 +456,7 @@ fn render_sources(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
                     worktree_badge(source.dirty()),
                 ],
                 index == app.focused_source(),
+                repository_inner.width,
             ));
         }
     }
@@ -421,7 +478,7 @@ fn render_sources(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
     let mut metadata_lines = vec![
         Line::styled(
             terminal_safe(&source.git_top_level().display().to_string()),
-            Style::default().add_modifier(Modifier::BOLD),
+            theme::emphasis(),
         ),
         Line::from(vec![
             Span::raw(format!(
@@ -516,6 +573,7 @@ fn render_sources(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
                     )),
                 ],
                 index == app.focused_variant(),
+                detail_inner.width,
             )
         })
         .collect::<Vec<_>>();
@@ -834,7 +892,7 @@ fn render_settings(frame: &mut Frame<'_>, area: Rect) {
     frame.render_widget(Clear, popup);
     frame.render_widget(
         Paragraph::new(vec![
-            Line::from("> Rerun setup"),
+            components::list_row(vec![Span::raw("Rerun setup")], true, 46),
             Line::default(),
             Line::from("Enter confirms · Esc closes"),
         ])
@@ -859,8 +917,8 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
 fn key_hints(app: &SkilledApp) -> Vec<KeyHint> {
     if app.source_path_input_active() {
         return vec![
-            KeyHint::new("Enter", "Inspect"),
-            KeyHint::new("Esc", "Cancel"),
+            KeyHint::essential("Enter", "Inspect"),
+            KeyHint::essential("Esc", "Cancel"),
             KeyHint::new("Ctrl-C", "Quit"),
         ];
     }
@@ -870,8 +928,8 @@ fn key_hints(app: &SkilledApp) -> Vec<KeyHint> {
             KeyHint::new("Space", "Include"),
             KeyHint::new("c", "Class"),
             KeyHint::new("1/2/3", "Agents"),
-            KeyHint::new("Enter", "Register"),
-            KeyHint::new("Esc", "Cancel"),
+            KeyHint::essential("Enter", "Register"),
+            KeyHint::essential("Esc", "Cancel"),
         ];
     }
     match app.view() {
@@ -884,10 +942,10 @@ fn key_hints(app: &SkilledApp) -> Vec<KeyHint> {
             if step == SetupStep::DiscoverSources {
                 hints.push(KeyHint::new("a", "Add source"));
             }
-            hints.push(KeyHint::new("Enter", "Continue"));
+            hints.push(KeyHint::essential("Enter", "Continue"));
             // Step one has nowhere to go back to.
             if step != SetupStep::Welcome {
-                hints.push(KeyHint::new("Esc", "Back"));
+                hints.push(KeyHint::essential("Esc", "Back"));
             }
             hints.push(KeyHint::new("q", "Quit"));
             hints
@@ -905,13 +963,14 @@ fn key_hints(app: &SkilledApp) -> Vec<KeyHint> {
             KeyHint::new("q", "Quit"),
         ],
         View::Settings => vec![
-            KeyHint::new("Enter", "Rerun setup"),
-            KeyHint::new("Esc", "Close"),
+            KeyHint::essential("Enter", "Rerun setup"),
+            KeyHint::essential("Esc", "Close"),
         ],
     }
 }
 
 fn render_size_notice(frame: &mut Frame<'_>, area: Rect) {
+    frame.render_widget(Block::new().style(theme::app_surface()), area);
     let message = format!(
         "Skilled needs at least {MINIMUM_WIDTH}×{MINIMUM_HEIGHT}. Current size: {}×{}. Resize the terminal to continue.",
         area.width, area.height
