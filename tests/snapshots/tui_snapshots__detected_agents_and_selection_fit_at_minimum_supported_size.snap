@@ -4,7 +4,7 @@ assertion_line: 90
 expression: "render(&app, 80, 24)"
 ---
  ◆ skilled   global                                         ● setup in progress
- Setup · Detect agents   navigation unlocks after setup
+ Setup · Detect agents   navigation is locked during setup
 ┌ Step 2 of 7 ─────────────────────────────────────────────────────────────────┐
 │                                                                              │
 │  Detect agents                                                               │

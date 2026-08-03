@@ -63,7 +63,7 @@ fn render_title_bar(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
     // silently flatten the product mark and wordmark to the status colour.
     let status = SessionStatus::of(app);
     let label = status.label();
-    let status_width = u16::try_from(label.chars().count() + 3)
+    let status_width = u16::try_from(Span::raw(&label).width() + 3)
         .unwrap_or(u16::MAX)
         .min(area.width);
     let [product, session] =
@@ -154,10 +154,16 @@ fn render_navigation(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
             },
             style,
         ));
+        // The digit is the route, so it appears only where pressing it works:
+        // never for a destination this release cannot open, and never for the
+        // view already on screen.
+        let key = match (destination.is_available(), active) {
+            (true, false) => format!("{} ", destination.key()),
+            _ => String::new(),
+        };
         spans.push(Span::styled(
             format!(
-                "{} {}{} ",
-                destination.key(),
+                "{key}{}{} ",
                 destination.title(),
                 if destination.is_available() {
                     ""
@@ -178,13 +184,16 @@ fn render_navigation(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
 /// open, for instance, `1` and `2` toggle agent compatibility. The row names
 /// the owner instead.
 ///
-/// The label must match what is actually on screen and the note must match how
-/// the lock is actually released: during setup navigation waits for setup to
-/// finish, not for a dialog to close, and a pending source outside the Sources
-/// view is rendered inline rather than as a dialog.
+/// The label must match what is actually on screen, and a pending source
+/// outside the Sources view is rendered inline rather than as a dialog.
+///
+/// The note states the present fact rather than predicting when the lock
+/// lifts. Confirming a path opens the catalog confirmation and confirming
+/// Settings starts setup, so "unlocks when this dialog closes" would be a
+/// promise the next transition breaks.
 fn keyboard_owner(app: &SkilledApp) -> Option<(String, &'static str)> {
-    const SETUP_NOTE: &str = "navigation unlocks after setup";
-    const DIALOG_NOTE: &str = "navigation unlocks when this dialog closes";
+    const SETUP_NOTE: &str = "navigation is locked during setup";
+    const DIALOG_NOTE: &str = "navigation is locked while this dialog is open";
 
     let in_setup = matches!(app.view(), View::Setup(_));
     let note = if in_setup { SETUP_NOTE } else { DIALOG_NOTE };
@@ -372,10 +381,10 @@ fn render_inventory(frame: &mut Frame<'_>, area: Rect) {
     frame.render_widget(
         components::empty_state(
             "⌕",
-            "No installed skills found",
-            "Skilled has not scanned any installation root yet. Register a \
-             local source in Sources to prepare for installation in a later \
-             release.",
+            "Installation roots have not been scanned",
+            "Skilled has not looked at any installation root yet, so it cannot \
+             say what is installed. Register a local source in Sources to \
+             prepare for installation in a later release.",
             body,
         ),
         body,

@@ -4,7 +4,7 @@ assertion_line: 16
 expression: "render(&app, 80, 24)"
 ---
  ◆ skilled   global                                         ● setup in progress
- Setup · Welcome and scope   navigation unlocks after setup
+ Setup · Welcome and scope   navigation is locked during setup
 ┌ Step 1 of 7 ─────────────────────────────────────────────────────────────────┐
 │                                                                              │
 │  Welcome and scope                                                           │

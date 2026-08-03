@@ -4,7 +4,7 @@ assertion_line: 61
 expression: "render(&app, 120, 40)"
 ---
  ◆ skilled   global                                                                      ● ready · 0 sources registered
-▌1 Inventory  2 Sources  3 Updates (soon)  4 Doctor (soon)
+▌Inventory  2 Sources  Updates (soon)  Doctor (soon)
 Global inventory  not scanned                                                   │ Details  no selection
 ────────────────────────────────────────────────────────────────────────────────│ ─────────────────────────────────────
                                                                                 │
@@ -23,11 +23,11 @@ Global inventory  not scanned                                                   
                                                                                 │
                                         ⌕                                       │                   ·
                                                                                 │
-                            No installed skills found                           │            Nothing to show
+                    Installation roots have not been scanned                    │            Nothing to show
                                                                                 │
-   Skilled has not scanned any installation root yet. Register a local source   │       Identity, provenance, and
-           in Sources to prepare for installation in a later release.           │  installation paths appear here once
-                                                                                │    installation inventory exists.
+   Skilled has not looked at any installation root yet, so it cannot say what   │       Identity, provenance, and
+  is installed. Register a local source in Sources to prepare for installation  │  installation paths appear here once
+                               in a later release.                              │    installation inventory exists.
                                                                                 │
                                                                                 │
                                                                                 │

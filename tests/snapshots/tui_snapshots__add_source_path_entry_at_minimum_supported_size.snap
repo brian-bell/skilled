@@ -4,7 +4,7 @@ assertion_line: 112
 expression: "render(&app, 80, 24)"
 ---
  ◆ skilled   global                              ● ready · 0 sources registered
- Add source   navigation unlocks when this dialog closes
+ Add source   navigation is locked while this dialog is open
 ┌ Repositories ───────────┐ ┌ Available variants ──────────────────────────────┐
 │ No registered sources.  │ │ Select Add Source to begin.                      │
 │ Press a to add one.     │ │                                                  │

@@ -4,7 +4,7 @@ assertion_line: 151
 expression: rendered
 ---
  ◆ skilled   global                              ● ready · 0 sources registered
- Confirm catalogs   navigation unlocks when this dialog closes
+ Confirm catalogs   navigation is locked while this dialog is open
 ┌ Repositories ───────────┐ ┌ Available variants ──────────────────────────────┐
 │ No registered sources.  │ │ Select Add Source to begin.                      │
 │ ┌ Confirm catalogs ───────────────────────────────────── registration only ┐ │

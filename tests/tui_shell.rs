@@ -21,7 +21,7 @@ fn the_shell_frames_inventory_with_product_navigation_and_key_hints() {
         text(&screen)
     );
     assert!(
-        row_text(&screen, 1).contains("1 Inventory"),
+        row_text(&screen, 1).contains("Inventory"),
         "{}",
         text(&screen)
     );
@@ -65,8 +65,8 @@ fn an_open_dialog_takes_the_navigation_row_with_it() {
     settings.update(Action::OpenSettings);
     let row = row_text(&buffer(&settings, 80, 24), 1);
     assert!(row.contains("Settings"), "{row}");
-    assert!(row.contains("navigation unlocks"), "{row}");
-    assert!(!row.contains("1 Inventory"), "{row}");
+    assert!(row.contains("navigation is locked"), "{row}");
+    assert!(!row.contains("Inventory"), "{row}");
 
     // Add source: 1 and 2 type characters into the path.
     let mut adding = harness.completed_setup();
@@ -74,7 +74,7 @@ fn an_open_dialog_takes_the_navigation_row_with_it() {
     adding.update(Action::BeginAddSource);
     let row = row_text(&buffer(&adding, 80, 24), 1);
     assert!(row.contains("Add source"), "{row}");
-    assert!(!row.contains("2 Sources"), "{row}");
+    assert!(!row.contains("Sources  "), "{row}");
 
     // Confirm catalogs from Sources: 1, 2 and 3 toggle agent compatibility.
     let mut confirming = harness.completed_setup();
@@ -90,7 +90,7 @@ fn an_open_dialog_takes_the_navigation_row_with_it() {
     assert!(confirming.pending_source().is_some());
     let row = row_text(&buffer(&confirming, 80, 24), 1);
     assert!(row.contains("Confirm catalogs"), "{row}");
-    assert!(!row.contains("2 Sources"), "{row}");
+    assert!(!row.contains("Sources  "), "{row}");
 }
 
 #[test]
@@ -110,8 +110,8 @@ fn setup_says_navigation_waits_for_setup_not_for_a_dialog() {
     // The dialog is on screen, but navigation is waiting on setup, not on it.
     let row = row_text(&buffer(&app, 80, 24), 1);
     assert!(row.contains("Add source"), "{row}");
-    assert!(row.contains("unlocks after setup"), "{row}");
-    assert!(!row.contains("when this dialog closes"), "{row}");
+    assert!(row.contains("locked during setup"), "{row}");
+    assert!(!row.contains("this dialog"), "{row}");
 
     for character in repository.to_string_lossy().chars() {
         app.update(Action::AppendSourcePath(character));
@@ -126,8 +126,8 @@ fn setup_says_navigation_waits_for_setup_not_for_a_dialog() {
     let screen = buffer(&app, 80, 24);
     let row = row_text(&screen, 1);
     assert!(row.contains("Setup · Confirm catalogs"), "{row}");
-    assert!(row.contains("unlocks after setup"), "{row}");
-    assert!(!row.contains("when this dialog closes"), "{row}");
+    assert!(row.contains("locked during setup"), "{row}");
+    assert!(!row.contains("this dialog"), "{row}");
 }
 
 #[test]
@@ -139,11 +139,11 @@ fn the_empty_state_styles_its_glyph_headline_and_body_distinctly() {
         style_at(&screen, "⌕").fg,
         Some(Color::Rgb(0x53, 0x61, 0x71))
     );
-    let headline = style_at(&screen, "No installed skills found");
+    let headline = style_at(&screen, "Installation roots have not been");
     assert_eq!(headline.fg, Some(Color::Rgb(0xd7, 0xde, 0xe7)));
     assert!(headline.add_modifier.contains(Modifier::BOLD));
 
-    let body = style_at(&screen, "Skilled has not scanned");
+    let body = style_at(&screen, "Skilled has not looked");
     assert_eq!(body.fg, Some(Color::Rgb(0x84, 0x91, 0xa1)));
     assert!(!body.add_modifier.contains(Modifier::BOLD));
 }
@@ -177,7 +177,7 @@ fn surfaces_are_painted_where_the_design_calls_for_them() {
     // The navigation strip is its own band, with the active tab lifted.
     // Sources is the active tab here, so Inventory is the inactive probe.
     assert_eq!(style_in_row(&screen, 1, "1 Inventory").bg, Some(SURFACE));
-    assert_eq!(style_in_row(&screen, 1, "▌2 Sources").bg, Some(SURFACE_2));
+    assert_eq!(style_in_row(&screen, 1, "▌Sources").bg, Some(SURFACE_2));
 
     // The focused row is tinted across the pane, not just behind its label.
     let focused = row_containing(&screen, "▌ source");
@@ -275,11 +275,13 @@ fn navigation_separates_active_reachable_and_unavailable_destinations() {
     let navigation = row_text(&screen, 1);
 
     // Focus is carried by a marker and emphasis, not by colour alone.
-    assert!(navigation.contains("▌1 Inventory"), "{navigation}");
+    assert!(navigation.contains("▌Inventory"), "{navigation}");
     assert!(navigation.contains(" 2 Sources"), "{navigation}");
     assert!(!navigation.contains("▌2 Sources"), "{navigation}");
+    // Pressing 1 on Inventory does nothing, so no shortcut is offered for it.
+    assert!(!navigation.contains("1 Inventory"), "{navigation}");
 
-    let active = style_at(&screen, "1 Inventory");
+    let active = style_at(&screen, "Inventory");
     assert_eq!(active.fg, Some(Color::Rgb(0xf2, 0xf6, 0xfa)));
     assert!(active.add_modifier.contains(Modifier::BOLD));
     assert!(active.add_modifier.contains(Modifier::UNDERLINED));
@@ -288,13 +290,16 @@ fn navigation_separates_active_reachable_and_unavailable_destinations() {
     assert_eq!(reachable.fg, Some(Color::Rgb(0x84, 0x91, 0xa1)));
     assert!(!reachable.add_modifier.contains(Modifier::BOLD));
 
-    // Views without an implementation are visibly unavailable rather than absent.
-    assert!(navigation.contains("3 Updates (soon)"), "{navigation}");
-    assert!(navigation.contains("4 Doctor (soon)"), "{navigation}");
+    // Views without an implementation are visibly unavailable rather than
+    // absent, and offer no shortcut, because 3 and 4 are unmapped everywhere.
+    assert!(navigation.contains("Updates (soon)"), "{navigation}");
+    assert!(navigation.contains("Doctor (soon)"), "{navigation}");
+    assert!(!navigation.contains("3 Updates"), "{navigation}");
+    assert!(!navigation.contains("4 Doctor"), "{navigation}");
 
     // One de-emphasis mechanism, plus the word "(soon)" for anyone who cannot
     // perceive it.
-    let unavailable = style_at(&screen, "3 Updates");
+    let unavailable = style_at(&screen, "Updates");
     assert_eq!(unavailable.fg, Some(Color::Rgb(0x53, 0x61, 0x71)));
     assert!(!unavailable.add_modifier.contains(Modifier::DIM));
 }
@@ -308,12 +313,12 @@ fn navigation_does_not_offer_routes_that_setup_blocks() {
     let navigation = row_text(&buffer(&app, 80, 24), 1);
 
     // Keys 1 and 2 do nothing during setup, so no tab may look reachable.
-    assert!(!navigation.contains("1 Inventory"), "{navigation}");
-    assert!(!navigation.contains("2 Sources"), "{navigation}");
+    assert!(!navigation.contains("Inventory"), "{navigation}");
+    assert!(!navigation.contains("Sources"), "{navigation}");
     // The row still carries the persistent frame's sense of place.
     assert!(navigation.contains("Setup · Detect agents"), "{navigation}");
     assert!(
-        navigation.contains("navigation unlocks after setup"),
+        navigation.contains("navigation is locked during setup"),
         "{navigation}"
     );
 }
@@ -343,8 +348,10 @@ fn navigation_follows_the_active_view() {
 
     let navigation = row_text(&buffer(&app, 80, 24), 1);
 
-    assert!(navigation.contains("▌2 Sources"), "{navigation}");
-    assert!(!navigation.contains("▌1 Inventory"), "{navigation}");
+    // Sources is active so it drops its own digit, and Inventory gains one.
+    assert!(navigation.contains("▌Sources"), "{navigation}");
+    assert!(navigation.contains("1 Inventory"), "{navigation}");
+    assert!(!navigation.contains("2 Sources"), "{navigation}");
 }
 
 #[test]
@@ -388,11 +395,16 @@ fn empty_inventory_states_what_is_known_without_inventing_data() {
 
     assert!(screen.contains("Global inventory"), "{screen}");
     assert!(screen.contains("not scanned"), "{screen}");
-    assert!(screen.contains("No installed skills found"), "{screen}");
+    // The headline reports the absence of a scan, not the result of one.
+    assert!(
+        screen.contains("Installation roots have not been scanned"),
+        "{screen}"
+    );
+    assert!(!screen.contains("No installed skills found"), "{screen}");
     // A zero count would itself be a scan result, and no scan has run.
     assert!(!screen.contains("0 skills"), "{screen}");
     assert!(
-        screen.contains("Skilled has not scanned any installation root yet."),
+        screen.contains("Skilled has not looked at any installation root yet"),
         "{screen}"
     );
 
@@ -400,14 +412,17 @@ fn empty_inventory_states_what_is_known_without_inventing_data() {
     // may not report their results or offer their actions.
     for invented in [
         "Doctor findings",
-        "findings: 0",
-        "Install",
+        "findings:",
         "Uninstall",
         "Repair",
         "Update available",
         "healthy",
     ] {
         assert!(!screen.contains(invented), "{invented} in\n{screen}");
+    }
+    // No per-skill status either: there are no skills to carry one.
+    for glyph in ["✓", "×", "!"] {
+        assert!(!screen.contains(glyph), "{glyph} in\n{screen}");
     }
 }
 
@@ -423,11 +438,17 @@ fn wide_terminals_gain_a_detail_region_and_compact_ones_do_not() {
     // Nothing is selectable yet, so the region must not imply that it is.
     assert!(!wide.contains("Select a skill"), "{wide}");
     // Both regions are present, so the primary empty state still reads.
-    assert!(wide.contains("No installed skills found"), "{wide}");
+    assert!(
+        wide.contains("Installation roots have not been scanned"),
+        "{wide}"
+    );
 
     let compact = text(&buffer(&app, 80, 24));
     assert!(!compact.contains("Nothing to show"), "{compact}");
-    assert!(compact.contains("No installed skills found"), "{compact}");
+    assert!(
+        compact.contains("Installation roots have not been scanned"),
+        "{compact}"
+    );
 }
 
 #[test]

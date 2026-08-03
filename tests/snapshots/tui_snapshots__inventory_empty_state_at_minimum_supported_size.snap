@@ -4,7 +4,7 @@ assertion_line: 45
 expression: "render(&app, 80, 24)"
 ---
  ◆ skilled   global                              ● ready · 0 sources registered
-▌1 Inventory  2 Sources  3 Updates (soon)  4 Doctor (soon)
+▌Inventory  2 Sources  Updates (soon)  Doctor (soon)
 Global inventory  not scanned
 ────────────────────────────────────────────────────────────────────────────────
 
@@ -15,11 +15,11 @@ Global inventory  not scanned
 
                                         ⌕
 
-                            No installed skills found
+                    Installation roots have not been scanned
 
-   Skilled has not scanned any installation root yet. Register a local source
-           in Sources to prepare for installation in a later release.
-
+   Skilled has not looked at any installation root yet, so it cannot say what
+  is installed. Register a local source in Sources to prepare for installation
+                               in a later release.
 
 
 

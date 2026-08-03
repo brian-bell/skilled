@@ -47,13 +47,18 @@ impl KeyHint {
     }
 
     fn width(self) -> usize {
-        character_width(self.key) + 1 + character_width(self.label)
+        cell_width(self.key) + 1 + cell_width(self.label)
     }
 }
 
-/// Widths are counted in characters throughout, never bytes.
-fn character_width(value: &str) -> usize {
-    value.chars().count()
+/// Widths are measured in terminal cells throughout, never bytes or scalars.
+///
+/// Source labels and skill directory names come from the filesystem, so they
+/// can contain full-width or combining characters that occupy a number of
+/// cells unrelated to their character count. Ratatui lays text out by cell, so
+/// anything that computes padding or a budget must agree with it.
+fn cell_width(value: &str) -> usize {
+    Span::raw(value).width()
 }
 
 const HINT_SEPARATOR: &str = "   ";
@@ -84,13 +89,13 @@ pub(crate) fn key_hint_line(hints: &[KeyHint], width: u16) -> Line<'static> {
         spans.push(Span::styled(hints[*index].label, theme::key_label()));
         used += hints[*index].width()
             + if position > 0 {
-                character_width(HINT_SEPARATOR)
+                cell_width(HINT_SEPARATOR)
             } else {
                 0
             };
     }
     // A row too narrow even for the mark says nothing rather than overflowing.
-    if dropped && used + character_width(OVERFLOW_MARK) <= usize::from(width) {
+    if dropped && used + cell_width(OVERFLOW_MARK) <= usize::from(width) {
         spans.push(Span::styled(OVERFLOW_MARK, theme::key_label()));
     }
     Line::from(spans)
@@ -109,13 +114,13 @@ fn fitting_hints(hints: &[KeyHint], width: u16) -> Vec<usize> {
                     + if position == 0 {
                         0
                     } else {
-                        character_width(HINT_SEPARATOR)
+                        cell_width(HINT_SEPARATOR)
                     }
             })
             .sum();
         1 + content
             + if truncated {
-                character_width(OVERFLOW_MARK)
+                cell_width(OVERFLOW_MARK)
             } else {
                 0
             }
@@ -234,11 +239,9 @@ pub(crate) fn list_row(content: Vec<Span<'static>>, selected: bool, width: u16) 
 
     // Pad to the region width so the tint reads as a band across the row
     // rather than stopping at the end of the label.
-    let used: usize = spans
-        .iter()
-        .map(|span| character_width(span.content.as_ref()))
-        .sum();
-    let padding = usize::from(width).saturating_sub(used);
+    let line = Line::from(spans);
+    let padding = usize::from(width).saturating_sub(line.width());
+    let mut spans = line.spans;
     if padding > 0 {
         spans.push(Span::raw(" ".repeat(padding)));
     }
@@ -415,7 +418,7 @@ mod tests {
             for width in 1..=60_u16 {
                 let line = rendered(hints, width);
                 assert!(
-                    line.chars().count() <= usize::from(width),
+                    cell_width(&line) <= usize::from(width),
                     "width {width} produced {line:?}"
                 );
             }
