@@ -1,7 +1,8 @@
 use std::{
+    env,
     ffi::{OsStr, OsString},
     fs,
-    io::Read,
+    io::{BufRead, BufReader},
     path::{Component, Path, PathBuf},
     process::{Command, Output, Stdio},
 };
@@ -287,7 +288,7 @@ impl RegisteredSource {
         self.inspected.remote_url()
     }
 
-    pub fn dirty(&self) -> bool {
+    pub fn dirty(&self) -> Option<bool> {
         self.inspected.dirty()
     }
 
@@ -328,7 +329,7 @@ pub struct InspectedSource {
     branch: Option<String>,
     head: String,
     remote_url: Option<String>,
-    dirty: bool,
+    dirty: Option<bool>,
 }
 
 impl InspectedSource {
@@ -348,7 +349,7 @@ impl InspectedSource {
         self.remote_url.as_deref()
     }
 
-    pub fn dirty(&self) -> bool {
+    pub fn dirty(&self) -> Option<bool> {
         self.dirty
     }
 }
@@ -441,7 +442,7 @@ impl InspectedSource {
         branch: Option<String>,
         head: String,
         remote_url: Option<String>,
-        dirty: bool,
+        dirty: Option<bool>,
     ) -> Self {
         Self {
             git_top_level,
@@ -761,22 +762,69 @@ fn optional_git_output(repository: &Path, arguments: &[&str]) -> Result<Option<S
     Ok((!value.is_empty()).then(|| value.to_owned()))
 }
 
-fn git_status_dirty(repository: &Path) -> Result<bool> {
-    let arguments = ["status", "--porcelain=v1", "--untracked-files=normal"];
-    let mut child = git_command(repository, &arguments)
+fn git_status_dirty(repository: &Path) -> Result<Option<bool>> {
+    let arguments = ["status", "--porcelain=v1", "-z", "--untracked-files=normal"];
+    let filter_settings = configured_filter_settings(repository)?;
+    let inherited_config_count = env::var("GIT_CONFIG_COUNT")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(0);
+    let mut command = git_command(repository, &arguments);
+    command.env(
+        "GIT_CONFIG_COUNT",
+        inherited_config_count
+            .checked_add(filter_settings.len())
+            .ok_or(Error::InvalidGitOutput)?
+            .to_string(),
+    );
+    for (offset, (key, value)) in filter_settings.iter().enumerate() {
+        let index = inherited_config_count + offset;
+        command
+            .env(format!("GIT_CONFIG_KEY_{index}"), key)
+            .env(format!("GIT_CONFIG_VALUE_{index}"), value);
+    }
+    let mut child = command
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
         .map_err(Error::GitUnavailable)?;
-    let mut stdout = child.stdout.take().expect("Git status stdout is piped");
-    let mut first_byte = [0_u8; 1];
-    let has_output = stdout.read(&mut first_byte)? != 0;
-    drop(stdout);
-    if has_output {
-        let _ = child.kill();
-        let _ = child.wait();
-        return Ok(true);
+    let stdout = child.stdout.take().expect("Git status stdout is piped");
+    let mut stdout = BufReader::new(stdout);
+    let mut record = Vec::new();
+    let mut filter_ambiguous = false;
+    while stdout.read_until(0, &mut record)? != 0 {
+        if record.last() == Some(&0) {
+            record.pop();
+        }
+        let Some(path) = worktree_modification_path(&record) else {
+            drop(stdout);
+            let _ = child.kill();
+            let _ = child.wait();
+            return Ok(Some(true));
+        };
+        let driver = match filter_driver_for_path(repository, path) {
+            Ok(driver) => driver,
+            Err(error) => {
+                drop(stdout);
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error);
+            }
+        };
+        let configured_filter_is_active = filter_settings
+            .iter()
+            .filter_map(|(key, _)| configured_filter_driver(key))
+            .any(|configured| driver.as_deref() == Some(configured));
+        if !configured_filter_is_active {
+            drop(stdout);
+            let _ = child.kill();
+            let _ = child.wait();
+            return Ok(Some(true));
+        }
+        filter_ambiguous = true;
+        record.clear();
     }
+    drop(stdout);
     let status = child.wait()?;
     if !status.success() {
         return Err(Error::GitCommand {
@@ -785,7 +833,72 @@ fn git_status_dirty(repository: &Path) -> Result<bool> {
             stderr: "git status failed before producing output".to_owned(),
         });
     }
-    Ok(false)
+    Ok((!filter_ambiguous).then_some(false))
+}
+
+fn worktree_modification_path(record: &[u8]) -> Option<&[u8]> {
+    (record.len() >= 3 && record[..3] == *b" M ").then_some(&record[3..])
+}
+
+fn configured_filter_driver(key: &str) -> Option<&str> {
+    let (driver, setting) = key.strip_prefix("filter.")?.rsplit_once('.')?;
+    matches!(setting, "clean" | "process").then_some(driver)
+}
+
+fn filter_driver_for_path(repository: &Path, path: &[u8]) -> Result<Option<String>> {
+    let path = git_path_component(path.to_vec())?;
+    let arguments = ["check-attr", "-z", "filter", "--"];
+    let output = git_command(repository, &arguments)
+        .arg(path)
+        .output()
+        .map_err(Error::GitUnavailable)?;
+    if !output.status.success() {
+        return Err(git_error(repository, &arguments, &output));
+    }
+    let mut fields = output.stdout.split(|byte| *byte == 0);
+    let (Some(_path), Some(attribute), Some(value)) = (fields.next(), fields.next(), fields.next())
+    else {
+        return Err(Error::InvalidGitOutput);
+    };
+    if attribute != b"filter" {
+        return Err(Error::InvalidGitOutput);
+    }
+    let value = String::from_utf8(value.to_vec()).map_err(|_| Error::InvalidGitOutput)?;
+    Ok((!matches!(value.as_str(), "unspecified" | "unset")).then_some(value))
+}
+
+fn configured_filter_settings(repository: &Path) -> Result<Vec<(String, &'static str)>> {
+    let arguments = [
+        "config",
+        "--null",
+        "--name-only",
+        "--get-regexp",
+        r"^filter\..*\.(clean|process|required)$",
+    ];
+    let output = run_git(repository, &arguments)?;
+    if !output.status.success() {
+        if output.status.code() == Some(1) && output.stdout.is_empty() {
+            return Ok(Vec::new());
+        }
+        return Err(git_error(repository, &arguments, &output));
+    }
+    output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|key| !key.is_empty())
+        .map(|key| {
+            let key = String::from_utf8(key.to_vec()).map_err(|_| Error::InvalidGitOutput)?;
+            let value = if key
+                .rsplit_once('.')
+                .is_some_and(|(_, suffix)| suffix.eq_ignore_ascii_case("required"))
+            {
+                "false"
+            } else {
+                ""
+            };
+            Ok((key, value))
+        })
+        .collect()
 }
 
 fn run_git(repository: &Path, arguments: &[&str]) -> Result<Output> {
@@ -829,10 +942,24 @@ fn git_path_from_output(mut value: Vec<u8>) -> Result<PathBuf> {
     Ok(PathBuf::from(OsString::from_vec(value)))
 }
 
+#[cfg(unix)]
+fn git_path_component(value: Vec<u8>) -> Result<OsString> {
+    use std::os::unix::ffi::OsStringExt;
+
+    Ok(OsString::from_vec(value))
+}
+
 #[cfg(not(unix))]
 fn git_path_from_output(value: Vec<u8>) -> Result<PathBuf> {
     let value = String::from_utf8(value).map_err(|_| Error::InvalidGitOutput)?;
     Ok(PathBuf::from(strip_record_terminator(&value)))
+}
+
+#[cfg(not(unix))]
+fn git_path_component(value: Vec<u8>) -> Result<OsString> {
+    String::from_utf8(value)
+        .map(OsString::from)
+        .map_err(|_| Error::InvalidGitOutput)
 }
 
 fn git_error(repository: &Path, arguments: &[&str], output: &Output) -> Error {

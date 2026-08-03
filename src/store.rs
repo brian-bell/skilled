@@ -15,7 +15,7 @@ use crate::{
     validation::InspectionBudget,
 };
 
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
 
 pub(crate) struct Store {
     connection: Connection,
@@ -103,14 +103,15 @@ impl Store {
         let transaction = self.connection.transaction()?;
         transaction.execute(
             "INSERT INTO source_repositories
-                (label, canonical_path, remote_url, branch, head_revision, dirty, last_scan_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                (label, canonical_path, remote_url, branch, head_revision, dirty, dirty_known, last_scan_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
              ON CONFLICT(canonical_path) DO UPDATE SET
                 label = excluded.label,
                 remote_url = excluded.remote_url,
                 branch = excluded.branch,
                 head_revision = excluded.head_revision,
                 dirty = excluded.dirty,
+                dirty_known = excluded.dirty_known,
                 last_scan_at = excluded.last_scan_at",
             params![
                 label,
@@ -118,7 +119,8 @@ impl Store {
                 source.remote_url(),
                 source.branch(),
                 source.head(),
-                source.dirty(),
+                source.dirty().unwrap_or(false),
+                source.dirty().is_some(),
                 scanned_at,
             ],
         )?;
@@ -158,7 +160,7 @@ impl Store {
 
     pub(crate) fn registered_sources(&self) -> Result<Vec<RegisteredSource>> {
         let mut statement = self.connection.prepare(
-            "SELECT id, label, canonical_path, remote_url, branch, head_revision, dirty, last_scan_at
+            "SELECT id, label, canonical_path, remote_url, branch, head_revision, dirty, dirty_known, last_scan_at
              FROM source_repositories ORDER BY label, canonical_path",
         )?;
         let rows = statement.query_map([], |row| {
@@ -170,21 +172,23 @@ impl Store {
                 row.get::<_, Option<String>>(4)?,
                 row.get::<_, String>(5)?,
                 row.get::<_, bool>(6)?,
-                row.get::<_, i64>(7)?,
+                row.get::<_, bool>(7)?,
+                row.get::<_, i64>(8)?,
             ))
         })?;
         let stored = rows.collect::<std::result::Result<Vec<_>, _>>()?;
         drop(statement);
 
         let mut sources = Vec::with_capacity(stored.len());
-        for (id, label, path, remote_url, branch, head, dirty, last_scan_at) in stored {
+        for (id, label, path, remote_url, branch, head, dirty, dirty_known, last_scan_at) in stored
+        {
             let git_top_level = PathBuf::from(path);
             let stored_inspected = InspectedSource::from_stored(
                 git_top_level.clone(),
                 branch,
                 head,
                 remote_url,
-                dirty,
+                dirty_known.then_some(dirty),
             );
             let (inspected, source_error, refreshed_at) = match inspect_local_source(&git_top_level)
             {
@@ -205,13 +209,15 @@ impl Store {
                                 branch = ?2,
                                 head_revision = ?3,
                                 dirty = ?4,
-                                last_scan_at = ?5
-                             WHERE id = ?6",
+                                dirty_known = ?5,
+                                last_scan_at = ?6
+                             WHERE id = ?7",
                             params![
                                 current.remote_url(),
                                 current.branch(),
                                 current.head(),
-                                current.dirty(),
+                                current.dirty().unwrap_or(false),
+                                current.dirty().is_some(),
                                 refreshed_at,
                                 id,
                             ],
@@ -356,6 +362,15 @@ fn migrate(connection: &mut Connection) -> Result<()> {
                 UNIQUE(source_id, relative_path)
              );
              PRAGMA user_version = 3;",
+        )?;
+        transaction.commit()?;
+    }
+    if current_version < 4 {
+        let transaction = connection.transaction()?;
+        transaction.execute_batch(
+            "ALTER TABLE source_repositories ADD COLUMN
+                dirty_known INTEGER NOT NULL DEFAULT 1 CHECK (dirty_known IN (0, 1));
+             PRAGMA user_version = 4;",
         )?;
         transaction.commit()?;
     }

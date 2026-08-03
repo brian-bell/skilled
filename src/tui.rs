@@ -228,7 +228,7 @@ fn render_sources(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
                     " "
                 },
                 terminal_safe(source.label()),
-                if source.dirty() { "dirty" } else { "clean" }
+                dirty_label(source.dirty())
             )));
         }
     }
@@ -258,7 +258,7 @@ fn render_sources(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
             "{} · {} · {} · scanned {}",
             terminal_safe(source.branch().unwrap_or("detached")),
             &source.head()[..source.head().len().min(8)],
-            if source.dirty() { "dirty" } else { "clean" },
+            dirty_label(source.dirty()),
             source.last_scan_at()
         )),
     ];
@@ -409,7 +409,7 @@ fn catalog_confirmation_lines(app: &SkilledApp) -> Vec<Line<'static>> {
                 "Branch: {}   HEAD: {}   {}",
                 terminal_safe(source.branch().unwrap_or("detached")),
                 &source.head()[..source.head().len().min(8)],
-                if source.dirty() { "dirty" } else { "clean" }
+                dirty_label(source.dirty())
             )),
             Line::default(),
         ]);
@@ -455,6 +455,14 @@ fn catalog_confirmation_lines(app: &SkilledApp) -> Vec<Line<'static>> {
 
 fn yes_no(value: bool) -> &'static str {
     if value { "yes" } else { "no" }
+}
+
+fn dirty_label(dirty: Option<bool>) -> &'static str {
+    match dirty {
+        Some(true) => "dirty",
+        Some(false) => "clean",
+        None => "status unavailable",
+    }
 }
 
 fn terminal_safe(value: &str) -> String {

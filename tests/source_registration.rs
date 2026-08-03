@@ -232,7 +232,7 @@ fn reopening_refreshes_the_current_head_and_dirty_state() {
 
     let reopened = SkilledApp::open(environment.clone()).expect("reopen at new revision");
     assert_ne!(reopened.sources()[0].head(), registered_head);
-    assert!(!reopened.sources()[0].dirty());
+    assert_eq!(reopened.sources()[0].dirty(), Some(false));
     assert!(reopened.sources()[0].source_error().is_none());
     assert!(reopened.sources()[0].last_scan_at() > 1);
     let connection = rusqlite::Connection::open(data.join("skilled.sqlite3"))
@@ -248,7 +248,7 @@ fn reopening_refreshes_the_current_head_and_dirty_state() {
     fs::write(repository.join("README.md"), "dirty change\n").expect("write dirty change");
 
     let dirty = SkilledApp::open(environment).expect("reopen dirty source");
-    assert!(dirty.sources()[0].dirty());
+    assert_eq!(dirty.sources()[0].dirty(), Some(true));
     assert!(dirty.sources()[0].source_error().is_none());
 }
 
@@ -455,7 +455,7 @@ fn confirmation_rejects_catalog_changes_when_the_checkout_was_already_dirty() {
     let preview = app
         .preview_source(&repository)
         .expect("preview dirty source");
-    assert!(preview.inspected().dirty());
+    assert_eq!(preview.inspected().dirty(), Some(true));
     fs::write(
         &skill_md,
         "---\nname: portable\ndescription: fixture\n---\n# Changed\n",

@@ -24,7 +24,7 @@ fn a_database_from_a_newer_skilled_version_is_rejected_before_use() {
         result,
         Err(Error::UnsupportedSchema {
             found: 99,
-            supported: 3
+            supported: 4
         })
     ));
 }
@@ -109,7 +109,7 @@ fn version_two_metadata_migrates_to_constrained_source_catalog_storage() {
         connection
             .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
             .unwrap(),
-        3
+        4
     );
     assert_eq!(
         connection

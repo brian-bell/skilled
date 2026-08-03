@@ -23,7 +23,7 @@ fn a_path_inside_a_checkout_resolves_to_its_canonical_git_top_level() {
     assert_eq!(source.git_top_level(), repository.canonicalize().unwrap());
     assert_eq!(source.branch(), Some("main"));
     assert_eq!(source.head().len(), 40);
-    assert!(!source.dirty());
+    assert_eq!(source.dirty(), Some(false));
 }
 
 #[test]
@@ -77,6 +77,28 @@ fn inspection_removes_credentials_from_remote_metadata() {
     assert_eq!(local_path.remote_url(), Some("/tmp/catalog@backup.git"));
 }
 
+#[test]
+fn inspection_accepts_an_explicitly_empty_filter_attribute() {
+    let temporary = tempfile::tempdir().expect("temporary source repository");
+    let repository = temporary.path().join("catalog");
+    fs::create_dir_all(&repository).expect("create repository");
+    git(&repository, &["init", "-b", "main"]);
+    git(&repository, &["config", "user.name", "Skilled Test"]);
+    git(
+        &repository,
+        &["config", "user.email", "skilled@example.test"],
+    );
+    fs::write(repository.join(".gitattributes"), "README.md filter=\n").expect("write attributes");
+    fs::write(repository.join("README.md"), "original\n").expect("write fixture");
+    git(&repository, &["add", ".gitattributes", "README.md"]);
+    git(&repository, &["commit", "-m", "fixture"]);
+    fs::write(repository.join("README.md"), "modified\n").expect("modify tracked file");
+
+    let source = inspect_local_source(&repository).expect("inspect checkout");
+
+    assert_eq!(source.dirty(), Some(true));
+}
+
 #[cfg(unix)]
 #[test]
 fn inspection_preserves_path_whitespace_and_does_not_invoke_fsmonitor() {
@@ -126,6 +148,67 @@ fn inspection_preserves_path_whitespace_and_does_not_invoke_fsmonitor() {
             .expect("read index modification time after inspection"),
         index_modified,
         "inspection refreshed the Git index"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn inspection_reports_filtered_dirty_state_as_unavailable_without_invoking_the_filter() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temporary = tempfile::tempdir().expect("temporary source repository");
+    let repository = temporary.path().join("catalog");
+    fs::create_dir_all(&repository).expect("create repository");
+    git(&repository, &["init", "-b", "main"]);
+    git(&repository, &["config", "user.name", "Skilled Test"]);
+    git(
+        &repository,
+        &["config", "user.email", "skilled@example.test"],
+    );
+    fs::write(
+        repository.join(".gitattributes"),
+        "README.md filter=sentinel\n",
+    )
+    .expect("write attributes");
+    let sentinel = temporary.path().join("filter-was-invoked");
+    let filter = temporary.path().join("clean-filter");
+    fs::write(
+        &filter,
+        format!(
+            "#!/bin/sh\ntouch '{}'\nprintf 'normalized\\n'\n",
+            sentinel.display()
+        ),
+    )
+    .expect("write clean filter fixture");
+    fs::set_permissions(&filter, fs::Permissions::from_mode(0o755))
+        .expect("make clean filter executable");
+    git(
+        &repository,
+        &["config", "filter.sentinel.clean", filter.to_str().unwrap()],
+    );
+    git(&repository, &["config", "filter.sentinel.required", "true"]);
+    fs::write(repository.join("README.md"), "original\n").expect("write fixture");
+    git(&repository, &["add", ".gitattributes", "README.md"]);
+    git(&repository, &["commit", "-m", "fixture"]);
+    fs::remove_file(&sentinel).expect("clear filter sentinel after fixture setup");
+    fs::write(repository.join("README.md"), "different\n").expect("modify filtered file");
+
+    let source = inspect_local_source(&repository).expect("inspect checkout");
+
+    assert!(source.dirty().is_none());
+    assert!(
+        !sentinel.exists(),
+        "inspection invoked a repository-defined clean filter"
+    );
+
+    fs::write(repository.join("untracked.txt"), "definitely dirty\n")
+        .expect("write untracked fixture");
+    let definitely_dirty = inspect_local_source(&repository).expect("reinspect checkout");
+
+    assert_eq!(definitely_dirty.dirty(), Some(true));
+    assert!(
+        !sentinel.exists(),
+        "reinspection invoked a repository-defined clean filter"
     );
 }
 
