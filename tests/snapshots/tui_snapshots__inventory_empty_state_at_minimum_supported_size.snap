@@ -1,0 +1,29 @@
+---
+source: tests/tui_snapshots.rs
+assertion_line: 45
+expression: "render(&app, 80, 24)"
+---
+ ◆ skilled   global                              ● ready · 0 sources registered
+▌1 Inventory  2 Sources  3 Updates (soon)  4 Doctor (soon)
+Global inventory  0 skills
+────────────────────────────────────────────────────────────────────────────────
+
+
+
+
+
+
+                                        ⌕
+
+                            No installed skills found
+
+               Skilled has not scanned any installation root yet.
+                Register a local source in Sources to prepare for
+                        installation in a later release.
+
+
+
+
+
+
+ 2 Sources   s Settings   q Quit

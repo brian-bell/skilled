@@ -1,8 +1,10 @@
 ---
 source: tests/tui_snapshots.rs
+assertion_line: 16
 expression: "render(&app, 80, 24)"
 ---
- Skilled   Setup · Welcome and scope
+ ◆ skilled   global                                         ● setup in progress
+ Setup · Welcome and scope   navigation unlocks after setup
 ┌ Step 1 of 7 ─────────────────────────────────────────────────────────────────┐
 │                                                                              │
 │  Welcome and scope                                                           │
@@ -23,6 +25,5 @@ expression: "render(&app, 80, 24)"
 │                                                                              │
 │                                                                              │
 │                                                                              │
-│                                                                              │
 └──────────────────────────────────────────────────────────────────────────────┘
-                       Enter Continue   Esc Back   q Quit
+ Enter Continue   q Quit

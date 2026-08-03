@@ -1,15 +1,16 @@
 ---
 source: tests/tui_snapshots.rs
+assertion_line: 112
 expression: "render(&app, 80, 24)"
 ---
- Skilled   Sources
+ ◆ skilled   global                              ● ready · 0 sources registered
+ 1 Inventory ▌2 Sources  3 Updates (soon)  4 Doctor (soon)
 ┌ Repositories ───────────┐ ┌ Available variants ──────────────────────────────┐
 │ No registered sources.  │ │ Select Add Source to begin.                      │
 │ Press a to add one.     │ │                                                  │
 │                         │ │                                                  │
 │                         │ │                                                  │
-│                         │ │                                                  │
-│     ┌ Add source ──────────────────────────────────────────────────────┐     │
+│     ┌ Add source ────────────────────────────────── local Git checkout ┐     │
 │     │                                                                  │     │
 │     │  Enter a path inside a local Git checkout:                       │     │
 │     │                                                                  │     │
@@ -25,4 +26,4 @@ expression: "render(&app, 80, 24)"
 │                         │ │                                                  │
 │                         │ │                                                  │
 └─────────────────────────┘ └──────────────────────────────────────────────────┘
-              Type path   Enter Inspect   Esc Cancel   Ctrl-C Quit
+ Enter Inspect   Esc Cancel   Ctrl-C Quit
