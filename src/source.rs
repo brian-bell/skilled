@@ -194,9 +194,10 @@ impl CatalogProposal {
         relative_path: PathBuf,
         classification: CatalogClassification,
         compatibility: Compatibility,
+        budget: &mut InspectionBudget,
     ) -> Self {
         let (candidates, scan_error) =
-            match confirmed_catalog_candidates(git_top_level, &relative_path) {
+            match confirmed_catalog_candidates(git_top_level, &relative_path, budget) {
                 Ok(candidates) => (candidates, None),
                 Err(error) => (Vec::new(), Some(error.to_string())),
             };
@@ -543,11 +544,6 @@ fn catalog_defaults(
     }
 }
 
-fn catalog_candidates(git_top_level: &Path, catalog: &Path) -> Result<Vec<SkillCandidate>> {
-    let mut budget = InspectionBudget::source_scan();
-    catalog_candidates_with_budget(git_top_level, catalog, &mut budget)
-}
-
 fn catalog_candidates_with_budget(
     git_top_level: &Path,
     catalog: &Path,
@@ -564,6 +560,7 @@ fn catalog_candidates_with_budget(
 fn confirmed_catalog_candidates(
     git_top_level: &Path,
     relative_path: &Path,
+    budget: &mut InspectionBudget,
 ) -> Result<Vec<SkillCandidate>> {
     if relative_path.as_os_str().is_empty()
         || relative_path.is_absolute()
@@ -578,9 +575,8 @@ fn confirmed_catalog_candidates(
     }
 
     let canonical_source = git_top_level.canonicalize()?;
-    let mut budget = InspectionBudget::source_scan();
     if relative_path == Path::new(".") {
-        let validation = validation_for(&canonical_source, &mut budget)?;
+        let validation = validation_for(&canonical_source, budget)?;
         return Ok(vec![SkillCandidate {
             directory_name: canonical_source
                 .file_name()
@@ -588,7 +584,7 @@ fn confirmed_catalog_candidates(
                 .unwrap_or_else(|| ".".to_owned()),
             relative_path: PathBuf::from("."),
             validation,
-            content_fingerprint: skill_document_fingerprint(&canonical_source, &mut budget)?,
+            content_fingerprint: skill_document_fingerprint(&canonical_source, budget)?,
         }]);
     }
 
@@ -600,7 +596,7 @@ fn confirmed_catalog_candidates(
     if !canonical_catalog.starts_with(&canonical_source) {
         return Err(Error::CatalogOutsideSource(canonical_catalog));
     }
-    catalog_candidates(&canonical_source, &canonical_catalog)
+    catalog_candidates_with_budget(&canonical_source, &canonical_catalog, budget)
 }
 
 fn skill_candidate(

@@ -323,6 +323,45 @@ fn an_unsafe_stored_catalog_path_is_a_recoverable_catalog_error() {
     );
 }
 
+#[test]
+fn reopening_shares_the_source_scan_budget_across_registered_catalogs() {
+    let temporary = tempfile::tempdir().expect("temporary application directory");
+    let repository = temporary.path().join("source");
+    for index in 0..5 {
+        let catalog = repository.join(format!("catalog-{index}/codex/skills"));
+        fs::create_dir_all(&catalog).expect("create catalog");
+        fs::write(catalog.join(".keep"), "tracked catalog fixture")
+            .expect("write catalog sentinel");
+    }
+    initialize_repository(&repository);
+    let environment = AppEnvironment::new(
+        temporary.path().join("home"),
+        temporary.path().join("data"),
+        "",
+    );
+    let mut app = SkilledApp::open(environment.clone()).expect("open application");
+    let preview = app.preview_source(&repository).expect("preview source");
+    assert_eq!(preview.catalogs().len(), 5);
+    app.confirm_source(preview).expect("confirm source");
+    drop(app);
+
+    for catalog_index in 0..5 {
+        let catalog = repository.join(format!("catalog-{catalog_index}/codex/skills"));
+        for candidate_index in 0..3_300 {
+            fs::create_dir(catalog.join(format!("candidate-{candidate_index}")))
+                .expect("create candidate");
+        }
+    }
+
+    let reopened = SkilledApp::open(environment).expect("reopen application");
+
+    assert!(reopened.sources()[0].catalogs().iter().any(|catalog| {
+        catalog
+            .scan_error()
+            .is_some_and(|error| error.contains("bounded directory limit"))
+    }));
+}
+
 #[cfg(unix)]
 #[test]
 fn a_catalog_root_replaced_by_a_symlink_is_a_recoverable_catalog_error() {

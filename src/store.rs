@@ -12,6 +12,7 @@ use crate::{
         CatalogClassification, CatalogProposal, Compatibility, InspectedSource, RegisteredSource,
         SourcePreview, contains_revision, inspect_local_source,
     },
+    validation::InspectionBudget,
 };
 
 const SCHEMA_VERSION: i64 = 3;
@@ -248,6 +249,7 @@ impl Store {
                 ))
             })?;
             let mut catalogs = Vec::new();
+            let mut budget = InspectionBudget::source_scan();
             for row in catalog_rows {
                 let (relative_path, classification, claude_code, codex, opencode) = row?;
                 let classification = match classification.as_str() {
@@ -269,6 +271,7 @@ impl Store {
                         relative_path,
                         classification,
                         compatibility,
+                        &mut budget,
                     ),
                 });
             }

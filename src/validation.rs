@@ -186,6 +186,7 @@ fn exact_skill_md(
             path: skill_directory.to_path_buf(),
             source,
         })?;
+    let mut skill_md = None;
     for (index, entry) in entries.enumerate() {
         if index == MAX_SKILL_DIRECTORY_ENTRIES {
             return Err(PortableValidationError::SkillDirectoryTooLarge {
@@ -204,10 +205,10 @@ fn exact_skill_md(
                 .file_type()
                 .is_ok_and(|file_type| file_type.is_file() && !file_type.is_symlink())
         {
-            return Ok(entry.path());
+            skill_md = Some(entry.path());
         }
     }
-    Err(PortableValidationError::MissingSkillMd)
+    skill_md.ok_or(PortableValidationError::MissingSkillMd)
 }
 
 fn read_bounded_skill_md(

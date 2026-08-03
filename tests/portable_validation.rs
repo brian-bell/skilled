@@ -167,6 +167,23 @@ fn portable_validation_bounds_the_skill_document_size() {
     ));
 }
 
+#[test]
+fn portable_validation_rejects_a_skill_directory_over_the_entry_limit() {
+    let temporary = tempfile::tempdir().expect("temporary skill directory");
+    let skill = temporary.path().join("portable");
+    fs::create_dir(&skill).expect("create skill directory");
+    write_skill(&skill, "portable", "fixture");
+    for index in 0..1_024 {
+        fs::write(skill.join(format!("resource-{index}")), "fixture")
+            .expect("write resource entry");
+    }
+
+    assert!(matches!(
+        validate_portable_skill(&skill),
+        Err(PortableValidationError::SkillDirectoryTooLarge { .. })
+    ));
+}
+
 fn write_skill(directory: &std::path::Path, name: &str, description: &str) {
     fs::write(
         directory.join("SKILL.md"),
