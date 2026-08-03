@@ -1,4 +1,5 @@
 use skilled::{AgentKind, agents::adapter};
+use std::path::Path;
 
 #[test]
 fn adapters_record_the_documented_global_discovery_conventions() {
@@ -32,4 +33,23 @@ fn adapters_record_the_documented_global_discovery_conventions() {
     for kind in AgentKind::ALL {
         assert_eq!(adapter(kind).documentation().snapshot_date(), "2026-08-02");
     }
+}
+
+#[test]
+fn adapters_own_source_catalog_compatibility() {
+    let claude = adapter(AgentKind::ClaudeCode);
+    assert!(claude.supports_source_catalog(Path::new("catalogs/claude-code/skills")));
+    assert!(claude.supports_source_catalog(Path::new(".claude/skills")));
+    assert!(!claude.supports_source_catalog(Path::new(".agents/skills")));
+
+    let codex = adapter(AgentKind::Codex);
+    assert!(codex.supports_source_catalog(Path::new("catalogs/codex/skills")));
+    assert!(codex.supports_source_catalog(Path::new(".agents/skills")));
+    assert!(!codex.supports_source_catalog(Path::new(".claude/skills")));
+
+    let opencode = adapter(AgentKind::OpenCode);
+    assert!(opencode.supports_source_catalog(Path::new("catalogs/opencode/skills")));
+    assert!(opencode.supports_source_catalog(Path::new(".config/opencode/skills")));
+    assert!(opencode.supports_source_catalog(Path::new(".agents/skills")));
+    assert!(opencode.supports_source_catalog(Path::new(".claude/skills")));
 }

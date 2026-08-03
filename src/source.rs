@@ -9,7 +9,7 @@ use std::{
 
 use crate::{
     Error, Result,
-    agents::AgentKind,
+    agents::{AgentKind, adapter},
     validation::{InspectionBudget, PortableValidationError, validate_portable_skill_with_budget},
 };
 
@@ -36,34 +36,10 @@ impl Compatibility {
         opencode: true,
     };
 
-    const CLAUDE_CODE: Self = Self {
-        claude_code: true,
+    const NONE: Self = Self {
+        claude_code: false,
         codex: false,
         opencode: false,
-    };
-
-    const CODEX: Self = Self {
-        claude_code: false,
-        codex: true,
-        opencode: false,
-    };
-
-    const OPENCODE: Self = Self {
-        claude_code: false,
-        codex: false,
-        opencode: true,
-    };
-
-    const CLAUDE_CODE_AND_OPENCODE: Self = Self {
-        claude_code: true,
-        codex: false,
-        opencode: true,
-    };
-
-    const CODEX_AND_OPENCODE: Self = Self {
-        claude_code: false,
-        codex: true,
-        opencode: true,
     };
 
     pub fn claude_code(self) -> bool {
@@ -523,26 +499,15 @@ fn catalog_defaults(
     if candidate.parent() == Some(git_top_level) {
         return Some((CatalogClassification::Common, Compatibility::ALL));
     }
-    match candidate.parent()?.file_name()?.to_str()? {
-        "claude" | "claude-code" => Some((
-            CatalogClassification::AgentSpecific,
-            Compatibility::CLAUDE_CODE,
-        )),
-        ".claude" => Some((
-            CatalogClassification::AgentSpecific,
-            Compatibility::CLAUDE_CODE_AND_OPENCODE,
-        )),
-        "codex" => Some((CatalogClassification::AgentSpecific, Compatibility::CODEX)),
-        ".agents" => Some((
-            CatalogClassification::AgentSpecific,
-            Compatibility::CODEX_AND_OPENCODE,
-        )),
-        "opencode" => Some((
-            CatalogClassification::AgentSpecific,
-            Compatibility::OPENCODE,
-        )),
-        _ => None,
+    let relative_path = candidate.strip_prefix(git_top_level).ok()?;
+    let mut compatibility = Compatibility::NONE;
+    for kind in AgentKind::ALL {
+        if adapter(kind).supports_source_catalog(relative_path) {
+            compatibility.toggle(kind);
+        }
     }
+    (compatibility != Compatibility::NONE)
+        .then_some((CatalogClassification::AgentSpecific, compatibility))
 }
 
 fn catalog_candidates_with_budget(
