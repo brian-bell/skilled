@@ -1,10 +1,12 @@
 use std::{
+    collections::HashSet,
     env,
     ffi::{OsStr, OsString},
     fs,
-    io::{BufRead, BufReader},
+    io::{self, BufRead, BufReader, Read, Write},
     path::{Component, Path, PathBuf},
-    process::{Command, Output, Stdio},
+    process::{Child, Command, Output, Stdio},
+    thread,
 };
 
 use crate::{
@@ -15,6 +17,8 @@ use crate::{
 
 const MAX_SCAN_DEPTH: usize = 12;
 const MAX_CATALOG_CANDIDATES: usize = 4_096;
+const MAX_FILTERED_STATUS_PATHS: usize = 4_096;
+const MAX_FILTERED_STATUS_PATH_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CatalogClassification {
@@ -748,6 +752,10 @@ fn git_status_dirty(repository: &Path) -> Result<Option<bool>> {
             .env(format!("GIT_CONFIG_KEY_{index}"), key)
             .env(format!("GIT_CONFIG_VALUE_{index}"), value);
     }
+    let configured_drivers = filter_settings
+        .iter()
+        .filter_map(|(key, _)| configured_filter_driver(key))
+        .collect::<HashSet<_>>();
     let mut child = command
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -756,7 +764,8 @@ fn git_status_dirty(repository: &Path) -> Result<Option<bool>> {
     let stdout = child.stdout.take().expect("Git status stdout is piped");
     let mut stdout = BufReader::new(stdout);
     let mut record = Vec::new();
-    let mut filter_ambiguous = false;
+    let mut worktree_modifications = Vec::new();
+    let mut worktree_modification_bytes = 0_usize;
     while stdout.read_until(0, &mut record)? != 0 {
         if record.last() == Some(&0) {
             record.pop();
@@ -767,26 +776,28 @@ fn git_status_dirty(repository: &Path) -> Result<Option<bool>> {
             let _ = child.wait();
             return Ok(Some(true));
         };
-        let driver = match filter_driver_for_path(repository, path) {
-            Ok(driver) => driver,
-            Err(error) => {
-                drop(stdout);
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(error);
-            }
-        };
-        let configured_filter_is_active = filter_settings
-            .iter()
-            .filter_map(|(key, _)| configured_filter_driver(key))
-            .any(|configured| driver.as_deref() == Some(configured));
-        if !configured_filter_is_active {
+        if configured_drivers.is_empty() {
             drop(stdout);
             let _ = child.kill();
             let _ = child.wait();
             return Ok(Some(true));
         }
-        filter_ambiguous = true;
+        let Some(next_bytes) = worktree_modification_bytes.checked_add(path.len()) else {
+            drop(stdout);
+            let _ = child.kill();
+            let _ = child.wait();
+            return Ok(Some(true));
+        };
+        if worktree_modifications.len() == MAX_FILTERED_STATUS_PATHS
+            || next_bytes > MAX_FILTERED_STATUS_PATH_BYTES
+        {
+            drop(stdout);
+            let _ = child.kill();
+            let _ = child.wait();
+            return Ok(Some(true));
+        }
+        worktree_modification_bytes = next_bytes;
+        worktree_modifications.push(path.to_vec());
         record.clear();
     }
     drop(stdout);
@@ -798,7 +809,16 @@ fn git_status_dirty(repository: &Path) -> Result<Option<bool>> {
             stderr: "git status failed before producing output".to_owned(),
         });
     }
-    Ok((!filter_ambiguous).then_some(false))
+    if worktree_modifications.is_empty() {
+        return Ok(Some(false));
+    }
+    let drivers = filter_drivers_for_paths(repository, &worktree_modifications)?;
+    let all_filter_ambiguous = drivers.iter().all(|driver| {
+        driver
+            .as_deref()
+            .is_some_and(|driver| configured_drivers.contains(driver))
+    });
+    Ok((!all_filter_ambiguous).then_some(true))
 }
 
 fn worktree_modification_path(record: &[u8]) -> Option<&[u8]> {
@@ -810,26 +830,117 @@ fn configured_filter_driver(key: &str) -> Option<&str> {
     matches!(setting, "clean" | "process").then_some(driver)
 }
 
-fn filter_driver_for_path(repository: &Path, path: &[u8]) -> Result<Option<String>> {
-    let path = git_path_component(path.to_vec())?;
-    let arguments = ["check-attr", "-z", "filter", "--"];
-    let output = git_command(repository, &arguments)
-        .arg(path)
-        .output()
+fn filter_drivers_for_paths(repository: &Path, paths: &[Vec<u8>]) -> Result<Vec<Option<String>>> {
+    let arguments = ["check-attr", "--stdin", "-z", "filter"];
+    let mut child = git_command(repository, &arguments)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(Error::GitUnavailable)?;
+    let mut input = Vec::new();
+    for path in paths {
+        input.extend_from_slice(path);
+        input.push(0);
+    }
+    let mut stdin = child.stdin.take().expect("Git check-attr stdin is piped");
+    let mut stdout = child.stdout.take().expect("Git check-attr stdout is piped");
+    let mut stderr = child.stderr.take().expect("Git check-attr stderr is piped");
+    let writer = match thread::Builder::new()
+        .name("git-check-attr-stdin".to_owned())
+        .spawn(move || stdin.write_all(&input))
+    {
+        Ok(writer) => writer,
+        Err(error) => {
+            terminate_child(&mut child);
+            return Err(error.into());
+        }
+    };
+    let stdout_reader = match thread::Builder::new()
+        .name("git-check-attr-stdout".to_owned())
+        .spawn(move || {
+            let mut bytes = Vec::new();
+            stdout.read_to_end(&mut bytes)?;
+            Ok::<_, io::Error>(bytes)
+        }) {
+        Ok(reader) => reader,
+        Err(error) => {
+            terminate_child(&mut child);
+            let _ = writer.join();
+            return Err(error.into());
+        }
+    };
+    let stderr_reader = match thread::Builder::new()
+        .name("git-check-attr-stderr".to_owned())
+        .spawn(move || {
+            let mut bytes = Vec::new();
+            stderr.read_to_end(&mut bytes)?;
+            Ok::<_, io::Error>(bytes)
+        }) {
+        Ok(reader) => reader,
+        Err(error) => {
+            terminate_child(&mut child);
+            let _ = writer.join();
+            let _ = stdout_reader.join();
+            return Err(error.into());
+        }
+    };
+    let status = match child.wait() {
+        Ok(status) => status,
+        Err(error) => {
+            terminate_child(&mut child);
+            let _ = writer.join();
+            let _ = stdout_reader.join();
+            let _ = stderr_reader.join();
+            return Err(error.into());
+        }
+    };
+    let write_result = join_io_thread(writer, "Git check-attr input writer");
+    let stdout_result = join_io_thread(stdout_reader, "Git check-attr stdout reader");
+    let stderr_result = join_io_thread(stderr_reader, "Git check-attr stderr reader");
+    write_result?;
+    let stdout = stdout_result?;
+    let stderr = stderr_result?;
+    let output = Output {
+        status,
+        stdout,
+        stderr,
+    };
     if !output.status.success() {
         return Err(git_error(repository, &arguments, &output));
     }
     let mut fields = output.stdout.split(|byte| *byte == 0);
-    let (Some(_path), Some(attribute), Some(value)) = (fields.next(), fields.next(), fields.next())
-    else {
-        return Err(Error::InvalidGitOutput);
-    };
-    if attribute != b"filter" {
+    let mut drivers = Vec::with_capacity(paths.len());
+    for expected_path in paths {
+        let (Some(path), Some(attribute), Some(value)) =
+            (fields.next(), fields.next(), fields.next())
+        else {
+            return Err(Error::InvalidGitOutput);
+        };
+        if path != expected_path || attribute != b"filter" {
+            return Err(Error::InvalidGitOutput);
+        }
+        let value = String::from_utf8(value.to_vec()).map_err(|_| Error::InvalidGitOutput)?;
+        drivers.push((!matches!(value.as_str(), "unspecified" | "unset")).then_some(value));
+    }
+    if fields.any(|field| !field.is_empty()) {
         return Err(Error::InvalidGitOutput);
     }
-    let value = String::from_utf8(value.to_vec()).map_err(|_| Error::InvalidGitOutput)?;
-    Ok((!matches!(value.as_str(), "unspecified" | "unset")).then_some(value))
+    Ok(drivers)
+}
+
+fn terminate_child(child: &mut Child) {
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+fn join_io_thread<T>(
+    thread: thread::JoinHandle<io::Result<T>>,
+    description: &'static str,
+) -> io::Result<T> {
+    thread
+        .join()
+        .map_err(|_| io::Error::other(format!("{description} panicked")))?
 }
 
 fn configured_filter_settings(repository: &Path) -> Result<Vec<(String, &'static str)>> {
@@ -907,24 +1018,10 @@ fn git_path_from_output(mut value: Vec<u8>) -> Result<PathBuf> {
     Ok(PathBuf::from(OsString::from_vec(value)))
 }
 
-#[cfg(unix)]
-fn git_path_component(value: Vec<u8>) -> Result<OsString> {
-    use std::os::unix::ffi::OsStringExt;
-
-    Ok(OsString::from_vec(value))
-}
-
 #[cfg(not(unix))]
 fn git_path_from_output(value: Vec<u8>) -> Result<PathBuf> {
     let value = String::from_utf8(value).map_err(|_| Error::InvalidGitOutput)?;
     Ok(PathBuf::from(strip_record_terminator(&value)))
-}
-
-#[cfg(not(unix))]
-fn git_path_component(value: Vec<u8>) -> Result<OsString> {
-    String::from_utf8(value)
-        .map(OsString::from)
-        .map_err(|_| Error::InvalidGitOutput)
 }
 
 fn git_error(repository: &Path, arguments: &[&str], output: &Output) -> Error {
