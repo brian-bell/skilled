@@ -1,0 +1,1104 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Skilled — TUI Prototype</title>
+  <style>
+    :root {
+      --page: #07090c;
+      --terminal: #0b0f14;
+      --surface: #0f151d;
+      --surface-2: #121a24;
+      --surface-3: #17212c;
+      --line: #293440;
+      --line-strong: #435264;
+      --text: #d7dee7;
+      --text-strong: #f2f6fa;
+      --muted: #8491a1;
+      --faint: #536171;
+      --cyan: #73d7ee;
+      --green: #8bd49c;
+      --amber: #e6bd6a;
+      --red: #ee6b73;
+      --violet: #c79bf2;
+      --blue: #82aaff;
+      --shadow: rgba(0, 0, 0, .45);
+      --mono: "SFMono-Regular", "Cascadia Code", "Roboto Mono", Menlo, Monaco, Consolas, monospace;
+    }
+
+    * { box-sizing: border-box; }
+    html, body { min-height: 100%; }
+    body {
+      margin: 0;
+      padding: 22px;
+      background:
+        radial-gradient(circle at 50% -20%, rgba(115, 215, 238, .08), transparent 38rem),
+        var(--page);
+      color: var(--text);
+      font-family: var(--mono);
+      font-size: 13px;
+      line-height: 1.45;
+    }
+
+    button, input { font: inherit; }
+    button { color: inherit; }
+    button:focus-visible, input:focus-visible {
+      outline: 2px solid var(--cyan);
+      outline-offset: 1px;
+    }
+
+    .prototype {
+      width: min(1480px, 100%);
+      margin: 0 auto;
+    }
+
+    .terminal {
+      display: grid;
+      grid-template-rows: auto auto minmax(0, 1fr) auto;
+      min-height: 720px;
+      height: calc(100vh - 44px);
+      max-height: 940px;
+      overflow: hidden;
+      border: 1px solid var(--line-strong);
+      background: var(--terminal);
+      box-shadow: 0 24px 80px var(--shadow);
+    }
+
+    .terminal-titlebar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 20px;
+      min-height: 40px;
+      padding: 8px 12px;
+      border-bottom: 1px solid var(--line);
+      background: #0d1218;
+    }
+
+    .terminal-title {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-width: 0;
+      color: var(--text-strong);
+      font-weight: 600;
+    }
+
+    .terminal-mark { color: var(--green); }
+    .terminal-path {
+      overflow: hidden;
+      color: var(--muted);
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-weight: 400;
+    }
+
+    .prototype-flag {
+      flex: none;
+      color: var(--amber);
+      font-size: 11px;
+      letter-spacing: .06em;
+      text-transform: uppercase;
+    }
+
+    .app-nav {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      border-bottom: 1px solid var(--line);
+      background: var(--surface);
+    }
+
+    .tabs { display: flex; min-width: 0; overflow-x: auto; }
+    .tab {
+      appearance: none;
+      min-width: 126px;
+      padding: 11px 16px 10px;
+      border: 0;
+      border-right: 1px solid var(--line);
+      border-bottom: 2px solid transparent;
+      background: transparent;
+      color: var(--muted);
+      cursor: pointer;
+      text-align: left;
+    }
+
+    .tab:hover { color: var(--text); background: var(--surface-2); }
+    .tab[aria-selected="true"] {
+      border-bottom-color: var(--cyan);
+      background: var(--surface-2);
+      color: var(--text-strong);
+    }
+    .tab-key { margin-right: 7px; color: var(--faint); }
+    .tab-count { margin-left: 6px; color: var(--amber); }
+
+    .session-state {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      padding: 0 13px;
+      color: var(--muted);
+      white-space: nowrap;
+    }
+    .pulse {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--green);
+      box-shadow: 0 0 12px rgba(139, 212, 156, .7);
+    }
+
+    .workspace {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 400px;
+      min-height: 0;
+    }
+
+    .primary-pane, .detail-pane {
+      min-width: 0;
+      min-height: 0;
+      overflow: auto;
+    }
+
+    .primary-pane { border-right: 1px solid var(--line); }
+    .detail-pane { background: #0c1117; }
+
+    .pane-header {
+      position: sticky;
+      top: 0;
+      z-index: 4;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      min-height: 48px;
+      padding: 8px 12px;
+      border-bottom: 1px solid var(--line);
+      background: rgba(15, 21, 29, .96);
+      backdrop-filter: blur(8px);
+    }
+
+    .pane-heading { color: var(--text-strong); font-weight: 600; }
+    .pane-subtitle { margin-left: 9px; color: var(--faint); font-weight: 400; }
+
+    .toolbar { display: flex; align-items: center; gap: 8px; }
+    .filter-wrap { position: relative; }
+    .filter-prefix {
+      position: absolute;
+      left: 9px;
+      top: 50%;
+      transform: translateY(-50%);
+      color: var(--faint);
+      pointer-events: none;
+    }
+    .filter-input {
+      width: 228px;
+      height: 30px;
+      padding: 4px 8px 4px 26px;
+      border: 1px solid var(--line);
+      border-radius: 0;
+      background: var(--terminal);
+      color: var(--text);
+    }
+    .filter-input::placeholder { color: var(--faint); }
+
+    .tui-button {
+      appearance: none;
+      min-height: 30px;
+      padding: 4px 10px;
+      border: 1px solid var(--line-strong);
+      border-radius: 0;
+      background: var(--surface-2);
+      color: var(--text);
+      cursor: pointer;
+    }
+    .tui-button:hover { border-color: var(--cyan); color: var(--text-strong); }
+    .tui-button.primary { border-color: var(--cyan); background: #16313b; color: #dff9ff; }
+    .tui-button.danger { border-color: var(--red); color: #ffc2c5; }
+    .tui-button.ghost { border-color: transparent; background: transparent; color: var(--muted); }
+    .tui-button:disabled { cursor: not-allowed; opacity: .45; }
+
+    .grid-head, .data-row {
+      display: grid;
+      grid-template-columns: minmax(145px, 1.5fr) minmax(110px, 1fr) repeat(3, 78px) 88px minmax(92px, .8fr);
+      align-items: center;
+      min-width: 790px;
+    }
+
+    .grid-head {
+      position: sticky;
+      top: 48px;
+      z-index: 3;
+      min-height: 34px;
+      border-bottom: 1px solid var(--line);
+      background: #0b1016;
+      color: var(--faint);
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: .05em;
+    }
+
+    .grid-head > span, .data-row > span { min-width: 0; padding: 7px 10px; }
+    .grid-head > span:not(:first-child), .data-row > span:not(:first-child) { border-left: 1px solid rgba(41, 52, 64, .55); }
+
+    .data-row {
+      appearance: none;
+      width: 100%;
+      min-height: 43px;
+      padding: 0;
+      border: 0;
+      border-bottom: 1px solid rgba(41, 52, 64, .76);
+      background: transparent;
+      color: var(--text);
+      cursor: pointer;
+      text-align: left;
+    }
+    .data-row:hover { background: var(--surface); }
+    .data-row.selected { background: #172530; box-shadow: inset 3px 0 0 var(--cyan); }
+    .data-row.selected .skill-name { color: var(--text-strong); }
+
+    .skill-name, .repo-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+    .source-name { overflow: hidden; color: var(--muted); text-overflow: ellipsis; white-space: nowrap; }
+
+    .agent-state { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+    .state-ok { color: var(--green); }
+    .state-warn { color: var(--amber); }
+    .state-bad { color: var(--red); }
+    .state-off { color: var(--faint); }
+    .state-unmanaged { color: var(--violet); }
+
+    .health-text { white-space: nowrap; }
+    .health-healthy { color: var(--green); }
+    .health-warning { color: var(--amber); }
+    .health-critical { color: var(--red); }
+    .health-unmanaged { color: var(--violet); }
+
+    .detail-section { padding: 13px 15px; border-bottom: 1px solid var(--line); }
+    .detail-kicker { margin-bottom: 7px; color: var(--faint); font-size: 10px; letter-spacing: .08em; text-transform: uppercase; }
+    .detail-title { margin: 0; color: var(--text-strong); font-size: 18px; line-height: 1.2; }
+    .detail-description { margin: 8px 0 0; color: var(--muted); }
+    .detail-actions { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 12px; }
+
+    .meta-list { display: grid; gap: 8px; margin: 0; }
+    .meta-row { display: grid; grid-template-columns: 105px minmax(0, 1fr); gap: 10px; }
+    .meta-row dt { color: var(--faint); }
+    .meta-row dd { min-width: 0; margin: 0; overflow-wrap: anywhere; color: var(--text); }
+
+    .path-list { display: grid; gap: 7px; }
+    .path-line { padding: 7px 8px; border-left: 2px solid var(--line-strong); background: var(--surface); }
+    .path-line.ok { border-left-color: var(--green); }
+    .path-line.warn { border-left-color: var(--amber); }
+    .path-line.bad { border-left-color: var(--red); }
+    .path-label { display: flex; justify-content: space-between; gap: 12px; margin-bottom: 3px; }
+    .path-value { overflow-wrap: anywhere; color: var(--muted); font-size: 11px; }
+
+    .skill-doc { color: #bac4cf; }
+    .skill-doc h3 { margin: 0 0 9px; color: var(--text-strong); font-size: 14px; }
+    .skill-doc p { margin: 7px 0; }
+    .skill-doc ul { margin: 7px 0; padding-left: 18px; }
+    .skill-doc code { color: var(--cyan); }
+
+    .empty-state {
+      display: grid;
+      place-items: center;
+      min-height: 310px;
+      padding: 30px;
+      color: var(--muted);
+      text-align: center;
+    }
+    .empty-glyph { margin-bottom: 12px; color: var(--faint); font-size: 24px; }
+    .empty-state strong { display: block; margin-bottom: 6px; color: var(--text); }
+
+    .source-layout { display: grid; grid-template-columns: 270px minmax(0, 1fr); min-height: 100%; }
+    .source-list { border-right: 1px solid var(--line); }
+    .source-row {
+      appearance: none;
+      display: block;
+      width: 100%;
+      padding: 12px;
+      border: 0;
+      border-bottom: 1px solid var(--line);
+      background: transparent;
+      cursor: pointer;
+      text-align: left;
+    }
+    .source-row:hover, .source-row.selected { background: var(--surface-2); }
+    .source-row.selected { box-shadow: inset 3px 0 0 var(--cyan); }
+    .source-path { margin-top: 4px; overflow: hidden; color: var(--faint); text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
+    .source-status { display: flex; gap: 8px; margin-top: 8px; color: var(--muted); font-size: 11px; }
+
+    .catalog-block { border-bottom: 1px solid var(--line); }
+    .catalog-title { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; background: #0b1016; color: var(--muted); }
+    .catalog-skills { display: grid; }
+    .catalog-skill {
+      display: grid;
+      grid-template-columns: minmax(140px, 1fr) 120px 112px 82px;
+      align-items: center;
+      min-height: 41px;
+      border-bottom: 1px solid rgba(41, 52, 64, .65);
+    }
+    .catalog-skill > span { min-width: 0; padding: 7px 10px; }
+    .catalog-skill button { justify-self: end; margin-right: 8px; }
+
+    .update-banner {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 18px;
+      padding: 12px;
+      border-bottom: 1px solid var(--line);
+      background: #101720;
+    }
+    .update-banner strong { color: var(--text-strong); }
+    .update-banner p { margin: 2px 0 0; color: var(--muted); }
+    .progress-line { height: 2px; overflow: hidden; background: var(--line); }
+    .progress-line span { display: block; width: 34%; height: 100%; background: var(--cyan); animation: progress 1s ease-in-out infinite alternate; }
+    @keyframes progress { from { transform: translateX(-100%); } to { transform: translateX(295%); } }
+
+    .group-label { padding: 9px 12px; border-bottom: 1px solid var(--line); background: #0b1016; color: var(--faint); text-transform: uppercase; letter-spacing: .06em; font-size: 10px; }
+    .issue-row, .update-row {
+      appearance: none;
+      display: grid;
+      grid-template-columns: 92px minmax(165px, 1fr) minmax(170px, 1.45fr) 105px;
+      align-items: center;
+      width: 100%;
+      min-height: 48px;
+      padding: 0;
+      border: 0;
+      border-bottom: 1px solid var(--line);
+      background: transparent;
+      cursor: pointer;
+      text-align: left;
+    }
+    .issue-row > span, .update-row > span { min-width: 0; padding: 8px 10px; }
+    .issue-row:hover, .update-row:hover, .issue-row.selected, .update-row.selected { background: var(--surface-2); }
+    .issue-row.selected, .update-row.selected { box-shadow: inset 3px 0 0 var(--cyan); }
+    .severity { font-size: 11px; text-transform: uppercase; }
+    .severity-critical { color: var(--red); }
+    .severity-warning { color: var(--amber); }
+    .severity-info { color: var(--violet); }
+
+    .keybar {
+      display: flex;
+      align-items: center;
+      gap: 17px;
+      min-height: 36px;
+      padding: 7px 12px;
+      overflow-x: auto;
+      border-top: 1px solid var(--line);
+      background: #0d1218;
+      color: var(--muted);
+      white-space: nowrap;
+    }
+    .keybar kbd {
+      margin-right: 5px;
+      padding: 1px 4px;
+      border: 1px solid var(--line-strong);
+      border-bottom-color: #5d6a78;
+      background: var(--surface-2);
+      color: var(--text-strong);
+      font: inherit;
+    }
+
+    dialog {
+      width: min(720px, calc(100% - 32px));
+      max-height: calc(100vh - 46px);
+      padding: 0;
+      overflow: auto;
+      border: 1px solid var(--line-strong);
+      border-radius: 0;
+      background: var(--surface);
+      color: var(--text);
+      box-shadow: 0 24px 90px rgba(0, 0, 0, .72);
+    }
+    dialog::backdrop { background: rgba(1, 3, 5, .78); backdrop-filter: blur(2px); }
+    .dialog-header { display: flex; justify-content: space-between; gap: 16px; padding: 13px 15px; border-bottom: 1px solid var(--line); background: #0b1016; }
+    .dialog-header strong { color: var(--text-strong); }
+    .dialog-body { padding: 18px; }
+    .dialog-footer { display: flex; justify-content: space-between; gap: 12px; padding: 12px 15px; border-top: 1px solid var(--line); background: #0b1016; }
+    .dialog-actions { display: flex; gap: 8px; }
+
+    .wizard-progress { display: grid; grid-template-columns: repeat(5, 1fr); gap: 4px; margin-bottom: 20px; }
+    .wizard-step { height: 3px; background: var(--line); }
+    .wizard-step.done { background: var(--green); }
+    .wizard-step.active { background: var(--cyan); }
+    .wizard-number { margin-bottom: 7px; color: var(--cyan); font-size: 11px; }
+    .wizard-title { margin: 0 0 8px; color: var(--text-strong); font-size: 20px; }
+    .wizard-copy { max-width: 620px; margin: 0 0 18px; color: var(--muted); }
+    .wizard-callout { padding: 11px 12px; border-left: 2px solid var(--amber); background: rgba(230, 189, 106, .06); color: #d6c39a; }
+
+    .choice-list { display: grid; gap: 8px; margin-top: 14px; }
+    .choice-list.detected { padding: 10px; margin-top: 0; }
+    .choice {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 11px;
+      padding: 10px 11px;
+      border: 1px solid var(--line);
+      background: var(--terminal);
+    }
+    .choice input { accent-color: var(--cyan); }
+    .choice strong { color: var(--text-strong); }
+    .choice small { display: block; margin-top: 2px; color: var(--muted); }
+    .choice-status { color: var(--green); font-size: 11px; }
+
+    .plan-summary { margin-bottom: 14px; padding: 10px 12px; border-left: 2px solid var(--cyan); background: var(--terminal); }
+    .plan-list { display: grid; gap: 8px; }
+    .plan-step { display: grid; grid-template-columns: 28px minmax(0, 1fr); gap: 8px; padding: 9px; border: 1px solid var(--line); background: var(--terminal); }
+    .plan-index { color: var(--cyan); }
+    .plan-command { display: block; margin-top: 4px; overflow-wrap: anywhere; color: var(--muted); font-size: 11px; }
+    .plan-preconditions { margin: 14px 0 0; padding-left: 19px; color: var(--muted); }
+    .plan-preconditions li { margin: 5px 0; }
+
+    .help-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px 18px; }
+    .help-row { display: grid; grid-template-columns: 86px minmax(0, 1fr); gap: 10px; padding: 6px 0; border-bottom: 1px solid var(--line); }
+    .help-row code { color: var(--cyan); }
+    .help-row span { color: var(--muted); }
+
+    .path-field { width: 100%; padding: 9px 10px; border: 1px solid var(--line-strong); border-radius: 0; background: var(--terminal); color: var(--text); }
+    .detected-box { margin-top: 14px; border: 1px solid var(--line); }
+    .detected-title { padding: 8px 10px; border-bottom: 1px solid var(--line); color: var(--muted); }
+
+    .toast {
+      position: fixed;
+      right: 28px;
+      bottom: 26px;
+      z-index: 100;
+      max-width: 440px;
+      padding: 10px 13px;
+      border: 1px solid var(--green);
+      background: #112119;
+      color: #c8f1d0;
+      box-shadow: 0 12px 42px rgba(0, 0, 0, .55);
+      opacity: 0;
+      transform: translateY(8px);
+      pointer-events: none;
+      transition: opacity .18s, transform .18s;
+    }
+    .toast.visible { opacity: 1; transform: translateY(0); }
+
+    .screen-reader-only {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
+
+    @media (max-width: 1050px) {
+      body { padding: 10px; }
+      .terminal { height: auto; min-height: calc(100vh - 20px); max-height: none; }
+      .workspace { grid-template-columns: 1fr; }
+      .primary-pane { min-height: 520px; border-right: 0; border-bottom: 1px solid var(--line); }
+      .detail-pane { max-height: none; }
+      .agent-state span { display: none; }
+      .source-layout { min-height: 520px; }
+      .terminal-titlebar { align-items: flex-start; }
+    }
+
+    @media (max-width: 700px) {
+      body { padding: 0; }
+      .terminal { min-height: 100vh; border-left: 0; border-right: 0; }
+      .prototype-flag, .session-state { display: none; }
+      .tab { min-width: 105px; padding-inline: 10px; }
+      .pane-header { align-items: flex-start; flex-direction: column; }
+      .toolbar, .filter-wrap, .filter-input { width: 100%; }
+      .grid-head { top: 82px; }
+      .source-layout { grid-template-columns: 1fr; }
+      .source-list { border-right: 0; border-bottom: 1px solid var(--line); }
+      .help-grid { grid-template-columns: 1fr; }
+      .dialog-footer { align-items: stretch; flex-direction: column; }
+      .dialog-actions { justify-content: flex-end; }
+      .toast { right: 10px; bottom: 10px; left: 10px; }
+    }
+  </style>
+</head>
+<body>
+  <main class="prototype">
+    <section class="terminal" aria-label="Skilled terminal prototype">
+      <header class="terminal-titlebar">
+        <div class="terminal-title">
+          <span class="terminal-mark">◆</span>
+          <span>skilled</span>
+          <span class="terminal-path">global · brian@macbook · macOS</span>
+        </div>
+        <span class="prototype-flag">interactive prototype · no filesystem writes</span>
+      </header>
+
+      <div class="app-nav">
+        <nav class="tabs" aria-label="Primary views">
+          <button type="button" class="tab" data-view="inventory" aria-selected="true"><span class="tab-key">1</span>Inventory <span class="tab-count" id="inventoryCount">6</span></button>
+          <button type="button" class="tab" data-view="sources" aria-selected="false"><span class="tab-key">2</span>Sources <span class="tab-count" id="sourceCount">2</span></button>
+          <button type="button" class="tab" data-view="updates" aria-selected="false"><span class="tab-key">3</span>Updates <span class="tab-count" id="updateCount">—</span></button>
+          <button type="button" class="tab" data-view="doctor" aria-selected="false"><span class="tab-key">4</span>Doctor <span class="tab-count" id="doctorCount">4</span></button>
+        </nav>
+        <div class="session-state"><span class="pulse"></span><span id="sessionLabel">scan complete · 2s ago</span></div>
+      </div>
+
+      <div class="workspace">
+        <section class="primary-pane" id="primaryPane" aria-live="polite"></section>
+        <aside class="detail-pane" id="detailPane" aria-label="Selected item details"></aside>
+      </div>
+
+      <footer class="keybar" id="keybar"></footer>
+    </section>
+  </main>
+
+  <dialog id="setupDialog" aria-labelledby="setupTitle">
+    <div class="dialog-header"><strong>First-run setup</strong><span>global skills only</span></div>
+    <div class="dialog-body" id="setupBody"></div>
+    <div class="dialog-footer">
+      <button type="button" class="tui-button ghost" id="setupSkip">Skip to populated demo</button>
+      <div class="dialog-actions">
+        <button type="button" class="tui-button" id="setupBack">Back</button>
+        <button type="button" class="tui-button primary" id="setupNext">Continue</button>
+      </div>
+    </div>
+  </dialog>
+
+  <dialog id="operationDialog" aria-labelledby="operationTitle">
+    <div class="dialog-header"><strong id="operationTitle">Operation plan</strong><span id="operationKind">preview</span></div>
+    <div class="dialog-body" id="operationBody"></div>
+    <div class="dialog-footer">
+      <span class="state-ok">✓ preconditions evaluated</span>
+      <div class="dialog-actions">
+        <button type="button" class="tui-button" id="operationCancel">Cancel</button>
+        <button type="button" class="tui-button primary" id="operationApply">Apply demo plan</button>
+      </div>
+    </div>
+  </dialog>
+
+  <dialog id="helpDialog" aria-labelledby="helpTitle">
+    <div class="dialog-header"><strong id="helpTitle">Keyboard reference</strong><span>press Esc to close</span></div>
+    <div class="dialog-body"><div class="help-grid" id="helpGrid"></div></div>
+    <div class="dialog-footer"><span>Actions always open a plan before applying.</span><button type="button" class="tui-button" id="helpClose">Close</button></div>
+  </dialog>
+
+  <dialog id="sourceDialog" aria-labelledby="sourceTitle">
+    <div class="dialog-header"><strong id="sourceTitle">Add local source</strong><span>repository checkout</span></div>
+    <div class="dialog-body">
+      <label for="sourcePath">Local Git repository</label>
+      <input type="text" class="path-field" id="sourcePath" value="~/dev/team-skills" autocomplete="off">
+      <div class="detected-box" id="detectedSource" hidden>
+        <div class="detected-title">Detected catalog roots</div>
+        <div class="choice-list detected">
+          <label class="choice"><input type="checkbox" checked><span><strong>skills/</strong><small>8 portable skills</small></span><span class="choice-status">common</span></label>
+          <label class="choice"><input type="checkbox" checked><span><strong>catalogs/codex/skills/</strong><small>2 Codex-specific skills</small></span><span class="choice-status">codex</span></label>
+        </div>
+      </div>
+    </div>
+    <div class="dialog-footer">
+      <span id="sourceHint">No files are read by this HTML prototype.</span>
+      <div class="dialog-actions">
+        <button type="button" class="tui-button" id="sourceCancel">Cancel</button>
+        <button type="button" class="tui-button primary" id="sourceScan">Detect catalogs</button>
+      </div>
+    </div>
+  </dialog>
+
+  <div class="toast" id="toast" role="status"></div>
+
+  <script>
+    (() => {
+      const inventory = [
+        {
+          name: 'autoreview', source: 'agent-skills', catalog: 'skills/', health: 'healthy', update: 'current',
+          description: 'Run a structured closeout code review before commit or ship.',
+          provenance: 'openclaw/agent-skills · MIT', variant: 'common · portable',
+          agents: { claude: 'ok', codex: 'ok', opencode: 'ok' },
+          paths: [
+            ['Claude Code', '~/.claude/skills/autoreview → ~/dev/agent-skills/skills/autoreview', 'ok'],
+            ['Codex', '~/.agents/skills/autoreview → ~/dev/agent-skills/skills/autoreview', 'ok'],
+            ['OpenCode', '~/.config/opencode/skills/autoreview → ~/dev/agent-skills/skills/autoreview', 'ok']
+          ],
+          doc: ['Run a structured code review as a closeout check.', 'Use local mode for dirty work and branch mode for committed work.', 'Return actionable findings with precise evidence.']
+        },
+        {
+          name: 'autofix', source: 'agent-skills', catalog: 'skills/', health: 'healthy', update: 'current',
+          description: 'Fix actionable GitHub pull request review comments.',
+          provenance: 'first-party', variant: 'common · portable',
+          agents: { claude: 'ok', codex: 'ok', opencode: 'ok' },
+          paths: [
+            ['Claude Code', '~/.claude/skills/autofix → ~/dev/agent-skills/skills/autofix', 'ok'],
+            ['Codex', '~/.agents/skills/autofix → ~/dev/agent-skills/skills/autofix', 'ok'],
+            ['OpenCode', '~/.config/opencode/skills/autofix → ~/dev/agent-skills/skills/autofix', 'ok']
+          ],
+          doc: ['Address one scoped review thread or triage unresolved PR feedback.', 'Preview every repository and GitHub mutation before execution.']
+        },
+        {
+          name: 'feature-review', source: 'agent-skills', catalog: 'experimental', health: 'warning', update: 'blocked',
+          description: 'Run a read-only feature acceptance review with agent-specific editions.',
+          provenance: 'first-party', variant: 'Claude + Codex variants',
+          agents: { claude: 'ok', codex: 'ok', opencode: 'warn' },
+          paths: [
+            ['Claude Code', '~/.claude/skills/feature-review → …/experimental/claude-code/…', 'ok'],
+            ['Codex', '~/.agents/skills/feature-review → …/experimental/codex/…', 'ok'],
+            ['OpenCode', 'Resolves Codex compatibility alias; no native OpenCode variant', 'warn']
+          ],
+          doc: ['Evaluate whether a feature is complete, safe, tested, maintainable, and documented.', 'OpenCode compatibility is not claimed for the Codex-specific edition.']
+        },
+        {
+          name: 'last30days', source: 'agent-skills', catalog: 'skills/', health: 'healthy', update: 'available',
+          description: 'Research what people have said about a topic in the last 30 days.',
+          provenance: 'mvanhorn/last30days-skill · MIT', variant: 'common · vendored',
+          agents: { claude: 'ok', codex: 'ok', opencode: 'ok' },
+          paths: [
+            ['Claude Code', '~/.claude/skills/last30days → ~/dev/agent-skills/skills/last30days', 'ok'],
+            ['Codex', '~/.agents/skills/last30days → ~/dev/agent-skills/skills/last30days', 'ok'],
+            ['OpenCode', '~/.config/opencode/skills/last30days → ~/dev/agent-skills/skills/last30days', 'ok']
+          ],
+          doc: ['Research recent discussion across social, developer, and web sources.', 'A confirmed upstream revision is available for comparison.']
+        },
+        {
+          name: 'review-loop', source: 'work-skills', catalog: 'skills/', health: 'critical', update: 'blocked',
+          description: 'Iterate through worker and reviewer quality loops.',
+          provenance: '2dmurali/review-loop-skill · MIT', variant: 'common · vendored',
+          agents: { claude: 'bad', codex: 'ok', opencode: 'warn' },
+          paths: [
+            ['Claude Code', '~/.claude/skills/review-loop is a physical directory', 'bad'],
+            ['Codex', '~/.agents/skills/review-loop → ~/dev/work-skills/skills/review-loop', 'ok'],
+            ['OpenCode', 'Native path absent; Codex compatibility alias wins', 'warn']
+          ],
+          doc: ['Run an iterative worker-reviewer loop until the quality gate is met.', 'Installation is blocked for Claude Code because the target is occupied.']
+        },
+        {
+          name: 'unknown-local', source: 'unmanaged', catalog: '—', health: 'unmanaged', update: '—',
+          description: 'A structurally valid skill with no identified source repository.',
+          provenance: 'unknown', variant: 'unmanaged physical copy',
+          agents: { claude: 'off', codex: 'unmanaged', opencode: 'off' },
+          paths: [
+            ['Codex', '~/.agents/skills/unknown-local is a physical directory', 'warn']
+          ],
+          doc: ['This installation is usable but not owned by Skilled.', 'Updates and repairs are unavailable until a source is associated.']
+        }
+      ];
+
+      const sources = [
+        {
+          id: 'agent-skills', name: 'agent-skills', path: '~/dev/agent-skills', branch: 'main', state: 'clean', head: '4b7d77c',
+          catalogs: [
+            { name: 'skills/', compatibility: 'Claude · Codex · OpenCode', kind: 'common', skills: [
+              ['autofix', 'installed', 'first-party'], ['autoreview', 'installed', 'third-party'], ['batch-grill-me', 'available', 'third-party'], ['last30days', 'installed', 'third-party'], ['write-spec', 'available', 'third-party']
+            ]},
+            { name: 'catalogs/experimental/claude-code/skills/', compatibility: 'Claude Code', kind: 'agent-specific', skills: [
+              ['feature-review', 'installed', 'first-party'], ['go-review', 'available', 'first-party'], ['product-manager', 'available', 'first-party']
+            ]},
+            { name: 'catalogs/experimental/codex/skills/', compatibility: 'Codex', kind: 'agent-specific', skills: [
+              ['feature-review', 'installed', 'first-party'], ['go-review', 'available', 'first-party'], ['product-manager', 'available', 'first-party']
+            ]}
+          ]
+        },
+        {
+          id: 'work-skills', name: 'work-skills', path: '~/dev/work-skills', branch: 'main', state: 'clean', head: 'f1c39aa',
+          catalogs: [
+            { name: 'skills/', compatibility: 'Claude · Codex · OpenCode', kind: 'common', skills: [
+              ['review-loop', 'partial', 'third-party'], ['release-check', 'available', 'first-party'], ['incident-brief', 'available', 'first-party']
+            ]}
+          ]
+        }
+      ];
+
+      const updates = [
+        { id: 'repo-agent-skills', kind: 'repository', name: 'agent-skills', summary: '2 commits · 6 files · 3 installed skills affected', status: 'available', action: 'Preview fast-forward' },
+        { id: 'vendored-last30days', kind: 'vendored', name: 'last30days', summary: 'Upstream changed 4 files since 83ea7b1', status: 'available', action: 'Preview vendored diff' },
+        { id: 'blocked-feature-review', kind: 'blocked', name: 'feature-review', summary: 'Local content differs from recorded baseline', status: 'blocked', action: 'Inspect modification' },
+        { id: 'unknown-autoreview', kind: 'provenance', name: 'autoreview', summary: 'Origin known; baseline revision not confirmed', status: 'unknown', action: 'Establish baseline' }
+      ];
+
+      const issues = [
+        { id: 'collision', severity: 'critical', skill: 'review-loop', code: 'install.physical_path_collision', summary: 'Claude Code target is a physical directory', repairable: false, evidence: '~/.claude/skills/review-loop cannot be replaced safely.', why: 'Installing or repairing this path would overwrite data the application does not own.' },
+        { id: 'foreign', severity: 'warning', skill: 'feature-review', code: 'variant.foreign_opencode_exposure', summary: 'OpenCode resolves the Codex-specific variant', repairable: false, evidence: '~/.agents/skills has higher compatibility precedence than ~/.claude/skills.', why: 'No explicit OpenCode-compatible variant exists, so usability is not guaranteed.' },
+        { id: 'modified', severity: 'warning', skill: 'feature-review', code: 'update.local_modification', summary: 'Update blocked by local modifications', repairable: false, evidence: 'Current SHA-256 differs from the recorded vendored baseline.', why: 'Updating would overwrite local changes.' },
+        { id: 'provenance', severity: 'info', skill: 'autoreview', code: 'provenance.incomplete', summary: 'Origin revision is not confirmed', repairable: true, evidence: 'ATTRIBUTION.md names openclaw/agent-skills but no baseline commit.', why: 'Future updates cannot be compared reliably until a baseline is established.' }
+      ];
+
+      const viewState = {
+        view: 'inventory',
+        selectedIndex: 0,
+        sourceIndex: 0,
+        updateIndex: 0,
+        issueIndex: 0,
+        query: '',
+        updatesChecked: false,
+        updateChecking: false,
+        setupStep: 0,
+        pendingPlan: null
+      };
+
+      const primaryPane = document.getElementById('primaryPane');
+      const detailPane = document.getElementById('detailPane');
+      const keybar = document.getElementById('keybar');
+      const setupDialog = document.getElementById('setupDialog');
+      const operationDialog = document.getElementById('operationDialog');
+      const helpDialog = document.getElementById('helpDialog');
+      const sourceDialog = document.getElementById('sourceDialog');
+      const toast = document.getElementById('toast');
+
+      const statusCell = status => {
+        const map = {
+          ok: ['state-ok', '✓', 'healthy'], warn: ['state-warn', '!', 'warning'], bad: ['state-bad', '×', 'broken'],
+          off: ['state-off', '—', 'not installed'], unmanaged: ['state-unmanaged', 'U', 'unmanaged']
+        };
+        const [klass, glyph, label] = map[status] || map.off;
+        return `<span class="agent-state ${klass}"><b>${glyph}</b><span>${label}</span></span>`;
+      };
+
+      const healthCell = health => `<span class="health-text health-${health}">${health === 'critical' ? '× critical' : health === 'warning' ? '! warning' : health === 'unmanaged' ? 'U unmanaged' : '✓ healthy'}</span>`;
+
+      const filteredInventory = () => inventory.filter(item => {
+        const q = viewState.query.trim().toLowerCase();
+        return !q || [item.name, item.source, item.health, item.variant].some(value => value.toLowerCase().includes(q));
+      });
+
+      function render() {
+        document.querySelectorAll('.tab').forEach(tab => tab.setAttribute('aria-selected', String(tab.dataset.view === viewState.view)));
+        if (viewState.view === 'inventory') renderInventory();
+        if (viewState.view === 'sources') renderSources();
+        if (viewState.view === 'updates') renderUpdates();
+        if (viewState.view === 'doctor') renderDoctor();
+        renderKeybar();
+      }
+
+      function renderInventory() {
+        const rows = filteredInventory();
+        viewState.selectedIndex = Math.min(viewState.selectedIndex, Math.max(0, rows.length - 1));
+        primaryPane.innerHTML = `
+          <div class="pane-header">
+            <div><span class="pane-heading">Global inventory</span><span class="pane-subtitle">${rows.length} of ${inventory.length} skills</span></div>
+            <div class="toolbar"><div class="filter-wrap"><span class="filter-prefix">/</span><input id="filterInput" class="filter-input" value="${viewState.query.replaceAll('&', '&amp;').replaceAll('"', '&quot;')}" placeholder="filter name, source, health"></div></div>
+          </div>
+          <div class="grid-head"><span>Skill</span><span>Source</span><span>Claude</span><span>Codex</span><span>OpenCode</span><span>Update</span><span>Health</span></div>
+          <div id="inventoryRows">${rows.map((item, index) => `
+            <button type="button" class="data-row ${index === viewState.selectedIndex ? 'selected' : ''}" data-row-index="${index}">
+              <span class="skill-name">${item.name}</span><span class="source-name">${item.source}</span>
+              <span>${statusCell(item.agents.claude)}</span><span>${statusCell(item.agents.codex)}</span><span>${statusCell(item.agents.opencode)}</span>
+              <span class="${item.update === 'available' ? 'state-warn' : item.update === 'blocked' ? 'state-bad' : 'source-name'}">${item.update}</span><span>${healthCell(item.health)}</span>
+            </button>`).join('')}</div>`;
+
+        const filter = document.getElementById('filterInput');
+        filter.addEventListener('input', event => { viewState.query = event.target.value; viewState.selectedIndex = 0; renderInventory(); });
+        document.getElementById('inventoryRows').addEventListener('click', event => {
+          const row = event.target.closest('[data-row-index]');
+          if (!row) return;
+          viewState.selectedIndex = Number(row.dataset.rowIndex);
+          renderInventory();
+        });
+        renderInventoryDetail(rows[viewState.selectedIndex]);
+      }
+
+      function renderInventoryDetail(item) {
+        if (!item) { detailPane.innerHTML = '<div class="empty-state"><div><div class="empty-glyph">⌕</div><strong>No matches</strong>Change the filter to show skills.</div></div>'; return; }
+        detailPane.innerHTML = `
+          <div class="detail-section"><div class="detail-kicker">Skill · ${item.catalog}</div><h2 class="detail-title">${item.name}</h2><p class="detail-description">${item.description}</p>
+            <div class="detail-actions"><button class="tui-button" data-action="uninstall">Uninstall [x]</button>${item.health === 'warning' || item.health === 'critical' ? '<button class="tui-button primary" data-action="repair">Review finding [r]</button>' : ''}</div>
+          </div>
+          <div class="detail-section"><div class="detail-kicker">Identity & provenance</div><dl class="meta-list">
+            <div class="meta-row"><dt>Source</dt><dd>${item.source}</dd></div><div class="meta-row"><dt>Variant</dt><dd>${item.variant}</dd></div><div class="meta-row"><dt>Provenance</dt><dd>${item.provenance}</dd></div><div class="meta-row"><dt>Update</dt><dd>${item.update}</dd></div>
+          </dl></div>
+          <div class="detail-section"><div class="detail-kicker">Effective installations</div><div class="path-list">${item.paths.map(([label, path, state]) => `<div class="path-line ${state}"><div class="path-label"><strong>${label}</strong><span class="${state === 'ok' ? 'state-ok' : state === 'bad' ? 'state-bad' : 'state-warn'}">${state === 'ok' ? 'healthy' : state === 'bad' ? 'blocked' : 'warning'}</span></div><div class="path-value">${path}</div></div>`).join('')}</div></div>
+          <div class="detail-section skill-doc"><div class="detail-kicker">SKILL.md preview</div><h3># ${item.name}</h3><p>${item.doc[0]}</p><ul>${item.doc.slice(1).map(line => `<li>${line}</li>`).join('')}</ul></div>`;
+        detailPane.querySelectorAll('[data-action]').forEach(button => button.addEventListener('click', () => {
+          if (button.dataset.action === 'uninstall') openPlan('uninstall', item);
+          if (button.dataset.action === 'repair') openIssueForSkill(item.name);
+        }));
+      }
+
+      function renderSources() {
+        const source = sources[viewState.sourceIndex];
+        primaryPane.innerHTML = `
+          <div class="pane-header"><div><span class="pane-heading">Source catalog</span><span class="pane-subtitle">${sources.length} local repositories</span></div><button type="button" class="tui-button primary" id="addSource">Add source [a]</button></div>
+          <div class="source-layout"><div class="source-list">${sources.map((item, index) => `<button type="button" class="source-row ${index === viewState.sourceIndex ? 'selected' : ''}" data-source-index="${index}"><span class="repo-name">${item.name}</span><div class="source-path">${item.path}</div><div class="source-status"><span class="state-ok">${item.state}</span><span>${item.branch}@${item.head}</span></div></button>`).join('')}</div>
+          <div class="catalog-area">${source.catalogs.map(catalog => `<section class="catalog-block"><div class="catalog-title"><span>${catalog.name}</span><span>${catalog.kind} · ${catalog.compatibility}</span></div><div class="catalog-skills">${catalog.skills.map(([name, status, origin]) => `<div class="catalog-skill"><span class="skill-name">${name}</span><span class="source-name">${origin}</span><span class="${status === 'installed' ? 'state-ok' : status === 'partial' ? 'state-warn' : 'state-off'}">${status}</span><button type="button" class="tui-button ${status === 'available' ? 'primary' : ''}" data-install-skill="${name}" ${status === 'installed' ? 'disabled' : ''}>${status === 'available' ? 'Install' : status}</button></div>`).join('')}</div></section>`).join('')}</div></div>`;
+        document.getElementById('addSource').addEventListener('click', openSourceDialog);
+        primaryPane.querySelectorAll('[data-source-index]').forEach(row => row.addEventListener('click', () => { viewState.sourceIndex = Number(row.dataset.sourceIndex); renderSources(); }));
+        primaryPane.querySelectorAll('[data-install-skill]').forEach(button => button.addEventListener('click', () => openPlan('install', { name: button.dataset.installSkill, source: source.name })));
+        renderSourceDetail(source);
+      }
+
+      function renderSourceDetail(source) {
+        const available = source.catalogs.flatMap(c => c.skills).filter(s => s[1] === 'available').length;
+        detailPane.innerHTML = `
+          <div class="detail-section"><div class="detail-kicker">Local Git repository</div><h2 class="detail-title">${source.name}</h2><p class="detail-description">${source.path}</p><div class="detail-actions"><button class="tui-button" id="refreshSource">Rescan</button><button class="tui-button danger" id="forgetSource">Forget [x]</button></div></div>
+          <div class="detail-section"><div class="detail-kicker">Repository state</div><dl class="meta-list"><div class="meta-row"><dt>Branch</dt><dd>${source.branch}</dd></div><div class="meta-row"><dt>HEAD</dt><dd>${source.head}</dd></div><div class="meta-row"><dt>Worktree</dt><dd class="state-ok">${source.state}</dd></div><div class="meta-row"><dt>Catalogs</dt><dd>${source.catalogs.length}</dd></div><div class="meta-row"><dt>Available</dt><dd>${available} skills</dd></div><div class="meta-row"><dt>Last fetched</dt><dd>never in this session</dd></div></dl></div>
+          <div class="detail-section"><div class="detail-kicker">Catalog policy</div><p class="detail-description">Catalog roots are confirmed explicitly. Only immediate child directories containing <code>SKILL.md</code> are candidates.</p></div>`;
+        document.getElementById('refreshSource').addEventListener('click', () => showToast(`${source.name} rescanned · no files changed`));
+        document.getElementById('forgetSource').addEventListener('click', () => openPlan('forget', source));
+      }
+
+      function renderUpdates() {
+        const selected = updates[viewState.updateIndex];
+        document.getElementById('updateCount').textContent = viewState.updatesChecked ? '2' : '—';
+        primaryPane.innerHTML = `
+          <div class="pane-header"><div><span class="pane-heading">Updates</span><span class="pane-subtitle">network access is explicit</span></div><button type="button" class="tui-button primary" id="checkUpdates" ${viewState.updateChecking ? 'disabled' : ''}>${viewState.updateChecking ? 'Checking…' : 'Check now [u]'}</button></div>
+          ${viewState.updateChecking ? '<div class="progress-line"><span></span></div>' : ''}
+          <div class="update-banner"><div><strong>${viewState.updatesChecked ? 'Last checked just now' : 'No update check this session'}</strong><p>${viewState.updatesChecked ? '2 updates available · 2 require attention' : 'Cached source state is shown until you request a fetch.'}</p></div><span class="${viewState.updatesChecked ? 'state-ok' : 'state-off'}">${viewState.updatesChecked ? 'fetch complete' : 'offline'}</span></div>
+          ${viewState.updatesChecked ? renderUpdateRows() : '<div class="empty-state"><div><div class="empty-glyph">⇣</div><strong>Updates are never checked automatically</strong>Press <b>u</b> or choose Check now to fetch configured remotes.</div></div>'}`;
+        document.getElementById('checkUpdates').addEventListener('click', checkUpdates);
+        primaryPane.querySelectorAll('[data-update-index]').forEach(row => row.addEventListener('click', () => { viewState.updateIndex = Number(row.dataset.updateIndex); renderUpdates(); }));
+        renderUpdateDetail(viewState.updatesChecked ? selected : null);
+      }
+
+      function renderUpdateRows() {
+        const groups = [['Available', ['repository', 'vendored']], ['Blocked', ['blocked']], ['Provenance', ['provenance']]];
+        return groups.map(([label, kinds]) => `<div class="group-label">${label}</div>${updates.map((item, index) => ({item, index})).filter(({item}) => kinds.includes(item.kind)).map(({item, index}) => `<button type="button" class="update-row ${index === viewState.updateIndex ? 'selected' : ''}" data-update-index="${index}"><span class="${item.status === 'available' ? 'state-ok' : item.status === 'blocked' ? 'state-bad' : 'state-warn'}">${item.status}</span><span class="skill-name">${item.name}</span><span class="source-name">${item.summary}</span><span>${item.kind}</span></button>`).join('')}`).join('');
+      }
+
+      function renderUpdateDetail(item) {
+        if (!item) {
+          detailPane.innerHTML = '<div class="empty-state"><div><div class="empty-glyph">◷</div><strong>No network access yet</strong>Run an explicit update check to populate candidates.</div></div>';
+          return;
+        }
+        const canApply = item.status === 'available';
+        detailPane.innerHTML = `<div class="detail-section"><div class="detail-kicker">${item.kind} update</div><h2 class="detail-title">${item.name}</h2><p class="detail-description">${item.summary}</p><div class="detail-actions"><button class="tui-button ${canApply ? 'primary' : ''}" id="previewUpdate">${item.action}</button></div></div>
+          <div class="detail-section"><div class="detail-kicker">Safety gates</div><div class="path-list">
+          <div class="path-line ok"><div class="path-label"><strong>Network</strong><span class="state-ok">explicit</span></div><div class="path-value">Fetch occurred only after the update command.</div></div>
+          <div class="path-line ${canApply ? 'ok' : 'bad'}"><div class="path-label"><strong>Precondition</strong><span class="${canApply ? 'state-ok' : 'state-bad'}">${canApply ? 'passed' : 'blocked'}</span></div><div class="path-value">${canApply ? 'Source is clean and the operation can be previewed.' : 'No write plan can be built until this finding is resolved.'}</div></div>
+          </div></div>`;
+        document.getElementById('previewUpdate').addEventListener('click', () => canApply ? openPlan('update', item) : openIssueForSkill(item.name));
+      }
+
+      function renderDoctor() {
+        const issue = issues[viewState.issueIndex];
+        primaryPane.innerHTML = `<div class="pane-header"><div><span class="pane-heading">Doctor</span><span class="pane-subtitle">${issues.length} findings · issue-first</span></div><button type="button" class="tui-button" id="rescanDoctor">Rescan</button></div>
+          ${['critical', 'warning', 'info'].map(severity => `<div class="group-label">${severity}</div>${issues.map((item, index) => ({item, index})).filter(({item}) => item.severity === severity).map(({item, index}) => `<button type="button" class="issue-row ${index === viewState.issueIndex ? 'selected' : ''}" data-issue-index="${index}"><span class="severity severity-${item.severity}">${item.severity}</span><span class="skill-name">${item.skill}</span><span class="source-name">${item.summary}</span><span>${item.repairable ? 'repairable' : 'manual'}</span></button>`).join('')}`).join('')}`;
+        document.getElementById('rescanDoctor').addEventListener('click', () => showToast('Doctor rescan complete · 4 findings remain'));
+        primaryPane.querySelectorAll('[data-issue-index]').forEach(row => row.addEventListener('click', () => { viewState.issueIndex = Number(row.dataset.issueIndex); renderDoctor(); }));
+        renderIssueDetail(issue);
+      }
+
+      function renderIssueDetail(issue) {
+        detailPane.innerHTML = `<div class="detail-section"><div class="detail-kicker">${issue.severity} · ${issue.code}</div><h2 class="detail-title">${issue.skill}</h2><p class="detail-description">${issue.summary}</p><div class="detail-actions">${issue.repairable ? '<button class="tui-button primary" id="repairIssue">Plan repair [r]</button>' : '<button class="tui-button" id="inspectIssue">Manual resolution</button>'}</div></div>
+          <div class="detail-section"><div class="detail-kicker">Observed</div><p>${issue.evidence}</p></div><div class="detail-section"><div class="detail-kicker">Why it matters</div><p>${issue.why}</p></div>
+          <div class="detail-section"><div class="detail-kicker">Safety decision</div><div class="path-line ${issue.repairable ? 'ok' : 'bad'}"><div class="path-label"><strong>${issue.repairable ? 'Application can plan this change' : 'Application will not mutate this state'}</strong><span class="${issue.repairable ? 'state-ok' : 'state-bad'}">${issue.repairable ? 'preview required' : 'blocked'}</span></div><div class="path-value">${issue.repairable ? 'The exact metadata change will be shown before confirmation.' : 'No overwrite, delete, or automatic agent-config edit is permitted.'}</div></div></div>`;
+        const repair = document.getElementById('repairIssue');
+        const inspect = document.getElementById('inspectIssue');
+        if (repair) repair.addEventListener('click', () => openPlan('repair', issue));
+        if (inspect) inspect.addEventListener('click', () => showToast('Manual resolution guidance selected · no changes made'));
+      }
+
+      function renderKeybar() {
+        const common = '<span><kbd>1–4</kbd>views</span><span><kbd>j/k</kbd>move</span><span><kbd>Enter</kbd>details</span>';
+        const byView = {
+          inventory: '<span><kbd>/</kbd>filter</span><span><kbd>x</kbd>uninstall</span>',
+          sources: '<span><kbd>a</kbd>add source</span><span><kbd>i</kbd>install</span><span><kbd>x</kbd>forget</span>',
+          updates: '<span><kbd>u</kbd>check / update</span>',
+          doctor: '<span><kbd>r</kbd>repair</span>'
+        };
+        keybar.innerHTML = `${common}${byView[viewState.view]}<span><kbd>?</kbd>help</span><span><kbd>q</kbd>quit</span>`;
+      }
+
+      function openPlan(type, item) {
+        const name = item.name || item.skill || 'selected item';
+        const plans = {
+          install: {
+            title: `Install ${name}`, kind: 'install · 3 targets', summary: `Create individual symlinks for ${name} on all compatible configured agents.`,
+            steps: [
+              ['Validate source', `read ${item.source || 'agent-skills'}/skills/${name}/SKILL.md`],
+              ['Create Claude link', `~/.claude/skills/${name} → ~/dev/${item.source || 'agent-skills'}/skills/${name}`],
+              ['Create Codex link', `~/.agents/skills/${name} → ~/dev/${item.source || 'agent-skills'}/skills/${name}`],
+              ['Create OpenCode link', `~/.config/opencode/skills/${name} → ~/dev/${item.source || 'agent-skills'}/skills/${name}`],
+              ['Verify', 'rescan all three roots and compute effective resolution']
+            ]
+          },
+          uninstall: {
+            title: `Uninstall ${name}`, kind: 'uninstall · managed links only', summary: `Remove only verified Skilled symlinks for ${name}. Source content remains untouched.`,
+            steps: [
+              ['Verify receipts', `match operation receipts for */skills/${name}`],
+              ['Remove links', `unlink matching managed symlinks only`],
+              ['Verify', 'rescan affected roots; never delete source content']
+            ]
+          },
+          update: {
+            title: `Update ${name}`, kind: `${item.kind || 'source'} update`, summary: item.summary || `Apply a clean, explicitly checked update for ${name}.`,
+            steps: item.kind === 'vendored' ? [
+              ['Verify baseline', 'compare vendored SHA-256 with recorded baseline'], ['Apply subtree', `replace only skills/${name} from confirmed upstream`], ['Record provenance', 'store new origin revision and content hash'], ['Verify', 'rescan all installed links; leave repository dirty']
+            ] : [
+              ['Verify repository', 'require clean index, clean worktree, attached branch'], ['Fast-forward', 'git merge --ff-only origin/main'], ['Rescan catalogs', 'identify every affected installed skill'], ['Verify', 'recompute all effective agent resolutions']
+            ]
+          },
+          repair: {
+            title: `Repair ${name}`, kind: 'repair · owned state only', summary: `Apply the narrow repair permitted for ${name} after ownership and path checks.`,
+            steps: [
+              ['Verify ownership', 'match exact path to an active operation receipt'], ['Apply repair', name === 'autoreview' ? 'adopt current content hash as future provenance baseline' : 'atomically replace the recorded managed symlink'], ['Verify', 'rescan and require observed state to match the plan']
+            ]
+          },
+          forget: {
+            title: `Forget ${name}`, kind: 'metadata only', summary: `Remove ${name} from the source catalog. No repository or skill files are deleted.`,
+            steps: [['Check links', 'block if active managed links still reference this source'], ['Remove metadata', 'delete source, catalog, cache, and inactive receipt records'], ['Verify', 'confirm checkout remains on disk']]
+          }
+        };
+        const plan = plans[type];
+        viewState.pendingPlan = { type, item, plan };
+        document.getElementById('operationTitle').textContent = plan.title;
+        document.getElementById('operationKind').textContent = plan.kind;
+        document.getElementById('operationBody').innerHTML = `<div class="plan-summary">${plan.summary}</div><div class="plan-list">${plan.steps.map(([label, command], index) => `<div class="plan-step"><span class="plan-index">${String(index + 1).padStart(2, '0')}</span><span><strong>${label}</strong><span class="plan-command">${command}</span></span></div>`).join('')}</div><ul class="plan-preconditions"><li>No existing physical directory or unknown symlink is replaced.</li><li>Paths are absolute and beneath the documented agent roots.</li><li>The prototype simulates apply; it never changes your filesystem.</li></ul>`;
+        operationDialog.showModal();
+      }
+
+      function applyPlan() {
+        const pending = viewState.pendingPlan;
+        operationDialog.close();
+        if (!pending) return;
+        showToast(`${pending.plan.title} verified in prototype · no filesystem changes made`);
+      }
+
+      function checkUpdates() {
+        if (viewState.updateChecking) return;
+        viewState.updateChecking = true;
+        document.getElementById('sessionLabel').textContent = 'fetching configured remotes…';
+        renderUpdates();
+        window.setTimeout(() => {
+          viewState.updateChecking = false;
+          viewState.updatesChecked = true;
+          viewState.updateIndex = 0;
+          document.getElementById('sessionLabel').textContent = 'update check complete · just now';
+          renderUpdates();
+          showToast('Explicit update check complete · 2 updates available');
+        }, 900);
+      }
+
+      function openIssueForSkill(skill) {
+        const index = issues.findIndex(issue => issue.skill === skill);
+        if (index >= 0) viewState.issueIndex = index;
+        switchView('doctor');
+      }
+
+      function switchView(view) {
+        viewState.view = view;
+        viewState.query = '';
+        render();
+      }
+
+      function moveSelection(delta) {
+        const lengths = { inventory: filteredInventory().length, sources: sources.length, updates: viewState.updatesChecked ? updates.length : 0, doctor: issues.length };
+        const keys = { inventory: 'selectedIndex', sources: 'sourceIndex', updates: 'updateIndex', doctor: 'issueIndex' };
+        const length = lengths[viewState.view];
+        if (!length) return;
+        const key = keys[viewState.view];
+        viewState[key] = (viewState[key] + delta + length) % length;
+        render();
+        requestAnimationFrame(() => document.querySelector('.data-row.selected, .source-row.selected, .update-row.selected, .issue-row.selected')?.scrollIntoView({block: 'nearest'}));
+      }
+
+      function showToast(message) {
+        toast.textContent = message;
+        toast.classList.add('visible');
+        window.clearTimeout(showToast.timer);
+        showToast.timer = window.setTimeout(() => toast.classList.remove('visible'), 3000);
+      }
+
+      function openSourceDialog() {
+        document.getElementById('detectedSource').hidden = true;
+        document.getElementById('sourceScan').textContent = 'Detect catalogs';
+        document.getElementById('sourceHint').textContent = 'No files are read by this HTML prototype.';
+        sourceDialog.showModal();
+      }
+
+      function renderSetup() {
+        const steps = [
+          {
+            title: 'Welcome to Skilled',
+            copy: 'Manage and diagnose global skills without launching an agent. Every write is planned, previewed, confirmed, and verified.',
+            body: '<div class="wizard-callout">Safety default: physical directories and unknown symlinks are never overwritten. The filesystem remains current truth.</div>'
+          },
+          {
+            title: 'Choose configured agents',
+            copy: 'The prototype detected the three version-one adapters. All are selected by default.',
+            body: `<div class="choice-list"><label class="choice"><input type="checkbox" checked><span><strong>Claude Code</strong><small>~/.claude/skills</small></span><span class="choice-status">detected</span></label><label class="choice"><input type="checkbox" checked><span><strong>Codex</strong><small>~/.agents/skills</small></span><span class="choice-status">detected</span></label><label class="choice"><input type="checkbox" checked><span><strong>OpenCode</strong><small>~/.config/opencode/skills + compatibility roots</small></span><span class="choice-status">detected</span></label></div>`
+          },
+          {
+            title: 'Confirm local repositories',
+            copy: 'Discovery combines explicit paths, bounded development roots, existing symlink targets, and lockfile hints.',
+            body: `<div class="choice-list"><label class="choice"><input type="checkbox" checked><span><strong>~/dev/agent-skills</strong><small>Git · main · 3 catalog roots</small></span><span class="choice-status">clean</span></label><label class="choice"><input type="checkbox" checked><span><strong>~/dev/work-skills</strong><small>Git · main · 1 catalog root</small></span><span class="choice-status">clean</span></label></div>`
+          },
+          {
+            title: 'Review detected catalogs',
+            copy: 'Catalog roots and compatibility are confirmed explicitly. Immediate child directories containing SKILL.md become available skills.',
+            body: `<div class="choice-list"><div class="choice"><span class="state-ok">✓</span><span><strong>agent-skills/skills</strong><small>15 common skills</small></span><span>all agents</span></div><div class="choice"><span class="state-ok">✓</span><span><strong>…/experimental/claude-code/skills</strong><small>3 agent-specific variants</small></span><span>Claude</span></div><div class="choice"><span class="state-ok">✓</span><span><strong>…/experimental/codex/skills</strong><small>3 agent-specific variants</small></span><span>Codex</span></div></div>`
+          },
+          {
+            title: 'Setup scan complete',
+            copy: 'You can enter Inventory with unresolved findings. Setup orients; it never holds the user hostage.',
+            body: `<div class="choice-list"><div class="choice"><span class="state-ok">✓</span><span><strong>2 repositories · 4 catalogs</strong><small>22 available definitions</small></span><span></span></div><div class="choice"><span class="state-ok">✓</span><span><strong>6 installed skills</strong><small>15 healthy agent resolutions</small></span><span></span></div><div class="choice"><span class="state-warn">!</span><span><strong>4 Doctor findings</strong><small>1 critical · 2 warnings · 1 info</small></span><span></span></div></div>`
+          }
+        ];
+        const step = steps[viewState.setupStep];
+        document.getElementById('setupBody').innerHTML = `<div class="wizard-progress">${steps.map((_, index) => `<span class="wizard-step ${index < viewState.setupStep ? 'done' : index === viewState.setupStep ? 'active' : ''}"></span>`).join('')}</div><div class="wizard-number">STEP ${viewState.setupStep + 1} / ${steps.length}</div><h2 class="wizard-title" id="setupTitle">${step.title}</h2><p class="wizard-copy">${step.copy}</p>${step.body}`;
+        document.getElementById('setupBack').disabled = viewState.setupStep === 0;
+        document.getElementById('setupNext').textContent = viewState.setupStep === steps.length - 1 ? 'Enter inventory' : 'Continue';
+      }
+
+      const helpItems = [
+        ['1–4', 'Switch primary view'], ['Tab', 'Move between panes'], ['j / k', 'Move selection'], ['Enter', 'Open selected details'], ['/', 'Focus inventory filter'], ['Space', 'Toggle multi-select'], ['a', 'Add a local source'], ['i', 'Install selected skill'], ['u', 'Check or apply updates'], ['r', 'Plan a repair'], ['x', 'Uninstall or forget'], ['Esc', 'Close modal / go back'], ['?', 'Open this help'], ['q', 'Quit application']
+      ];
+      document.getElementById('helpGrid').innerHTML = helpItems.map(([key, label]) => `<div class="help-row"><code>${key}</code><span>${label}</span></div>`).join('');
+
+      document.querySelectorAll('.tab').forEach(tab => tab.addEventListener('click', () => switchView(tab.dataset.view)));
+      document.getElementById('operationCancel').addEventListener('click', () => operationDialog.close());
+      document.getElementById('operationApply').addEventListener('click', applyPlan);
+      document.getElementById('helpClose').addEventListener('click', () => helpDialog.close());
+      document.getElementById('sourceCancel').addEventListener('click', () => sourceDialog.close());
+      document.getElementById('sourceScan').addEventListener('click', event => {
+        const detected = document.getElementById('detectedSource');
+        if (detected.hidden) {
+          detected.hidden = false;
+          event.target.textContent = 'Register demo source';
+          document.getElementById('sourceHint').textContent = '2 catalog roots detected · confirmation required';
+        } else {
+          sourceDialog.close();
+          showToast('Demo source registered · no repository was changed');
+        }
+      });
+      document.getElementById('setupBack').addEventListener('click', () => { viewState.setupStep = Math.max(0, viewState.setupStep - 1); renderSetup(); });
+      document.getElementById('setupNext').addEventListener('click', () => {
+        if (viewState.setupStep < 4) { viewState.setupStep += 1; renderSetup(); }
+        else { setupDialog.close(); render(); }
+      });
+      document.getElementById('setupSkip').addEventListener('click', () => { setupDialog.close(); render(); });
+
+      document.addEventListener('keydown', event => {
+        const activeTag = document.activeElement?.tagName;
+        const typing = activeTag === 'INPUT' || activeTag === 'TEXTAREA';
+        if (typing && event.key !== 'Escape') return;
+        if (event.key === 'Escape') {
+          if (operationDialog.open) operationDialog.close();
+          else if (helpDialog.open) helpDialog.close();
+          else if (sourceDialog.open) sourceDialog.close();
+          return;
+        }
+        if (setupDialog.open || operationDialog.open || helpDialog.open || sourceDialog.open) return;
+        if (['1', '2', '3', '4'].includes(event.key)) {
+          event.preventDefault();
+          switchView(['inventory', 'sources', 'updates', 'doctor'][Number(event.key) - 1]);
+        } else if (event.key === 'j' || event.key === 'ArrowDown') { event.preventDefault(); moveSelection(1); }
+        else if (event.key === 'k' || event.key === 'ArrowUp') { event.preventDefault(); moveSelection(-1); }
+        else if (event.key === '/' && viewState.view === 'inventory') { event.preventDefault(); document.getElementById('filterInput')?.focus(); }
+        else if (event.key === '?') { event.preventDefault(); helpDialog.showModal(); }
+        else if (event.key === 'a' && viewState.view === 'sources') { event.preventDefault(); openSourceDialog(); }
+        else if (event.key === 'i' && viewState.view === 'sources') { event.preventDefault(); showToast('Select an available skill and choose Install'); }
+        else if (event.key === 'u' && viewState.view === 'updates') {
+          event.preventDefault();
+          if (!viewState.updatesChecked) checkUpdates();
+          else if (updates[viewState.updateIndex].status === 'available') openPlan('update', updates[viewState.updateIndex]);
+          else openIssueForSkill(updates[viewState.updateIndex].name);
+        }
+        else if (event.key === 'r' && viewState.view === 'doctor') { event.preventDefault(); issues[viewState.issueIndex].repairable ? openPlan('repair', issues[viewState.issueIndex]) : showToast('Selected finding requires manual resolution'); }
+        else if (event.key === 'x' && viewState.view === 'inventory') { event.preventDefault(); openPlan('uninstall', filteredInventory()[viewState.selectedIndex]); }
+        else if (event.key === 'x' && viewState.view === 'sources') { event.preventDefault(); openPlan('forget', sources[viewState.sourceIndex]); }
+        else if (event.key === 'q') { event.preventDefault(); showToast('Prototype quit requested · browser remains open'); }
+      });
+
+      renderSetup();
+      render();
+      if (document.readyState === 'complete') setupDialog.showModal();
+      else window.addEventListener('load', () => setupDialog.showModal(), { once: true });
+    })();
+  </script>
+</body>
+</html>

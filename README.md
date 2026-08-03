@@ -8,6 +8,14 @@ The project is early in version-one development. The current build establishes
 the setup, terminal, and local source-registration foundation; it does not yet
 install, repair, update, or uninstall skills.
 
+## Design references
+
+- [GitHub issue #3](https://github.com/brian-bell/skilled/issues/3) is the
+  authoritative version-one product and technical specification.
+- [`spec/tui-prototype.html`](spec/tui-prototype.html) is the tracked,
+  interactive visual reference. It uses demo data and performs no filesystem
+  writes.
+
 ## What works today
 
 - A seven-step first-run setup flow.

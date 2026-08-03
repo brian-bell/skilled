@@ -24,7 +24,9 @@ setup reset, responsive size handling, and guarded terminal restoration.
 Source registration, installation inventory, Doctor findings, and all
 filesystem or Git mutation workflows are not implemented yet. Do not turn the
 current wizard placeholders into behavior unless the active Beads issue places
-that work in scope. `spec/SPEC.md` is the product and technical source of truth.
+that work in scope. [GitHub issue #3](https://github.com/brian-bell/skilled/issues/3)
+is the product and technical source of truth. The tracked
+`spec/tui-prototype.html` is the visual design reference.
 
 ## Build and Test
 
