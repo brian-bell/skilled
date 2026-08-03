@@ -329,6 +329,68 @@ fn catalog_confirmation_keeps_the_focused_root_visible() {
     assert!(!screen.contains("set-0"));
 }
 
+#[test]
+fn wrapped_catalog_confirmation_keeps_focus_error_and_actions_visible() {
+    let temporary = tempfile::tempdir().expect("temporary application directory");
+    let repository = temporary
+        .path()
+        .join("a-deliberately-long-source-repository-directory-name");
+    for index in 0..2 {
+        let name = format!("skill-{index}");
+        let directory = repository
+            .join("catalogs")
+            .join(format!(
+                "set-{index}-with-a-deliberately-long-catalog-root-name"
+            ))
+            .join("claude-code/skills")
+            .join(&name);
+        fs::create_dir_all(&directory).expect("create catalog fixture");
+        fs::write(
+            directory.join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: Fixture\n---\n# Fixture\n"),
+        )
+        .expect("write skill");
+    }
+    git(&repository, &["init", "-b", "main"]);
+    git(&repository, &["config", "user.name", "Skilled Test"]);
+    git(
+        &repository,
+        &["config", "user.email", "skilled@example.test"],
+    );
+    git(&repository, &["add", "."]);
+    git(&repository, &["commit", "-m", "fixture"]);
+    let mut app = SkilledApp::open(AppEnvironment::new(
+        temporary.path().join("home"),
+        temporary.path().join("data"),
+        "",
+    ))
+    .expect("open application");
+    for _ in 0..7 {
+        dispatch(&mut app, Action::Continue);
+    }
+    app.update(Action::OpenSources);
+    app.update(Action::BeginAddSource);
+    for character in repository.to_string_lossy().chars() {
+        app.update(Action::AppendSourcePath(character));
+    }
+    dispatch(&mut app, Action::SubmitSourcePath);
+    app.update(Action::ToggleCatalogIncluded);
+    app.update(Action::MoveCatalogSelection(1));
+    app.update(Action::ToggleCatalogIncluded);
+    app.update(Action::ConfirmPendingSource);
+
+    let screen = render(&app, 80, 24);
+
+    assert_eq!(app.focused_catalog(), 1);
+    assert!(screen.contains("> [ ]"), "{screen}");
+    assert!(screen.contains("catalogs/set-1"), "{screen}");
+    assert!(
+        screen.contains("Select at least one catalog root to register."),
+        "{screen}"
+    );
+    assert!(screen.contains("Enter registers metadata only"), "{screen}");
+}
+
 fn render(app: &SkilledApp, width: u16, height: u16) -> String {
     let backend = TestBackend::new(width, height);
     let mut terminal = Terminal::new(backend).expect("create test terminal");

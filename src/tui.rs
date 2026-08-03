@@ -467,26 +467,113 @@ fn render_source_path_entry(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp)
 fn render_catalog_confirmation(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
     let popup = centered_rect(76, 16, area);
     frame.render_widget(Clear, popup);
-    frame.render_widget(
-        Paragraph::new(catalog_confirmation_lines(app))
-            .wrap(Wrap { trim: false })
-            .block(
-                Block::default()
-                    .title(" Confirm catalogs ")
-                    .borders(Borders::ALL)
-                    .padding(Padding::new(2, 2, 1, 1)),
-            ),
-        popup,
+    let block = Block::default()
+        .title(" Confirm catalogs ")
+        .borders(Borders::ALL)
+        .padding(Padding::new(2, 2, 1, 1));
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    let (metadata, catalogs, error, footer) = catalog_confirmation_sections(app);
+    let wrap = Wrap { trim: false };
+    let viewport_height = usize::from(inner.height);
+    let footer_height = Paragraph::new(footer.clone())
+        .wrap(wrap)
+        .line_count(inner.width)
+        .min(viewport_height);
+    let error_height = Paragraph::new(error.clone())
+        .wrap(wrap)
+        .line_count(inner.width)
+        .min(viewport_height.saturating_sub(footer_height));
+    let focused_height = catalogs
+        .get(app.focused_catalog())
+        .map(|line| wrapped_line_count(line, inner.width))
+        .unwrap_or(0)
+        .min(
+            viewport_height
+                .saturating_sub(footer_height)
+                .saturating_sub(error_height),
+        );
+    let metadata_height = Paragraph::new(metadata.clone())
+        .wrap(wrap)
+        .line_count(inner.width)
+        .min(
+            viewport_height
+                .saturating_sub(footer_height)
+                .saturating_sub(error_height)
+                .saturating_sub(focused_height),
+        );
+    let catalog_height = viewport_height
+        .saturating_sub(metadata_height)
+        .saturating_sub(error_height)
+        .saturating_sub(footer_height);
+    let visible_catalogs = visible_wrapped_lines(
+        &catalogs,
+        app.focused_catalog(),
+        inner.width,
+        catalog_height,
     );
+    let visible_catalog_height = Paragraph::new(visible_catalogs.clone())
+        .wrap(wrap)
+        .line_count(inner.width)
+        .min(catalog_height);
+    let mut spare_rows = viewport_height
+        .saturating_sub(metadata_height)
+        .saturating_sub(visible_catalog_height)
+        .saturating_sub(error_height)
+        .saturating_sub(footer_height);
+    let metadata_gap = !metadata.is_empty() && !visible_catalogs.is_empty() && spare_rows > 0;
+    spare_rows = spare_rows.saturating_sub(usize::from(metadata_gap));
+    let error_gap = !error.is_empty() && spare_rows > 0;
+    spare_rows = spare_rows.saturating_sub(usize::from(error_gap));
+    let footer_gap = !footer.is_empty() && spare_rows > 0;
+
+    let mut y = inner.y;
+    render_confirmation_section(frame, inner, &mut y, metadata_height, metadata);
+    y = y.saturating_add(u16::from(metadata_gap));
+    render_confirmation_section(
+        frame,
+        inner,
+        &mut y,
+        visible_catalog_height,
+        visible_catalogs,
+    );
+    y = y.saturating_add(u16::from(error_gap));
+    render_confirmation_section(frame, inner, &mut y, error_height, error);
+    y = y.saturating_add(u16::from(footer_gap));
+    render_confirmation_section(frame, inner, &mut y, footer_height, footer);
 }
 
 fn catalog_confirmation_lines(app: &SkilledApp) -> Vec<Line<'static>> {
-    let mut lines = vec![Line::from(
+    let (mut lines, catalogs, error, footer) = catalog_confirmation_sections(app);
+    lines.push(Line::default());
+    let capacity = 2;
+    let start = visible_window_start(app.focused_catalog(), capacity);
+    lines.extend(catalogs.into_iter().skip(start).take(capacity));
+    if !error.is_empty() {
+        lines.push(Line::default());
+        lines.extend(error);
+    }
+    lines.push(Line::default());
+    lines.extend(footer);
+    lines
+}
+
+fn catalog_confirmation_sections(
+    app: &SkilledApp,
+) -> (
+    Vec<Line<'static>>,
+    Vec<Line<'static>>,
+    Vec<Line<'static>>,
+    Vec<Line<'static>>,
+) {
+    let mut metadata = vec![Line::from(
         "Confirm the resolved repository, roots, and compatible agents.",
     )];
+    let mut catalogs = Vec::new();
     if let Some(preview) = app.pending_source() {
         let source = preview.inspected();
-        lines.extend([
+        metadata.extend([
             Line::from(format!(
                 "Repository: {}",
                 terminal_safe(&source.git_top_level().display().to_string())
@@ -497,18 +584,9 @@ fn catalog_confirmation_lines(app: &SkilledApp) -> Vec<Line<'static>> {
                 &source.head()[..source.head().len().min(8)],
                 dirty_label(source.dirty())
             )),
-            Line::default(),
         ]);
-        let capacity = 2;
-        let start = visible_window_start(app.focused_catalog(), capacity);
-        for (index, catalog) in preview
-            .catalogs()
-            .iter()
-            .enumerate()
-            .skip(start)
-            .take(capacity)
-        {
-            lines.push(Line::from(format!(
+        for (index, catalog) in preview.catalogs().iter().enumerate() {
+            catalogs.push(Line::from(format!(
                 "{} [{}] {}  {:?}  C:{} X:{} O:{}",
                 if index == app.focused_catalog() {
                     ">"
@@ -524,19 +602,36 @@ fn catalog_confirmation_lines(app: &SkilledApp) -> Vec<Line<'static>> {
             )));
         }
     }
-    if let Some(error) = app.source_error() {
-        lines.push(Line::default());
-        lines.push(Line::styled(
-            terminal_safe(error),
+    let mut error = Vec::new();
+    if let Some(message) = app.source_error() {
+        error.push(Line::styled(
+            terminal_safe(message),
             Style::default().fg(Color::Red),
         ));
     }
-    lines.extend([
-        Line::default(),
+    let footer = vec![
         Line::from("Space include · c classification · 1/2/3 compatibility"),
         Line::from("Enter registers metadata only · Esc cancels"),
-    ]);
-    lines
+    ];
+    (metadata, catalogs, error, footer)
+}
+
+fn render_confirmation_section(
+    frame: &mut Frame<'_>,
+    inner: Rect,
+    y: &mut u16,
+    height: usize,
+    lines: Vec<Line<'static>>,
+) {
+    let height = u16::try_from(height).unwrap_or(u16::MAX);
+    if height == 0 {
+        return;
+    }
+    frame.render_widget(
+        Paragraph::new(lines).wrap(Wrap { trim: false }),
+        Rect::new(inner.x, *y, inner.width, height),
+    );
+    *y = y.saturating_add(height);
 }
 
 fn yes_no(value: bool) -> &'static str {

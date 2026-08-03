@@ -466,7 +466,7 @@ pub fn propose_catalogs(git_top_level: &Path) -> Result<Vec<CatalogProposal>> {
         children.sort();
         children.reverse();
         for child in children {
-            if child.file_name() == Some(OsStr::new(".git")) {
+            if is_ignored_scan_directory(&child) {
                 continue;
             }
             if let Some((classification, compatibility)) = catalog_defaults(&git_top_level, &child)
@@ -491,6 +491,13 @@ pub fn propose_catalogs(git_top_level: &Path) -> Result<Vec<CatalogProposal>> {
     }
     proposals.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
     Ok(proposals)
+}
+
+fn is_ignored_scan_directory(directory: &Path) -> bool {
+    matches!(
+        directory.file_name().and_then(OsStr::to_str),
+        Some(".git" | "node_modules" | "target")
+    )
 }
 
 fn catalog_defaults(

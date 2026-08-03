@@ -166,6 +166,26 @@ fn a_large_valid_catalog_is_not_counted_twice() {
 }
 
 #[test]
+fn generated_dependency_trees_do_not_exhaust_catalog_discovery() {
+    let temporary = tempfile::tempdir().expect("temporary source repository");
+    let repository = temporary.path();
+    write_skill(repository.join("skills/portable/SKILL.md"), "portable");
+    let generated = repository.join("node_modules");
+    fs::create_dir_all(&generated).expect("create unrelated generated tree");
+    for index in 0..16_384 {
+        fs::write(generated.join(format!("generated-{index}")), "fixture")
+            .expect("write generated entry");
+    }
+
+    let catalogs = propose_catalogs(repository).expect("preserve completed catalog proposal");
+
+    assert_eq!(catalogs.len(), 1);
+    assert_eq!(catalogs[0].relative_path(), std::path::Path::new("skills"));
+    assert_eq!(catalogs[0].candidates().len(), 1);
+    assert_eq!(catalogs[0].candidates()[0].directory_name(), "portable");
+}
+
+#[test]
 fn shared_agent_roots_include_opencode_in_their_defaults() {
     let temporary = tempfile::tempdir().expect("temporary source repository");
     let repository = temporary.path();
