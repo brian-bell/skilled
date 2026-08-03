@@ -61,17 +61,21 @@ This protocol applies when ending a Beads implementation workflow. It is subordi
 ## Project Status
 
 Skilled is an early Rust 2024 and Ratatui terminal application for inspecting
-and eventually managing global coding-agent skills. The current implementation
-covers the first vertical slice only: first-run setup, agent detection and
-selection, SQLite-backed setup persistence, an empty Inventory view, Settings
-setup reset, responsive size handling, and guarded terminal restoration.
+and eventually managing global coding-agent skills. Implemented so far:
+first-run setup, agent detection and selection, SQLite-backed setup
+persistence, local Git source registration with catalog confirmation, Sources
+browsing of registered sources and their skill variants, an empty Inventory
+view, Settings setup reset, responsive size handling, and guarded terminal
+restoration.
 
-Source registration, installation inventory, Doctor findings, and all
-filesystem or Git mutation workflows are not implemented yet. Do not turn the
-current wizard placeholders into behavior unless the active Beads issue places
-that work in scope. [GitHub issue #3](https://github.com/brian-bell/skilled/issues/3)
-is the product and technical source of truth. The tracked
-`spec/tui-prototype.html` is the visual design reference.
+Installation inventory, Doctor findings, Updates, contextual help, and every
+filesystem or network mutation beyond the private metadata database are not
+implemented yet. Do not turn the current placeholders into behavior unless the
+active Beads issue places that work in scope, and do not display a count,
+finding, status, or key hint the code cannot currently produce.
+[GitHub issue #3](https://github.com/brian-bell/skilled/issues/3) is the
+product and technical source of truth. The tracked `spec/tui-prototype.html` is
+the visual design reference.
 
 ## Build and Test
 
@@ -87,7 +91,10 @@ cargo clippy --all-targets --all-features -- -D warnings
 
 Tests use temporary homes and application-data directories. Never point a test
 at the real user home or real agent skill roots. Ratatui layouts are verified
-with Insta snapshots under `tests/snapshots/`.
+two ways: Insta snapshots under `tests/snapshots/` capture the text of a whole
+screen, and `tests/tui_shell.rs` asserts styles cell by cell against the
+rendered buffer. A status or focus signal needs both, because colour alone is
+not an acceptable cue.
 
 ## Application Architecture
 
@@ -96,10 +103,23 @@ with Insta snapshots under `tests/snapshots/`.
 - `src/agents.rs`: Claude Code, Codex, and OpenCode adapters plus non-executing
   root and executable detection. Agent path conventions and documentation
   snapshots belong here.
+- `src/source.rs`: local Git source inspection, catalog discovery, and skill
+  candidate validation.
+- `src/validation.rs`: portable `SKILL.md` front-matter validation.
 - `src/store.rs`: private versioned SQLite metadata and migrations. Newer
   unknown schemas fail closed.
-- `src/tui.rs`: pure Ratatui rendering; it does not access SQLite, the
-  filesystem, or the terminal event source.
+- `src/theme.rs`: semantic presentation tokens translated from the prototype
+  palette. Every colour in the application is defined here; a screen asks for a
+  role such as `Tone::Warning` or `nav_active()` rather than naming a colour. A
+  test enforces that `Color::` appears in no other module.
+- `src/viewport.rs`: responsive viewport classes and workspace region geometry.
+  Screens ask whether the terminal is `Compact` or `Wide` instead of comparing
+  raw widths.
+- `src/components.rs`: pure shared primitives — status badges, list rows, pane
+  headers, empty states, the modal dialog frame, and the key-hint bar.
+- `src/tui.rs`: composes the persistent shell (title bar, navigation, session
+  status, workspace, key hints) from those primitives. Pure: it does not access
+  SQLite, the filesystem, or the terminal event source.
 - `src/input.rs`: contextual key-event to action mapping.
 - `src/runner.rs`: terminal event loop and effect execution boundary.
 - `src/terminal.rs`: Crossterm raw-mode/alternate-screen ownership and
@@ -110,4 +130,8 @@ with Insta snapshots under `tests/snapshots/`.
 Keep `update` free of filesystem and database work. New external work should be
 represented as typed effects and performed outside the reducer. Keep agent
 conventions behind adapters rather than spreading paths or enablement rules
-through UI and scanner code. Production dependencies require explicit review.
+through UI and scanner code. Build new screens from `components` primitives and
+`theme` tokens rather than ad hoc styles. The key-hint bar and the navigation
+row are contracts: a hint or destination may only appear when `src/input.rs`
+actually handles it in that context. Production dependencies require explicit
+review.
