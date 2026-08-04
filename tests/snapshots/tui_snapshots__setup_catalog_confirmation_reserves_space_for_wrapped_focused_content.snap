@@ -10,17 +10,17 @@ expression: rendered
   │  STEP 5 / 7                                                              │
   │  Confirm catalogs                                                        │
   │                                                                          │
-  │  Review the local checkout and detected catalog roots.                   │
-  │  Repository:                                                             │
-  │  [TEMP]                                                             /a-  │
-  │  deliberately-long-source-repository-directory-name                      │
+  │  Repository: a-deliberately-long-s... · /private/var/f...directory-name  │
   │  Branch: main   HEAD: [HEAD]                                             │
   │  Remote: not configured                                                  │
   │  Worktree: ✓ clean                                                       │
-  │  ▌ Included ·                                                            │
-  │  catalogs/set-5-with-a-deliberately-long-catalog-root-name/claude-code/  │
-  │  skills · 1 candidate · Agent-specific catalog · Claude Code: yes ·      │
-  │  Codex: no · OpenCode: no                                                │
+  │                                                                          │
+  │    Included · catalogs/set-3-with-...e/claude-code/skills · 1 candidate  │
+  │    Agent-specific catalog · Claude Code: yes · Codex: no · OpenCode: no  │
+  │    Included · catalogs/set-4-with-...e/claude-code/skills · 1 candidate  │
+  │    Agent-specific catalog · Claude Code: yes · Codex: no · OpenCode: no  │
+  │  ▌ Included · catalogs/set-5-with-...e/claude-code/skills · 1 candidate  │
+  │    Agent-specific catalog · Claude Code: yes · Codex: no · OpenCode: no  │
   │  ──────────────────────────────────────────────────────────────────────  │
   │  Registration records metadata only         Esc Cancel   Enter Register  │
   │                                                                          │

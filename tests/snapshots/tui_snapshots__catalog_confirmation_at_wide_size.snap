@@ -14,13 +14,13 @@ expression: rendered
 │                                │ │                                           ││                                      │
 │       ┌ Confirm catalogs ───────────────────────────────────────────────────────────────── registration only ┐       │
 │       │                                                                                                      │       │
-│       │  Review the local checkout and detected catalog roots.                                               │       │
 │       │  Repository: [TEMP]                     /source                                                      │       │
 │       │  Branch: main   HEAD: [HEAD]                                                                         │       │
 │       │  Remote: not configured                                                                              │       │
 │       │  Worktree: ✓ clean                                                                                   │       │
 │       │                                                                                                      │       │
-│       │  ▌ Included · skills · 1 candidate · Common catalog · Claude Code: yes · Codex: yes · OpenCode: yes  │       │
+│       │  ▌ Included · skills · 1 candidate                                                                   │       │
+│       │    Common catalog · Claude Code: yes · Codex: yes · OpenCode: yes                                    │       │
 │    No │                                                                                                      │       │
 │       │                                                                                                      │       │
 │   Pres│                                                                                                      │its    │

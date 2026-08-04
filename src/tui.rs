@@ -1173,39 +1173,31 @@ fn render_catalog_confirmation(frame: &mut Frame<'_>, area: Rect, app: &SkilledA
 }
 
 fn render_catalog_confirmation_content(frame: &mut Frame<'_>, inner: Rect, app: &SkilledApp) {
-    let (metadata, catalogs, error) = catalog_confirmation_sections(app);
-    let wrap = Wrap { trim: false };
+    let (metadata, catalogs, error) = catalog_confirmation_sections(app, inner.width);
     let viewport_height = usize::from(inner.height);
-    let error_height = Paragraph::new(error.clone())
-        .wrap(wrap)
-        .line_count(inner.width)
-        .min(viewport_height);
     let focused_height = catalogs
         .get(app.focused_catalog())
-        .map(|line| wrapped_line_count(line, inner.width))
+        .map(|lines| confirmation_lines_height(lines, inner.width))
         .unwrap_or(0)
-        .min(viewport_height.saturating_sub(error_height));
-    let metadata_height = Paragraph::new(metadata.clone())
-        .wrap(wrap)
-        .line_count(inner.width)
-        .min(
-            viewport_height
-                .saturating_sub(error_height)
-                .saturating_sub(focused_height),
-        );
+        .min(viewport_height);
+    let error_height = confirmation_lines_height(&error, inner.width)
+        .min(viewport_height.saturating_sub(focused_height));
+    let metadata_height = confirmation_lines_height(&metadata, inner.width).min(
+        viewport_height
+            .saturating_sub(focused_height)
+            .saturating_sub(error_height),
+    );
     let catalog_height = viewport_height
         .saturating_sub(metadata_height)
         .saturating_sub(error_height);
-    let visible_catalogs = visible_wrapped_lines(
+    let visible_catalogs = visible_catalog_confirmation_lines(
         &catalogs,
         app.focused_catalog(),
         inner.width,
         catalog_height,
     );
-    let visible_catalog_height = Paragraph::new(visible_catalogs.clone())
-        .wrap(wrap)
-        .line_count(inner.width)
-        .min(catalog_height);
+    let visible_catalog_height =
+        confirmation_lines_height(&visible_catalogs, inner.width).min(catalog_height);
     let mut spare_rows = viewport_height
         .saturating_sub(metadata_height)
         .saturating_sub(visible_catalog_height)
@@ -1230,30 +1222,28 @@ fn render_catalog_confirmation_content(frame: &mut Frame<'_>, inner: Rect, app: 
 
 fn catalog_confirmation_sections(
     app: &SkilledApp,
-) -> (Vec<Line<'static>>, Vec<Line<'static>>, Vec<Line<'static>>) {
-    let mut metadata = vec![Line::from(
-        "Review the local checkout and detected catalog roots.",
-    )];
+    width: u16,
+) -> (
+    Vec<Line<'static>>,
+    Vec<Vec<Line<'static>>>,
+    Vec<Line<'static>>,
+) {
+    let mut metadata = Vec::new();
     let mut catalogs = Vec::new();
     if let Some(preview) = app.pending_source() {
         let source = preview.inspected();
         metadata.extend([
-            Line::from(format!(
-                "Repository: {}",
-                terminal_safe(&source.git_top_level().display().to_string())
-            )),
-            Line::from(format!(
-                "Branch: {}   HEAD: {}",
-                terminal_safe(source.branch().unwrap_or("detached")),
-                &source.head()[..source.head().len().min(8)]
-            )),
-            Line::from(format!(
-                "Remote: {}",
-                source
-                    .remote_url()
-                    .map(terminal_safe)
-                    .unwrap_or_else(|| "not configured".to_owned())
-            )),
+            confirmation_repository_line(source.git_top_level(), width),
+            confirmation_branch_line(
+                source.branch().unwrap_or("detached"),
+                &source.head()[..source.head().len().min(8)],
+                width,
+            ),
+            confirmation_field(
+                "Remote",
+                source.remote_url().unwrap_or("not configured"),
+                width,
+            ),
             Line::from(vec![
                 Span::raw("Worktree: "),
                 worktree_badge(source.dirty()),
@@ -1261,24 +1251,33 @@ fn catalog_confirmation_sections(
         ]);
         for (index, catalog) in preview.catalogs().iter().enumerate() {
             let count = catalog.candidates().len();
-            catalogs.push(Line::from(vec![
-                Span::styled(
-                    if index == app.focused_catalog() {
-                        components::FOCUS_MARKER
-                    } else {
-                        " "
-                    },
-                    theme::focus_marker(),
-                ),
-                Span::raw(format!(
-                    " {} · {} · {count} candidate{} · {} catalog · Claude Code: {} · Codex: {} · OpenCode: {}",
-                    if catalog.included() {
-                        "Included"
-                    } else {
-                        "Excluded"
-                    },
-                    terminal_safe(&catalog.relative_path().display().to_string()),
-                    if count == 1 { "" } else { "s" },
+            let marker = if index == app.focused_catalog() {
+                components::FOCUS_MARKER
+            } else {
+                " "
+            };
+            let inclusion = if catalog.included() {
+                "Included"
+            } else {
+                "Excluded"
+            };
+            let prefix = format!(" {inclusion} · ");
+            let suffix = format!(" · {count} candidate{}", if count == 1 { "" } else { "s" });
+            let path_budget = usize::from(width).saturating_sub(
+                Span::raw(marker).width() + Span::raw(&prefix).width() + Span::raw(&suffix).width(),
+            );
+            catalogs.push(vec![
+                Line::from(vec![
+                    Span::styled(marker, theme::focus_marker()),
+                    Span::raw(prefix),
+                    Span::raw(terminal_safe_bounded_middle(
+                        &catalog.relative_path().display().to_string(),
+                        path_budget,
+                    )),
+                    Span::raw(suffix),
+                ]),
+                Line::from(format!(
+                    "  {} catalog · Claude Code: {} · Codex: {} · OpenCode: {}",
                     match catalog.classification() {
                         CatalogClassification::Common => "Common",
                         CatalogClassification::AgentSpecific => "Agent-specific",
@@ -1287,17 +1286,161 @@ fn catalog_confirmation_sections(
                     yes_no(catalog.compatibility().codex()),
                     yes_no(catalog.compatibility().opencode())
                 )),
-            ]));
+            ]);
         }
     }
     let mut error = Vec::new();
     if let Some(message) = app.source_error() {
+        let budget = usize::from(width).saturating_mul(2).saturating_sub(2);
         error.push(Line::from(components::badge(
             Tone::Critical,
-            &terminal_safe(message),
+            &terminal_safe_bounded_middle(message, budget),
         )));
     }
     (metadata, catalogs, error)
+}
+
+fn confirmation_field(label: &str, value: &str, width: u16) -> Line<'static> {
+    let prefix = format!("{label}: ");
+    let value = terminal_safe_bounded_middle(
+        value,
+        usize::from(width).saturating_sub(Span::raw(&prefix).width()),
+    );
+    Line::from(vec![Span::raw(prefix), Span::raw(value)])
+}
+
+fn confirmation_repository_line(path: &std::path::Path, width: u16) -> Line<'static> {
+    let value = terminal_safe(&path.display().to_string());
+    let prefix = "Repository: ";
+    let available = usize::from(width).saturating_sub(Span::raw(prefix).width());
+    if Span::raw(&value).width() <= available {
+        return Line::from(format!("{prefix}{value}"));
+    }
+
+    let label = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| value.clone());
+    let label_budget = available.min(24);
+    let label = terminal_safe_bounded_start(&label, label_budget);
+    let separator = " · ";
+    let path_budget = available
+        .saturating_sub(Span::raw(&label).width())
+        .saturating_sub(Span::raw(separator).width());
+    let path = terminal_safe_bounded_middle(&value, path_budget);
+    Line::from(format!("{prefix}{label}{separator}{path}"))
+}
+
+fn confirmation_branch_line(branch: &str, head: &str, width: u16) -> Line<'static> {
+    let prefix = "Branch: ";
+    let suffix = format!("   HEAD: {head}");
+    let branch = terminal_safe_bounded_middle(
+        branch,
+        usize::from(width)
+            .saturating_sub(Span::raw(prefix).width())
+            .saturating_sub(Span::raw(&suffix).width()),
+    );
+    Line::from(vec![
+        Span::raw(prefix),
+        Span::raw(branch),
+        Span::raw(suffix),
+    ])
+}
+
+fn terminal_safe_bounded_middle(value: &str, budget: usize) -> String {
+    const ELLIPSIS: &str = "...";
+    let safe = terminal_safe(value);
+    if Span::raw(&safe).width() <= budget {
+        return safe;
+    }
+    if budget <= ELLIPSIS.len() {
+        return ELLIPSIS[..budget].to_owned();
+    }
+
+    let content_budget = budget - ELLIPSIS.len();
+    let prefix = display_prefix(&safe, content_budget.div_ceil(2));
+    let suffix = display_suffix(&safe, content_budget / 2);
+    format!("{prefix}{ELLIPSIS}{suffix}")
+}
+
+fn terminal_safe_bounded_start(value: &str, budget: usize) -> String {
+    const ELLIPSIS: &str = "...";
+    let safe = terminal_safe(value);
+    if Span::raw(&safe).width() <= budget {
+        return safe;
+    }
+    if budget <= ELLIPSIS.len() {
+        return ELLIPSIS[..budget].to_owned();
+    }
+    format!(
+        "{}{ELLIPSIS}",
+        display_prefix(&safe, budget - ELLIPSIS.len())
+    )
+}
+
+fn display_prefix(value: &str, budget: usize) -> String {
+    let mut prefix = String::new();
+    for character in value.chars() {
+        let mut candidate = prefix.clone();
+        candidate.push(character);
+        if Span::raw(&candidate).width() > budget {
+            break;
+        }
+        prefix.push(character);
+    }
+    prefix
+}
+
+fn display_suffix(value: &str, budget: usize) -> String {
+    let mut suffix = String::new();
+    for character in value.chars().rev() {
+        let mut candidate = String::with_capacity(suffix.len() + character.len_utf8());
+        candidate.push(character);
+        candidate.push_str(&suffix);
+        if Span::raw(&candidate).width() > budget {
+            break;
+        }
+        suffix = candidate;
+    }
+    suffix
+}
+
+fn confirmation_lines_height(lines: &[Line<'_>], width: u16) -> usize {
+    lines
+        .iter()
+        .map(|line| wrapped_line_count(line, width))
+        .sum()
+}
+
+fn visible_catalog_confirmation_lines(
+    entries: &[Vec<Line<'static>>],
+    focused: usize,
+    width: u16,
+    height: usize,
+) -> Vec<Line<'static>> {
+    let Some(focused_entry) = entries.get(focused) else {
+        return Vec::new();
+    };
+    let mut visible = focused_entry.clone();
+    let mut used = confirmation_lines_height(&visible, width);
+
+    for entry in entries[..focused].iter().rev() {
+        let entry_height = confirmation_lines_height(entry, width);
+        if used.saturating_add(entry_height) > height {
+            break;
+        }
+        visible.splice(0..0, entry.clone());
+        used = used.saturating_add(entry_height);
+    }
+    for entry in &entries[focused.saturating_add(1)..] {
+        let entry_height = confirmation_lines_height(entry, width);
+        if used.saturating_add(entry_height) > height {
+            break;
+        }
+        visible.extend(entry.clone());
+        used = used.saturating_add(entry_height);
+    }
+    visible
 }
 
 fn render_registration_footer(frame: &mut Frame<'_>, regions: components::DialogRegions) {

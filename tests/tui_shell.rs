@@ -1582,6 +1582,82 @@ fn catalog_confirmation_uses_one_shared_body_and_owner_dialog_footer() {
 }
 
 #[test]
+fn catalog_confirmation_bounds_pathological_paths_without_hiding_required_sections() {
+    let harness = Harness::new();
+    let repository = harness
+        .directory
+        .path()
+        .join(format!("source-{}", "r".repeat(120)));
+    for index in 0..2 {
+        let name = format!("skill-{index}");
+        let first = format!("set-{index}-{}", "a".repeat(170));
+        let second = format!("nested-{index}-{}", "b".repeat(165));
+        let skill = repository
+            .join("catalogs")
+            .join(first)
+            .join(second)
+            .join("claude-code/skills")
+            .join(&name);
+        fs::create_dir_all(&skill).expect("create long catalog fixture");
+        fs::write(
+            skill.join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: fixture\n---\n# Fixture\n"),
+        )
+        .expect("write long catalog fixture");
+    }
+    git(&repository, &["init", "-b", "main"]);
+    git(&repository, &["config", "user.name", "Skilled Test"]);
+    git(
+        &repository,
+        &["config", "user.email", "skilled@example.test"],
+    );
+    git(&repository, &["add", "."]);
+    git(&repository, &["commit", "-m", "fixture"]);
+    let long_branch = format!("branch-{}", "c".repeat(120));
+    git(&repository, &["branch", "-m", &long_branch]);
+    let long_remote = format!("https://example.test/{}/source.git", "d".repeat(180));
+    git(&repository, &["remote", "add", "origin", &long_remote]);
+
+    let mut app = harness.completed_setup();
+    app.update(Action::OpenSources);
+    app.update(Action::BeginAddSource);
+    for character in repository.to_string_lossy().chars() {
+        app.update(Action::AppendSourcePath(character));
+    }
+    let update = app.update(Action::SubmitSourcePath);
+    app.perform_effects(update.effects())
+        .expect("inspect long source");
+    app.update(Action::ToggleCatalogIncluded);
+    app.update(Action::MoveCatalogSelection(1));
+    app.update(Action::ToggleCatalogIncluded);
+    app.update(Action::ConfirmPendingSource);
+
+    let rendered = text(&buffer(&app, 80, 24));
+
+    assert!(rendered.contains("Repository:"), "{rendered}");
+    assert!(rendered.contains("source-"), "{rendered}");
+    assert!(rendered.contains("Worktree: ✓ clean"), "{rendered}");
+    assert!(rendered.contains("▌ Excluded"), "{rendered}");
+    assert!(rendered.contains("set-1-"), "{rendered}");
+    assert!(rendered.contains("Agent-specific"), "{rendered}");
+    assert!(rendered.contains("Claude Code: yes"), "{rendered}");
+    assert!(rendered.contains("Codex: no"), "{rendered}");
+    assert!(rendered.contains("OpenCode: no"), "{rendered}");
+    assert!(
+        rendered.contains("Select at least one catalog root to register."),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("Registration records metadata only"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("Esc Cancel   Enter Register"),
+        "{rendered}"
+    );
+}
+
+#[test]
 fn the_focused_row_is_marked_and_emphasised_not_merely_tinted() {
     let harness = Harness::new();
     let first = harness.directory.path().join("first");
