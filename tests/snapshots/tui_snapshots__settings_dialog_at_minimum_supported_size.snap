@@ -4,8 +4,8 @@ expression: "render(&app, 80, 24)"
 ---
  ◆ skilled   global                              ● ready · 0 sources registered
  Settings   navigation is locked while this dialog is open
-Global inventory  not scanned
-────────────────────────────────────────────────────────────────────────────────
+
+
 
       ┌ Settings ────────────────────────────────────────── global scope ┐
       │                                                                  │
@@ -16,8 +16,8 @@ Global inventory  not scanned
       │  Reset setup completion and return to Welcome.                   │
       │  Agent root and executable detection is refreshed.               │
       │  Agent selections and registered sources are retained.           │
-   Ski│  Enter reruns setup; Esc closes Settings.                        │hat
-  is i│  ──────────────────────────────────────────────────────────────  │tion
+      │  Enter reruns setup; Esc closes Settings.                        │
+      │  ──────────────────────────────────────────────────────────────  │
       │  No agent is launched                   Enter Rerun   Esc Close  │
       │                                                                  │
       └──────────────────────────────────────────────────────────────────┘

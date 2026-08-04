@@ -515,6 +515,77 @@ fn wrapped_catalog_confirmation_keeps_focus_error_and_actions_visible() {
     assert!(screen.contains("Enter registers metadata only"), "{screen}");
 }
 
+#[test]
+fn setup_catalog_confirmation_reserves_space_for_wrapped_focused_content() {
+    let temporary = tempfile::tempdir().expect("temporary application directory");
+    let repository = temporary
+        .path()
+        .join("a-deliberately-long-source-repository-directory-name");
+    for index in 0..6 {
+        let name = format!("skill-{index}");
+        let directory = repository
+            .join("catalogs")
+            .join(format!(
+                "set-{index}-with-a-deliberately-long-catalog-root-name"
+            ))
+            .join("claude-code/skills")
+            .join(&name);
+        fs::create_dir_all(&directory).expect("create catalog fixture");
+        fs::write(
+            directory.join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: Fixture\n---\n# Fixture\n"),
+        )
+        .expect("write skill");
+    }
+    git(&repository, &["init", "-b", "main"]);
+    git(&repository, &["config", "user.name", "Skilled Test"]);
+    git(
+        &repository,
+        &["config", "user.email", "skilled@example.test"],
+    );
+    git(&repository, &["add", "."]);
+    git(&repository, &["commit", "-m", "fixture"]);
+    let mut app = SkilledApp::open(AppEnvironment::new(
+        temporary.path().join("home"),
+        temporary.path().join("data"),
+        "",
+    ))
+    .expect("open application");
+    for _ in 0..3 {
+        dispatch(&mut app, Action::Continue);
+    }
+    app.update(Action::BeginAddSource);
+    for character in repository.to_string_lossy().chars() {
+        app.update(Action::AppendSourcePath(character));
+    }
+    dispatch(&mut app, Action::SubmitSourcePath);
+    for _ in 0..5 {
+        app.update(Action::MoveCatalogSelection(1));
+    }
+
+    let preview = app.pending_source().expect("pending source preview");
+    let rendered = render(&app, 80, 24)
+        .replace(
+            temporary
+                .path()
+                .canonicalize()
+                .expect("canonical temporary directory")
+                .to_string_lossy()
+                .as_ref(),
+            "[TEMP]",
+        )
+        .replace(&preview.inspected().head()[..8], "[HEAD]");
+
+    assert_eq!(app.focused_catalog(), 5);
+    assert!(rendered.contains("> [x]"), "{rendered}");
+    assert!(rendered.contains("catalogs/set-5"), "{rendered}");
+    assert!(
+        rendered.contains("Enter registers metadata only"),
+        "{rendered}"
+    );
+    insta::assert_snapshot!(rendered);
+}
+
 fn render(app: &SkilledApp, width: u16, height: u16) -> String {
     let backend = TestBackend::new(width, height);
     let mut terminal = Terminal::new(backend).expect("create test terminal");

@@ -72,6 +72,14 @@ fn detect_agents_separates_focus_selection_root_and_executable_status() {
     let codex_row = row_containing(&screen, "Codex");
     let row = row_text(&screen, codex_row);
 
+    assert!(
+        rendered.contains("Choose the agents Skilled should configure"),
+        "{rendered}"
+    );
+    assert!(
+        !rendered.contains("All supported agents are selected"),
+        "{rendered}"
+    );
     assert!(row.contains("▌ [ ] Codex"), "{row}\n{rendered}");
     assert!(row.contains("✓ root found"), "{row}\n{rendered}");
     assert!(row.contains("- executable not found"), "{row}\n{rendered}");
@@ -184,6 +192,15 @@ fn settings_explains_and_frames_the_existing_rerun_effects() {
         rendered.lines().any(|line| line.matches('─').count() > 30),
         "{rendered}"
     );
+    for y in 2..23 {
+        for x in (0..6).chain(74..80) {
+            assert_eq!(
+                screen[(x, y)].symbol(),
+                " ",
+                "workspace text leaked outside Settings at ({x}, {y})\n{rendered}"
+            );
+        }
+    }
 }
 
 #[test]

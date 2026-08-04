@@ -42,7 +42,7 @@ pub fn render(frame: &mut Frame<'_>, app: &SkilledApp) {
         View::Sources => render_sources(frame, body, app),
         View::Settings => {
             render_inventory(frame, body);
-            render_settings(frame, area);
+            render_settings(frame, body);
         }
     }
     if app.source_path_input_active() {
@@ -278,18 +278,27 @@ fn render_setup(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp, step: Setup
     let regions = components::dialog_regions(block.inner(popup), 31);
     frame.render_widget(block, popup);
 
-    let mut lines = vec![
-        components::segmented_progress(step.number(), STEP_COUNT, regions.body.width),
-        Line::styled(
-            format!("STEP {} / {STEP_COUNT}", step.number()),
-            theme::section_title(),
-        ),
-    ];
-    lines.extend(setup_lines(app, step, regions.body.width));
+    let [heading, content] =
+        Layout::vertical([Constraint::Length(4), Constraint::Min(0)]).areas(regions.body);
     frame.render_widget(
-        Paragraph::new(lines).wrap(Wrap { trim: false }),
-        regions.body,
+        Paragraph::new(vec![
+            components::segmented_progress(step.number(), STEP_COUNT, heading.width),
+            Line::styled(
+                format!("STEP {} / {STEP_COUNT}", step.number()),
+                theme::section_title(),
+            ),
+            Line::styled(step.title(), theme::section_title()),
+        ]),
+        heading,
     );
+    if step == SetupStep::ConfirmCatalogs && app.pending_source().is_some() {
+        render_catalog_confirmation_content(frame, content, app);
+    } else {
+        frame.render_widget(
+            Paragraph::new(setup_lines(app, step, content.width)).wrap(Wrap { trim: false }),
+            content,
+        );
+    }
     frame.render_widget(
         Paragraph::new(components::rule(regions.divider.width)),
         regions.divider,
@@ -348,8 +357,7 @@ fn setup_action_line(step: SetupStep, pending_source: bool) -> Line<'static> {
 }
 
 fn setup_lines(app: &SkilledApp, step: SetupStep, width: u16) -> Vec<Line<'static>> {
-    let title = Line::styled(step.title(), theme::section_title());
-    let mut lines = vec![title, Line::default()];
+    let mut lines = Vec::new();
     match step {
         SetupStep::Welcome => {
             lines.extend([
@@ -361,7 +369,7 @@ fn setup_lines(app: &SkilledApp, step: SetupStep, width: u16) -> Vec<Line<'stati
             ]);
         }
         SetupStep::DetectAgents => {
-            lines.push(Line::from("All supported agents are selected by default."));
+            lines.push(Line::from("Choose the agents Skilled should configure."));
             lines.push(Line::default());
             for (index, detection) in app.agents().iter().enumerate() {
                 let root = if detection.root_exists() {
@@ -409,21 +417,15 @@ fn setup_lines(app: &SkilledApp, step: SetupStep, width: u16) -> Vec<Line<'stati
             Line::from("Press a to inspect a known local Git checkout."),
             Line::from("Skilled never scans the entire home directory by default."),
         ]),
-        SetupStep::ConfirmCatalogs => {
-            if app.pending_source().is_some() {
-                lines.extend(catalog_confirmation_lines(app));
-            } else {
-                lines.extend([
-                    Line::from(components::badge(
-                        Tone::Inactive,
-                        "no catalogs awaiting confirmation",
-                    )),
-                    Line::default(),
-                    Line::from("Catalog confirmation follows inspection of a local source."),
-                    Line::from("Registration records metadata only; it does not install skills."),
-                ]);
-            }
-        }
+        SetupStep::ConfirmCatalogs => lines.extend([
+            Line::from(components::badge(
+                Tone::Inactive,
+                "no catalogs awaiting confirmation",
+            )),
+            Line::default(),
+            Line::from("Catalog confirmation follows inspection of a local source."),
+            Line::from("Registration records metadata only; it does not install skills."),
+        ]),
         SetupStep::ScanInstallations => lines.extend([
             Line::from(components::badge(
                 Tone::Inactive,
@@ -806,6 +808,10 @@ fn render_catalog_confirmation(frame: &mut Frame<'_>, area: Rect, app: &SkilledA
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
 
+    render_catalog_confirmation_content(frame, inner, app);
+}
+
+fn render_catalog_confirmation_content(frame: &mut Frame<'_>, inner: Rect, app: &SkilledApp) {
     let (metadata, catalogs, error, footer) = catalog_confirmation_sections(app);
     let wrap = Wrap { trim: false };
     let viewport_height = usize::from(inner.height);
@@ -874,21 +880,6 @@ fn render_catalog_confirmation(frame: &mut Frame<'_>, area: Rect, app: &SkilledA
     render_confirmation_section(frame, inner, &mut y, error_height, error);
     y = y.saturating_add(u16::from(footer_gap));
     render_confirmation_section(frame, inner, &mut y, footer_height, footer);
-}
-
-fn catalog_confirmation_lines(app: &SkilledApp) -> Vec<Line<'static>> {
-    let (mut lines, catalogs, error, footer) = catalog_confirmation_sections(app);
-    lines.push(Line::default());
-    let capacity = 2;
-    let start = visible_window_start(app.focused_catalog(), capacity);
-    lines.extend(catalogs.into_iter().skip(start).take(capacity));
-    if !error.is_empty() {
-        lines.push(Line::default());
-        lines.extend(error);
-    }
-    lines.push(Line::default());
-    lines.extend(footer);
-    lines
 }
 
 fn catalog_confirmation_sections(
@@ -997,6 +988,8 @@ fn terminal_safe(value: &str) -> String {
 }
 
 fn render_settings(frame: &mut Frame<'_>, area: Rect) {
+    frame.render_widget(Clear, area);
+    frame.render_widget(Block::new().style(theme::app_surface()), area);
     let width = match viewport::classify(area) {
         viewport::Viewport::Compact => 68,
         viewport::Viewport::Wide => 72,

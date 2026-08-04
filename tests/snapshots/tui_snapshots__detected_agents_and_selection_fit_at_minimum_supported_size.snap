@@ -10,7 +10,7 @@ expression: "render(&app, 80, 24)"
   │  STEP 2 / 7                                                              │
   │  Detect agents                                                           │
   │                                                                          │
-  │  All supported agents are selected by default.                           │
+  │  Choose the agents Skilled should configure.                             │
   │                                                                          │
   │    [x] Claude Code  - root not found   - executable not found            │
   │  ▌ [ ] Codex        - root not found   - executable not found            │
