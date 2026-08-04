@@ -3,26 +3,26 @@ source: tests/tui_snapshots.rs
 expression: rendered
 ---
  ◆ skilled   global                              ● ready · 0 sources registered
- Confirm catalogs   navigation is locked while this dialog is open
+ Add source   navigation is locked while this dialog is open
 ┌▌ Repositories  0 registered──────────────────────────────────────────────────┐
-│ ┌ Confirm catalogs ───────────────────────────────────── registration only ┐ │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│ ┌ Add source ────────────────────────────────────────── local Git checkout ┐ │
 │ │                                                                          │ │
-│ │  Review the local checkout and detected catalog roots.                   │ │
-│ │  Repository: [TEMP]                     /source                          │ │
-│ │  Branch: main   HEAD: [HEAD]                                             │ │
-│ │  Remote: not configured                                                  │ │
-│ │  Worktree: ✓ clean                                                       │ │
+│ │  Local Git repository                                                    │ │
+│ │  >                                                                       │ │
+│ │  [TEMP]                                                     /a-delibera  │ │
+│ │  tely-long-missing-repository-directory/and-an-equally-long-nested-path  │ │
 │ │                                                                          │ │
-│ │  ▌ Included · skills · 1 candidate · Common catalog · Claude Code: yes   │ │
-│ │  · Codex: yes · OpenCode: yes                                            │ │
-│ │                                                                          │ │
-│ │                                                                          │ │
-│ │                                                                          │ │
-│ │                                                                          │ │
+│ │  × filesystem operation failed: No such file or directory (os error 2)   │ │
 │ │  ──────────────────────────────────────────────────────────────────────  │ │
-│ │  Registration records metadata only         Esc Cancel   Enter Register  │ │
+│ │  Inspection reads Git metadata only          Esc Cancel   Enter Inspect  │ │
 │ │                                                                          │ │
 │ └──────────────────────────────────────────────────────────────────────────┘ │
 │                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
 └──────────────────────────────────────────────────────────────────────────────┘
- j/k Move   Space Include   c Class   1/2/3 Agents   Enter Register   Esc Cancel
+ Enter Inspect   Esc Cancel   Ctrl-C Quit

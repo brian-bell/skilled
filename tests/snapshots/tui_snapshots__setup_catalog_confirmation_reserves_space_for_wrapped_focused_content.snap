@@ -10,17 +10,17 @@ expression: rendered
   │  STEP 5 / 7                                                              │
   │  Confirm catalogs                                                        │
   │                                                                          │
-  │  Confirm the resolved repository, roots, and compatible agents.          │
+  │  Review the local checkout and detected catalog roots.                   │
   │  Repository:                                                             │
-  │  [TEMP]/a-  │
+  │  [TEMP]                                                             /a-  │
   │  deliberately-long-source-repository-directory-name                      │
-  │  Branch: main   HEAD: [HEAD]   ✓ clean                                 │
-  │                                                                          │
-  │  > [x]                                                                   │
+  │  Branch: main   HEAD: [HEAD]                                             │
+  │  Remote: not configured                                                  │
+  │  Worktree: ✓ clean                                                       │
+  │  ▌ Included ·                                                            │
   │  catalogs/set-5-with-a-deliberately-long-catalog-root-name/claude-code/  │
-  │  skills  AgentSpecific  C:yes X:no O:no                                  │
-  │  Space include · c classification · 1/2/3 compatibility                  │
-  │  Enter registers metadata only · Esc cancels                             │
+  │  skills · 1 candidate · Agent-specific catalog · Claude Code: yes ·      │
+  │  Codex: no · OpenCode: no                                                │
   │  ──────────────────────────────────────────────────────────────────────  │
   │  Registration records metadata only         Esc Cancel   Enter Register  │
   │                                                                          │

@@ -362,10 +362,7 @@ impl SkilledApp {
                 if self.view == View::Setup(SetupStep::ConfirmCatalogs) {
                     self.view = View::Setup(SetupStep::DiscoverSources);
                 }
-                self.source_path_input_active = false;
-                self.source_path.clear();
-                self.source_error = None;
-                self.pending_source = None;
+                self.clear_pending_source_state();
                 Vec::new()
             }
             Action::MoveCatalogSelection(delta) => {
@@ -533,10 +530,10 @@ impl SkilledApp {
 
     fn back(&mut self) -> UpdateResult {
         if self.source_path_input_active || self.pending_source.is_some() {
-            self.source_path_input_active = false;
-            self.source_path.clear();
-            self.source_error = None;
-            self.pending_source = None;
+            if self.view == View::Setup(SetupStep::ConfirmCatalogs) {
+                self.view = View::Setup(SetupStep::DiscoverSources);
+            }
+            self.clear_pending_source_state();
             return UpdateResult::continuing(Vec::new());
         }
         match self.view {
@@ -554,6 +551,14 @@ impl SkilledApp {
             View::Inventory => {}
         }
         UpdateResult::continuing(Vec::new())
+    }
+
+    fn clear_pending_source_state(&mut self) {
+        self.source_path_input_active = false;
+        self.source_path.clear();
+        self.source_error = None;
+        self.pending_source = None;
+        self.focused_catalog = 0;
     }
 
     fn move_selection(&mut self, delta: i8) {

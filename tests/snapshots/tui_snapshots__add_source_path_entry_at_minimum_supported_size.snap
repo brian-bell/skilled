@@ -8,18 +8,18 @@ expression: "render(&app, 80, 24)"
 │                                                                              │
 │                                                                              │
 │                                                                              │
-│                                                                              │
-│     ┌ Add source ────────────────────────────────── local Git checkout ┐     │
-│     │                                                                  │     │
-│     │  Enter a path inside a local Git checkout:                       │     │
-│     │                                                                  │     │
-│     │  > /Users/example/dev/skills                                     │     │
-│     │                                                                  │     │
-│     │                                                                  │     │
-│     │                                                                  │     │
-│     └──────────────────────────────────────────────────────────────────┘     │
-│                                                                              │
-│                                                                              │
+│ ┌ Add source ────────────────────────────────────────── local Git checkout ┐ │
+│ │                                                                          │ │
+│ │  Local Git repository                                                    │ │
+│ │  Enter a path inside a local Git checkout:                               │ │
+│ │                                                                          │ │
+│ │  > /Users/example/dev/skills                                             │ │
+│ │                                                                          │ │
+│ │                                                                          │ │
+│ │  ──────────────────────────────────────────────────────────────────────  │ │
+│ │  Inspection reads Git metadata only          Esc Cancel   Enter Inspect  │ │
+│ │                                                                          │ │
+│ └──────────────────────────────────────────────────────────────────────────┘ │
 │                                                                              │
 │                                                                              │
 │                                                                              │

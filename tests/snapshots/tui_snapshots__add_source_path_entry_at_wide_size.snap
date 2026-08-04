@@ -1,0 +1,44 @@
+---
+source: tests/tui_snapshots.rs
+expression: "render(&app, 120, 40)"
+---
+ ◆ skilled   global                                                                      ● ready · 0 sources registered
+ Add source   navigation is locked while this dialog is open
+┌▌ Repositories  0 registered────┐ ┌Available variants  no source──────────────┐┌Details  no selection─────────────────┐
+│                                │ │                                           ││                                      │
+│                                │ │                                           ││                                      │
+│                                │ │                                           ││                                      │
+│                                │ │                                           ││                                      │
+│                                │ │                                           ││                                      │
+│                                │ │                                           ││                                      │
+│                                │ │                                           ││                                      │
+│                                │ │                                           ││                                      │
+│                                │ │                                           ││                                      │
+│                                │ │                                           ││                                      │
+│                                │ │                                           ││                                      │
+│                   ┌ Add source ────────────────────────────────────────────── local Git checkout ┐                   │
+│                   │                                                                              │                   │
+│                   │  Local Git repository                                                        │                   │
+│                ·  │  Enter a path inside a local Git checkout:                                   │·                  │
+│                   │                                                                              │                   │
+│    No sources are │  > /Users/example/dev/skills                                                 │ selected          │
+│                   │                                                                              │                   │
+│   Press a to regis│                                                                              │tory to see its    │
+│          Git check│  ──────────────────────────────────────────────────────────────────────────  │details.           │
+│                   │  Inspection reads Git metadata only              Esc Cancel   Enter Inspect  │                   │
+│                   │                                                                              │                   │
+│                   └──────────────────────────────────────────────────────────────────────────────┘                   │
+│                                │ │                                           ││                                      │
+│                                │ │                                           ││                                      │
+│                                │ │                                           ││                                      │
+│                                │ │                                           ││                                      │
+│                                │ │                                           ││                                      │
+│                                │ │                                           ││                                      │
+│                                │ │                                           ││                                      │
+│                                │ │                                           ││                                      │
+│                                │ │                                           ││                                      │
+│                                │ │                                           ││                                      │
+│                                │ │                                           ││                                      │
+│                                │ │                                           ││                                      │
+└────────────────────────────────┘ └───────────────────────────────────────────┘└──────────────────────────────────────┘
+ Enter Inspect   Esc Cancel   Ctrl-C Quit

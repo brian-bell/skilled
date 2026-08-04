@@ -468,6 +468,188 @@ fn confirmation_rejects_catalog_changes_when_the_checkout_was_already_dirty() {
     assert!(app.sources().is_empty());
 }
 
+#[test]
+fn sources_registration_stays_in_sources_and_focuses_the_new_repository() {
+    let temporary = tempfile::tempdir().expect("temporary application directory");
+    let first = temporary.path().join("first");
+    let second = temporary.path().join("second");
+    create_portable_source(&first, "first-skill");
+    create_portable_source(&second, "second-skill");
+    let environment = AppEnvironment::new(
+        temporary.path().join("home"),
+        temporary.path().join("data"),
+        "",
+    );
+    let mut app = SkilledApp::open(environment.clone()).expect("open application");
+    let preview = app.preview_source(&first).expect("preview first source");
+    app.confirm_source(preview).expect("register first source");
+    for _ in 0..7 {
+        dispatch(&mut app, Action::Continue);
+    }
+    app.update(Action::OpenSources);
+    app.update(Action::BeginAddSource);
+    for character in second.to_string_lossy().chars() {
+        app.update(Action::AppendSourcePath(character));
+    }
+    dispatch(&mut app, Action::SubmitSourcePath);
+
+    dispatch(&mut app, Action::ConfirmPendingSource);
+
+    assert_eq!(app.view(), View::Sources);
+    assert_eq!(app.sources().len(), 2);
+    assert_eq!(
+        app.selected_source()
+            .expect("focused registered source")
+            .git_top_level(),
+        second.canonicalize().expect("canonical second source")
+    );
+    assert!(app.pending_source().is_none());
+    assert!(!app.source_path_input_active());
+    assert!(app.source_path().is_empty());
+
+    drop(app);
+    assert_eq!(
+        SkilledApp::open(environment)
+            .expect("reopen application")
+            .sources()
+            .len(),
+        2
+    );
+}
+
+#[test]
+fn cancel_and_back_clear_all_pending_source_state_without_registration() {
+    let temporary = tempfile::tempdir().expect("temporary application directory");
+    let repository = temporary.path().join("source");
+    for index in 0..2 {
+        let name = format!("skill-{index}");
+        let directory = repository
+            .join("catalogs")
+            .join(format!("set-{index}"))
+            .join("claude-code/skills")
+            .join(&name);
+        fs::create_dir_all(&directory).expect("create catalog fixture");
+        fs::write(
+            directory.join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: fixture\n---\n# Fixture\n"),
+        )
+        .expect("write skill fixture");
+    }
+    initialize_repository(&repository);
+    let environment = AppEnvironment::new(
+        temporary.path().join("home"),
+        temporary.path().join("data"),
+        "",
+    );
+    let mut app = SkilledApp::open(environment.clone()).expect("open application");
+    for _ in 0..3 {
+        dispatch(&mut app, Action::Continue);
+    }
+    app.update(Action::BeginAddSource);
+    for character in repository.to_string_lossy().chars() {
+        app.update(Action::AppendSourcePath(character));
+    }
+    dispatch(&mut app, Action::SubmitSourcePath);
+    app.update(Action::MoveCatalogSelection(1));
+    assert_eq!(app.focused_catalog(), 1);
+
+    let cancelled = app.update(Action::CancelSourceFlow);
+
+    assert!(cancelled.effects().is_empty());
+    assert_eq!(app.view(), View::Setup(SetupStep::DiscoverSources));
+    assert_pending_source_state_cleared(&app);
+
+    for _ in 0..4 {
+        dispatch(&mut app, Action::Continue);
+    }
+    app.update(Action::OpenSources);
+    app.update(Action::BeginAddSource);
+    for character in repository.to_string_lossy().chars() {
+        app.update(Action::AppendSourcePath(character));
+    }
+    dispatch(&mut app, Action::SubmitSourcePath);
+    app.update(Action::MoveCatalogSelection(1));
+    assert_eq!(app.focused_catalog(), 1);
+
+    let backed = app.update(Action::Back);
+
+    assert!(backed.effects().is_empty());
+    assert_eq!(app.view(), View::Sources);
+    assert_pending_source_state_cleared(&app);
+    drop(app);
+    assert!(
+        SkilledApp::open(environment)
+            .expect("reopen application")
+            .sources()
+            .is_empty()
+    );
+}
+
+#[test]
+fn failed_revalidation_keeps_confirmation_active_without_persisting() {
+    let temporary = tempfile::tempdir().expect("temporary application directory");
+    let repository = temporary.path().join("source");
+    create_portable_source(&repository, "portable");
+    let environment = AppEnvironment::new(
+        temporary.path().join("home"),
+        temporary.path().join("data"),
+        "",
+    );
+    let mut app = SkilledApp::open(environment.clone()).expect("open application");
+    for _ in 0..7 {
+        dispatch(&mut app, Action::Continue);
+    }
+    app.update(Action::OpenSources);
+    app.update(Action::BeginAddSource);
+    for character in repository.to_string_lossy().chars() {
+        app.update(Action::AppendSourcePath(character));
+    }
+    dispatch(&mut app, Action::SubmitSourcePath);
+    fs::write(repository.join("README.md"), "changed after preview\n")
+        .expect("change source after preview");
+    git(&repository, &["add", "README.md"]);
+    git(&repository, &["commit", "-m", "change source"]);
+
+    let update = app.update(Action::ConfirmPendingSource);
+    assert_eq!(update.effects().len(), 1);
+    app.perform_effects(update.effects())
+        .expect("revalidation failure is recoverable");
+
+    assert_eq!(app.view(), View::Sources);
+    assert!(app.pending_source().is_some());
+    assert!(
+        app.source_error()
+            .is_some_and(|error| error.contains("changed after it was previewed"))
+    );
+    assert!(app.sources().is_empty());
+    drop(app);
+    assert!(
+        SkilledApp::open(environment)
+            .expect("reopen application")
+            .sources()
+            .is_empty()
+    );
+}
+
+fn assert_pending_source_state_cleared(app: &SkilledApp) {
+    assert!(!app.source_path_input_active());
+    assert!(app.source_path().is_empty());
+    assert!(app.pending_source().is_none());
+    assert!(app.source_error().is_none());
+    assert_eq!(app.focused_catalog(), 0);
+}
+
+fn create_portable_source(repository: &Path, name: &str) {
+    let skill = repository.join("skills").join(name);
+    fs::create_dir_all(&skill).expect("create portable source fixture");
+    fs::write(
+        skill.join("SKILL.md"),
+        format!("---\nname: {name}\ndescription: fixture\n---\n# Fixture\n"),
+    )
+    .expect("write portable source fixture");
+    initialize_repository(repository);
+}
+
 fn initialize_repository(repository: &Path) {
     git(repository, &["init", "-b", "main"]);
     git(repository, &["config", "user.name", "Skilled Test"]);
