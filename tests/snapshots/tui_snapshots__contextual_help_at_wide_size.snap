@@ -4,27 +4,27 @@ expression: "render(&app, 120, 40)"
 ---
  ◆ skilled   global                                                                      ● ready · 0 sources registered
  Keyboard reference   navigation is locked while this dialog is open
-┌ Repositories ─────────────────────────┐ ┌ Available variants ────────────────────────────────────────────────────────┐
-│ No registered sources.                │ │ Select Add Source to begin.                                                │
-│ Press a to add one.                   │ │                                                                            │
-│                                       │ │                                                                            │
-│                                       │ │                                                                            │
-│                                       │ │                                                                            │
-│                                       │ │                                                                            │
-│                                       │ │                                                                            │
+┌▌ Repositories  0 registered────┐ ┌Available variants  no source──────────────┐┌Details  no selection─────────────────┐
+│                                │ │                                           ││                                      │
+│                                │ │                                           ││                                      │
+│                                │ │                                           ││                                      │
+│                                │ │                                           ││                                      │
+│                                │ │                                           ││                                      │
+│                                │ │                                           ││                                      │
+│                                │ │                                           ││                                      │
 │           ┌ Keyboard reference ───────────────────────────────────────────────────────────────── Sources ┐           │
 │           │                                                                                              │           │
 │           │  Only commands available in this context are listed.                                         │           │
 │           │                                                                                              │           │
-│           │  Tab / Shift-Tab Pane — switch panes           Esc Back — return to Inventory                │           │
-│           │  Up/Down or j/k Move — move selection          ? Help — open this keyboard reference         │           │
-│           │  a Add source — inspect a local checkout       q Quit — quit when no dialog is open          │           │
-│           │  1 Inventory — return to Inventory                                                           │           │
+│           │  Tab / Shift-Tab Region — move region focus    Esc Back one region — return toward           │           │
+│           │  forward or backward                           Repositories, then Inventory                  │           │
+│           │  a Add source — inspect a local checkout       ? Help — open this keyboard reference         │           │
+│           │  1 Inventory — return to Inventory             q Quit — quit when no dialog is open          │           │
 │           │                                                                                              │           │
+│    No sour│                                                                                              │d          │
 │           │                                                                                              │           │
-│           │                                                                                              │           │
-│           │                                                                                              │           │
-│           │                                                                                              │           │
+│   Press a │                                                                                              │see its    │
+│          G│                                                                                              │           │
 │           │                                                                                              │           │
 │           │                                                                                              │           │
 │           │                                                                                              │           │
@@ -32,13 +32,13 @@ expression: "render(&app, 120, 40)"
 │           │  Commands for Sources                                                             Esc Close  │           │
 │           │                                                                                              │           │
 │           └──────────────────────────────────────────────────────────────────────────────────────────────┘           │
-│                                       │ │                                                                            │
-│                                       │ │                                                                            │
-│                                       │ │                                                                            │
-│                                       │ │                                                                            │
-│                                       │ │                                                                            │
-│                                       │ │                                                                            │
-│                                       │ │                                                                            │
-│                                       │ │                                                                            │
-└───────────────────────────────────────┘ └────────────────────────────────────────────────────────────────────────────┘
+│                                │ │                                           ││                                      │
+│                                │ │                                           ││                                      │
+│                                │ │                                           ││                                      │
+│                                │ │                                           ││                                      │
+│                                │ │                                           ││                                      │
+│                                │ │                                           ││                                      │
+│                                │ │                                           ││                                      │
+│                                │ │                                           ││                                      │
+└────────────────────────────────┘ └───────────────────────────────────────────┘└──────────────────────────────────────┘
  Esc Close   Ctrl-C Quit

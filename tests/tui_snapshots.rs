@@ -275,8 +275,8 @@ fn sources_browse_valid_and_invalid_immediate_variants_without_nested_examples()
 
     let screen = render(&app, 120, 40);
 
-    assert!(screen.contains("✓ portable"));
-    assert!(screen.contains("× broken"));
+    assert!(screen.contains("✓ valid portable"));
+    assert!(screen.contains("× invalid broken"));
     assert!(!screen.contains("Nested example"));
 }
 
@@ -311,7 +311,60 @@ fn sources_show_the_persisted_catalog_classification_and_compatibility() {
     let screen = render(&reopened, 120, 40);
 
     assert!(screen.contains("Agent-specific"));
-    assert!(screen.contains("Claude: yes · Codex: yes · OpenCode: no"));
+    assert!(screen.contains("Compatibility: Claude Code: yes ·"));
+    assert!(screen.contains("Codex: yes · OpenCode: no"));
+}
+
+#[test]
+fn responsive_sources_workspace_at_wide_and_compact_sizes() {
+    let temporary = tempfile::tempdir_in("/tmp").expect("temporary application directory");
+    let repository = temporary.path().join("source");
+    create_source_fixture(&repository);
+    fs::create_dir_all(repository.join("skills/broken")).expect("create invalid candidate");
+    fs::write(repository.join("skills/broken/skill.md"), "wrong filename")
+        .expect("write invalid candidate");
+    git(&repository, &["add", "."]);
+    git(&repository, &["commit", "-m", "add invalid candidate"]);
+    git(
+        &repository,
+        &["remote", "add", "origin", "https://example.test/source.git"],
+    );
+    let mut app = SkilledApp::open(AppEnvironment::new(
+        temporary.path().join("home"),
+        temporary.path().join("data"),
+        "",
+    ))
+    .expect("open application");
+    let preview = app.preview_source(&repository).expect("preview source");
+    app.confirm_source(preview).expect("confirm source");
+    for _ in 0..7 {
+        dispatch(&mut app, Action::Continue);
+    }
+    app.update(Action::OpenSources);
+    app.update(Action::MoveSourcesPane(1));
+    app.update(Action::MoveSourcesSelection(1));
+    app.update(Action::MoveSourcesPane(-1));
+
+    insta::assert_snapshot!(
+        "sources_populated_at_wide_size",
+        normalize_sources_screen(&app, &temporary, render(&app, 120, 40))
+    );
+    insta::assert_snapshot!(
+        "sources_repositories_at_minimum_supported_size",
+        normalize_sources_screen(&app, &temporary, render(&app, 80, 24))
+    );
+
+    app.update(Action::AdvanceSourcesPane);
+    insta::assert_snapshot!(
+        "sources_variants_at_minimum_supported_size",
+        normalize_sources_screen(&app, &temporary, render(&app, 80, 24))
+    );
+
+    app.update(Action::AdvanceSourcesPane);
+    insta::assert_snapshot!(
+        "sources_details_at_minimum_supported_size",
+        normalize_sources_screen(&app, &temporary, render(&app, 80, 24))
+    );
 }
 
 #[test]
@@ -348,7 +401,7 @@ fn sources_escape_control_characters_from_skill_metadata() {
     let screen = render(&app, 120, 40);
 
     assert!(!screen.contains('\u{1b}'));
-    assert!(screen.contains("fixture\\u{1b}]8;;https://example.test"));
+    assert!(screen.contains("fixture\\u{1b}]8;;https"), "{screen}");
 }
 
 #[test]
@@ -384,7 +437,7 @@ fn sources_keeps_a_variant_selection_and_details_visible_beyond_the_first_viewpo
         dispatch(&mut app, Action::Continue);
     }
     app.update(Action::OpenSources);
-    app.update(Action::ToggleSourcesPane);
+    app.update(Action::MoveSourcesPane(1));
     for _ in 0..25 {
         app.update(Action::MoveSourcesSelection(1));
     }
@@ -393,12 +446,15 @@ fn sources_keeps_a_variant_selection_and_details_visible_beyond_the_first_viewpo
         .to_owned();
     let expected_description = "Fixture 24";
 
-    let screen = render(&app, 80, 24);
+    let variants = render(&app, 80, 24);
 
     assert_eq!(app.focused_variant(), 25);
-    assert!(screen.contains(&format!("▌ ✓ {expected}")));
-    assert!(screen.contains("(skills)"), "{screen}");
-    assert!(screen.contains(expected_description), "{screen}");
+    assert!(variants.contains(&format!("▌ ✓ valid {expected}")));
+    assert!(variants.contains("(skills/"), "{variants}");
+
+    app.update(Action::AdvanceSourcesPane);
+    let details = render(&app, 80, 24);
+    assert!(details.contains(expected_description), "{details}");
 }
 
 #[test]
@@ -593,6 +649,51 @@ fn render(app: &SkilledApp, width: u16, height: u16) -> String {
         .draw(|frame| skilled::tui::render(frame, app))
         .expect("render frame");
     buffer_text(terminal.backend().buffer())
+}
+
+fn normalize_sources_screen(
+    app: &SkilledApp,
+    temporary: &tempfile::TempDir,
+    screen: String,
+) -> String {
+    let source = &app.sources()[0];
+    let temporary_path = temporary
+        .path()
+        .canonicalize()
+        .expect("canonical temporary directory")
+        .to_string_lossy()
+        .into_owned();
+    let repository_path = source.git_top_level().display().to_string();
+    let mut normalized = screen
+        .replace(
+            &repository_path,
+            &padded_placeholder(&repository_path, "[TEMP]/source"),
+        )
+        .replace(
+            &temporary_path,
+            &padded_placeholder(&temporary_path, "[TEMP]"),
+        )
+        .replace(source.head(), &padded_placeholder(source.head(), "[HEAD]"))
+        .replace(
+            &source.last_scan_at().to_string(),
+            &padded_placeholder(&source.last_scan_at().to_string(), "[SCAN]"),
+        );
+    if source.head().len() > 36 {
+        normalized = normalized
+            .replace(
+                &source.head()[..36],
+                &padded_placeholder(&source.head()[..36], "[HEAD]"),
+            )
+            .replace(&source.head()[36..], &" ".repeat(source.head().len() - 36));
+    }
+    normalized
+}
+
+fn padded_placeholder(value: &str, placeholder: &str) -> String {
+    format!(
+        "{placeholder}{}",
+        " ".repeat(value.len().saturating_sub(placeholder.len()))
+    )
 }
 
 fn buffer_text(buffer: &Buffer) -> String {

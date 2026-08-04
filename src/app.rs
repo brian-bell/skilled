@@ -80,6 +80,7 @@ pub enum View {
 pub enum SourcesPane {
     Repositories,
     Variants,
+    Details,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -103,7 +104,8 @@ pub enum Action {
     ToggleCatalogClassification,
     ToggleCatalogCompatibility(AgentKind),
     ConfirmPendingSource,
-    ToggleSourcesPane,
+    MoveSourcesPane(i8),
+    AdvanceSourcesPane,
     MoveSourcesSelection(i8),
     RerunSetup,
     Quit,
@@ -326,8 +328,9 @@ impl SkilledApp {
                 Vec::new()
             }
             Action::OpenSources => {
-                if matches!(self.view, View::Inventory | View::Sources) {
+                if self.view == View::Inventory {
                     self.view = View::Sources;
+                    self.sources_pane = SourcesPane::Repositories;
                 }
                 Vec::new()
             }
@@ -406,11 +409,31 @@ impl SkilledApp {
                 Vec::new()
             }
             Action::ConfirmPendingSource => self.register_pending_source(),
-            Action::ToggleSourcesPane => {
+            Action::MoveSourcesPane(delta) => {
+                if self.view == View::Sources {
+                    let index = match self.sources_pane {
+                        SourcesPane::Repositories => 0,
+                        SourcesPane::Variants => 1,
+                        SourcesPane::Details => 2,
+                    };
+                    self.sources_pane = match (index + i16::from(delta)).rem_euclid(3) {
+                        0 => SourcesPane::Repositories,
+                        1 => SourcesPane::Variants,
+                        _ => SourcesPane::Details,
+                    };
+                }
+                Vec::new()
+            }
+            Action::AdvanceSourcesPane => {
                 if self.view == View::Sources {
                     self.sources_pane = match self.sources_pane {
-                        SourcesPane::Repositories => SourcesPane::Variants,
-                        SourcesPane::Variants => SourcesPane::Repositories,
+                        SourcesPane::Repositories if self.selected_source().is_some() => {
+                            SourcesPane::Variants
+                        }
+                        SourcesPane::Variants if self.selected_source().is_some() => {
+                            SourcesPane::Details
+                        }
+                        current => current,
                     };
                 }
                 Vec::new()
@@ -523,7 +546,11 @@ impl SkilledApp {
                 }
             }
             View::Settings => self.view = View::Inventory,
-            View::Sources => self.view = View::Inventory,
+            View::Sources => match self.sources_pane {
+                SourcesPane::Details => self.sources_pane = SourcesPane::Variants,
+                SourcesPane::Variants => self.sources_pane = SourcesPane::Repositories,
+                SourcesPane::Repositories => self.view = View::Inventory,
+            },
             View::Inventory => {}
         }
         UpdateResult::continuing(Vec::new())
@@ -592,10 +619,12 @@ impl SkilledApp {
         }
         match self.sources_pane {
             SourcesPane::Repositories if !self.sources.is_empty() => {
-                self.focused_source = (self.focused_source as i16 + i16::from(delta))
-                    .rem_euclid(self.sources.len() as i16)
-                    as usize;
-                self.focused_variant = 0;
+                let next = (self.focused_source as i16 + i16::from(delta))
+                    .rem_euclid(self.sources.len() as i16) as usize;
+                if next != self.focused_source {
+                    self.focused_source = next;
+                    self.focused_variant = 0;
+                }
             }
             SourcesPane::Variants => {
                 let count = self
@@ -610,7 +639,7 @@ impl SkilledApp {
                         as usize;
                 }
             }
-            SourcesPane::Repositories => {}
+            SourcesPane::Repositories | SourcesPane::Details => {}
         }
     }
 

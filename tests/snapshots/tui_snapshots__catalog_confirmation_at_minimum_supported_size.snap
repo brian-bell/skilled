@@ -1,12 +1,11 @@
 ---
 source: tests/tui_snapshots.rs
-assertion_line: 151
 expression: rendered
 ---
  ◆ skilled   global                              ● ready · 0 sources registered
  Confirm catalogs   navigation is locked while this dialog is open
-┌ Repositories ───────────┐ ┌ Available variants ──────────────────────────────┐
-│ No registered sources.  │ │ Select Add Source to begin.                      │
+┌▌ Repositories  0 registered──────────────────────────────────────────────────┐
+│                                                                              │
 │ ┌ Confirm catalogs ───────────────────────────────────── registration only ┐ │
 │ │                                                                          │ │
 │ │  Confirm the resolved repository, roots, and compatible agents.          │ │
@@ -23,7 +22,7 @@ expression: rendered
 │ │                                                                          │ │
 │ │                                                                          │ │
 │ └──────────────────────────────────────────────────────────────────────────┘ │
-│                         │ │                                                  │
-│                         │ │                                                  │
-└─────────────────────────┘ └──────────────────────────────────────────────────┘
+│                                                                              │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
  j/k Move   Space Include   c Class   1/2/3 Agents   Enter Register   Esc Cancel

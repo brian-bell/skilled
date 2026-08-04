@@ -19,10 +19,10 @@ Skilled is an early Rust 2024 and Ratatui terminal application for inspecting
 and eventually managing global coding-agent skills. Implemented so far:
 prototype-aligned seven-step first-run setup with segmented progress, agent
 detection and selection, SQLite-backed setup persistence, local Git source
-registration with catalog confirmation, Sources browsing of registered sources
-and their skill variants, an empty Inventory view, shared-dialog Settings setup
-reset, reducer-owned contextual help, responsive size handling, and guarded
-terminal restoration.
+registration with catalog confirmation, responsive three-region Sources
+browsing of registered repositories, skill variants, and structured details,
+an empty Inventory view, shared-dialog Settings setup reset, reducer-owned
+contextual help, responsive size handling, and guarded terminal restoration.
 
 Installation inventory, Doctor findings, Updates, and every filesystem or
 network mutation beyond the private metadata database are not implemented yet.

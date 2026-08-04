@@ -280,10 +280,24 @@ pub(crate) fn list_row(content: Vec<Span<'static>>, selected: bool, width: u16) 
 
 /// A pane heading with a subtitle that quantifies what the pane contains.
 pub(crate) fn pane_header(heading: &str, subtitle: &str) -> Line<'static> {
-    Line::from(vec![
-        Span::styled(heading.to_owned(), theme::pane_heading()),
-        Span::styled(format!("  {subtitle}"), theme::pane_subtitle()),
-    ])
+    focused_pane_header(heading, subtitle, false)
+}
+
+/// A pane heading whose active state remains visible without colour.
+pub(crate) fn focused_pane_header(heading: &str, subtitle: &str, focused: bool) -> Line<'static> {
+    let mut spans = Vec::new();
+    if focused {
+        spans.push(Span::styled(
+            format!("{FOCUS_MARKER} "),
+            theme::focus_marker(),
+        ));
+    }
+    spans.push(Span::styled(heading.to_owned(), theme::pane_heading()));
+    spans.push(Span::styled(
+        format!("  {subtitle}"),
+        theme::pane_subtitle(),
+    ));
+    Line::from(spans)
 }
 
 /// A horizontal rule spanning a region.
@@ -412,6 +426,22 @@ mod tests {
         unique.sort_unstable();
         unique.dedup();
         assert_eq!(unique.len(), glyphs.len(), "glyphs must be distinguishable");
+    }
+
+    #[test]
+    fn focused_pane_header_has_a_text_marker_independent_of_row_selection() {
+        let active = focused_pane_header("Repositories", "2 registered", true);
+        let inactive = focused_pane_header("Repositories", "2 registered", false);
+        let text = |line: &Line<'_>| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        };
+
+        assert_eq!(text(&active), "▌ Repositories  2 registered");
+        assert_eq!(text(&inactive), "Repositories  2 registered");
+        assert_ne!(text(&active), text(&inactive));
     }
 
     #[test]

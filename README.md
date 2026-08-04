@@ -31,9 +31,11 @@ install, repair, update, or uninstall skills.
   roots, and repositories containing one root `SKILL.md`.
 - Portable skill validation for exact filenames, YAML frontmatter, names,
   descriptions, readable UTF-8 content, and immediate catalog children.
-- A Sources browser for registered repositories and valid or invalid variants,
-  including current Git state, catalog classification, agent compatibility, and
-  recoverable source or catalog errors.
+- A responsive Sources browser with Repositories, Variants, and structured
+  Details regions for current Git state, catalog classification, agent
+  compatibility, valid or invalid skills, and recoverable source or catalog
+  errors. Wide terminals show all three regions; compact terminals show the
+  focused region.
 - Versioned SQLite persistence for setup, configured agents, source metadata,
   and confirmed catalog roots.
 - Direct startup into Inventory after setup is complete.
@@ -97,9 +99,11 @@ In catalog confirmation:
 - `1`, `2`, and `3` toggle Claude Code, Codex, and OpenCode compatibility.
 - Enter registers the selected metadata; Esc cancels.
 
-From Inventory, press `2` to open Sources. In Sources, Tab switches between the
-repository and variant panes, `j` / `k` or arrow keys move the selection, `a`
-adds another source, and `1` returns to Inventory.
+From Inventory, press `2` to open Sources. In Sources, Tab and Shift-Tab move
+forward and backward through Repositories, Variants, and Details; Enter advances
+toward Details; and Esc returns through the region hierarchy before leaving the
+screen. In a selectable list, `j` / `k` or arrow keys move the selection. Press
+`a` to add another source or `1` to return to Inventory.
 
 Private metadata is stored in the platform application-data directory. On
 macOS, the database is normally

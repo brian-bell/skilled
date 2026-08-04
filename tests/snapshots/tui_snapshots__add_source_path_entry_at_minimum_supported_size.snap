@@ -1,15 +1,14 @@
 ---
 source: tests/tui_snapshots.rs
-assertion_line: 112
 expression: "render(&app, 80, 24)"
 ---
  ◆ skilled   global                              ● ready · 0 sources registered
  Add source   navigation is locked while this dialog is open
-┌ Repositories ───────────┐ ┌ Available variants ──────────────────────────────┐
-│ No registered sources.  │ │ Select Add Source to begin.                      │
-│ Press a to add one.     │ │                                                  │
-│                         │ │                                                  │
-│                         │ │                                                  │
+┌▌ Repositories  0 registered──────────────────────────────────────────────────┐
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
 │     ┌ Add source ────────────────────────────────── local Git checkout ┐     │
 │     │                                                                  │     │
 │     │  Enter a path inside a local Git checkout:                       │     │
@@ -19,11 +18,11 @@ expression: "render(&app, 80, 24)"
 │     │                                                                  │     │
 │     │                                                                  │     │
 │     └──────────────────────────────────────────────────────────────────┘     │
-│                         │ │                                                  │
-│                         │ │                                                  │
-│                         │ │                                                  │
-│                         │ │                                                  │
-│                         │ │                                                  │
-│                         │ │                                                  │
-└─────────────────────────┘ └──────────────────────────────────────────────────┘
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
  Enter Inspect   Esc Cancel   Ctrl-C Quit

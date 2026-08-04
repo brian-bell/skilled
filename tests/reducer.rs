@@ -1,6 +1,180 @@
+use std::{fs, path::Path, process::Command};
+
 use skilled::{
-    Action, AgentKind, AppEnvironment, Effect, SetupStep, SkilledApp, UpdateOutcome, View,
+    Action, AgentKind, AppEnvironment, Effect, SetupStep, SkilledApp, SourcesPane, UpdateOutcome,
+    View,
 };
+
+#[test]
+fn sources_region_focus_cycles_forward_without_effects() {
+    let temporary = tempfile::tempdir().expect("temporary application directory");
+    let mut app = app_in(&temporary);
+    finish_setup(&mut app);
+    app.update(Action::OpenSources);
+
+    for expected in [
+        SourcesPane::Variants,
+        SourcesPane::Details,
+        SourcesPane::Repositories,
+    ] {
+        let update = app.update(Action::MoveSourcesPane(1));
+        assert_eq!(app.sources_pane(), expected);
+        assert_eq!(update.outcome(), UpdateOutcome::Continue);
+        assert!(update.effects().is_empty());
+    }
+}
+
+#[test]
+fn sources_enter_requires_a_repository_then_advances_without_wrapping() {
+    let temporary = tempfile::tempdir().expect("temporary application directory");
+    let mut app = app_in(&temporary);
+    finish_setup(&mut app);
+    app.update(Action::OpenSources);
+
+    let no_source = app.update(Action::AdvanceSourcesPane);
+    assert_eq!(app.sources_pane(), SourcesPane::Repositories);
+    assert!(no_source.effects().is_empty());
+
+    app.update(Action::MoveSourcesPane(1));
+    let no_source = app.update(Action::AdvanceSourcesPane);
+    assert_eq!(app.sources_pane(), SourcesPane::Variants);
+    assert!(no_source.effects().is_empty());
+
+    app.update(Action::AdvanceSourcesPane);
+    assert_eq!(app.sources_pane(), SourcesPane::Variants);
+}
+
+#[test]
+fn sources_back_walks_the_region_hierarchy_before_leaving() {
+    let temporary = tempfile::tempdir().expect("temporary application directory");
+    let mut app = app_in(&temporary);
+    finish_setup(&mut app);
+    app.update(Action::OpenSources);
+    app.update(Action::MoveSourcesPane(-1));
+    assert_eq!(app.sources_pane(), SourcesPane::Details);
+
+    for expected in [SourcesPane::Variants, SourcesPane::Repositories] {
+        let update = app.update(Action::Back);
+        assert_eq!(app.view(), View::Sources);
+        assert_eq!(app.sources_pane(), expected);
+        assert!(update.effects().is_empty());
+    }
+
+    app.update(Action::Back);
+    assert_eq!(app.view(), View::Inventory);
+}
+
+#[test]
+fn reopening_sources_starts_at_repositories() {
+    let temporary = tempfile::tempdir().expect("temporary application directory");
+    let mut app = app_in(&temporary);
+    finish_setup(&mut app);
+    app.update(Action::OpenSources);
+    app.update(Action::MoveSourcesPane(-1));
+    assert_eq!(app.sources_pane(), SourcesPane::Details);
+
+    app.update(Action::OpenInventory);
+    app.update(Action::OpenSources);
+
+    assert_eq!(app.sources_pane(), SourcesPane::Repositories);
+}
+
+#[test]
+fn sources_region_focus_normalizes_backward_and_large_movements() {
+    let temporary = tempfile::tempdir().expect("temporary application directory");
+    let mut app = app_in(&temporary);
+    finish_setup(&mut app);
+    app.update(Action::OpenSources);
+
+    app.update(Action::MoveSourcesPane(-1));
+    assert_eq!(app.sources_pane(), SourcesPane::Details);
+    app.update(Action::MoveSourcesPane(4));
+    assert_eq!(app.sources_pane(), SourcesPane::Repositories);
+    app.update(Action::MoveSourcesPane(-4));
+    assert_eq!(app.sources_pane(), SourcesPane::Details);
+}
+
+#[test]
+fn changing_repository_resets_the_variant_selection() {
+    let temporary = tempfile::tempdir().expect("temporary application directory");
+    let mut app = app_in(&temporary);
+    finish_setup(&mut app);
+    register_source(&mut app, &temporary.path().join("first"), 2);
+    register_source(&mut app, &temporary.path().join("second"), 2);
+    app.update(Action::OpenSources);
+    app.update(Action::MoveSourcesPane(1));
+    app.update(Action::MoveSourcesSelection(1));
+    assert_eq!(app.focused_variant(), 1);
+
+    app.update(Action::MoveSourcesPane(-1));
+    app.update(Action::MoveSourcesSelection(-1));
+
+    assert_eq!(app.focused_source(), 0);
+    assert_eq!(app.focused_variant(), 0);
+}
+
+#[test]
+fn moving_a_singleton_repository_preserves_the_selected_variant() {
+    let temporary = tempfile::tempdir().expect("temporary application directory");
+    let mut app = app_in(&temporary);
+    finish_setup(&mut app);
+    register_source(&mut app, &temporary.path().join("source"), 2);
+    app.update(Action::OpenSources);
+    app.update(Action::MoveSourcesPane(1));
+    app.update(Action::MoveSourcesSelection(1));
+    app.update(Action::MoveSourcesPane(-1));
+
+    app.update(Action::MoveSourcesSelection(1));
+
+    assert_eq!(app.focused_source(), 0);
+    assert_eq!(app.focused_variant(), 1);
+}
+
+#[test]
+fn sources_enter_opens_details_for_a_selected_source_with_no_variants() {
+    let temporary = tempfile::tempdir().expect("temporary application directory");
+    let mut app = app_in(&temporary);
+    finish_setup(&mut app);
+    register_source(&mut app, &temporary.path().join("source"), 0);
+    app.update(Action::OpenSources);
+
+    app.update(Action::AdvanceSourcesPane);
+    assert_eq!(app.sources_pane(), SourcesPane::Variants);
+    app.update(Action::AdvanceSourcesPane);
+
+    assert_eq!(app.sources_pane(), SourcesPane::Details);
+}
+
+#[test]
+fn details_focus_preserves_repository_and_variant_selection() {
+    let temporary = tempfile::tempdir().expect("temporary application directory");
+    let mut app = app_in(&temporary);
+    finish_setup(&mut app);
+    register_source(&mut app, &temporary.path().join("source"), 2);
+    app.update(Action::OpenSources);
+    app.update(Action::MoveSourcesPane(1));
+    app.update(Action::MoveSourcesSelection(1));
+    app.update(Action::MoveSourcesPane(1));
+
+    app.update(Action::MoveSourcesSelection(1));
+
+    assert_eq!(app.focused_source(), 0);
+    assert_eq!(app.focused_variant(), 1);
+}
+
+#[test]
+fn sources_enter_opens_variants_when_a_repository_is_selected() {
+    let temporary = tempfile::tempdir().expect("temporary application directory");
+    let mut app = app_in(&temporary);
+    finish_setup(&mut app);
+    register_source(&mut app, &temporary.path().join("source"), 1);
+    app.update(Action::OpenSources);
+
+    let update = app.update(Action::AdvanceSourcesPane);
+
+    assert_eq!(app.sources_pane(), SourcesPane::Variants);
+    assert!(update.effects().is_empty());
+}
 
 #[test]
 fn setup_actions_advance_and_change_the_focused_agent_selection() {
@@ -245,4 +419,43 @@ fn assert_help_blocks(app: &mut SkilledApp, blocked_action: Action) {
     assert!(closed.effects().is_empty());
     assert_eq!(app.help_context(), None);
     assert_eq!(app.view(), original_view);
+}
+
+fn register_source(app: &mut SkilledApp, repository: &Path, variants: usize) {
+    fs::create_dir_all(repository.join("skills")).expect("create catalog fixture");
+    if variants == 0 {
+        fs::write(repository.join("skills/.keep"), "empty catalog fixture")
+            .expect("write empty catalog fixture");
+    }
+    for index in 0..variants {
+        let skill = repository.join("skills").join(format!("variant-{index}"));
+        fs::create_dir_all(&skill).expect("create skill fixture");
+        fs::write(
+            skill.join("SKILL.md"),
+            format!(
+                "---\nname: variant-{index}\ndescription: Variant {index}\n---\n# Variant {index}\n"
+            ),
+        )
+        .expect("write skill fixture");
+    }
+    git(repository, &["init", "-b", "main"]);
+    git(repository, &["config", "user.name", "Skilled Test"]);
+    git(
+        repository,
+        &["config", "user.email", "skilled@example.test"],
+    );
+    git(repository, &["add", "."]);
+    git(repository, &["commit", "-m", "fixture"]);
+    let preview = app.preview_source(repository).expect("preview source");
+    app.confirm_source(preview).expect("register source");
+}
+
+fn git(repository: &Path, arguments: &[&str]) {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repository)
+        .args(arguments)
+        .output()
+        .expect("run Git fixture command");
+    assert!(output.status.success(), "Git command failed: {output:?}");
 }

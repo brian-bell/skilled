@@ -168,13 +168,6 @@ pub(crate) fn dialog_surface() -> Style {
     Style::default().fg(TEXT).bg(SURFACE)
 }
 
-/// Emphasised body text.
-pub(crate) fn emphasis() -> Style {
-    Style::default()
-        .fg(TEXT_STRONG)
-        .add_modifier(Modifier::BOLD)
-}
-
 /// The title of a workspace pane.
 pub(crate) fn pane_heading() -> Style {
     Style::default()
