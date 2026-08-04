@@ -1632,12 +1632,19 @@ fn catalog_confirmation_bounds_pathological_paths_without_hiding_required_sectio
     app.update(Action::ToggleCatalogIncluded);
     app.update(Action::ConfirmPendingSource);
 
-    let rendered = text(&buffer(&app, 80, 24));
+    let screen = buffer(&app, 80, 24);
+    let rendered = text(&screen);
 
     assert!(rendered.contains("Repository:"), "{rendered}");
     assert!(rendered.contains("source-"), "{rendered}");
     assert!(rendered.contains("Worktree: ✓ clean"), "{rendered}");
     assert!(rendered.contains("▌ Excluded"), "{rendered}");
+    let focused_catalog = row_containing(&screen, "▌ Excluded");
+    assert_eq!(
+        style_in_row(&screen, focused_catalog, "▌").fg,
+        Some(Color::Rgb(0x73, 0xd7, 0xee)),
+        "{rendered}"
+    );
     assert!(rendered.contains("set-1-"), "{rendered}");
     assert!(rendered.contains("Agent-specific"), "{rendered}");
     assert!(rendered.contains("Claude Code: yes"), "{rendered}");
