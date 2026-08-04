@@ -1,3 +1,5 @@
+use std::{fs, path::Path, process::Command};
+
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use skilled::{Action, AppEnvironment, SetupStep, SkilledApp, View};
 
@@ -42,6 +44,34 @@ fn keys_map_to_contextual_actions_without_mutating_application_state() {
             KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)
         ),
         Some(Action::Quit)
+    );
+}
+
+#[test]
+fn sources_tab_and_backtab_move_region_focus_in_opposite_directions() {
+    use skilled::input::action_for_key;
+
+    assert_eq!(
+        action_for_key(View::Sources, key(KeyCode::Tab)),
+        Some(Action::MoveSourcesPane(1))
+    );
+    assert_eq!(
+        action_for_key(View::Sources, key(KeyCode::BackTab)),
+        Some(Action::MoveSourcesPane(-1))
+    );
+}
+
+#[test]
+fn sources_enter_advances_and_escape_backs_through_the_region_hierarchy() {
+    use skilled::input::action_for_key;
+
+    assert_eq!(
+        action_for_key(View::Sources, key(KeyCode::Enter)),
+        Some(Action::AdvanceSourcesPane)
+    );
+    assert_eq!(
+        action_for_key(View::Sources, key(KeyCode::Esc)),
+        Some(Action::Back)
     );
 }
 
@@ -165,6 +195,19 @@ fn repeated_keys_only_move_the_agent_selection() {
 }
 
 #[test]
+fn repeated_sources_hierarchy_keys_do_not_skip_regions() {
+    use skilled::input::action_for_key;
+
+    for code in [KeyCode::Tab, KeyCode::BackTab, KeyCode::Enter, KeyCode::Esc] {
+        assert_eq!(
+            action_for_key(View::Sources, repeat(code)),
+            None,
+            "{code:?}"
+        );
+    }
+}
+
+#[test]
 fn source_path_entry_treats_printable_keys_as_text_and_keeps_ctrl_c_as_quit() {
     use skilled::input::action_for_app_key;
 
@@ -203,10 +246,78 @@ fn source_path_entry_treats_printable_keys_as_text_and_keeps_ctrl_c_as_quit() {
     );
 }
 
+#[test]
+fn pending_catalog_confirmation_precedes_sources_region_navigation() {
+    use skilled::input::action_for_app_key;
+
+    let temporary = tempfile::tempdir().expect("temporary application directory");
+    let repository = temporary.path().join("source");
+    fs::create_dir_all(repository.join("skills/portable")).expect("create skill fixture");
+    fs::write(
+        repository.join("skills/portable/SKILL.md"),
+        "---\nname: portable\ndescription: fixture\n---\n# Portable\n",
+    )
+    .expect("write skill fixture");
+    initialize_repository(&repository);
+    let mut app = SkilledApp::open(AppEnvironment::new(
+        temporary.path().join("home"),
+        temporary.path().join("data"),
+        "",
+    ))
+    .expect("open application");
+    for _ in 0..7 {
+        let update = app.update(Action::Continue);
+        app.perform_effects(update.effects())
+            .expect("complete setup");
+    }
+    app.update(Action::OpenSources);
+    app.update(Action::BeginAddSource);
+    for character in repository.to_string_lossy().chars() {
+        app.update(Action::AppendSourcePath(character));
+    }
+    let update = app.update(Action::SubmitSourcePath);
+    app.perform_effects(update.effects())
+        .expect("inspect source");
+    assert!(app.pending_source().is_some());
+
+    assert_eq!(
+        action_for_app_key(&app, key(KeyCode::Enter)),
+        Some(Action::ConfirmPendingSource)
+    );
+    assert_eq!(
+        action_for_app_key(&app, key(KeyCode::Esc)),
+        Some(Action::CancelSourceFlow)
+    );
+    assert_eq!(action_for_app_key(&app, key(KeyCode::Tab)), None);
+    assert_eq!(action_for_app_key(&app, key(KeyCode::BackTab)), None);
+    assert_eq!(action_for_app_key(&app, repeat(KeyCode::Enter)), None);
+}
+
 fn key(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)
 }
 
 fn repeat(code: KeyCode) -> KeyEvent {
     KeyEvent::new_with_kind(code, KeyModifiers::NONE, KeyEventKind::Repeat)
+}
+
+fn initialize_repository(repository: &Path) {
+    git(repository, &["init", "-b", "main"]);
+    git(repository, &["config", "user.name", "Skilled Test"]);
+    git(
+        repository,
+        &["config", "user.email", "skilled@example.test"],
+    );
+    git(repository, &["add", "."]);
+    git(repository, &["commit", "-m", "fixture"]);
+}
+
+fn git(repository: &Path, arguments: &[&str]) {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repository)
+        .args(arguments)
+        .output()
+        .expect("run Git fixture command");
+    assert!(output.status.success());
 }

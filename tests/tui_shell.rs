@@ -450,7 +450,7 @@ fn surfaces_are_painted_where_the_design_calls_for_them() {
         .perform_effects(update.effects())
         .expect("inspect source");
     let screen = buffer(&dialog, 120, 40);
-    let branch = row_containing(&screen, "Branch:");
+    let branch = row_containing(&screen, "Branch: main   HEAD:");
     assert_eq!(style_in_row(&screen, branch, "Branch:").bg, Some(SURFACE));
     assert_eq!(
         style_in_row(&screen, branch, "✓ clean").bg,
@@ -713,11 +713,12 @@ fn sources_and_settings_help_match_their_active_bindings() {
 
     let sources_help = text(&buffer(&sources, 120, 40));
     for command in [
-        "Tab / Shift-Tab Pane",
+        "Tab / Shift-Tab Region",
         "j/k Move",
+        "Enter Open next region",
         "a Add source",
         "1 Inventory",
-        "Esc Back",
+        "Esc Back one region",
         "? Help",
         "q Quit",
     ] {
@@ -752,7 +753,36 @@ fn wide_help_balances_commands_across_two_columns() {
     let first_command_row = row_containing(&screen, "Tab / Shift-Tab");
     let row = row_text(&screen, first_command_row);
 
-    assert!(row.contains("Esc Back"), "{row}\n{}", text(&screen));
+    assert!(row.contains("1 Inventory"), "{row}\n{}", text(&screen));
+    assert!(text(&screen).contains("Esc Back one region"));
+}
+
+#[test]
+fn sources_key_hints_follow_the_focused_region_at_compact_size() {
+    let harness = Harness::new();
+    let repository = harness.directory.path().join("source");
+    create_source_fixture(&repository);
+    let mut app = harness.completed_setup();
+    let preview = app.preview_source(&repository).expect("preview source");
+    app.confirm_source(preview).expect("register source");
+    app.update(Action::OpenSources);
+
+    let repositories = row_text(&buffer(&app, 80, 24), 23);
+    assert!(
+        repositories.contains("Tab/Shift-Tab Region"),
+        "{repositories}"
+    );
+    assert!(repositories.contains("j/k Move"), "{repositories}");
+    assert!(repositories.contains("Enter Open"), "{repositories}");
+    assert!(repositories.contains("Esc Back"), "{repositories}");
+
+    app.update(Action::AdvanceSourcesPane);
+    app.update(Action::AdvanceSourcesPane);
+    let details = row_text(&buffer(&app, 80, 24), 23);
+    assert!(details.contains("Tab/Shift-Tab Region"), "{details}");
+    assert!(!details.contains("j/k Move"), "{details}");
+    assert!(!details.contains("Enter Open"), "{details}");
+    assert!(details.contains("Esc Back"), "{details}");
 }
 
 #[test]
@@ -766,16 +796,12 @@ fn complete_key_hints_render_at_compact_and_wide_sizes() {
     let mut settings = harness.completed_setup();
     settings.update(Action::OpenSettings);
 
-    let contexts: [(&SkilledApp, &str); 4] = [
+    let contexts: [(&SkilledApp, &str); 3] = [
         (
             &setup,
             " j/k Move   Space Toggle   Enter Continue   Esc Back   ? Help   q Quit",
         ),
         (&inventory, " 2 Sources   s Settings   ? Help   q Quit"),
-        (
-            &sources,
-            " Tab Pane   j/k Move   a Add source   1 Inventory   ? Help   q Quit",
-        ),
         (&settings, " Enter Rerun setup   ? Help   Esc Close"),
     ];
 
@@ -786,6 +812,15 @@ fn complete_key_hints_render_at_compact_and_wide_sizes() {
             assert_eq!(footer, expected, "unexpected hints at {width}x{height}");
         }
     }
+
+    assert_eq!(
+        row_text(&buffer(&sources, 80, 24), 23),
+        " Tab/Shift-Tab Region   j/k Move   Enter Open   a Add source   Esc Back …"
+    );
+    assert_eq!(
+        row_text(&buffer(&sources, 120, 40), 39),
+        " Tab/Shift-Tab Region   j/k Move   Enter Open   a Add source   1 Inventory   ? Help   q Quit   Esc Back"
+    );
 }
 
 #[test]
@@ -918,6 +953,57 @@ fn wide_terminals_gain_a_detail_region_and_compact_ones_do_not() {
 }
 
 #[test]
+fn sources_wide_workspace_shows_three_regions_and_marks_focus_in_text() {
+    let harness = Harness::new();
+    let mut app = harness.completed_setup();
+    app.update(Action::OpenSources);
+
+    let rendered = text(&buffer(&app, 120, 40));
+
+    assert!(rendered.contains("▌ Repositories"), "{rendered}");
+    assert!(rendered.contains("Available variants"), "{rendered}");
+    assert!(rendered.contains("Details"), "{rendered}");
+}
+
+#[test]
+fn sources_compact_workspace_replaces_regions_as_enter_advances() {
+    let harness = Harness::new();
+    let repository = harness.directory.path().join("source");
+    create_source_fixture(&repository);
+    let mut app = harness.completed_setup();
+    let preview = app.preview_source(&repository).expect("preview source");
+    app.confirm_source(preview).expect("register source");
+    app.update(Action::OpenSources);
+
+    let repositories = text(&buffer(&app, 80, 24));
+    assert!(repositories.contains("▌ Repositories"), "{repositories}");
+    assert!(
+        !repositories.contains("Available variants"),
+        "{repositories}"
+    );
+    assert!(!repositories.contains("Details"), "{repositories}");
+
+    app.update(Action::AdvanceSourcesPane);
+    let variants = text(&buffer(&app, 80, 24));
+    assert!(variants.contains("▌ Available variants"), "{variants}");
+    assert!(!variants.contains("Repositories"), "{variants}");
+    assert!(!variants.contains("Details"), "{variants}");
+
+    app.update(Action::AdvanceSourcesPane);
+    let details = text(&buffer(&app, 80, 24));
+    assert!(details.contains("▌ Details"), "{details}");
+    assert!(!details.contains("Repositories"), "{details}");
+    assert!(!details.contains("Available variants"), "{details}");
+
+    app.update(Action::Back);
+    let variants = text(&buffer(&app, 80, 24));
+    assert!(variants.contains("▌ Available variants"), "{variants}");
+    app.update(Action::Back);
+    let repositories = text(&buffer(&app, 80, 24));
+    assert!(repositories.contains("▌ Repositories"), "{repositories}");
+}
+
+#[test]
 fn source_status_pairs_every_colour_with_a_glyph_and_a_word() {
     let harness = Harness::new();
     let repository = harness.directory.path().join("source");
@@ -941,17 +1027,205 @@ fn source_status_pairs_every_colour_with_a_glyph_and_a_word() {
         Some(Color::Rgb(0xe6, 0xbd, 0x6a))
     );
 
-    assert!(rendered.contains("✓ portable"), "{rendered}");
+    assert!(rendered.contains("✓ valid portable"), "{rendered}");
     assert_eq!(
-        style_at(&screen, "✓ portable").fg,
+        style_at(&screen, "✓ valid").fg,
         Some(Color::Rgb(0x8b, 0xd4, 0x9c))
     );
 
-    assert!(rendered.contains("× broken"), "{rendered}");
+    assert!(rendered.contains("× invalid broken"), "{rendered}");
     assert_eq!(
-        style_at(&screen, "× broken").fg,
+        style_at(&screen, "× invalid").fg,
         Some(Color::Rgb(0xee, 0x6b, 0x73))
     );
+}
+
+#[test]
+fn sources_distinguish_clean_and_unavailable_repositories_semantically() {
+    let clean_harness = Harness::new();
+    let clean_repository = clean_harness.directory.path().join("clean-source");
+    create_source_fixture(&clean_repository);
+    let mut clean_app = clean_harness.completed_setup();
+    let preview = clean_app
+        .preview_source(&clean_repository)
+        .expect("preview clean source");
+    clean_app
+        .confirm_source(preview)
+        .expect("register clean source");
+    clean_app.update(Action::OpenSources);
+    let clean = buffer(&clean_app, 120, 40);
+    assert!(text(&clean).contains("✓ clean"), "{}", text(&clean));
+    assert_eq!(
+        style_at(&clean, "✓ clean").fg,
+        Some(Color::Rgb(0x8b, 0xd4, 0x9c))
+    );
+
+    let unavailable_harness = Harness::new();
+    let repository = unavailable_harness.directory.path().join("source");
+    let moved = unavailable_harness.directory.path().join("source-moved");
+    create_source_fixture(&repository);
+    let environment = unavailable_harness.environment();
+    let mut app = unavailable_harness.completed_setup();
+    let preview = app.preview_source(&repository).expect("preview source");
+    app.confirm_source(preview).expect("register source");
+    drop(app);
+    fs::rename(&repository, &moved).expect("move registered checkout");
+    let mut reopened = SkilledApp::open(environment).expect("reopen application");
+    reopened.update(Action::OpenSources);
+
+    let unavailable = buffer(&reopened, 120, 40);
+    let rendered = text(&unavailable);
+    assert!(rendered.contains("× unavailable"), "{rendered}");
+    assert!(rendered.contains("Source error:"), "{rendered}");
+    assert!(!rendered.contains("✓ clean"), "{rendered}");
+    assert_eq!(
+        style_at(&unavailable, "× unavailable").fg,
+        Some(Color::Rgb(0xee, 0x6b, 0x73))
+    );
+}
+
+#[test]
+fn sources_surface_catalog_scan_errors_in_variants_and_details() {
+    let harness = Harness::new();
+    let repository = harness.directory.path().join("source");
+    create_source_fixture(&repository);
+    let environment = harness.environment();
+    let mut app = harness.completed_setup();
+    let preview = app.preview_source(&repository).expect("preview source");
+    app.confirm_source(preview).expect("register source");
+    drop(app);
+    let connection =
+        rusqlite::Connection::open(harness.directory.path().join("data/skilled.sqlite3"))
+            .expect("open application database");
+    connection
+        .execute("UPDATE catalog_roots SET relative_path = '../outside'", [])
+        .expect("create unsafe stored catalog fixture");
+    drop(connection);
+    let mut reopened = SkilledApp::open(environment).expect("reopen application");
+    reopened.update(Action::OpenSources);
+    reopened.update(Action::AdvanceSourcesPane);
+
+    let variants = text(&buffer(&reopened, 80, 24));
+    assert!(variants.contains("× unavailable"), "{variants}");
+    assert!(variants.contains("Open Details"), "{variants}");
+
+    reopened.update(Action::AdvanceSourcesPane);
+    let details = text(&buffer(&reopened, 80, 24));
+    assert!(details.contains("Catalog error (../outside):"), "{details}");
+    assert!(details.contains("relative"), "{details}");
+}
+
+#[test]
+fn sources_details_render_stored_repository_catalog_and_variant_metadata() {
+    let harness = Harness::new();
+    let repository = harness.directory.path().join("source");
+    create_source_fixture(&repository);
+    git(
+        &repository,
+        &["remote", "add", "origin", "https://example.test/source.git"],
+    );
+    let mut app = harness.completed_setup();
+    let preview = app.preview_source(&repository).expect("preview source");
+    app.confirm_source(preview).expect("register source");
+    let head = app.sources()[0].head().to_owned();
+    let canonical = repository.canonicalize().expect("canonical repository");
+    app.update(Action::OpenSources);
+    app.update(Action::AdvanceSourcesPane);
+    app.update(Action::AdvanceSourcesPane);
+
+    let rendered = text(&buffer(&app, 80, 24));
+
+    for expected in [
+        "REPOSITORY",
+        "Label: source",
+        "Branch: main",
+        "Status: ✓ clean",
+        "Remote: https://example.test/source.git",
+        "Last scan:",
+        "CATALOG",
+        "Classification: Common",
+        "Compatibility: Claude Code: yes · Codex: yes · OpenCode: yes",
+        "VARIANT",
+        "Directory: portable · Name: portable",
+        "Path: skills/portable · Status: ✓ valid",
+        "Description: Portable fixture",
+    ] {
+        assert!(
+            rendered.contains(expected),
+            "missing {expected:?} in\n{rendered}"
+        );
+    }
+    assert!(rendered.contains(&head), "{rendered}");
+    assert!(
+        rendered.contains(&canonical.display().to_string()),
+        "{rendered}"
+    );
+}
+
+#[test]
+fn sources_keep_offscreen_repository_selection_visible() {
+    let harness = Harness::new();
+    let mut app = harness.completed_setup();
+    for index in 0..24 {
+        let repository = harness.directory.path().join(format!("source-{index:02}"));
+        create_source_fixture(&repository);
+        let preview = app.preview_source(&repository).expect("preview source");
+        app.confirm_source(preview).expect("register source");
+    }
+    app.update(Action::OpenSources);
+
+    let rendered = text(&buffer(&app, 80, 24));
+
+    assert_eq!(app.focused_source(), 23);
+    assert!(rendered.contains("▌ source-23"), "{rendered}");
+    assert!(!rendered.contains("source-00"), "{rendered}");
+}
+
+#[test]
+fn long_wrapped_metadata_keeps_variant_identity_and_status_visible() {
+    let harness = Harness::new();
+    let repository = harness.directory.path().join("source");
+    fs::create_dir_all(repository.join("skills/portable")).expect("create skill directory");
+    fs::write(
+        repository.join("skills/portable/SKILL.md"),
+        format!(
+            "---\nname: portable\ndescription: Long detail {}\n---\n# Portable\n",
+            "description ".repeat(40)
+        ),
+    )
+    .expect("write long skill metadata");
+    git(&repository, &["init", "-b", "main"]);
+    git(&repository, &["config", "user.name", "Skilled Test"]);
+    git(
+        &repository,
+        &["config", "user.email", "skilled@example.test"],
+    );
+    git(
+        &repository,
+        &[
+            "remote",
+            "add",
+            "origin",
+            &format!("https://example.test/{}", "remote-segment/".repeat(16)),
+        ],
+    );
+    git(&repository, &["add", "."]);
+    git(&repository, &["commit", "-m", "fixture"]);
+    let mut app = harness.completed_setup();
+    let preview = app.preview_source(&repository).expect("preview source");
+    app.confirm_source(preview).expect("register source");
+    app.update(Action::OpenSources);
+    app.update(Action::AdvanceSourcesPane);
+    app.update(Action::AdvanceSourcesPane);
+
+    let rendered = text(&buffer(&app, 80, 24));
+
+    assert!(
+        rendered.contains("Directory: portable · Name: portable"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("Status: ✓ valid"), "{rendered}");
+    assert!(rendered.contains("remote-segment/..."), "{rendered}");
 }
 
 #[test]

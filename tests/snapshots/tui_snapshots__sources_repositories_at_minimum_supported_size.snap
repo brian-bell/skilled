@@ -1,0 +1,28 @@
+---
+source: tests/tui_snapshots.rs
+expression: "normalize_sources_screen(&app, &temporary, render(&app, 80, 24))"
+---
+ ◆ skilled   global                               ● ready · 1 source registered
+ 1 Inventory ▌Sources  Updates (soon)  Doctor (soon)
+┌▌ Repositories  1 registered──────────────────────────────────────────────────┐
+│ ▌ source  ✓ clean                                                            │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+ Tab/Shift-Tab Region   j/k Move   Enter Open   a Add source   Esc Back …
