@@ -16,13 +16,13 @@ expression: "render(&app, 120, 40)"
 │           │                                                                                              │           │
 │           │  Only commands available in this context are listed.                                         │           │
 │           │                                                                                              │           │
-│           │  Tab / Shift-Tab Region — move region focus    1 Inventory — return to Inventory             │           │
-│           │  forward or backward                           Esc Back one region — return toward           │           │
-│           │  Up/Down or j/k Move — move repository or      Repositories, then Inventory                  │           │
-│           │  variant selection                             ? Help — open this keyboard reference         │           │
-│           │  Enter Open next region — advance toward       q Quit — quit when no dialog is open          │           │
-│    No sour│  Details                                                                                     │d          │
-│           │  a Add source — inspect a local checkout                                                     │           │
+│           │  Tab / Shift-Tab Region — move region focus    Esc Back one region — return toward           │           │
+│           │  forward or backward                           Repositories, then Inventory                  │           │
+│           │  a Add source — inspect a local checkout       ? Help — open this keyboard reference         │           │
+│           │  1 Inventory — return to Inventory             q Quit — quit when no dialog is open          │           │
+│           │                                                                                              │           │
+│    No sour│                                                                                              │d          │
+│           │                                                                                              │           │
 │   Press a │                                                                                              │see its    │
 │          G│                                                                                              │           │
 │           │                                                                                              │           │

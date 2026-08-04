@@ -624,8 +624,16 @@ fn render_source_variants(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
         .selected_source()
         .map(flattened_variants)
         .unwrap_or_default();
+    let catalog_error_count = app
+        .selected_source()
+        .into_iter()
+        .flat_map(RegisteredSource::catalogs)
+        .filter(|catalog| catalog.scan_error().is_some())
+        .count();
     let subtitle = match app.selected_source() {
         Some(source) if source.source_error().is_some() => "unavailable".to_owned(),
+        Some(_) if catalog_error_count > 0 && variants.is_empty() => "scan unavailable".to_owned(),
+        Some(_) if catalog_error_count > 0 => format!("{} found · scan error", variants.len()),
         Some(_) => format!("{} found", variants.len()),
         None => "no source".to_owned(),
     };
@@ -757,50 +765,58 @@ fn render_source_details(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
         return;
     };
 
-    let mut lines = Vec::new();
-    push_detail_section(&mut lines, "REPOSITORY", inner.width);
-    lines.push(detail_field("Label", source.label()));
-    lines.push(detail_field_bounded(
+    let bounded_lines = 2;
+    let mut repository_lines = Vec::new();
+    push_detail_section(&mut repository_lines, "REPOSITORY", inner.width);
+    repository_lines.push(detail_field_bounded(
+        "Label",
+        &format!(
+            "{} · Branch: {}",
+            terminal_safe(source.label()),
+            terminal_safe(source.branch().unwrap_or("detached"))
+        ),
+        inner.width,
+        1,
+    ));
+    repository_lines.push(detail_field_bounded(
         "Path",
         &source.git_top_level().display().to_string(),
         inner.width,
-        2,
+        bounded_lines,
     ));
-    lines.push(Line::from(vec![
-        Span::styled("Branch: ", theme::pane_subtitle()),
-        Span::raw(terminal_safe(source.branch().unwrap_or("detached"))),
-        Span::raw(" · "),
-        Span::styled("Status: ", theme::pane_subtitle()),
-        source_status_badge(source),
-    ]));
-    lines.push(detail_field("HEAD", source.head()));
-    lines.push(detail_field_bounded(
+    repository_lines.push(detail_field("HEAD", source.head()));
+    repository_lines.push(detail_field_bounded(
         "Remote",
         source.remote_url().unwrap_or("not configured"),
         inner.width,
-        2,
+        bounded_lines,
     ));
-    lines.push(detail_field(
-        "Last scan",
-        &source.last_scan_at().to_string(),
-    ));
+    repository_lines.push(Line::from(vec![
+        Span::styled("Status: ", theme::pane_subtitle()),
+        source_status_badge(source),
+        Span::raw(" · "),
+        Span::styled("Last scan: ", theme::pane_subtitle()),
+        Span::raw(source.last_scan_at().to_string()),
+    ]));
     if let Some(error) = source.source_error() {
-        lines.push(detail_field("Source error", error));
+        repository_lines.push(detail_field_bounded("Source error", error, inner.width, 3));
     }
 
-    push_detail_section(&mut lines, "CATALOG", inner.width);
+    let mut catalog_lines = Vec::new();
+    push_detail_section(&mut catalog_lines, "CATALOG", inner.width);
     if let Some(variant) = selected {
-        lines.push(Line::from(vec![
-            Span::styled("Path: ", theme::pane_subtitle()),
-            Span::raw(terminal_safe(
-                &variant.catalog.relative_path().display().to_string(),
-            )),
-            Span::raw(" · "),
-            Span::styled("Classification: ", theme::pane_subtitle()),
-            Span::raw(catalog_classification(variant.catalog)),
-        ]));
+        catalog_lines.push(detail_field_bounded(
+            "Path",
+            &format!(
+                "{} · Classification: {}",
+                terminal_safe(&variant.catalog.relative_path().display().to_string()),
+                catalog_classification(variant.catalog)
+            ),
+            inner.width,
+            if inner.width >= 60 { 1 } else { 2 },
+        ));
         let compatibility = variant.catalog.compatibility();
-        lines.push(detail_field(
+        catalog_lines.push(detail_field_bounded(
             "Compatibility",
             &format!(
                 "Claude Code: {} · Codex: {} · OpenCode: {}",
@@ -808,28 +824,35 @@ fn render_source_details(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
                 yes_no(compatibility.codex()),
                 yes_no(compatibility.opencode())
             ),
+            inner.width,
+            2,
         ));
-        if let Some(error) = variant.catalog.scan_error() {
-            lines.push(detail_field("Catalog error", error));
-        }
     } else {
-        lines.push(Line::from(
+        catalog_lines.push(Line::from(
             "No variant selected; catalog metadata is unavailable.",
         ));
-        for catalog in source.catalogs() {
-            if let Some(error) = catalog.scan_error() {
-                lines.push(detail_field(
-                    &format!(
-                        "Catalog error ({})",
-                        terminal_safe(&catalog.relative_path().display().to_string())
-                    ),
-                    error,
-                ));
-            }
-        }
+    }
+    let catalog_essential_height = detail_lines_height(&catalog_lines, inner.width);
+    for catalog in source
+        .catalogs()
+        .iter()
+        .filter(|catalog| catalog.scan_error().is_some())
+    {
+        let error = catalog.scan_error().expect("filtered catalog error");
+        catalog_lines.push(detail_field_bounded(
+            "Catalog error",
+            &format!(
+                "{}: {}",
+                terminal_safe(&catalog.relative_path().display().to_string()),
+                terminal_safe(error)
+            ),
+            inner.width,
+            3,
+        ));
     }
 
-    push_detail_section(&mut lines, "VARIANT", inner.width);
+    let mut variant_lines = Vec::new();
+    push_detail_section(&mut variant_lines, "VARIANT", inner.width);
     if let Some(variant) = selected {
         let (status, name) = match variant.candidate.validation() {
             SkillValidation::Valid { name, .. } => {
@@ -840,35 +863,105 @@ fn render_source_details(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
                 variant.candidate.directory_name(),
             ),
         };
-        lines.push(Line::from(vec![
-            Span::styled("Directory: ", theme::pane_subtitle()),
-            Span::raw(terminal_safe(variant.candidate.directory_name())),
-            Span::raw(" · "),
-            Span::styled("Name: ", theme::pane_subtitle()),
-            Span::raw(terminal_safe(name)),
-        ]));
-        lines.push(Line::from(vec![
-            Span::styled("Path: ", theme::pane_subtitle()),
-            Span::raw(terminal_safe(
-                &variant.candidate.relative_path().display().to_string(),
-            )),
-            Span::raw(" · "),
+        variant_lines.push(detail_field_bounded(
+            "Directory",
+            &format!(
+                "{} · Name: {}",
+                terminal_safe(variant.candidate.directory_name()),
+                terminal_safe(name)
+            ),
+            inner.width,
+            1,
+        ));
+        variant_lines.push(detail_field_bounded(
+            "Path",
+            &variant.candidate.relative_path().display().to_string(),
+            inner.width,
+            1,
+        ));
+        variant_lines.push(Line::from(vec![
             Span::styled("Status: ", theme::pane_subtitle()),
             status,
         ]));
+        let variant_essential_height = detail_lines_height(&variant_lines, inner.width);
         match variant.candidate.validation() {
             SkillValidation::Valid { description, .. } => {
-                lines.push(detail_field("Description", description));
+                variant_lines.push(detail_field("Description", description));
             }
             SkillValidation::Invalid { message } => {
-                lines.push(detail_field("Validation error", message));
+                variant_lines.push(detail_field("Validation error", message));
             }
         }
+        render_detail_regions(
+            frame,
+            inner,
+            repository_lines,
+            catalog_lines,
+            catalog_essential_height,
+            variant_lines,
+            variant_essential_height,
+        );
     } else {
-        lines.push(Line::from("No variant selected."));
+        variant_lines.push(Line::from("No variant selected."));
+        let variant_essential_height = detail_lines_height(&variant_lines, inner.width);
+        render_detail_regions(
+            frame,
+            inner,
+            repository_lines,
+            catalog_lines,
+            catalog_essential_height,
+            variant_lines,
+            variant_essential_height,
+        );
     }
+}
 
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+fn render_detail_regions(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    repository_lines: Vec<Line<'static>>,
+    catalog_lines: Vec<Line<'static>>,
+    catalog_essential_height: usize,
+    variant_lines: Vec<Line<'static>>,
+    variant_essential_height: usize,
+) {
+    let available = usize::from(area.height);
+    let reserved_variant = variant_essential_height.min(available);
+    let reserved_catalog = catalog_essential_height.min(available.saturating_sub(reserved_variant));
+    let repository_height = detail_lines_height(&repository_lines, area.width).min(
+        available
+            .saturating_sub(reserved_catalog)
+            .saturating_sub(reserved_variant),
+    );
+    let after_repository = available.saturating_sub(repository_height);
+    let catalog_height = detail_lines_height(&catalog_lines, area.width)
+        .min(after_repository.saturating_sub(reserved_variant));
+    let variant_height = after_repository.saturating_sub(catalog_height);
+    let [repository_area, catalog_area, variant_area] = Layout::vertical([
+        Constraint::Length(u16::try_from(repository_height).unwrap_or(u16::MAX)),
+        Constraint::Length(u16::try_from(catalog_height).unwrap_or(u16::MAX)),
+        Constraint::Length(u16::try_from(variant_height).unwrap_or(u16::MAX)),
+    ])
+    .areas(area);
+    frame.render_widget(
+        Paragraph::new(repository_lines).wrap(Wrap { trim: false }),
+        repository_area,
+    );
+    frame.render_widget(
+        Paragraph::new(catalog_lines).wrap(Wrap { trim: false }),
+        catalog_area,
+    );
+    frame.render_widget(
+        Paragraph::new(variant_lines).wrap(Wrap { trim: false }),
+        variant_area,
+    );
+}
+
+fn detail_lines_height(lines: &[Line<'_>], width: u16) -> usize {
+    lines
+        .iter()
+        .map(|line| wrapped_line_count(line, width))
+        .sum()
 }
 
 #[derive(Clone, Copy)]
@@ -1444,19 +1537,19 @@ fn help_commands(context: View, app: &SkilledApp) -> Vec<HelpCommand> {
             },
         ],
         View::Sources => {
-            let mut commands = vec![
-                HelpCommand {
-                    key: "Tab / Shift-Tab",
-                    label: "Region",
-                    description: "move region focus forward or backward",
-                },
-                HelpCommand {
+            let mut commands = vec![HelpCommand {
+                key: "Tab / Shift-Tab",
+                label: "Region",
+                description: "move region focus forward or backward",
+            }];
+            if sources_can_move_selection(app) {
+                commands.push(HelpCommand {
                     key: "Up/Down or j/k",
                     label: "Move",
                     description: "move repository or variant selection",
-                },
-            ];
-            if app.sources_pane() != SourcesPane::Details {
+                });
+            }
+            if sources_can_advance(app) {
                 commands.push(HelpCommand {
                     key: "Enter",
                     label: "Open next region",
@@ -1593,8 +1686,10 @@ fn key_hints(app: &SkilledApp) -> Vec<KeyHint> {
         ],
         View::Sources => {
             let mut hints = vec![KeyHint::new("Tab/Shift-Tab", "Region")];
-            if app.sources_pane() != SourcesPane::Details {
+            if sources_can_move_selection(app) {
                 hints.push(KeyHint::new("j/k", "Move"));
+            }
+            if sources_can_advance(app) {
                 hints.push(KeyHint::essential("Enter", "Open"));
             }
             hints.extend([
@@ -1611,6 +1706,23 @@ fn key_hints(app: &SkilledApp) -> Vec<KeyHint> {
             KeyHint::new("?", "Help"),
             KeyHint::essential("Esc", "Close"),
         ],
+    }
+}
+
+fn sources_can_move_selection(app: &SkilledApp) -> bool {
+    match app.sources_pane() {
+        SourcesPane::Repositories => app.sources().len() > 1,
+        SourcesPane::Variants => app
+            .selected_source()
+            .is_some_and(|source| flattened_variants(source).len() > 1),
+        SourcesPane::Details => false,
+    }
+}
+
+fn sources_can_advance(app: &SkilledApp) -> bool {
+    match app.sources_pane() {
+        SourcesPane::Repositories | SourcesPane::Variants => app.selected_source().is_some(),
+        SourcesPane::Details => false,
     }
 }
 

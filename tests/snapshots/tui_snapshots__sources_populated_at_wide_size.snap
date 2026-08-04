@@ -7,15 +7,15 @@ expression: "normalize_sources_screen(&app, &temporary, render(&app, 120, 40))"
 ┌▌ Repositories  1 registered────┐ ┌Available variants  2 found────────────────┐┌Details  portable─────────────────────┐
 │ ▌ source  ✓ clean              │ │   × invalid broken  (skills/broken)       ││ REPOSITORY                           │
 │                                │ │ ▌ ✓ valid portable  (skills/portable)     ││ ──────────────────────────────────── │
-│                                │ │                                           ││ Label: source                        │
+│                                │ │                                           ││ Label: source · Branch: main         │
 │                                │ │                                           ││ Path: [TEMP]/source                  │
-│                                │ │                                           ││ Branch: main · Status: ✓ clean       │
 │                                │ │                                           ││ HEAD:                                │
 │                                │ │                                           ││ [HEAD]                               │
 │                                │ │                                           ││                                      │
 │                                │ │                                           ││ Remote:                              │
 │                                │ │                                           ││ https://example.test/source.git      │
-│                                │ │                                           ││ Last scan: [SCAN]                    │
+│                                │ │                                           ││ Status: ✓ clean · Last scan:         │
+│                                │ │                                           ││ [SCAN]                               │
 │                                │ │                                           ││ CATALOG                              │
 │                                │ │                                           ││ ──────────────────────────────────── │
 │                                │ │                                           ││ Path: skills · Classification:       │
@@ -25,8 +25,8 @@ expression: "normalize_sources_screen(&app, &temporary, render(&app, 120, 40))"
 │                                │ │                                           ││ VARIANT                              │
 │                                │ │                                           ││ ──────────────────────────────────── │
 │                                │ │                                           ││ Directory: portable · Name: portable │
-│                                │ │                                           ││ Path: skills/portable · Status: ✓    │
-│                                │ │                                           ││ valid                                │
+│                                │ │                                           ││ Path: skills/portable                │
+│                                │ │                                           ││ Status: ✓ valid                      │
 │                                │ │                                           ││ Description: Portable fixture        │
 │                                │ │                                           ││                                      │
 │                                │ │                                           ││                                      │
@@ -41,4 +41,4 @@ expression: "normalize_sources_screen(&app, &temporary, render(&app, 120, 40))"
 │                                │ │                                           ││                                      │
 │                                │ │                                           ││                                      │
 └────────────────────────────────┘ └───────────────────────────────────────────┘└──────────────────────────────────────┘
- Tab/Shift-Tab Region   j/k Move   Enter Open   a Add source   1 Inventory   ? Help   q Quit   Esc Back
+ Tab/Shift-Tab Region   Enter Open   a Add source   1 Inventory   ? Help   q Quit   Esc Back

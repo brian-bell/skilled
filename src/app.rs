@@ -430,7 +430,9 @@ impl SkilledApp {
                         SourcesPane::Repositories if self.selected_source().is_some() => {
                             SourcesPane::Variants
                         }
-                        SourcesPane::Variants => SourcesPane::Details,
+                        SourcesPane::Variants if self.selected_source().is_some() => {
+                            SourcesPane::Details
+                        }
                         current => current,
                     };
                 }
@@ -617,10 +619,12 @@ impl SkilledApp {
         }
         match self.sources_pane {
             SourcesPane::Repositories if !self.sources.is_empty() => {
-                self.focused_source = (self.focused_source as i16 + i16::from(delta))
-                    .rem_euclid(self.sources.len() as i16)
-                    as usize;
-                self.focused_variant = 0;
+                let next = (self.focused_source as i16 + i16::from(delta))
+                    .rem_euclid(self.sources.len() as i16) as usize;
+                if next != self.focused_source {
+                    self.focused_source = next;
+                    self.focused_variant = 0;
+                }
             }
             SourcesPane::Variants => {
                 let count = self

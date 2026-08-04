@@ -7,12 +7,11 @@ expression: "normalize_sources_screen(&app, &temporary, render(&app, 80, 24))"
 ┌▌ Details  portable───────────────────────────────────────────────────────────┐
 │ REPOSITORY                                                                   │
 │ ──────────────────────────────────────────────────────────────────────────── │
-│ Label: source                                                                │
+│ Label: source · Branch: main                                                 │
 │ Path: [TEMP]/source                                                          │
-│ Branch: main · Status: ✓ clean                                               │
 │ HEAD: [HEAD]                                                                 │
 │ Remote: https://example.test/source.git                                      │
-│ Last scan: [SCAN]                                                            │
+│ Status: ✓ clean · Last scan: [SCAN]                                          │
 │ CATALOG                                                                      │
 │ ──────────────────────────────────────────────────────────────────────────── │
 │ Path: skills · Classification: Common                                        │
@@ -20,7 +19,8 @@ expression: "normalize_sources_screen(&app, &temporary, render(&app, 80, 24))"
 │ VARIANT                                                                      │
 │ ──────────────────────────────────────────────────────────────────────────── │
 │ Directory: portable · Name: portable                                         │
-│ Path: skills/portable · Status: ✓ valid                                      │
+│ Path: skills/portable                                                        │
+│ Status: ✓ valid                                                              │
 │ Description: Portable fixture                                                │
 │                                                                              │
 │                                                                              │

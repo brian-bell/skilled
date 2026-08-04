@@ -395,6 +395,14 @@ fn surfaces_are_painted_where_the_design_calls_for_them() {
     let harness = Harness::new();
     let repository = harness.directory.path().join("source");
     create_source_fixture(&repository);
+    fs::create_dir_all(repository.join("skills/second")).expect("create second skill fixture");
+    fs::write(
+        repository.join("skills/second/SKILL.md"),
+        "---\nname: second\ndescription: Second fixture\n---\n# Second\n",
+    )
+    .expect("write second skill fixture");
+    git(&repository, &["add", "."]);
+    git(&repository, &["commit", "-m", "add second skill"]);
     let mut app = harness.completed_setup();
     let preview = app.preview_source(&repository).expect("preview source");
     app.confirm_source(preview).expect("register source");
@@ -714,8 +722,6 @@ fn sources_and_settings_help_match_their_active_bindings() {
     let sources_help = text(&buffer(&sources, 120, 40));
     for command in [
         "Tab / Shift-Tab Region",
-        "j/k Move",
-        "Enter Open next region",
         "a Add source",
         "1 Inventory",
         "Esc Back one region",
@@ -727,6 +733,8 @@ fn sources_and_settings_help_match_their_active_bindings() {
             "missing {command:?} in\n{sources_help}"
         );
     }
+    assert!(!sources_help.contains("j/k Move"), "{sources_help}");
+    assert!(!sources_help.contains("Enter Open"), "{sources_help}");
 
     let mut settings = harness.completed_setup();
     settings.update(Action::OpenSettings);
@@ -753,15 +761,39 @@ fn wide_help_balances_commands_across_two_columns() {
     let first_command_row = row_containing(&screen, "Tab / Shift-Tab");
     let row = row_text(&screen, first_command_row);
 
-    assert!(row.contains("1 Inventory"), "{row}\n{}", text(&screen));
-    assert!(text(&screen).contains("Esc Back one region"));
+    assert!(
+        row.contains("Esc Back one region"),
+        "{row}\n{}",
+        text(&screen)
+    );
+    assert!(text(&screen).contains("1 Inventory"));
 }
 
 #[test]
 fn sources_key_hints_follow_the_focused_region_at_compact_size() {
+    let empty_harness = Harness::new();
+    let mut empty = empty_harness.completed_setup();
+    empty.update(Action::OpenSources);
+    let empty_footer = row_text(&buffer(&empty, 80, 24), 23);
+    assert!(
+        empty_footer.contains("Tab/Shift-Tab Region"),
+        "{empty_footer}"
+    );
+    assert!(!empty_footer.contains("j/k Move"), "{empty_footer}");
+    assert!(!empty_footer.contains("Enter Open"), "{empty_footer}");
+    assert!(empty_footer.contains("Esc Back"), "{empty_footer}");
+
     let harness = Harness::new();
     let repository = harness.directory.path().join("source");
     create_source_fixture(&repository);
+    fs::create_dir_all(repository.join("skills/second")).expect("create second skill fixture");
+    fs::write(
+        repository.join("skills/second/SKILL.md"),
+        "---\nname: second\ndescription: Second fixture\n---\n# Second\n",
+    )
+    .expect("write second skill fixture");
+    git(&repository, &["add", "."]);
+    git(&repository, &["commit", "-m", "add second skill"]);
     let mut app = harness.completed_setup();
     let preview = app.preview_source(&repository).expect("preview source");
     app.confirm_source(preview).expect("register source");
@@ -772,11 +804,16 @@ fn sources_key_hints_follow_the_focused_region_at_compact_size() {
         repositories.contains("Tab/Shift-Tab Region"),
         "{repositories}"
     );
-    assert!(repositories.contains("j/k Move"), "{repositories}");
+    assert!(!repositories.contains("j/k Move"), "{repositories}");
     assert!(repositories.contains("Enter Open"), "{repositories}");
     assert!(repositories.contains("Esc Back"), "{repositories}");
 
     app.update(Action::AdvanceSourcesPane);
+    let variants = row_text(&buffer(&app, 80, 24), 23);
+    assert!(variants.contains("j/k Move"), "{variants}");
+    assert!(variants.contains("Enter Open"), "{variants}");
+    assert!(variants.contains("Esc Back"), "{variants}");
+
     app.update(Action::AdvanceSourcesPane);
     let details = row_text(&buffer(&app, 80, 24), 23);
     assert!(details.contains("Tab/Shift-Tab Region"), "{details}");
@@ -815,11 +852,11 @@ fn complete_key_hints_render_at_compact_and_wide_sizes() {
 
     assert_eq!(
         row_text(&buffer(&sources, 80, 24), 23),
-        " Tab/Shift-Tab Region   j/k Move   Enter Open   a Add source   Esc Back …"
+        " Tab/Shift-Tab Region   a Add source   1 Inventory   ? Help   q Quit   Esc Back"
     );
     assert_eq!(
         row_text(&buffer(&sources, 120, 40), 39),
-        " Tab/Shift-Tab Region   j/k Move   Enter Open   a Add source   1 Inventory   ? Help   q Quit   Esc Back"
+        " Tab/Shift-Tab Region   a Add source   1 Inventory   ? Help   q Quit   Esc Back"
     );
 }
 
@@ -1108,11 +1145,105 @@ fn sources_surface_catalog_scan_errors_in_variants_and_details() {
     let variants = text(&buffer(&reopened, 80, 24));
     assert!(variants.contains("× unavailable"), "{variants}");
     assert!(variants.contains("Open Details"), "{variants}");
+    assert!(variants.contains("scan unavailable"), "{variants}");
+    assert!(!variants.contains("0 found"), "{variants}");
 
     reopened.update(Action::AdvanceSourcesPane);
     let details = text(&buffer(&reopened, 80, 24));
-    assert!(details.contains("Catalog error (../outside):"), "{details}");
+    assert!(details.contains("Catalog error: ../outside:"), "{details}");
     assert!(details.contains("relative"), "{details}");
+}
+
+#[test]
+fn details_keep_failed_catalog_errors_beside_a_healthy_selected_variant() {
+    let harness = Harness::new();
+    let repository = harness.directory.path().join("source");
+    for (catalog, skill) in [("catalog-a", "portable"), ("catalog-b", "second")] {
+        let directory = repository.join(catalog).join("codex/skills").join(skill);
+        fs::create_dir_all(&directory).expect("create catalog fixture");
+        fs::write(
+            directory.join("SKILL.md"),
+            format!("---\nname: {skill}\ndescription: {skill} fixture\n---\n# Fixture\n"),
+        )
+        .expect("write catalog fixture");
+    }
+    git(&repository, &["init", "-b", "main"]);
+    git(&repository, &["config", "user.name", "Skilled Test"]);
+    git(
+        &repository,
+        &["config", "user.email", "skilled@example.test"],
+    );
+    git(&repository, &["add", "."]);
+    git(&repository, &["commit", "-m", "fixture"]);
+    let environment = harness.environment();
+    let mut app = harness.completed_setup();
+    let preview = app.preview_source(&repository).expect("preview source");
+    assert_eq!(preview.catalogs().len(), 2);
+    app.confirm_source(preview).expect("register source");
+    drop(app);
+    let connection =
+        rusqlite::Connection::open(harness.directory.path().join("data/skilled.sqlite3"))
+            .expect("open application database");
+    connection
+        .execute(
+            "UPDATE catalog_roots SET relative_path = '../outside' WHERE relative_path LIKE 'catalog-b/%'",
+            [],
+        )
+        .expect("corrupt one stored catalog path");
+    drop(connection);
+    let mut reopened = SkilledApp::open(environment).expect("reopen application");
+    reopened.update(Action::OpenSources);
+    reopened.update(Action::AdvanceSourcesPane);
+    reopened.update(Action::AdvanceSourcesPane);
+
+    let details = text(&buffer(&reopened, 80, 24));
+
+    assert!(details.contains("Directory: portable"), "{details}");
+    assert!(details.contains("Status: ✓ valid"), "{details}");
+    assert!(details.contains("Catalog error: ../outside:"), "{details}");
+    assert!(details.contains("relative"), "{details}");
+}
+
+#[test]
+fn long_branch_catalog_and_candidate_paths_cannot_hide_selected_variant_status() {
+    let harness = Harness::new();
+    let repository = harness.directory.path().join("source");
+    let catalog = "catalog-segment-with-a-long-name/codex/skills";
+    let candidate = "portable-candidate-with-a-long-but-valid-directory-name";
+    let directory = repository.join(catalog).join(candidate);
+    fs::create_dir_all(&directory).expect("create long catalog fixture");
+    fs::write(
+        directory.join("SKILL.md"),
+        format!("---\nname: {candidate}\ndescription: Long candidate fixture\n---\n# Fixture\n"),
+    )
+    .expect("write long candidate fixture");
+    let branch = format!("feature/{}", "long-branch-segment-".repeat(8));
+    git(&repository, &["init", "-b", &branch]);
+    git(&repository, &["config", "user.name", "Skilled Test"]);
+    git(
+        &repository,
+        &["config", "user.email", "skilled@example.test"],
+    );
+    git(&repository, &["add", "."]);
+    git(&repository, &["commit", "-m", "fixture"]);
+    let mut app = harness.completed_setup();
+    let preview = app.preview_source(&repository).expect("preview source");
+    app.confirm_source(preview).expect("register source");
+    app.update(Action::OpenSources);
+    app.update(Action::AdvanceSourcesPane);
+    app.update(Action::AdvanceSourcesPane);
+
+    let details = text(&buffer(&app, 80, 24));
+
+    assert!(
+        details.contains("Directory: portable-candidate"),
+        "{details}"
+    );
+    assert!(details.contains("Status: ✓ valid"), "{details}");
+    assert!(
+        details.contains("Description: Long candidate fixture"),
+        "{details}"
+    );
 }
 
 #[test]
@@ -1147,7 +1278,8 @@ fn sources_details_render_stored_repository_catalog_and_variant_metadata() {
         "Compatibility: Claude Code: yes · Codex: yes · OpenCode: yes",
         "VARIANT",
         "Directory: portable · Name: portable",
-        "Path: skills/portable · Status: ✓ valid",
+        "Path: skills/portable",
+        "Status: ✓ valid",
         "Description: Portable fixture",
     ] {
         assert!(

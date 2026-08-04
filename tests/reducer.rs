@@ -36,12 +36,12 @@ fn sources_enter_requires_a_repository_then_advances_without_wrapping() {
     assert!(no_source.effects().is_empty());
 
     app.update(Action::MoveSourcesPane(1));
-    let details = app.update(Action::AdvanceSourcesPane);
-    assert_eq!(app.sources_pane(), SourcesPane::Details);
-    assert!(details.effects().is_empty());
+    let no_source = app.update(Action::AdvanceSourcesPane);
+    assert_eq!(app.sources_pane(), SourcesPane::Variants);
+    assert!(no_source.effects().is_empty());
 
     app.update(Action::AdvanceSourcesPane);
-    assert_eq!(app.sources_pane(), SourcesPane::Details);
+    assert_eq!(app.sources_pane(), SourcesPane::Variants);
 }
 
 #[test]
@@ -111,6 +111,38 @@ fn changing_repository_resets_the_variant_selection() {
 
     assert_eq!(app.focused_source(), 0);
     assert_eq!(app.focused_variant(), 0);
+}
+
+#[test]
+fn moving_a_singleton_repository_preserves_the_selected_variant() {
+    let temporary = tempfile::tempdir().expect("temporary application directory");
+    let mut app = app_in(&temporary);
+    finish_setup(&mut app);
+    register_source(&mut app, &temporary.path().join("source"), 2);
+    app.update(Action::OpenSources);
+    app.update(Action::MoveSourcesPane(1));
+    app.update(Action::MoveSourcesSelection(1));
+    app.update(Action::MoveSourcesPane(-1));
+
+    app.update(Action::MoveSourcesSelection(1));
+
+    assert_eq!(app.focused_source(), 0);
+    assert_eq!(app.focused_variant(), 1);
+}
+
+#[test]
+fn sources_enter_opens_details_for_a_selected_source_with_no_variants() {
+    let temporary = tempfile::tempdir().expect("temporary application directory");
+    let mut app = app_in(&temporary);
+    finish_setup(&mut app);
+    register_source(&mut app, &temporary.path().join("source"), 0);
+    app.update(Action::OpenSources);
+
+    app.update(Action::AdvanceSourcesPane);
+    assert_eq!(app.sources_pane(), SourcesPane::Variants);
+    app.update(Action::AdvanceSourcesPane);
+
+    assert_eq!(app.sources_pane(), SourcesPane::Details);
 }
 
 #[test]
@@ -390,6 +422,11 @@ fn assert_help_blocks(app: &mut SkilledApp, blocked_action: Action) {
 }
 
 fn register_source(app: &mut SkilledApp, repository: &Path, variants: usize) {
+    fs::create_dir_all(repository.join("skills")).expect("create catalog fixture");
+    if variants == 0 {
+        fs::write(repository.join("skills/.keep"), "empty catalog fixture")
+            .expect("write empty catalog fixture");
+    }
     for index in 0..variants {
         let skill = repository.join("skills").join(format!("variant-{index}"));
         fs::create_dir_all(&skill).expect("create skill fixture");
