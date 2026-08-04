@@ -25,7 +25,7 @@ expression: "render(&app, 120, 40)"
 │                   │                                                                              │                   │
 │   Press a to regis│                                                                              │tory to see its    │
 │          Git check│  ──────────────────────────────────────────────────────────────────────────  │details.           │
-│                   │  Inspection reads Git metadata only              Esc Cancel   Enter Inspect  │                   │
+│                   │  Read-only checkout and catalog scan             Esc Cancel   Enter Inspect  │                   │
 │                   │                                                                              │                   │
 │                   └──────────────────────────────────────────────────────────────────────────────┘                   │
 │                                │ │                                           ││                                      │

@@ -1417,7 +1417,7 @@ fn add_source_uses_the_shared_dialog_body_divider_and_footer() {
 
     assert!(rendered.contains("Local Git repository"), "{rendered}");
     assert!(
-        rendered.contains("Inspection reads Git metadata only"),
+        rendered.contains("Read-only checkout and catalog scan"),
         "{rendered}"
     );
     assert!(

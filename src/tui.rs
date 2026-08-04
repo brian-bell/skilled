@@ -1135,7 +1135,7 @@ fn render_source_path_entry(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp)
     );
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
-            "Inspection reads Git metadata only",
+            "Read-only checkout and catalog scan",
             theme::key_label(),
         ))),
         regions.status,

@@ -17,7 +17,7 @@ expression: rendered
 │ │                                                                          │ │
 │ │  × filesystem operation failed: No such file or directory (os error 2)   │ │
 │ │  ──────────────────────────────────────────────────────────────────────  │ │
-│ │  Inspection reads Git metadata only          Esc Cancel   Enter Inspect  │ │
+│ │  Read-only checkout and catalog scan         Esc Cancel   Enter Inspect  │ │
 │ │                                                                          │ │
 │ └──────────────────────────────────────────────────────────────────────────┘ │
 │                                                                              │

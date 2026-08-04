@@ -17,7 +17,7 @@ expression: "render(&app, 80, 24)"
 │ │                                                                          │ │
 │ │                                                                          │ │
 │ │  ──────────────────────────────────────────────────────────────────────  │ │
-│ │  Inspection reads Git metadata only          Esc Cancel   Enter Inspect  │ │
+│ │  Read-only checkout and catalog scan         Esc Cancel   Enter Inspect  │ │
 │ │                                                                          │ │
 │ └──────────────────────────────────────────────────────────────────────────┘ │
 │                                                                              │
