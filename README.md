@@ -18,7 +18,9 @@ install, repair, update, or uninstall skills.
 
 ## What works today
 
-- A seven-step first-run setup flow.
+- A prototype-aligned seven-step first-run setup flow with explicit segmented
+  progress, truthful placeholders for scans that do not exist yet, and
+  responsive shared-dialog layouts.
 - Detection of Claude Code, Codex, and OpenCode roots and executables without
   launching an agent.
 - Agent selection, with all three agents selected by default.
@@ -35,7 +37,9 @@ install, repair, update, or uninstall skills.
 - Versioned SQLite persistence for setup, configured agents, source metadata,
   and confirmed catalog roots.
 - Direct startup into Inventory after setup is complete.
-- A Settings action for rerunning setup.
+- A shared-dialog Settings action for rerunning setup. Rerunning refreshes agent
+  root and executable detection while retaining current agent selections and
+  registered source metadata.
 - A persistent application frame — product title bar, primary navigation,
   session status, workspace, and contextual key hints — drawn from the tracked
   visual prototype. Destinations without an implementation are shown as
@@ -66,8 +70,8 @@ modify skills in agent roots.
 cargo run
 ```
 
-On first launch, use Enter to move through setup. The Detect Agents step also
-supports:
+On first launch, use Enter to move through all seven setup steps; Summary labels
+the final action `Enter Inventory`. The Detect Agents step also supports:
 
 - `j` / `k` or arrow keys to move.
 - Space to toggle the focused agent.
@@ -78,7 +82,9 @@ Press `?` in Setup or any implemented top-level view to open its contextual
 keyboard reference. Press Esc to close help; ordinary `q` does not bypass an
 open dialog.
 
-After setup, press `s` to open Settings and rerun the wizard.
+After setup, press `s` to open Settings and rerun the wizard. Rerunning preserves
+the selected agents and registered sources while refreshing non-executing root
+and executable detection.
 
 During setup's Discover Sources step, or later from Sources, press `a` and enter
 a path anywhere inside a local Git checkout. Enter inspects the checkout and
@@ -123,7 +129,7 @@ under `tests/snapshots/` and cell-level style assertions in
   names a colour.
 - `src/viewport.rs` classifies terminal width and lays out workspace regions.
 - `src/components.rs` provides the shared badge, row, header, empty-state,
-  dialog frame and footer regions, and key-hint primitives.
+  segmented-progress, dialog frame and footer regions, and key-hint primitives.
 - `src/agents.rs` isolates agent discovery conventions and their documentation
   snapshots.
 - `src/store.rs` owns versioned SQLite metadata and migrations.
