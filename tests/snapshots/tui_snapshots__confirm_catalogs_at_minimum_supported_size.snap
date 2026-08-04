@@ -3,26 +3,26 @@ source: tests/tui_snapshots.rs
 expression: "render(&app, 80, 24)"
 ---
  ◆ skilled   global                                         ● setup in progress
- Setup · Welcome and scope   navigation is locked during setup
+ Setup · Confirm catalogs   navigation is locked during setup
   ┌ First-run setup ───────────────────────────────────── global skills only ┐
   │                                                                          │
-  │  ●━━━━━━━━━ ○──────── ○──────── ○──────── ○──────── ○──────── ○────────  │
-  │  STEP 1 / 7                                                              │
-  │  Welcome and scope                                                       │
+  │  ✓━━━━━━━━━ ✓━━━━━━━━ ✓━━━━━━━━ ✓━━━━━━━━ ●━━━━━━━━ ○──────── ○────────  │
+  │  STEP 5 / 7                                                              │
+  │  Confirm catalogs                                                        │
   │                                                                          │
-  │  Skilled manages global skills for Claude Code, Codex, and OpenCode.     │
-  │  This setup configures agents and local source metadata.                 │
+  │  - no catalogs awaiting confirmation                                     │
   │                                                                          │
-  │  No coding agent is launched during setup or diagnosis.                  │
-  │  Existing physical files, directories, and unknown links are never       │
-  │  overwritten.                                                            │
+  │  Catalog confirmation follows inspection of a local source.              │
+  │  Registration records metadata only; it does not install skills.         │
+  │                                                                          │
+  │                                                                          │
   │                                                                          │
   │                                                                          │
   │                                                                          │
   │                                                                          │
   │                                                                          │
   │  ──────────────────────────────────────────────────────────────────────  │
-  │  Setup is persisted when it finishes                     Enter Continue  │
+  │  Setup is persisted when it finishes          Esc Back   Enter Continue  │
   │                                                                          │
   └──────────────────────────────────────────────────────────────────────────┘
- Enter Continue   ? Help   q Quit
+ Enter Continue   Esc Back   ? Help   q Quit

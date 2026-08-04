@@ -1,0 +1,44 @@
+---
+source: tests/tui_snapshots.rs
+expression: "render(&app, 120, 40)"
+---
+ ◆ skilled   global                                                                      ● ready · 0 sources registered
+ Settings   navigation is locked while this dialog is open
+Global inventory  not scanned                                                   │ Details  no selection
+────────────────────────────────────────────────────────────────────────────────│ ─────────────────────────────────────
+                                                                                │
+                                                                                │
+                                                                                │
+                                                                                │
+                                                                                │
+                                                                                │
+                                                                                │
+                                                                                │
+                                                                                │
+                        ┌ Settings ────────────────────────────────────────────── global scope ┐
+                        │                                                                      │
+                        │  Setup                                                               │
+                        │                                                                      │
+                        │  ▌ Rerun setup                                                       │
+                        │                                                                      │    ·
+                        │  Reset setup completion and return to Welcome.                       │
+                    Inst│  Agent root and executable detection is refreshed.                   │hing to show
+                        │  Agent selections and registered sources are retained.               │
+   Skilled has not looke│  Enter reruns setup; Esc closes Settings.                            │, provenance, and
+  is installed. Register│  ──────────────────────────────────────────────────────────────────  │paths appear here once
+                        │  No agent is launched                       Enter Rerun   Esc Close  │n inventory exists.
+                        │                                                                      │
+                        └──────────────────────────────────────────────────────────────────────┘
+                                                                                │
+                                                                                │
+                                                                                │
+                                                                                │
+                                                                                │
+                                                                                │
+                                                                                │
+                                                                                │
+                                                                                │
+                                                                                │
+                                                                                │
+                                                                                │
+ Enter Rerun setup   ? Help   Esc Close

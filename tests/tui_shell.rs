@@ -10,6 +10,183 @@ use std::{fs, path::Path, process::Command};
 use skilled::{Action, AgentKind, AppEnvironment, SkilledApp};
 
 #[test]
+fn setup_uses_the_shared_dialog_and_seven_segment_progress() {
+    let harness = Harness::new();
+    let screen = buffer(&harness.first_run(), 80, 24);
+    let rendered = text(&screen);
+
+    assert!(rendered.contains("┌ First-run setup"), "{rendered}");
+    assert!(rendered.contains("global skills only"), "{rendered}");
+    assert!(rendered.contains("STEP 1 / 7"), "{rendered}");
+    let progress = row_text(&screen, row_containing(&screen, "○"));
+    assert_eq!(progress.matches('●').count(), 1, "{progress}");
+    assert_eq!(progress.matches('○').count(), 6, "{progress}");
+    assert!(
+        rendered.contains("This setup configures agents and local source metadata"),
+        "{rendered}"
+    );
+    assert!(!rendered.contains("previews every filesystem mutation"));
+    assert!(!rendered.contains("Skip"), "{rendered}");
+    assert!(!rendered.contains("demo"), "{rendered}");
+}
+
+#[test]
+fn setup_progress_has_text_and_semantic_styles_for_every_state() {
+    let harness = Harness::new();
+    let mut app = harness.first_run();
+    app.update(Action::Continue);
+    app.update(Action::Continue);
+
+    let screen = buffer(&app, 120, 40);
+    let progress_row = row_containing(&screen, "○");
+    let progress = row_text(&screen, progress_row);
+    assert!(progress.contains('✓'), "{progress}");
+    assert!(progress.contains('●'), "{progress}");
+    assert!(progress.contains('○'), "{progress}");
+    assert_eq!(
+        style_in_row(&screen, progress_row, "✓").fg,
+        Some(Color::Rgb(0x8b, 0xd4, 0x9c))
+    );
+    assert_eq!(
+        style_in_row(&screen, progress_row, "●").fg,
+        Some(Color::Rgb(0x73, 0xd7, 0xee))
+    );
+    assert_eq!(
+        style_in_row(&screen, progress_row, "○").fg,
+        Some(Color::Rgb(0x53, 0x61, 0x71))
+    );
+}
+
+#[test]
+fn detect_agents_separates_focus_selection_root_and_executable_status() {
+    let harness = Harness::new();
+    fs::create_dir_all(harness.directory.path().join("home/.agents/skills"))
+        .expect("create detected Codex root");
+    let mut app = harness.first_run();
+    app.update(Action::Continue);
+    app.update(Action::MoveSelection(1));
+    app.update(Action::ToggleSelection);
+
+    let screen = buffer(&app, 80, 24);
+    let rendered = text(&screen);
+    let codex_row = row_containing(&screen, "Codex");
+    let row = row_text(&screen, codex_row);
+
+    assert!(row.contains("▌ [ ] Codex"), "{row}\n{rendered}");
+    assert!(row.contains("✓ root found"), "{row}\n{rendered}");
+    assert!(row.contains("- executable not found"), "{row}\n{rendered}");
+    assert_eq!(
+        style_in_row(&screen, codex_row, "✓ root found").fg,
+        Some(Color::Rgb(0x8b, 0xd4, 0x9c))
+    );
+    assert_eq!(
+        style_in_row(&screen, codex_row, "- executable not found").fg,
+        Some(Color::Rgb(0x53, 0x61, 0x71))
+    );
+    assert!(
+        style_in_row(&screen, codex_row, "Codex")
+            .add_modifier
+            .contains(Modifier::BOLD)
+    );
+}
+
+#[test]
+fn placeholder_setup_steps_describe_only_observed_work() {
+    let harness = Harness::new();
+    let mut app = harness.first_run();
+    app.update(Action::Continue);
+    app.update(Action::Continue);
+
+    let choose_roots = text(&buffer(&app, 80, 24));
+    assert!(
+        choose_roots.contains("scan roots not configured"),
+        "{choose_roots}"
+    );
+    assert!(
+        choose_roots.contains("has not scanned your home directory"),
+        "{choose_roots}"
+    );
+
+    app.update(Action::Continue);
+    let discovery = text(&buffer(&app, 80, 24));
+    assert!(
+        discovery.contains("automatic discovery unavailable"),
+        "{discovery}"
+    );
+    assert!(discovery.contains("Registered sources: 0"), "{discovery}");
+
+    app.update(Action::Continue);
+    let catalogs = text(&buffer(&app, 80, 24));
+    assert!(
+        catalogs.contains("no catalogs awaiting confirmation"),
+        "{catalogs}"
+    );
+
+    app.update(Action::Continue);
+    let installations = text(&buffer(&app, 80, 24));
+    assert!(installations.contains("not scanned"), "{installations}");
+    assert!(
+        installations.contains("cannot report installation or Doctor status"),
+        "{installations}"
+    );
+
+    for screen in [choose_roots, discovery, catalogs, installations] {
+        assert!(!screen.contains("Skip"), "{screen}");
+        assert!(!screen.contains("demo"), "{screen}");
+        assert!(!screen.contains("Doctor findings"), "{screen}");
+    }
+}
+
+#[test]
+fn summary_names_inventory_as_the_next_destination_everywhere() {
+    let harness = Harness::new();
+    let mut app = harness.first_run();
+    for _ in 0..6 {
+        app.update(Action::Continue);
+    }
+
+    let screen = buffer(&app, 80, 24);
+    let rendered = text(&screen);
+    assert!(rendered.contains("Enter Inventory"), "{rendered}");
+    assert!(
+        row_text(&screen, 23).contains("Enter Inventory"),
+        "{rendered}"
+    );
+    assert!(!rendered.contains("Enter Continue"), "{rendered}");
+
+    app.update(Action::OpenHelp);
+    let help = text(&buffer(&app, 80, 24));
+    assert!(help.contains("Enter Inventory"), "{help}");
+    assert!(help.contains("enter the Inventory view"), "{help}");
+}
+
+#[test]
+fn settings_explains_and_frames_the_existing_rerun_effects() {
+    let harness = Harness::new();
+    let mut app = harness.completed_setup();
+    app.update(Action::OpenSettings);
+
+    let screen = buffer(&app, 80, 24);
+    let rendered = text(&screen);
+    assert!(rendered.contains("▌ Rerun setup"), "{rendered}");
+    assert!(
+        rendered.contains("Agent root and executable detection is refreshed"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("Agent selections and registered sources are retained"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("No agent is launched"), "{rendered}");
+    assert!(rendered.contains("Enter Rerun"), "{rendered}");
+    assert!(rendered.contains("Esc Close"), "{rendered}");
+    assert!(
+        rendered.lines().any(|line| line.matches('─').count() > 30),
+        "{rendered}"
+    );
+}
+
+#[test]
 fn the_shell_frames_inventory_with_product_navigation_and_key_hints() {
     let harness = Harness::new();
     let app = harness.completed_setup();
@@ -169,6 +346,10 @@ fn setup_says_navigation_waits_for_setup_not_for_a_dialog() {
     assert!(row.contains("Setup · Confirm catalogs"), "{row}");
     assert!(row.contains("locked during setup"), "{row}");
     assert!(!row.contains("this dialog"), "{row}");
+    let rendered = text(&screen);
+    assert!(rendered.contains("Enter Register"), "{rendered}");
+    assert!(rendered.contains("Esc Cancel"), "{rendered}");
+    assert!(!rendered.contains("Enter Continue"), "{rendered}");
 }
 
 #[test]

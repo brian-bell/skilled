@@ -124,6 +124,65 @@ fn detected_agents_and_selection_fit_at_minimum_supported_size() {
 }
 
 #[test]
+fn remaining_setup_steps_fit_at_minimum_supported_size() {
+    let temporary = tempfile::tempdir().expect("temporary application directory");
+    let mut app = SkilledApp::open(AppEnvironment::new(
+        temporary.path().join("home"),
+        temporary.path().join("data"),
+        "",
+    ))
+    .expect("open application");
+    app.update(Action::Continue);
+    app.update(Action::Continue);
+
+    insta::assert_snapshot!(
+        "choose_scan_roots_at_minimum_supported_size",
+        render(&app, 80, 24)
+    );
+    app.update(Action::Continue);
+    insta::assert_snapshot!(
+        "discover_sources_at_minimum_supported_size",
+        render(&app, 80, 24)
+    );
+    app.update(Action::Continue);
+    insta::assert_snapshot!(
+        "confirm_catalogs_at_minimum_supported_size",
+        render(&app, 80, 24)
+    );
+    app.update(Action::Continue);
+    insta::assert_snapshot!(
+        "scan_installations_at_minimum_supported_size",
+        render(&app, 80, 24)
+    );
+    app.update(Action::Continue);
+    insta::assert_snapshot!(
+        "setup_summary_at_minimum_supported_size",
+        render(&app, 80, 24)
+    );
+}
+
+#[test]
+fn settings_dialog_at_compact_and_wide_sizes() {
+    let temporary = tempfile::tempdir().expect("temporary application directory");
+    let mut app = SkilledApp::open(AppEnvironment::new(
+        temporary.path().join("home"),
+        temporary.path().join("data"),
+        "",
+    ))
+    .expect("open application");
+    for _ in 0..7 {
+        dispatch(&mut app, Action::Continue);
+    }
+    app.update(Action::OpenSettings);
+
+    insta::assert_snapshot!(
+        "settings_dialog_at_minimum_supported_size",
+        render(&app, 80, 24)
+    );
+    insta::assert_snapshot!("settings_dialog_at_wide_size", render(&app, 120, 40));
+}
+
+#[test]
 fn add_source_path_entry_at_minimum_supported_size() {
     let temporary = tempfile::tempdir().expect("temporary application directory");
     let mut app = SkilledApp::open(AppEnvironment::new(

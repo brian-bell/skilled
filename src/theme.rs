@@ -130,6 +130,21 @@ pub(crate) fn section_title() -> Style {
     Style::default().fg(CYAN).add_modifier(Modifier::BOLD)
 }
 
+/// A setup step that the user has already completed.
+pub(crate) fn progress_complete() -> Style {
+    Style::default().fg(GREEN)
+}
+
+/// The setup step currently on screen.
+pub(crate) fn progress_active() -> Style {
+    Style::default().fg(CYAN).add_modifier(Modifier::BOLD)
+}
+
+/// A setup step that has not been reached yet.
+pub(crate) fn progress_pending() -> Style {
+    Style::default().fg(FAINT)
+}
+
 /// The border of a modal dialog.
 pub(crate) fn dialog_border() -> Style {
     Style::default().fg(LINE_STRONG).bg(SURFACE)

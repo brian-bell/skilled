@@ -3,26 +3,26 @@ source: tests/tui_snapshots.rs
 expression: "render(&app, 80, 24)"
 ---
  ◆ skilled   global                                         ● setup in progress
- Setup · Welcome and scope   navigation is locked during setup
+ Setup · Discover sources   navigation is locked during setup
   ┌ First-run setup ───────────────────────────────────── global skills only ┐
   │                                                                          │
-  │  ●━━━━━━━━━ ○──────── ○──────── ○──────── ○──────── ○──────── ○────────  │
-  │  STEP 1 / 7                                                              │
-  │  Welcome and scope                                                       │
+  │  ✓━━━━━━━━━ ✓━━━━━━━━ ✓━━━━━━━━ ●━━━━━━━━ ○──────── ○──────── ○────────  │
+  │  STEP 4 / 7                                                              │
+  │  Discover sources                                                        │
   │                                                                          │
-  │  Skilled manages global skills for Claude Code, Codex, and OpenCode.     │
-  │  This setup configures agents and local source metadata.                 │
+  │  - automatic discovery unavailable                                       │
   │                                                                          │
-  │  No coding agent is launched during setup or diagnosis.                  │
-  │  Existing physical files, directories, and unknown links are never       │
-  │  overwritten.                                                            │
+  │  Registered sources: 0                                                   │
+  │  Press a to inspect a known local Git checkout.                          │
+  │  Skilled never scans the entire home directory by default.               │
+  │                                                                          │
   │                                                                          │
   │                                                                          │
   │                                                                          │
   │                                                                          │
   │                                                                          │
   │  ──────────────────────────────────────────────────────────────────────  │
-  │  Setup is persisted when it finishes                     Enter Continue  │
+  │  Setup is persisted when it finishes          Esc Back   Enter Continue  │
   │                                                                          │
   └──────────────────────────────────────────────────────────────────────────┘
- Enter Continue   ? Help   q Quit
+ a Add source   Enter Continue   Esc Back   ? Help   q Quit

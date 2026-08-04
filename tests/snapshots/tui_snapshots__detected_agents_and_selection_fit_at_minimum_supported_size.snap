@@ -4,25 +4,25 @@ expression: "render(&app, 80, 24)"
 ---
  ◆ skilled   global                                         ● setup in progress
  Setup · Detect agents   navigation is locked during setup
-┌ Step 2 of 7 ─────────────────────────────────────────────────────────────────┐
-│                                                                              │
-│  Detect agents                                                               │
-│                                                                              │
-│  All supported agents are selected by default.                               │
-│                                                                              │
-│    [x] Claude Code  root not found     executable not found                  │
-│  > [ ] Codex        root not found     executable not found                  │
-│    [x] OpenCode     root not found     executable not found                  │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-└──────────────────────────────────────────────────────────────────────────────┘
+  ┌ First-run setup ───────────────────────────────────── global skills only ┐
+  │                                                                          │
+  │  ✓━━━━━━━━━ ●━━━━━━━━ ○──────── ○──────── ○──────── ○──────── ○────────  │
+  │  STEP 2 / 7                                                              │
+  │  Detect agents                                                           │
+  │                                                                          │
+  │  All supported agents are selected by default.                           │
+  │                                                                          │
+  │    [x] Claude Code  - root not found   - executable not found            │
+  │  ▌ [ ] Codex        - root not found   - executable not found            │
+  │    [x] OpenCode     - root not found   - executable not found            │
+  │                                                                          │
+  │                                                                          │
+  │                                                                          │
+  │                                                                          │
+  │                                                                          │
+  │                                                                          │
+  │  ──────────────────────────────────────────────────────────────────────  │
+  │  Setup is persisted when it finishes          Esc Back   Enter Continue  │
+  │                                                                          │
+  └──────────────────────────────────────────────────────────────────────────┘
  j/k Move   Space Toggle   Enter Continue   Esc Back   ? Help   q Quit

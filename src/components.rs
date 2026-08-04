@@ -291,6 +291,44 @@ pub(crate) fn rule(width: u16) -> Line<'static> {
     Line::from(Span::styled("─".repeat(usize::from(width)), theme::rule()))
 }
 
+/// A terminal-readable segmented progress line.
+///
+/// Each segment carries a glyph as well as a colour: completed steps use a
+/// check, the active step uses a filled circle, and pending steps use an open
+/// circle. The caller supplies a one-based current step.
+pub(crate) fn segmented_progress(current: usize, total: usize, width: u16) -> Line<'static> {
+    if total == 0 || width == 0 {
+        return Line::default();
+    }
+
+    let available = usize::from(width).saturating_sub(total.saturating_sub(1));
+    let base_width = available / total;
+    let wider_segments = available % total;
+    let mut spans = Vec::with_capacity(total.saturating_mul(2));
+
+    for index in 1..=total {
+        if index > 1 {
+            spans.push(Span::raw(" "));
+        }
+        let segment_width = base_width + usize::from(index <= wider_segments);
+        let (glyph, bar, style) = if index < current {
+            ('✓', '━', theme::progress_complete())
+        } else if index == current {
+            ('●', '━', theme::progress_active())
+        } else {
+            ('○', '─', theme::progress_pending())
+        };
+        let mut segment = String::new();
+        if segment_width > 0 {
+            segment.push(glyph);
+            segment.extend(std::iter::repeat_n(bar, segment_width.saturating_sub(1)));
+        }
+        spans.push(Span::styled(segment, style));
+    }
+
+    Line::from(spans)
+}
+
 /// A centred explanation of why a region has nothing to show.
 ///
 /// The headline states the observed fact and the body explains what the user
