@@ -124,6 +124,65 @@ fn detected_agents_and_selection_fit_at_minimum_supported_size() {
 }
 
 #[test]
+fn remaining_setup_steps_fit_at_minimum_supported_size() {
+    let temporary = tempfile::tempdir().expect("temporary application directory");
+    let mut app = SkilledApp::open(AppEnvironment::new(
+        temporary.path().join("home"),
+        temporary.path().join("data"),
+        "",
+    ))
+    .expect("open application");
+    app.update(Action::Continue);
+    app.update(Action::Continue);
+
+    insta::assert_snapshot!(
+        "choose_scan_roots_at_minimum_supported_size",
+        render(&app, 80, 24)
+    );
+    app.update(Action::Continue);
+    insta::assert_snapshot!(
+        "discover_sources_at_minimum_supported_size",
+        render(&app, 80, 24)
+    );
+    app.update(Action::Continue);
+    insta::assert_snapshot!(
+        "confirm_catalogs_at_minimum_supported_size",
+        render(&app, 80, 24)
+    );
+    app.update(Action::Continue);
+    insta::assert_snapshot!(
+        "scan_installations_at_minimum_supported_size",
+        render(&app, 80, 24)
+    );
+    app.update(Action::Continue);
+    insta::assert_snapshot!(
+        "setup_summary_at_minimum_supported_size",
+        render(&app, 80, 24)
+    );
+}
+
+#[test]
+fn settings_dialog_at_compact_and_wide_sizes() {
+    let temporary = tempfile::tempdir().expect("temporary application directory");
+    let mut app = SkilledApp::open(AppEnvironment::new(
+        temporary.path().join("home"),
+        temporary.path().join("data"),
+        "",
+    ))
+    .expect("open application");
+    for _ in 0..7 {
+        dispatch(&mut app, Action::Continue);
+    }
+    app.update(Action::OpenSettings);
+
+    insta::assert_snapshot!(
+        "settings_dialog_at_minimum_supported_size",
+        render(&app, 80, 24)
+    );
+    insta::assert_snapshot!("settings_dialog_at_wide_size", render(&app, 120, 40));
+}
+
+#[test]
 fn add_source_path_entry_at_minimum_supported_size() {
     let temporary = tempfile::tempdir().expect("temporary application directory");
     let mut app = SkilledApp::open(AppEnvironment::new(
@@ -454,6 +513,77 @@ fn wrapped_catalog_confirmation_keeps_focus_error_and_actions_visible() {
         "{screen}"
     );
     assert!(screen.contains("Enter registers metadata only"), "{screen}");
+}
+
+#[test]
+fn setup_catalog_confirmation_reserves_space_for_wrapped_focused_content() {
+    let temporary = tempfile::tempdir().expect("temporary application directory");
+    let repository = temporary
+        .path()
+        .join("a-deliberately-long-source-repository-directory-name");
+    for index in 0..6 {
+        let name = format!("skill-{index}");
+        let directory = repository
+            .join("catalogs")
+            .join(format!(
+                "set-{index}-with-a-deliberately-long-catalog-root-name"
+            ))
+            .join("claude-code/skills")
+            .join(&name);
+        fs::create_dir_all(&directory).expect("create catalog fixture");
+        fs::write(
+            directory.join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: Fixture\n---\n# Fixture\n"),
+        )
+        .expect("write skill");
+    }
+    git(&repository, &["init", "-b", "main"]);
+    git(&repository, &["config", "user.name", "Skilled Test"]);
+    git(
+        &repository,
+        &["config", "user.email", "skilled@example.test"],
+    );
+    git(&repository, &["add", "."]);
+    git(&repository, &["commit", "-m", "fixture"]);
+    let mut app = SkilledApp::open(AppEnvironment::new(
+        temporary.path().join("home"),
+        temporary.path().join("data"),
+        "",
+    ))
+    .expect("open application");
+    for _ in 0..3 {
+        dispatch(&mut app, Action::Continue);
+    }
+    app.update(Action::BeginAddSource);
+    for character in repository.to_string_lossy().chars() {
+        app.update(Action::AppendSourcePath(character));
+    }
+    dispatch(&mut app, Action::SubmitSourcePath);
+    for _ in 0..5 {
+        app.update(Action::MoveCatalogSelection(1));
+    }
+
+    let preview = app.pending_source().expect("pending source preview");
+    let rendered = render(&app, 80, 24)
+        .replace(
+            temporary
+                .path()
+                .canonicalize()
+                .expect("canonical temporary directory")
+                .to_string_lossy()
+                .as_ref(),
+            "[TEMP]",
+        )
+        .replace(&preview.inspected().head()[..8], "[HEAD]");
+
+    assert_eq!(app.focused_catalog(), 5);
+    assert!(rendered.contains("> [x]"), "{rendered}");
+    assert!(rendered.contains("catalogs/set-5"), "{rendered}");
+    assert!(
+        rendered.contains("Enter registers metadata only"),
+        "{rendered}"
+    );
+    insta::assert_snapshot!(rendered);
 }
 
 fn render(app: &SkilledApp, width: u16, height: u16) -> String {

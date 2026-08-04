@@ -75,6 +75,63 @@ fn back_is_a_no_op_on_the_first_setup_step() {
 }
 
 #[test]
+fn placeholder_setup_steps_advance_without_external_effects() {
+    let temporary = tempfile::tempdir().expect("temporary application directory");
+    let mut app = SkilledApp::open(AppEnvironment::new(
+        temporary.path().join("home"),
+        temporary.path().join("data"),
+        "",
+    ))
+    .expect("open application");
+
+    for expected in [
+        SetupStep::DetectAgents,
+        SetupStep::ChooseScanRoots,
+        SetupStep::DiscoverSources,
+        SetupStep::ConfirmCatalogs,
+        SetupStep::ScanInstallations,
+        SetupStep::Summary,
+    ] {
+        let update = app.update(Action::Continue);
+        assert!(update.effects().is_empty(), "step {expected:?}");
+        assert_eq!(app.view(), View::Setup(expected));
+    }
+}
+
+#[test]
+fn settings_rerun_emits_only_reset_and_redetection_in_order() {
+    let temporary = tempfile::tempdir().expect("temporary application directory");
+    let mut app = SkilledApp::open(AppEnvironment::new(
+        temporary.path().join("home"),
+        temporary.path().join("data"),
+        "",
+    ))
+    .expect("open application");
+    app.update(Action::Continue);
+    app.update(Action::MoveSelection(1));
+    app.update(Action::ToggleSelection);
+    for _ in 0..6 {
+        let update = app.update(Action::Continue);
+        app.perform_effects(update.effects())
+            .expect("complete setup");
+    }
+    app.update(Action::OpenSettings);
+
+    let update = app.update(Action::RerunSetup);
+
+    assert_eq!(app.view(), View::Setup(SetupStep::Welcome));
+    assert_eq!(
+        update.effects(),
+        [
+            Effect::ResetSetup,
+            Effect::RedetectAgents {
+                agent_selections: [true, false, true],
+            },
+        ]
+    );
+}
+
+#[test]
 fn help_captures_and_protects_every_implemented_top_level_context() {
     let setup_directory = tempfile::tempdir().expect("temporary application directory");
     let mut setup = app_in(&setup_directory);

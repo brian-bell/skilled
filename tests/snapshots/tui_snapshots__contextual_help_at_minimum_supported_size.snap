@@ -4,25 +4,25 @@ expression: "render(&app, 80, 24)"
 ---
  ◆ skilled   global                                         ● setup in progress
  Keyboard reference   navigation is locked while this dialog is open
-┌ Step 2 of 7 ─────────────────────────────────────────────────────────────────┐
-│ ┌ Keyboard reference ─────────────────────────────── Setup · Detect agents ┐ │
-│ │                                                                          │ │
-│ │  Only commands available in this context are listed.                     │ │
-│ │                                                                          │ │
-│ │  Up/Down or j/k Move — move the focused agent                            │ │
-│ │  Space Toggle — toggle the focused agent                                 │ │
-│ │  Enter Continue — advance the setup flow                                 │ │
-│ │  Esc Back — return to the previous setup step                            │ │
-│ │  ? Help — open this keyboard reference                                   │ │
-│ │  q Quit — quit when no dialog is open                                    │ │
-│ │                                                                          │ │
-│ │                                                                          │ │
-│ │                                                                          │ │
-│ │                                                                          │ │
-│ │  ──────────────────────────────────────────────────────────────────────  │ │
-│ │  Commands for Setup · Detect agents                           Esc Close  │ │
-│ │                                                                          │ │
-│ └──────────────────────────────────────────────────────────────────────────┘ │
-│                                                                              │
-└──────────────────────────────────────────────────────────────────────────────┘
+  ┌ First-run setup ───────────────────────────────────── global skills only ┐
+  ┌ Keyboard reference ─────────────────────────────── Setup · Detect agents ┐
+  │                                                                          │
+  │  Only commands available in this context are listed.                     │
+  │                                                                          │
+  │  Up/Down or j/k Move — move the focused agent                            │
+  │  Space Toggle — toggle the focused agent                                 │
+  │  Enter Continue — advance the setup flow                                 │
+  │  Esc Back — return to the previous setup step                            │
+  │  ? Help — open this keyboard reference                                   │
+  │  q Quit — quit when no dialog is open                                    │
+  │                                                                          │
+  │                                                                          │
+  │                                                                          │
+  │                                                                          │
+  │  ──────────────────────────────────────────────────────────────────────  │
+  │  Commands for Setup · Detect agents                           Esc Close  │
+  │                                                                          │
+  └──────────────────────────────────────────────────────────────────────────┘
+  │                                                                          │
+  └──────────────────────────────────────────────────────────────────────────┘
  Esc Close   Ctrl-C Quit

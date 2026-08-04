@@ -3,18 +3,18 @@ source: tests/tui_snapshots.rs
 expression: "render(&app, 80, 24)"
 ---
  ◆ skilled   global                                         ● setup in progress
- Setup · Detect agents   navigation is locked during setup
+ Setup · Scan installations   navigation is locked during setup
   ┌ First-run setup ───────────────────────────────────── global skills only ┐
   │                                                                          │
-  │  ✓━━━━━━━━━ ●━━━━━━━━ ○──────── ○──────── ○──────── ○──────── ○────────  │
-  │  STEP 2 / 7                                                              │
-  │  Detect agents                                                           │
+  │  ✓━━━━━━━━━ ✓━━━━━━━━ ✓━━━━━━━━ ✓━━━━━━━━ ✓━━━━━━━━ ●━━━━━━━━ ○────────  │
+  │  STEP 6 / 7                                                              │
+  │  Scan installations                                                      │
   │                                                                          │
-  │  Choose the agents Skilled should configure.                             │
+  │  - installation roots not scanned                                        │
   │                                                                          │
-  │    [x] Claude Code  - root not found   - executable not found            │
-  │  ▌ [ ] Codex        - root not found   - executable not found            │
-  │    [x] OpenCode     - root not found   - executable not found            │
+  │  This build cannot report installation or Doctor status.                 │
+  │  Continue without reading or changing any agent skill root.              │
+  │                                                                          │
   │                                                                          │
   │                                                                          │
   │                                                                          │
@@ -25,4 +25,4 @@ expression: "render(&app, 80, 24)"
   │  Setup is persisted when it finishes          Esc Back   Enter Continue  │
   │                                                                          │
   └──────────────────────────────────────────────────────────────────────────┘
- j/k Move   Space Toggle   Enter Continue   Esc Back   ? Help   q Quit
+ Enter Continue   Esc Back   ? Help   q Quit

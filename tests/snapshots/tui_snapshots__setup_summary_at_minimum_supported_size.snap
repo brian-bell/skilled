@@ -3,26 +3,26 @@ source: tests/tui_snapshots.rs
 expression: "render(&app, 80, 24)"
 ---
  ◆ skilled   global                                         ● setup in progress
- Setup · Detect agents   navigation is locked during setup
+ Setup · Summary   navigation is locked during setup
   ┌ First-run setup ───────────────────────────────────── global skills only ┐
   │                                                                          │
-  │  ✓━━━━━━━━━ ●━━━━━━━━ ○──────── ○──────── ○──────── ○──────── ○────────  │
-  │  STEP 2 / 7                                                              │
-  │  Detect agents                                                           │
+  │  ✓━━━━━━━━━ ✓━━━━━━━━ ✓━━━━━━━━ ✓━━━━━━━━ ✓━━━━━━━━ ✓━━━━━━━━ ●━━━━━━━━  │
+  │  STEP 7 / 7                                                              │
+  │  Summary                                                                 │
   │                                                                          │
-  │  Choose the agents Skilled should configure.                             │
+  │  Setup is ready to finish.                                               │
   │                                                                          │
-  │    [x] Claude Code  - root not found   - executable not found            │
-  │  ▌ [ ] Codex        - root not found   - executable not found            │
-  │    [x] OpenCode     - root not found   - executable not found            │
+  │  Configured agents: 3                                                    │
+  │  Sources: 0   Skills: 0                                                  │
   │                                                                          │
+  │  Unresolved findings never force a repair.                               │
   │                                                                          │
   │                                                                          │
   │                                                                          │
   │                                                                          │
   │                                                                          │
   │  ──────────────────────────────────────────────────────────────────────  │
-  │  Setup is persisted when it finishes          Esc Back   Enter Continue  │
+  │  Setup is persisted when it finishes         Esc Back   Enter Inventory  │
   │                                                                          │
   └──────────────────────────────────────────────────────────────────────────┘
- j/k Move   Space Toggle   Enter Continue   Esc Back   ? Help   q Quit
+ Enter Inventory   Esc Back   ? Help   q Quit

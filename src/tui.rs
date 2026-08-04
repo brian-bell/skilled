@@ -42,7 +42,7 @@ pub fn render(frame: &mut Frame<'_>, app: &SkilledApp) {
         View::Sources => render_sources(frame, body, app),
         View::Settings => {
             render_inventory(frame, body);
-            render_settings(frame, area);
+            render_settings(frame, body);
         }
     }
     if app.source_path_input_active() {
@@ -267,78 +267,173 @@ impl Destination {
 }
 
 fn render_setup(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp, step: SetupStep) {
-    let block = Block::default()
-        .title(format!(" Step {} of 7 ", step.number()))
-        .borders(Borders::ALL)
-        .padding(Padding::new(2, 2, 1, 1));
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
+    const STEP_COUNT: usize = 7;
+    let (width, height) = match viewport::classify(area) {
+        viewport::Viewport::Compact => (76, 21),
+        viewport::Viewport::Wide => (92, 28),
+    };
+    let popup = centered_rect(width, height, area);
+    frame.render_widget(Clear, popup);
+    let block = components::dialog_frame("First-run setup", "global skills only");
+    let regions = components::dialog_regions(block.inner(popup), 31);
+    frame.render_widget(block, popup);
 
-    let lines = setup_lines(app, step);
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+    let [heading, content] =
+        Layout::vertical([Constraint::Length(4), Constraint::Min(0)]).areas(regions.body);
+    frame.render_widget(
+        Paragraph::new(vec![
+            components::segmented_progress(step.number(), STEP_COUNT, heading.width),
+            Line::styled(
+                format!("STEP {} / {STEP_COUNT}", step.number()),
+                theme::section_title(),
+            ),
+            Line::styled(step.title(), theme::section_title()),
+        ]),
+        heading,
+    );
+    if step == SetupStep::ConfirmCatalogs && app.pending_source().is_some() {
+        render_catalog_confirmation_content(frame, content, app);
+    } else {
+        frame.render_widget(
+            Paragraph::new(setup_lines(app, step, content.width)).wrap(Wrap { trim: false }),
+            content,
+        );
+    }
+    frame.render_widget(
+        Paragraph::new(components::rule(regions.divider.width)),
+        regions.divider,
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            if step == SetupStep::ConfirmCatalogs && app.pending_source().is_some() {
+                "Registration records metadata only"
+            } else {
+                "Setup is persisted when it finishes"
+            },
+            theme::key_label(),
+        ))),
+        regions.status,
+    );
+    frame.render_widget(
+        Paragraph::new(setup_action_line(step, app.pending_source().is_some()).right_aligned()),
+        regions.actions,
+    );
 }
 
-fn setup_lines(app: &SkilledApp, step: SetupStep) -> Vec<Line<'static>> {
-    let title = Line::styled(step.title(), theme::section_title());
-    let mut lines = vec![title, Line::default()];
+fn setup_action_line(step: SetupStep, pending_source: bool) -> Line<'static> {
+    if step == SetupStep::ConfirmCatalogs && pending_source {
+        return Line::from(vec![
+            Span::styled("Esc", theme::key_cap()),
+            Span::raw(" "),
+            Span::styled("Cancel", theme::key_label()),
+            Span::raw("   "),
+            Span::styled("Enter", theme::key_cap()),
+            Span::raw(" "),
+            Span::styled("Register", theme::key_label()),
+        ]);
+    }
+    let mut spans = Vec::new();
+    if step != SetupStep::Welcome {
+        spans.extend([
+            Span::styled("Esc", theme::key_cap()),
+            Span::raw(" "),
+            Span::styled("Back", theme::key_label()),
+            Span::raw("   "),
+        ]);
+    }
+    spans.extend([
+        Span::styled("Enter", theme::key_cap()),
+        Span::raw(" "),
+        Span::styled(
+            if step == SetupStep::Summary {
+                "Inventory"
+            } else {
+                "Continue"
+            },
+            theme::key_label(),
+        ),
+    ]);
+    Line::from(spans)
+}
+
+fn setup_lines(app: &SkilledApp, step: SetupStep, width: u16) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
     match step {
         SetupStep::Welcome => {
             lines.extend([
                 Line::from("Skilled manages global skills for Claude Code, Codex, and OpenCode."),
-                Line::from("It inventories local state and previews every filesystem mutation."),
+                Line::from("This setup configures agents and local source metadata."),
                 Line::default(),
                 Line::from("No coding agent is launched during setup or diagnosis."),
                 Line::from("Existing physical files, directories, and unknown links are never overwritten."),
             ]);
         }
         SetupStep::DetectAgents => {
-            lines.push(Line::from("All supported agents are selected by default."));
+            lines.push(Line::from("Choose the agents Skilled should configure."));
             lines.push(Line::default());
             for (index, detection) in app.agents().iter().enumerate() {
-                let executable = detection
-                    .executable_path()
-                    .map(|path| path.display().to_string())
-                    .unwrap_or_else(|| "executable not found".to_owned());
                 let root = if detection.root_exists() {
-                    "root found"
+                    components::badge(Tone::Healthy, "root found")
                 } else {
-                    "root not found"
+                    components::badge(Tone::Inactive, "root not found")
                 };
-                lines.push(Line::from(format!(
-                    "{} [{}] {:<12} {:<18} {}",
-                    if index == app.focused_agent() {
-                        ">"
-                    } else {
-                        " "
-                    },
-                    if detection.selected() { "x" } else { " " },
-                    detection.kind().display_name(),
-                    root,
-                    executable
-                )));
+                let executable = if detection.executable_path().is_some() {
+                    components::badge(Tone::Healthy, "executable found")
+                } else {
+                    components::badge(Tone::Inactive, "executable not found")
+                };
+                lines.push(components::list_row(
+                    vec![
+                        Span::raw(format!(
+                            "[{}] {:<11}  ",
+                            if detection.selected() { "x" } else { " " },
+                            detection.kind().display_name(),
+                        )),
+                        root,
+                        Span::raw("   "),
+                        executable,
+                    ],
+                    index == app.focused_agent(),
+                    width,
+                ));
             }
         }
         SetupStep::ChooseScanRoots => lines.extend([
-            Line::from("No development scan roots are selected."),
-            Line::from("Source-root selection is introduced by the next implementation slice."),
+            Line::from(components::badge(
+                Tone::Inactive,
+                "scan roots not configured",
+            )),
+            Line::default(),
+            Line::from("Skilled has not scanned your home directory."),
+            Line::from("Continue without scanning; add a known checkout in Discover sources."),
         ]),
         SetupStep::DiscoverSources => lines.extend([
-            Line::from("No local source repositories discovered."),
+            Line::from(components::badge(
+                Tone::Inactive,
+                "automatic discovery unavailable",
+            )),
+            Line::default(),
+            Line::from(format!("Registered sources: {}", app.sources().len())),
+            Line::from("Press a to inspect a known local Git checkout."),
             Line::from("Skilled never scans the entire home directory by default."),
         ]),
-        SetupStep::ConfirmCatalogs => {
-            if app.pending_source().is_some() {
-                lines.extend(catalog_confirmation_lines(app));
-            } else {
-                lines.extend([
-                    Line::from("No catalog roots require confirmation."),
-                    Line::from("Catalog registration and installation remain separate actions."),
-                ]);
-            }
-        }
+        SetupStep::ConfirmCatalogs => lines.extend([
+            Line::from(components::badge(
+                Tone::Inactive,
+                "no catalogs awaiting confirmation",
+            )),
+            Line::default(),
+            Line::from("Catalog confirmation follows inspection of a local source."),
+            Line::from("Registration records metadata only; it does not install skills."),
+        ]),
         SetupStep::ScanInstallations => lines.extend([
-            Line::from("No configured installation roots have been scanned yet."),
-            Line::from("Filesystem inventory is introduced by a later implementation slice."),
+            Line::from(components::badge(
+                Tone::Inactive,
+                "installation roots not scanned",
+            )),
+            Line::default(),
+            Line::from("This build cannot report installation or Doctor status."),
+            Line::from("Continue without reading or changing any agent skill root."),
         ]),
         SetupStep::Summary => lines.extend([
             Line::from("Setup is ready to finish."),
@@ -713,6 +808,10 @@ fn render_catalog_confirmation(frame: &mut Frame<'_>, area: Rect, app: &SkilledA
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
 
+    render_catalog_confirmation_content(frame, inner, app);
+}
+
+fn render_catalog_confirmation_content(frame: &mut Frame<'_>, inner: Rect, app: &SkilledApp) {
     let (metadata, catalogs, error, footer) = catalog_confirmation_sections(app);
     let wrap = Wrap { trim: false };
     let viewport_height = usize::from(inner.height);
@@ -781,21 +880,6 @@ fn render_catalog_confirmation(frame: &mut Frame<'_>, area: Rect, app: &SkilledA
     render_confirmation_section(frame, inner, &mut y, error_height, error);
     y = y.saturating_add(u16::from(footer_gap));
     render_confirmation_section(frame, inner, &mut y, footer_height, footer);
-}
-
-fn catalog_confirmation_lines(app: &SkilledApp) -> Vec<Line<'static>> {
-    let (mut lines, catalogs, error, footer) = catalog_confirmation_sections(app);
-    lines.push(Line::default());
-    let capacity = 2;
-    let start = visible_window_start(app.focused_catalog(), capacity);
-    lines.extend(catalogs.into_iter().skip(start).take(capacity));
-    if !error.is_empty() {
-        lines.push(Line::default());
-        lines.extend(error);
-    }
-    lines.push(Line::default());
-    lines.extend(footer);
-    lines
 }
 
 fn catalog_confirmation_sections(
@@ -904,16 +988,56 @@ fn terminal_safe(value: &str) -> String {
 }
 
 fn render_settings(frame: &mut Frame<'_>, area: Rect) {
-    let popup = centered_rect(52, 9, area);
+    frame.render_widget(Clear, area);
+    frame.render_widget(Block::new().style(theme::app_surface()), area);
+    let width = match viewport::classify(area) {
+        viewport::Viewport::Compact => 68,
+        viewport::Viewport::Wide => 72,
+    };
+    let popup = centered_rect(width, 14, area);
     frame.render_widget(Clear, popup);
+    let block = components::dialog_frame("Settings", "global scope");
+    let regions = components::dialog_regions(block.inner(popup), 29);
+    frame.render_widget(block, popup);
     frame.render_widget(
         Paragraph::new(vec![
-            components::list_row(vec![Span::raw("Rerun setup")], true, 46),
+            Line::styled("Setup", theme::section_title()),
             Line::default(),
-            Line::from("Enter confirms · Esc closes"),
+            components::list_row(vec![Span::raw("Rerun setup")], true, regions.body.width),
+            Line::default(),
+            Line::from("Reset setup completion and return to Welcome."),
+            Line::from("Agent root and executable detection is refreshed."),
+            Line::from("Agent selections and registered sources are retained."),
+            Line::from("Enter reruns setup; Esc closes Settings."),
         ])
-        .block(components::dialog_frame("Settings", "global scope")),
-        popup,
+        .wrap(Wrap { trim: false }),
+        regions.body,
+    );
+    frame.render_widget(
+        Paragraph::new(components::rule(regions.divider.width)),
+        regions.divider,
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            "No agent is launched",
+            theme::key_label(),
+        ))),
+        regions.status,
+    );
+    frame.render_widget(
+        Paragraph::new(
+            Line::from(vec![
+                Span::styled("Enter", theme::key_cap()),
+                Span::raw(" "),
+                Span::styled("Rerun", theme::key_label()),
+                Span::raw("   "),
+                Span::styled("Esc", theme::key_cap()),
+                Span::raw(" "),
+                Span::styled("Close", theme::key_label()),
+            ])
+            .right_aligned(),
+        ),
+        regions.actions,
     );
 }
 
@@ -1040,10 +1164,18 @@ fn help_commands(context: View) -> Vec<HelpCommand> {
                     description: "inspect a local Git checkout",
                 });
             }
-            commands.push(HelpCommand {
-                key: "Enter",
-                label: "Continue",
-                description: "advance the setup flow",
+            commands.push(if step == SetupStep::Summary {
+                HelpCommand {
+                    key: "Enter",
+                    label: "Inventory",
+                    description: "enter the Inventory view",
+                }
+            } else {
+                HelpCommand {
+                    key: "Enter",
+                    label: "Continue",
+                    description: "advance the setup flow",
+                }
             });
             if step != SetupStep::Welcome {
                 commands.push(HelpCommand {
@@ -1202,7 +1334,14 @@ fn key_hints(app: &SkilledApp) -> Vec<KeyHint> {
             if step == SetupStep::DiscoverSources {
                 hints.push(KeyHint::new("a", "Add source"));
             }
-            hints.push(KeyHint::essential("Enter", "Continue"));
+            hints.push(KeyHint::essential(
+                "Enter",
+                if step == SetupStep::Summary {
+                    "Inventory"
+                } else {
+                    "Continue"
+                },
+            ));
             // Step one has nowhere to go back to.
             if step != SetupStep::Welcome {
                 hints.push(KeyHint::essential("Esc", "Back"));

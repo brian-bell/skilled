@@ -4,25 +4,25 @@ expression: "render(&app, 80, 24)"
 ---
  ◆ skilled   global                                         ● setup in progress
  Setup · Welcome and scope   navigation is locked during setup
-┌ Step 1 of 7 ─────────────────────────────────────────────────────────────────┐
-│                                                                              │
-│  Welcome and scope                                                           │
-│                                                                              │
-│  Skilled manages global skills for Claude Code, Codex, and OpenCode.         │
-│  It inventories local state and previews every filesystem mutation.          │
-│                                                                              │
-│  No coding agent is launched during setup or diagnosis.                      │
-│  Existing physical files, directories, and unknown links are never           │
-│  overwritten.                                                                │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-└──────────────────────────────────────────────────────────────────────────────┘
+  ┌ First-run setup ───────────────────────────────────── global skills only ┐
+  │                                                                          │
+  │  ●━━━━━━━━━ ○──────── ○──────── ○──────── ○──────── ○──────── ○────────  │
+  │  STEP 1 / 7                                                              │
+  │  Welcome and scope                                                       │
+  │                                                                          │
+  │  Skilled manages global skills for Claude Code, Codex, and OpenCode.     │
+  │  This setup configures agents and local source metadata.                 │
+  │                                                                          │
+  │  No coding agent is launched during setup or diagnosis.                  │
+  │  Existing physical files, directories, and unknown links are never       │
+  │  overwritten.                                                            │
+  │                                                                          │
+  │                                                                          │
+  │                                                                          │
+  │                                                                          │
+  │                                                                          │
+  │  ──────────────────────────────────────────────────────────────────────  │
+  │  Setup is persisted when it finishes                     Enter Continue  │
+  │                                                                          │
+  └──────────────────────────────────────────────────────────────────────────┘
  Enter Continue   ? Help   q Quit

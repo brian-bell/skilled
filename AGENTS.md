@@ -17,11 +17,12 @@ This project uses **bd** (beads) for issue tracking. Run `bd prime` for full wor
 
 Skilled is an early Rust 2024 and Ratatui terminal application for inspecting
 and eventually managing global coding-agent skills. Implemented so far:
-first-run setup, agent detection and selection, SQLite-backed setup
-persistence, local Git source registration with catalog confirmation, Sources
-browsing of registered sources and their skill variants, an empty Inventory
-view, Settings setup reset, reducer-owned contextual help, responsive size
-handling, and guarded terminal restoration.
+prototype-aligned seven-step first-run setup with segmented progress, agent
+detection and selection, SQLite-backed setup persistence, local Git source
+registration with catalog confirmation, Sources browsing of registered sources
+and their skill variants, an empty Inventory view, shared-dialog Settings setup
+reset, reducer-owned contextual help, responsive size handling, and guarded
+terminal restoration.
 
 Installation inventory, Doctor findings, Updates, and every filesystem or
 network mutation beyond the private metadata database are not implemented yet.
@@ -71,11 +72,12 @@ not an acceptable cue.
   Screens ask whether the terminal is `Compact` or `Wide` instead of comparing
   raw widths.
 - `src/components.rs`: pure shared primitives — status badges, list rows, pane
-  headers, empty states, the modal dialog frame and footer regions, and the
-  key-hint bar.
+  headers, empty states, segmented setup progress, the modal dialog frame and
+  footer regions, and the key-hint bar.
 - `src/tui.rs`: composes the persistent shell (title bar, navigation, session
-  status, workspace, contextual help, key hints) from those primitives. Pure:
-  it does not access SQLite, the filesystem, or the terminal event source.
+  status, workspace, Setup and Settings dialogs, contextual help, key hints)
+  from those primitives. Pure: it does not access SQLite, the filesystem, or
+  the terminal event source.
 - `src/input.rs`: contextual key-event to action mapping.
 - `src/runner.rs`: terminal event loop and effect execution boundary.
 - `src/terminal.rs`: Crossterm raw-mode/alternate-screen ownership and
