@@ -53,8 +53,10 @@ it does not yet install, repair, update, or uninstall skills.
   as not a skill rather than as a broken installation.
 - Per-root accounting that distinguishes a root that was read from one that
   does not exist, one that could not be read in full, one belonging to an agent
-  that was never selected, and one that has not been scanned yet. Counts are
-  withheld rather than reported as zero whenever a root was not read.
+  that was never selected, and one that has not been scanned yet. A number is
+  stated only when every root in scope was read or found absent and at least one
+  of them was actually read; otherwise Skilled says why it is withholding the
+  count instead of reporting a zero.
 - Filtering the inventory by skill name, source, or health.
 - Direct startup into Inventory after setup is complete.
 - A shared-dialog Settings action for rerunning setup. Rerunning refreshes agent
@@ -64,7 +66,10 @@ it does not yet install, repair, update, or uninstall skills.
   session status, workspace, and contextual key hints — drawn from the tracked
   visual prototype. Destinations without an implementation are shown as
   explicitly unavailable rather than offered, and key hints advertise only
-  commands the active context handles.
+  commands the active context handles. Sources and Inventory carry a count
+  beside their name in the navigation row — Sources always, Inventory whenever
+  the scan is entitled to state one — while an unavailable destination carries
+  no count at all.
 - Contextual keyboard help from Setup, Inventory, Sources, and Settings. Help is
   modal, lists only commands implemented in the underlying context, and closes
   before Esc changes that context.

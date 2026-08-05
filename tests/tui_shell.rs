@@ -474,21 +474,56 @@ fn surfaces_are_painted_where_the_design_calls_for_them() {
     let screen = buffer(&app, 120, 40);
 
     const TERMINAL: Color = Color::Rgb(0x0b, 0x0f, 0x14);
+    const BAND: Color = Color::Rgb(0x0d, 0x12, 0x18);
     const SURFACE: Color = Color::Rgb(0x0f, 0x15, 0x1d);
     const SURFACE_2: Color = Color::Rgb(0x12, 0x1a, 0x24);
     const SURFACE_3: Color = Color::Rgb(0x17, 0x21, 0x2c);
 
-    // One canvas under everything, chrome and workspace alike.
-    assert_eq!(style_in_row(&screen, 0, "skilled").bg, Some(TERMINAL));
+    // The canvas shows through the workspace, while the two chrome rows sit on
+    // their own band.
+    assert_eq!(style_in_row(&screen, 0, "skilled").bg, Some(BAND));
     assert_eq!(
         style_in_row(&screen, row_containing(&screen, "Repositories"), "┌").bg,
         Some(TERMINAL)
+    );
+    // The title row is laid out as two rectangles, so the band is only right
+    // if it covers the empty space between them and the far end of the second
+    // one as well as the text in the first.
+    let title = row_text(&screen, 0);
+    let status = u16::try_from(
+        title[..title.find('●').expect("session status glyph")]
+            .chars()
+            .count(),
+    )
+    .expect("column");
+    let last = screen.area.x + screen.area.width - 1;
+    assert_eq!(
+        screen[(screen.area.x + status - 2, 0)].style().bg,
+        Some(BAND),
+        "the gap between the product mark and the session status is on the band"
+    );
+    assert_eq!(
+        screen[(last, 0)].style().bg,
+        Some(BAND),
+        "the band should reach the end of the row, not stop with the product half"
     );
 
     // The navigation strip is its own band, with the active tab lifted.
     // Sources is the active tab here, so Inventory is the inactive probe.
     assert_eq!(style_in_row(&screen, 1, "1 Inventory").bg, Some(SURFACE));
     assert_eq!(style_in_row(&screen, 1, "▌Sources").bg, Some(SURFACE_2));
+
+    // The key-hint row shares the title bar's band, and it reaches the edge of
+    // the terminal rather than stopping where the last hint does.
+    let key_hints = screen.area.y + screen.area.height - 1;
+    assert_eq!(style_in_row(&screen, key_hints, "Quit").bg, Some(BAND));
+    assert_eq!(
+        screen[(last, key_hints)].style().bg,
+        Some(BAND),
+        "the band should reach the end of the row, not stop at the last hint"
+    );
+    // A key cap keeps its own emphasis on top of that band.
+    assert_eq!(style_in_row(&screen, key_hints, "q ").bg, Some(SURFACE_2));
 
     // The focused row is tinted across the pane, not just behind its label.
     let focused = row_containing(&screen, "▌ source");
@@ -549,6 +584,14 @@ fn the_setup_summary_counts_only_what_exists() {
     // Nothing scans installations and nothing produces findings yet.
     assert!(!screen.contains("Installations:"), "{screen}");
     assert!(!screen.contains("Doctor findings"), "{screen}");
+    // Every root of this home was found absent, so the scan is complete but
+    // read nothing. That earns the same refusal the Inventory surfaces give:
+    // a phrase, not a measured zero.
+    assert!(!screen.contains("Installed:"), "{screen}");
+    assert!(
+        screen.contains("installation counts unavailable: no skill root was read"),
+        "{screen}"
+    );
 }
 
 #[test]
@@ -1145,6 +1188,115 @@ fn a_partially_read_inventory_lists_rows_without_claiming_a_total() {
         rendered.contains("the skill root is not a directory"),
         "{rendered}"
     );
+}
+
+/// A tab count is a claim about a scan, so it is withheld whenever the scan
+/// read nothing, or did not read everything it was asked to.
+///
+/// The navigation must reach the same verdict as the subtitle beside the
+/// inventory, which is why each case checks both.
+#[test]
+fn navigation_withholds_a_count_it_could_not_observe() {
+    // What follows a tab's title, past the space that separates them, which is
+    // where a count would appear. `None` means the row ends there, which the
+    // last title's does: nothing follows it to inspect.
+    fn after(row: &str, title: &str) -> Option<char> {
+        let index = row
+            .find(title)
+            .unwrap_or_else(|| panic!("{title:?} not found in {row:?}"));
+        let rest = &row[index + title.len()..];
+        rest.strip_prefix(' ').unwrap_or(rest).chars().next()
+    }
+
+    // A file where a root belongs is a root that cannot be read.
+    fn block_root(at: PathBuf) {
+        fs::create_dir_all(at.parent().expect("root parent")).expect("create root parent");
+        fs::write(&at, "not a directory").expect("write a file where the root belongs");
+    }
+
+    /// A home to arrange, paired with the phrase the inventory subtitle uses
+    /// for the state it produces.
+    type Scenario = (fn(&Path), &'static str);
+
+    let scenarios: [Scenario; 3] = [
+        // Nothing was read, so there is nothing to count.
+        (|_home| {}, "no root read"),
+        (
+            |home| block_root(home.join(".claude/skills")),
+            "not fully read",
+        ),
+        // One root reads cleanly and holds a skill; the other does not, so a
+        // total would cover less than it appears to.
+        (
+            |home| {
+                write_skill_fixture(&home.join(".claude/skills/alpha"), "alpha");
+                block_root(home.join(".agents/skills"));
+            },
+            "1 listed · not fully read",
+        ),
+    ];
+
+    for (prepare, subtitle) in scenarios {
+        let harness = Harness::new();
+        let home = harness.directory.path().join("home");
+        prepare(&home);
+        let app = harness.completed_setup();
+
+        let screen = buffer(&app, 80, 24);
+        let navigation = row_text(&screen, 1);
+        let rendered = text(&screen);
+
+        // The subtitle names this state, and the count beside the tab is
+        // absent in it. Two spaces after the title is the positive evidence:
+        // nothing at all was rendered between it and the next entry.
+        assert!(rendered.contains(subtitle), "{rendered}");
+        assert!(navigation.contains("▌Inventory  2 Sources"), "{navigation}");
+        assert_eq!(
+            after(&navigation, "▌Inventory"),
+            // The next entry's own marker, and so nothing of the inventory's.
+            Some(' '),
+            "{subtitle:?} may not state a total: {navigation}"
+        );
+        // The registry is not the filesystem: it is still fully known.
+        assert!(navigation.contains(" 2 Sources 0 "), "{navigation}");
+
+        // A destination this release cannot open counts nothing, and says so
+        // by rendering nothing rather than by a placeholder that reads as an
+        // empty measurement.
+        for unavailable in ["Updates (soon)", "Doctor (soon)"] {
+            match after(&navigation, unavailable) {
+                // Doctor is the last entry, so the row ends after its title.
+                None => assert!(navigation.ends_with(unavailable), "{navigation}"),
+                Some(next) => {
+                    assert!(!next.is_ascii_digit(), "{unavailable}: {navigation}");
+                    assert_ne!(next, '—', "{unavailable}: {navigation}");
+                }
+            }
+        }
+        assert!(!navigation.contains('—'), "{navigation}");
+    }
+}
+
+/// The one state in which a bare zero beside the tab is an observation: a root
+/// that exists, was read, and holds nothing.
+#[test]
+fn navigation_states_zero_when_a_root_was_read_and_held_nothing() {
+    let harness = Harness::new();
+    fs::create_dir_all(harness.directory.path().join("home/.claude/skills"))
+        .expect("create an empty root");
+    let app = harness.completed_setup();
+
+    let screen = buffer(&app, 80, 24);
+    let navigation = row_text(&screen, 1);
+
+    // "nothing installed" and "0" are the same finding, worded for their
+    // places. Neither may appear when no root was read.
+    assert!(
+        text(&screen).contains("nothing installed"),
+        "{}",
+        text(&screen)
+    );
+    assert!(navigation.contains("▌Inventory 0 "), "{navigation}");
 }
 
 #[test]
@@ -2066,6 +2218,23 @@ fn style_in_row(buffer: &Buffer, y: u16, needle: &str) -> Style {
     buffer[(buffer.area.x + column, y)].style()
 }
 
+/// The style of the cell immediately after `needle` in row `y`.
+///
+/// A count is only ever a digit, so it has to be located by what precedes it
+/// rather than by its own text.
+///
+/// Like [`style_in_row`], this counts one column per character: the chrome it
+/// probes is single width, and a double-width glyph before the needle would
+/// put the probe a column short.
+fn style_following(buffer: &Buffer, y: u16, needle: &str) -> Style {
+    let row = row_text(buffer, y);
+    let byte_index = row
+        .find(needle)
+        .unwrap_or_else(|| panic!("{needle:?} not found in row {y}: {row:?}"));
+    let column = row[..byte_index].chars().count() + needle.chars().count();
+    buffer[(buffer.area.x + u16::try_from(column).expect("column"), y)].style()
+}
+
 fn style_at(buffer: &Buffer, needle: &str) -> Style {
     let area = buffer.area;
     for y in area.y..area.y + area.height {
@@ -2154,6 +2323,74 @@ mod installed {
             assert!(rendered.contains(heading), "{heading} in\n{rendered}");
         }
     }
+
+    #[test]
+    fn navigation_counts_what_the_scan_and_the_registry_know() {
+        const SURFACE: Color = Color::Rgb(0x0f, 0x15, 0x1d);
+        const SURFACE_2: Color = Color::Rgb(0x12, 0x1a, 0x24);
+        const AMBER: Color = Color::Rgb(0xe6, 0xbd, 0x6a);
+
+        let harness = Harness::new();
+        let mut app = harness.installed_inventory();
+        // A root was read here, so a count is an observation the navigation is
+        // entitled to state.
+        let skills = app
+            .inventory()
+            .stated_skill_count()
+            .expect("a scan that read a root states a count");
+        let sources = app.sources().len();
+
+        let screen = buffer(&app, 120, 40);
+        let navigation = row_text(&screen, 1);
+
+        // The count says the same thing the Inventory subtitle does: skills,
+        // not every listed entry.
+        assert!(
+            navigation.contains(&format!("▌Inventory {skills} ")),
+            "{navigation}"
+        );
+        assert!(
+            navigation.contains(&format!(" 2 Sources {sources} ")),
+            "{navigation}"
+        );
+
+        // A count carries no surface of its own: it sits inside its entry and
+        // inherits it, so only the accent distinguishes it from the title. The
+        // active tab's underline runs under its count as well, standing in for
+        // the prototype's border along the whole tab, but the bold belongs to
+        // the title and stops there.
+        let inventory_count = style_following(&screen, 1, "▌Inventory ");
+        assert_eq!(inventory_count.fg, Some(AMBER));
+        assert_eq!(inventory_count.bg, Some(SURFACE_2));
+        assert!(
+            inventory_count.add_modifier.contains(Modifier::UNDERLINED),
+            "the active tab's underline should span its count"
+        );
+        assert!(
+            !inventory_count.add_modifier.contains(Modifier::BOLD),
+            "the title's emphasis should not leak into the count"
+        );
+        let sources_count = style_following(&screen, 1, "2 Sources ");
+        assert_eq!(sources_count.fg, Some(AMBER));
+        assert_eq!(sources_count.bg, Some(SURFACE));
+        assert!(!sources_count.add_modifier.contains(Modifier::UNDERLINED));
+        assert!(!sources_count.add_modifier.contains(Modifier::BOLD));
+
+        // Which is what makes both swap when the other tab is active.
+        app.update(Action::OpenSources);
+        let screen = buffer(&app, 120, 40);
+        let inventory_count = style_following(&screen, 1, "1 Inventory ");
+        assert_eq!(inventory_count.fg, Some(AMBER));
+        assert_eq!(inventory_count.bg, Some(SURFACE));
+        assert!(!inventory_count.add_modifier.contains(Modifier::UNDERLINED));
+        assert!(!inventory_count.add_modifier.contains(Modifier::BOLD));
+        let sources_count = style_following(&screen, 1, "▌Sources ");
+        assert_eq!(sources_count.fg, Some(AMBER));
+        assert_eq!(sources_count.bg, Some(SURFACE_2));
+        assert!(sources_count.add_modifier.contains(Modifier::UNDERLINED));
+        assert!(!sources_count.add_modifier.contains(Modifier::BOLD));
+    }
+
     /// Stray content is listed, but never described as a skill.
     #[test]
     fn a_root_holding_only_stray_files_is_not_described_as_holding_skills() {
@@ -2167,11 +2404,15 @@ mod installed {
         let screen = buffer(&app, 80, 24);
         let rendered = text(&screen);
 
-        // The two counts on screen describe the same roots and must agree.
+        // The three counts on screen describe the same roots and must agree.
         assert!(
             rendered.contains("0 skills · 2 other entries"),
             "{rendered}"
         );
+        // The tab counts skills, so two stray entries are not two of anything
+        // it may report.
+        let navigation = row_text(&screen, 1);
+        assert!(navigation.contains("▌Inventory 0 "), "{navigation}");
         assert!(
             rendered.contains("Roots: Claude Code 0 installed"),
             "{rendered}"

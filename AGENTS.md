@@ -36,13 +36,18 @@ Truthfulness is a hard requirement of the inventory in particular. The scanner
 keeps apart what it read, what it could not read, what does not exist, what it
 was never asked to look at, and what it has not looked at yet; and it keeps
 "came from no registered source" apart from "could not tell". Every rendered
-count and phrase must follow those distinctions rather than flattening them,
-and a count may only be shown when every root it covers was read or found
-absent. A root that could not be read in
-full contributes nothing and says why; a stray file beside the skill
-directories is listed as not a skill rather than counted as a broken
-installation; a symbolic link is claimed as managed only when it resolves by
-canonical path to a registered source variant.
+count and phrase must follow those distinctions rather than flattening them.
+A count may only be shown when every root it covers was read or found absent
+and at least one of those roots was actually read: finding every root absent is
+a complete answer about the roots but not a measurement of their contents, so
+it earns a phrase rather than a zero. That decision lives in
+`InventorySnapshot::stated_skill_count`, and every surface summarising the
+roots — the navigation tab as much as the inventory subtitle — asks it instead
+of re-deriving the rule. A root that could not be read in full contributes
+nothing and says why; a stray file beside the skill directories is listed as
+not a skill rather than counted as a broken installation; a symbolic link is
+claimed as managed only when it resolves by canonical path to a registered
+source variant.
 [GitHub issue #3](https://github.com/brian-bell/skilled/issues/3) is the
 product and technical source of truth. The tracked `spec/tui-prototype.html` is
 the visual design reference.
@@ -80,7 +85,8 @@ not an acceptable cue.
   process, and never writes. Resolution to a registered source is canonical
   path equality against that source's included catalog candidates and nothing
   else, so content that merely resembles a variant is never adopted. Owns the
-  stable finding codes and the per-root and per-row state vocabulary.
+  stable finding codes, the per-root and per-row state vocabulary, and the
+  single count-or-phrase verdict every summarising surface defers to.
 - `src/validation.rs`: portable `SKILL.md` front-matter validation.
 - `src/store.rs`: private versioned SQLite metadata and migrations. Newer
   unknown schemas fail closed.
@@ -113,10 +119,15 @@ represented as typed effects and performed outside the reducer; the
 installation scan runs as `Effect::ScanInstallations` for this reason. Keep agent
 conventions behind adapters rather than spreading paths or enablement rules
 through UI and scanner code. Build new screens from `components` primitives and
-`theme` tokens rather than ad hoc styles. The key-hint bar and the navigation
+`theme` tokens rather than ad hoc styles. The title-bar and key-hint rows are
+painted on `theme::chrome_band()` beneath their text, so the shell reads as
+band, navigation surface, and workspace. The key-hint bar and the navigation
 row are contracts: a hint or destination may only appear when `src/input.rs`
-actually handles it in that context. Production dependencies require explicit
-review.
+actually handles it in that context, and a navigation count may only appear
+when the data behind it supports one. Sources counts the registry, which is
+always fully known; Inventory asks the snapshot; and a destination this release
+cannot open renders no count at all, where the prototype fakes one. Production
+dependencies require explicit review.
 
 ## Quick Reference
 

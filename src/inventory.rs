@@ -561,6 +561,27 @@ impl InventorySnapshot {
         })
     }
 
+    /// The number of installed skills, when the scan is entitled to state one.
+    ///
+    /// This is the single place that decides whether a number may be shown at
+    /// all, so every surface that summarises the roots reaches the same
+    /// verdict.
+    ///
+    /// Two conditions must hold. Every root Skilled was asked to look at was
+    /// read or found absent, so the number covers the whole requested scope —
+    /// that is [`Self::counts_are_complete`]. And at least one root was
+    /// actually read: finding every root absent entitles the application to a
+    /// phrase about the roots, not to a measurement of their contents. The
+    /// difference is the one between "no root read" and "nothing installed",
+    /// and a bare `0` beside a tab would flatten it.
+    pub fn stated_skill_count(&self) -> Option<usize> {
+        let read_a_root = self
+            .roots
+            .iter()
+            .any(|root| matches!(root.status(), RootStatus::Scanned { .. }));
+        (self.counts_are_complete() && read_a_root).then(|| self.skill_row_count())
+    }
+
     /// The message behind an unreadable root, if any root could not be read.
     ///
     /// A root Skilled could not read in full contributes nothing, so the reason
@@ -1165,5 +1186,35 @@ mod tests {
             snapshot.root(AgentKind::ClaudeCode).status(),
             &RootStatus::Scanned { installed: 1 }
         );
+    }
+
+    /// Finding every root absent is a complete answer about the roots, but it
+    /// is not a measurement of what any root holds: nothing was read. Only a
+    /// root that was actually read entitles the application to a number.
+    #[test]
+    fn a_count_needs_a_root_that_was_read_and_not_merely_one_found_absent() {
+        let temporary = tempfile::tempdir().expect("temporary home");
+        let home = temporary.path().join("home");
+        let environment = AppEnvironment::new(&home, temporary.path().join("data"), "");
+        let agents = detect_agents(&environment);
+
+        let absent = scan_with_budget(&agents, &[], InspectionBudget::installation_scan());
+
+        assert!(
+            absent
+                .roots()
+                .iter()
+                .all(|root| root.status() == &RootStatus::Missing)
+        );
+        // The scope was covered, so a phrase about the roots is honest ...
+        assert!(absent.counts_are_complete());
+        // ... but there is no observation to state as a number.
+        assert_eq!(absent.stated_skill_count(), None);
+
+        // An empty root that exists was read, and zero is what it holds.
+        fs::create_dir_all(home.join(".claude/skills")).expect("create an empty root");
+        let read = scan_with_budget(&agents, &[], InspectionBudget::installation_scan());
+
+        assert_eq!(read.stated_skill_count(), Some(0));
     }
 }

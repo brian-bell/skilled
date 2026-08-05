@@ -85,13 +85,6 @@ pub(crate) fn chrome() -> Style {
 /// Background only, mirroring `nav_surface()`: the text on it keeps its own
 /// role — `chrome()` and `key_label()` inherit the band, `key_cap()` carries
 /// its own local emphasis.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "consumed by the persistent-chrome slice (skilled-2k3.15.2)"
-    )
-)]
 pub(crate) fn chrome_band() -> Style {
     Style::default().bg(BAND)
 }
@@ -130,18 +123,15 @@ pub(crate) fn nav_inactive() -> Style {
 ///
 /// No background of its own: the count sits inside an entry and inherits that
 /// entry's surface, so it reads the same on an active (`SURFACE_2`) and an
-/// inactive (`SURFACE`) tab. A count may only be rendered when the underlying
-/// condition it summarises actually holds; this token styles it, it does not
-/// license it.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "consumed by the persistent-chrome slice (skilled-2k3.15.2)"
-    )
-)]
+/// inactive (`SURFACE`) tab. It inherits the active entry's underline for the
+/// same reason — the prototype draws that as a border under the whole tab,
+/// count included — but it drops the bold, which is emphasis on the
+/// destination's name rather than on the number beside it.
+///
+/// A count may only be rendered when the underlying condition it summarises
+/// actually holds; this token styles it, it does not license it.
 pub(crate) fn nav_count() -> Style {
-    Style::default().fg(AMBER)
+    Style::default().fg(AMBER).remove_modifier(Modifier::BOLD)
 }
 
 /// The surface behind the focused row of a list.

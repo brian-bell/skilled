@@ -73,6 +73,11 @@ fn render_title_bar(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
     // The two halves get their own rectangles because a Paragraph repaints its
     // whole area before drawing: rendering the status across the full row would
     // silently flatten the product mark and wordmark to the status colour.
+    //
+    // The band goes down first and the paragraphs only carry foreground
+    // colours, so it survives underneath them.
+    frame.render_widget(Block::new().style(theme::chrome_band()), area);
+
     let status = SessionStatus::of(app);
     let label = status.label();
     let status_width = u16::try_from(Span::raw(&label).width() + 3)
@@ -185,6 +190,14 @@ fn render_navigation(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
             ),
             style,
         ));
+        // The accent is patched over the entry's own style, so the count keeps
+        // the surface of the tab it belongs to.
+        if let Some(count) = destination.count(app) {
+            spans.push(Span::styled(
+                format!("{count} "),
+                style.patch(theme::nav_count()),
+            ));
+        }
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
@@ -272,6 +285,24 @@ impl Destination {
 
     fn is_available(self) -> bool {
         matches!(self, Self::Inventory | Self::Sources)
+    }
+
+    /// What this destination can honestly say it holds, if anything.
+    ///
+    /// The registry is always fully known, so Sources always has a count, zero
+    /// included. The inventory is an observation of the filesystem, and
+    /// whether that observation may be stated as a number is decided by
+    /// [`crate::inventory::InventorySnapshot::stated_skill_count`] — the same decision
+    /// [`inventory_subtitle`] defers to, so the tab and the subtitle beneath it
+    /// cannot disagree. A destination this release cannot open has nothing to
+    /// count and renders nothing: an em dash would read as a measurement that
+    /// came back empty.
+    fn count(self, app: &SkilledApp) -> Option<usize> {
+        match self {
+            Self::Inventory => app.inventory().stated_skill_count(),
+            Self::Sources => Some(app.sources().len()),
+            Self::Updates | Self::Doctor => None,
+        }
     }
 
     fn is_active(self, view: View) -> bool {
@@ -500,10 +531,11 @@ fn setup_lines(app: &SkilledApp, step: SetupStep, width: u16) -> Vec<Line<'stati
                         .map(|catalog| catalog.candidates().len())
                         .sum::<usize>()
                 )),
-                if !inventory.counts_are_complete() {
-                    // A root that was not read contributes nothing, so a total
-                    // taken across the roots would read as "none installed"
-                    // when it means "not known".
+                if inventory.stated_skill_count().is_none() {
+                    // The same verdict the Inventory surfaces defer to: a total
+                    // taken across roots that were not read would read as
+                    // "none installed" when it means "not known", and a scan
+                    // that only found roots absent earns a phrase, not a zero.
                     Line::from(components::badge(
                         Tone::Inactive,
                         if inventory.unreadable_roots().next().is_some() {
@@ -674,7 +706,11 @@ fn inventory_subtitle(app: &SkilledApp, shown: usize) -> String {
     // could not be read, the rows that were read are only "listed": stating
     // "N skills" here would read as a complete total while part of the
     // requested scope contributed nothing.
-    if total > 0 && !inventory.counts_are_complete() {
+    //
+    // Rows only come from a root that was read, so a withheld count means an
+    // incomplete scope here and never an unread one: this branch cannot be
+    // reached by the "nothing was read at all" half of the rule below.
+    if total > 0 && inventory.stated_skill_count().is_none() {
         return format!("{total} listed · not fully read");
     }
     // Skills and stray content are counted apart: a root holding only a
@@ -688,27 +724,23 @@ fn inventory_subtitle(app: &SkilledApp, shown: usize) -> String {
             if other == 1 { "y" } else { "ies" }
         );
     }
-    match total {
-        // A count of zero is a scan result. It may only be stated when every
-        // selected root was actually read.
-        0 if inventory
+    // Whether a number may be stated at all is decided once, in the snapshot.
+    // What is left here is the wording: a stated count says how much was
+    // found, and a withheld one says which of the three reasons it was
+    // withheld for.
+    match inventory.stated_skill_count() {
+        Some(0) => "nothing installed".to_owned(),
+        Some(1) => "1 skill".to_owned(),
+        Some(skills) => format!("{skills} skills"),
+        None if inventory
             .roots()
             .iter()
             .all(|root| root.status() == &RootStatus::NotScanned) =>
         {
             "not scanned".to_owned()
         }
-        0 if inventory.unreadable_roots().next().is_some() => "not fully read".to_owned(),
-        0 if !inventory
-            .roots()
-            .iter()
-            .any(|root| matches!(root.status(), RootStatus::Scanned { .. })) =>
-        {
-            "no root read".to_owned()
-        }
-        0 => "nothing installed".to_owned(),
-        1 => "1 skill".to_owned(),
-        total => format!("{total} skills"),
+        None if inventory.unreadable_roots().next().is_some() => "not fully read".to_owned(),
+        None => "no root read".to_owned(),
     }
 }
 
@@ -2525,6 +2557,10 @@ fn help_scope(context: View) -> String {
 }
 
 fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
+    // The band reaches the full width, so the row reads as chrome rather than
+    // as a smear the length of the hints. The hint line itself only sets
+    // foreground colours, apart from the key caps' own emphasis.
+    frame.render_widget(Block::new().style(theme::chrome_band()), area);
     frame.render_widget(
         Paragraph::new(components::key_hint_line(&key_hints(app), area.width))
             .style(theme::chrome()),
