@@ -76,6 +76,52 @@ fn sources_enter_advances_and_escape_backs_through_the_region_hierarchy() {
 }
 
 #[test]
+fn inventory_navigates_its_rows_and_regions() {
+    use skilled::input::action_for_key;
+
+    for (code, expected) in [
+        (KeyCode::Tab, Action::MoveInventoryPane(1)),
+        (KeyCode::BackTab, Action::MoveInventoryPane(-1)),
+        (KeyCode::Enter, Action::AdvanceInventoryPane),
+        (KeyCode::Up, Action::MoveInventorySelection(-1)),
+        (KeyCode::Char('k'), Action::MoveInventorySelection(-1)),
+        (KeyCode::Down, Action::MoveInventorySelection(1)),
+        (KeyCode::Char('j'), Action::MoveInventorySelection(1)),
+        (KeyCode::Char('/'), Action::BeginInventoryFilter),
+        (KeyCode::Esc, Action::Back),
+        (KeyCode::Char('2'), Action::OpenSources),
+    ] {
+        assert_eq!(
+            action_for_key(View::Inventory, key(code)),
+            Some(expected),
+            "{code:?}"
+        );
+    }
+}
+
+#[test]
+fn a_held_inventory_key_repeats_movement_but_not_navigation() {
+    use skilled::input::action_for_key;
+
+    assert_eq!(
+        action_for_key(View::Inventory, repeat(KeyCode::Char('j'))),
+        Some(Action::MoveInventorySelection(1))
+    );
+    for code in [
+        KeyCode::Tab,
+        KeyCode::Enter,
+        KeyCode::Esc,
+        KeyCode::Char('/'),
+    ] {
+        assert_eq!(
+            action_for_key(View::Inventory, repeat(code)),
+            None,
+            "{code:?}"
+        );
+    }
+}
+
+#[test]
 fn actions_remain_copyable_values() {
     fn assert_copy<T: Copy>() {}
 
@@ -311,6 +357,17 @@ fn repeat(code: KeyCode) -> KeyEvent {
     KeyEvent::new_with_kind(code, KeyModifiers::NONE, KeyEventKind::Repeat)
 }
 
+#[cfg(unix)]
+fn create_source_fixture(repository: &Path) {
+    fs::create_dir_all(repository.join("skills/portable")).expect("create source fixture");
+    fs::write(
+        repository.join("skills/portable/SKILL.md"),
+        "---\nname: portable\ndescription: Portable fixture\n---\n# Portable\n",
+    )
+    .expect("write source fixture");
+    initialize_repository(repository);
+}
+
 fn initialize_repository(repository: &Path) {
     git(repository, &["init", "-b", "main"]);
     git(repository, &["config", "user.name", "Skilled Test"]);
@@ -330,4 +387,81 @@ fn git(repository: &Path, arguments: &[&str]) {
         .output()
         .expect("run Git fixture command");
     assert!(output.status.success());
+}
+
+/// Filter input needs a real installed skill to narrow.
+///
+/// Managed installations are symbolic links, so the fixture is Unix-only.
+#[cfg(unix)]
+mod installed {
+    use super::*;
+
+    #[test]
+    fn the_inventory_filter_takes_printable_keys_as_text_and_keeps_ctrl_c_as_quit() {
+        use skilled::input::action_for_app_key;
+
+        let temporary = tempfile::tempdir().expect("temporary application directory");
+        let repository = temporary.path().join("library");
+        let mut app = SkilledApp::open(AppEnvironment::new(
+            temporary.path().join("home"),
+            temporary.path().join("data"),
+            "",
+        ))
+        .expect("open application");
+        for _ in 0..7 {
+            let update = app.update(Action::Continue);
+            app.perform_effects(update.effects())
+                .expect("setup effects");
+        }
+        create_source_fixture(&repository);
+        let preview = app.preview_source(&repository).expect("preview source");
+        app.confirm_source(preview).expect("register source");
+        install_link(
+            &temporary.path().join("home"),
+            "portable",
+            &repository.join("skills/portable"),
+        );
+        let update = app.update(Action::OpenSources);
+        app.perform_effects(update.effects()).expect("effects");
+        let update = app.update(Action::OpenInventory);
+        app.perform_effects(update.effects()).expect("scan");
+        app.update(Action::BeginInventoryFilter);
+        assert!(app.inventory_filter_active());
+
+        // Every printable key is text, including the ones that are routes outside
+        // the filter, so a query can name a source or a destination digit.
+        for (code, expected) in [
+            (KeyCode::Char('2'), Action::AppendInventoryFilter('2')),
+            (KeyCode::Char('s'), Action::AppendInventoryFilter('s')),
+            (KeyCode::Char('?'), Action::AppendInventoryFilter('?')),
+            (KeyCode::Char('/'), Action::AppendInventoryFilter('/')),
+            (KeyCode::Backspace, Action::DeleteInventoryFilterCharacter),
+            (KeyCode::Enter, Action::SubmitInventoryFilter),
+            (KeyCode::Esc, Action::Back),
+        ] {
+            assert_eq!(
+                action_for_app_key(&app, key(code)),
+                Some(expected),
+                "{code:?}"
+            );
+        }
+        assert_eq!(
+            action_for_app_key(
+                &app,
+                KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)
+            ),
+            Some(Action::Quit)
+        );
+        // Held keys type and delete; nothing else repeats.
+        assert_eq!(
+            action_for_app_key(&app, repeat(KeyCode::Char('a'))),
+            Some(Action::AppendInventoryFilter('a'))
+        );
+        assert_eq!(action_for_app_key(&app, repeat(KeyCode::Enter)), None);
+    }
+    fn install_link(home: &Path, name: &str, target: &Path) {
+        let root = home.join(".claude/skills");
+        fs::create_dir_all(&root).expect("create agent skill root");
+        std::os::unix::fs::symlink(target, root.join(name)).expect("install symbolic link");
+    }
 }

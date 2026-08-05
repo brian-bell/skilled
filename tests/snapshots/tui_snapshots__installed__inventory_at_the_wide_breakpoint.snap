@@ -1,0 +1,30 @@
+---
+source: tests/tui_snapshots.rs
+expression: screen
+---
+ ◆ skilled   global                                                   ● ready · 1 source registered
+▌Inventory  2 Sources  Updates (soon)  Doctor (soon)
+▌ Global inventory  3 skills                                │ Details  alpha
+Roots: Claude Code 2 installed · Codex 2 installed ·        │ ─────────────────────────────────────
+OpenCode no root                                            │ SKILL
+────────────────────────────────────────────────────────────│ ─────────────────────────────────────
+  Skill              Claude  Codex  OpenCode  Health        │ Name: alpha
+▌ alpha              ✓       ✓      -         ✓ healthy     │ Health: ✓ healthy
+  broken             ×       -      -         × broken      │ Description: alpha fixture
+  copied             -       U      -         U unmanaged   │ SOURCE
+                                                            │ ─────────────────────────────────────
+                                                            │ Source: library
+                                                            │ CLAUDE CODE
+                                                            │ ─────────────────────────────────────
+                                                            │ Path: ~/.claude/skills/alpha
+                                                            │ Object: symbolic link
+                                                            │ Variant: skills · skills/alpha
+                                                            │ Target: ~/library/skills/alpha
+                                                            │ Validation: ✓ valid as alpha
+                                                            │ CODEX
+                                                            │ ─────────────────────────────────────
+                                                            │ Path: ~/.agents/skills/alpha
+                                                            │ Object: symbolic link
+                                                            │ Variant: skills · skills/alpha
+                                                            │ ! 5 more lines
+ Tab/Shift-Tab Region   j/k Move   Enter Open   / Filter   2 Sources   s Settings   ? Help   q Quit

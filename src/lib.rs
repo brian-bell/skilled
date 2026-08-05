@@ -3,6 +3,7 @@ pub mod app;
 mod components;
 pub mod error;
 pub mod input;
+pub mod inventory;
 pub mod paths;
 pub mod runner;
 pub mod source;
@@ -15,7 +16,8 @@ mod viewport;
 
 pub use agents::{AgentDetection, AgentKind};
 pub use app::{
-    Action, Effect, SetupStep, SkilledApp, SourcesPane, UpdateOutcome, UpdateResult, View,
+    Action, Effect, InventoryPane, SetupStep, SkilledApp, SourcesPane, UpdateOutcome, UpdateResult,
+    View,
 };
 pub use error::{Error, Result};
 pub use paths::AppEnvironment;

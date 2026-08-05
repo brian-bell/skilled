@@ -278,12 +278,8 @@ pub(crate) fn list_row(content: Vec<Span<'static>>, selected: bool, width: u16) 
     Line::from(spans).style(theme::selected_row())
 }
 
-/// A pane heading with a subtitle that quantifies what the pane contains.
-pub(crate) fn pane_header(heading: &str, subtitle: &str) -> Line<'static> {
-    focused_pane_header(heading, subtitle, false)
-}
-
-/// A pane heading whose active state remains visible without colour.
+/// A pane heading with a subtitle that quantifies what the pane contains, and
+/// whose active state remains visible without colour.
 pub(crate) fn focused_pane_header(heading: &str, subtitle: &str, focused: bool) -> Line<'static> {
     let mut spans = Vec::new();
     if focused {

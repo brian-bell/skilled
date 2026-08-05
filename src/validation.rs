@@ -14,6 +14,8 @@ const MAX_SKILL_MD_BYTES: usize = 1024 * 1024;
 const MAX_SKILL_DIRECTORY_ENTRIES: usize = 1_024;
 const MAX_SOURCE_SCAN_ENTRIES: usize = 16_384;
 const MAX_SOURCE_SCAN_BYTES: usize = 32 * 1024 * 1024;
+const MAX_INSTALLATION_SCAN_ENTRIES: usize = 262_144;
+const MAX_INSTALLATION_SCAN_BYTES: usize = 32 * 1024 * 1024;
 
 pub(crate) struct InspectionBudget {
     remaining_entries: usize,
@@ -25,6 +27,26 @@ impl InspectionBudget {
         Self {
             remaining_entries: MAX_SOURCE_SCAN_ENTRIES,
             remaining_bytes: MAX_SOURCE_SCAN_BYTES,
+        }
+    }
+
+    /// A pass over the agent installation roots.
+    ///
+    /// Three roots of bounded width, each entry validated in place, so the
+    /// aggregate allowance is wider than a single source scan's.
+    pub(crate) fn installation_scan() -> Self {
+        Self {
+            remaining_entries: MAX_INSTALLATION_SCAN_ENTRIES,
+            remaining_bytes: MAX_INSTALLATION_SCAN_BYTES,
+        }
+    }
+
+    /// A budget with nothing left, for exercising the fail-closed paths.
+    #[cfg(test)]
+    pub(crate) fn exhausted() -> Self {
+        Self {
+            remaining_entries: 0,
+            remaining_bytes: 0,
         }
     }
 

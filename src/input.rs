@@ -28,6 +28,23 @@ pub fn action_for_app_key(app: &SkilledApp, key: KeyEvent) -> Option<Action> {
             _ => action,
         };
     }
+    // The filter bar is a text field, so every printable key is a character
+    // rather than the route or command it would be elsewhere in the Inventory.
+    if app.inventory_filter_active() {
+        let action = match key.code {
+            KeyCode::Enter => Some(Action::SubmitInventoryFilter),
+            KeyCode::Esc => Some(Action::Back),
+            KeyCode::Backspace => Some(Action::DeleteInventoryFilterCharacter),
+            KeyCode::Char(character) => Some(Action::AppendInventoryFilter(character)),
+            _ => None,
+        };
+        return match (key.kind, action) {
+            (KeyEventKind::Repeat, Some(Action::DeleteInventoryFilterCharacter)) => action,
+            (KeyEventKind::Repeat, Some(Action::AppendInventoryFilter(_))) => action,
+            (KeyEventKind::Repeat, _) => None,
+            _ => action,
+        };
+    }
     if app.pending_source().is_some() {
         let action = match key.code {
             KeyCode::Enter => Some(Action::ConfirmPendingSource),
@@ -67,6 +84,13 @@ pub fn action_for_key(view: View, key: KeyEvent) -> Option<Action> {
             View::Inventory => match key.code {
                 KeyCode::Char('s') => Some(Action::OpenSettings),
                 KeyCode::Char('2') => Some(Action::OpenSources),
+                KeyCode::Tab => Some(Action::MoveInventoryPane(1)),
+                KeyCode::BackTab => Some(Action::MoveInventoryPane(-1)),
+                KeyCode::Enter => Some(Action::AdvanceInventoryPane),
+                KeyCode::Up | KeyCode::Char('k') => Some(Action::MoveInventorySelection(-1)),
+                KeyCode::Down | KeyCode::Char('j') => Some(Action::MoveInventorySelection(1)),
+                KeyCode::Char('/') => Some(Action::BeginInventoryFilter),
+                KeyCode::Esc => Some(Action::Back),
                 _ => None,
             },
             View::Sources => match key.code {
@@ -90,6 +114,7 @@ pub fn action_for_key(view: View, key: KeyEvent) -> Option<Action> {
 
     match (key.kind, action) {
         (KeyEventKind::Repeat, Some(Action::MoveSelection(_))) => action,
+        (KeyEventKind::Repeat, Some(Action::MoveInventorySelection(_))) => action,
         (KeyEventKind::Repeat, _) => None,
         _ => action,
     }

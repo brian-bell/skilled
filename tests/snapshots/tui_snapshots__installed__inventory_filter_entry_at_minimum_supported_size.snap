@@ -1,0 +1,28 @@
+---
+source: tests/tui_snapshots.rs
+expression: "normalize_inventory(&temporary, render(&app, 80, 24))"
+---
+ ◆ skilled   global                               ● ready · 1 source registered
+ Filter inventory   navigation is locked while the filter is open
+▌ Global inventory  1 of 3 listed
+/unman▌
+Roots: Claude Code 2 installed · Codex 2 installed · OpenCode no root
+────────────────────────────────────────────────────────────────────────────────
+  Skill                  Source          Claude  Codex  OpenCode  Health
+▌ copied                 not registered  -       U      -         U unmanaged
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ Enter Apply   Esc Clear   Ctrl-C Quit

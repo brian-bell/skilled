@@ -1,0 +1,28 @@
+---
+source: tests/tui_snapshots.rs
+expression: "normalize_inventory(&temporary, render(&app, 80, 24))"
+---
+ ◆ skilled   global                               ● ready · 1 source registered
+▌Inventory  2 Sources  Updates (soon)  Doctor (soon)
+ ▌ Details  copied
+ ──────────────────────────────────────────────────────────────────────────────
+ SKILL
+ ──────────────────────────────────────────────────────────────────────────────
+ Name: copied
+ Health: U unmanaged
+ Description: copied fixture
+ SOURCE
+ ──────────────────────────────────────────────────────────────────────────────
+ Not resolved to any registered source; Skilled does not manage it.
+ CODEX
+ ──────────────────────────────────────────────────────────────────────────────
+ Finding: install.unmanaged · info
+   this installation does not come from a registered source
+ Path: ~/.agents/skills/copied
+ Object: directory
+ Validation: ✓ valid as copied
+ NOT INSTALLED
+ ──────────────────────────────────────────────────────────────────────────────
+ - Claude Code, OpenCode
+
+ Tab/Shift-Tab Region   2 Sources   s Settings   ? Help   q Quit   Esc Back

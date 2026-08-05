@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Layout, Margin, Rect},
@@ -6,8 +8,13 @@ use ratatui::{
 };
 
 use crate::{
-    SetupStep, SkilledApp, SourcesPane, View,
+    AgentKind, InventoryPane, SetupStep, SkilledApp, SourcesPane, View,
+    app::MAX_INVENTORY_FILTER,
     components::{self, KeyHint},
+    inventory::{
+        Finding, FindingSeverity, InstallationHealth, InstallationObject,
+        InstalledSkillObservation, InventoryRow, RootScan, RootStatus, RowProvenance,
+    },
     source::{
         CatalogClassification, CatalogProposal, RegisteredSource, SkillCandidate, SkillValidation,
     },
@@ -40,10 +47,10 @@ pub fn render(frame: &mut Frame<'_>, app: &SkilledApp) {
     let body = workspace;
     match app.view() {
         View::Setup(step) => render_setup(frame, body, app, step),
-        View::Inventory => render_inventory(frame, body),
+        View::Inventory => render_inventory(frame, body, app),
         View::Sources => render_sources(frame, body, app),
         View::Settings => {
-            render_inventory(frame, body);
+            render_inventory(frame, body, app);
             render_settings(frame, body);
         }
     }
@@ -95,8 +102,8 @@ fn render_title_bar(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
 
 /// What the application can honestly say about the current session.
 ///
-/// Skilled performs no installation scan and no network access in this release,
-/// so the status may only describe setup progress and registered-source counts.
+/// Skilled performs no network access in this release, so the status may only
+/// describe setup progress and what the local scan observed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SessionStatus {
     SetupInProgress,
@@ -209,6 +216,14 @@ fn keyboard_owner(app: &SkilledApp) -> Option<(String, &'static str)> {
 
     if app.source_path_input_active() {
         return Some(("Add source".to_owned(), note));
+    }
+    // The filter is a text field rather than a dialog, but it still takes every
+    // printable key, so the destination digits would not work while it is open.
+    if app.inventory_filter_active() {
+        return Some((
+            "Filter inventory".to_owned(),
+            "navigation is locked while the filter is open",
+        ));
     }
     // Mirrors the render gate: the confirmation is only a dialog in Sources.
     if app.pending_source().is_some() && app.view() == View::Sources {
@@ -417,113 +432,757 @@ fn setup_lines(app: &SkilledApp, step: SetupStep, width: u16) -> Vec<Line<'stati
             Line::from("Catalog confirmation follows inspection of a local source."),
             Line::from("Registration records metadata only; it does not install skills."),
         ]),
-        SetupStep::ScanInstallations => lines.extend([
-            Line::from(components::badge(
-                Tone::Inactive,
-                "installation roots not scanned",
-            )),
-            Line::default(),
-            Line::from("This build cannot report installation or Doctor status."),
-            Line::from("Continue without reading or changing any agent skill root."),
-        ]),
-        SetupStep::Summary => lines.extend([
-            Line::from("Setup is ready to finish."),
-            Line::default(),
-            Line::from(format!(
-                "Configured agents: {}",
-                app.agents().iter().filter(|agent| agent.selected()).count()
-            )),
-            Line::from(format!(
-                "Sources: {}   Skills: {}",
-                app.sources().len(),
-                app.sources()
-                    .iter()
-                    .flat_map(|source| source.catalogs())
-                    .map(|catalog| catalog.candidates().len())
-                    .sum::<usize>()
-            )),
-            Line::default(),
-            Line::from("Unresolved findings never force a repair."),
-        ]),
+        SetupStep::ScanInstallations => {
+            // A root that could not be read was attempted, not read; the
+            // sentence follows the statuses below it rather than asserting a
+            // success the scan did not have.
+            lines.push(Line::from(
+                if app.inventory().unreadable_roots().next().is_some() {
+                    "Skilled attempted to read the global skill root of each selected agent."
+                } else {
+                    "Skilled read the global skill root of each selected agent."
+                },
+            ));
+            lines.push(Line::default());
+            // The status badges vary in width, so they are padded to a column
+            // and the agent names line up beneath one another.
+            const STATUS_COLUMN: usize = 19;
+            for root in app.inventory().roots() {
+                let badge = components::badge(root_tone(root), &root.status().summary());
+                let padding = STATUS_COLUMN.saturating_sub(badge.width());
+                lines.push(Line::from(vec![
+                    badge,
+                    Span::raw(format!(
+                        "{}{:<11}  {}",
+                        " ".repeat(padding),
+                        root.agent().display_name(),
+                        terminal_safe(&home_relative(root.path(), app.home()))
+                    )),
+                ]));
+                // A root that could not be read contributed nothing above, so
+                // its reason is the only account of it — same as the Inventory
+                // header. The message is bounded so an operating-system error
+                // cannot displace the line that closes the step.
+                if let RootStatus::Unreadable { message } = root.status() {
+                    let badge = components::badge(Tone::Critical, root.agent().display_name());
+                    let budget = usize::from(width)
+                        .saturating_mul(2)
+                        .saturating_sub(badge.width() + 2);
+                    lines.push(Line::from(vec![
+                        badge,
+                        Span::raw(format!(
+                            ": {}",
+                            terminal_safe_bounded_start(message, budget)
+                        )),
+                    ]));
+                }
+            }
+            lines.extend([
+                Line::default(),
+                Line::from("Nothing outside those roots was read, and nothing was changed."),
+            ]);
+        }
+        SetupStep::Summary => {
+            let inventory = app.inventory();
+            lines.extend([
+                Line::from("Setup is ready to finish."),
+                Line::default(),
+                Line::from(format!(
+                    "Configured agents: {}",
+                    app.agents().iter().filter(|agent| agent.selected()).count()
+                )),
+                Line::from(format!(
+                    "Sources: {}   Skills: {}",
+                    app.sources().len(),
+                    app.sources()
+                        .iter()
+                        .flat_map(|source| source.catalogs())
+                        .map(|catalog| catalog.candidates().len())
+                        .sum::<usize>()
+                )),
+                if !inventory.counts_are_complete() {
+                    // A root that was not read contributes nothing, so a total
+                    // taken across the roots would read as "none installed"
+                    // when it means "not known".
+                    Line::from(components::badge(
+                        Tone::Inactive,
+                        if inventory.unreadable_roots().next().is_some() {
+                            "installation counts unavailable: a skill root could not be read"
+                        } else {
+                            "installation counts unavailable: no skill root was read"
+                        },
+                    ))
+                } else {
+                    Line::from(format!(
+                        "Installed: {}   Unmanaged: {}   Broken: {}",
+                        inventory.installation_count(),
+                        inventory.unmanaged_count(),
+                        inventory.broken_count()
+                    ))
+                },
+                Line::default(),
+                Line::from("Unresolved findings never force a repair."),
+            ]);
+        }
     }
     lines
 }
 
-fn render_inventory(frame: &mut Frame<'_>, area: Rect) {
-    let (primary, detail) = viewport::workspace_regions(area);
-    if let Some(detail) = detail {
-        render_inventory_detail(frame, detail);
+/// The Inventory workspace: one row per installed skill, and its detail.
+///
+/// A wide terminal shows the table and the detail region together; a compact
+/// one shows whichever region has focus, so `Enter` is a drill-in and `Esc`
+/// comes back.
+fn render_inventory(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
+    match viewport::workspace_regions(area) {
+        (primary, Some(detail)) => {
+            render_inventory_skills(frame, primary, app);
+            render_inventory_detail(frame, detail, app, true);
+        }
+        (primary, None) => match app.inventory_pane() {
+            InventoryPane::Skills => render_inventory_skills(frame, primary, app),
+            InventoryPane::Details => render_inventory_detail(frame, primary, app, false),
+        },
     }
+}
 
-    let [header, body] =
-        Layout::vertical([Constraint::Length(2), Constraint::Min(1)]).areas(primary);
+/// Column widths for the installation table.
+///
+/// The three agent columns and the health column are sized by their headings,
+/// which never change; the identity columns divide whatever is left.
+#[derive(Clone, Copy)]
+struct InventoryColumns {
+    skill: usize,
+    source: usize,
+}
+
+const AGENT_COLUMN_WIDTHS: [usize; 3] = [8, 7, 10];
+/// Wide enough for the longest health badge — `- not a skill`, thirteen cells
+/// — plus a column of clearance, so the row is never clipped and never abuts
+/// the detail region's separator.
+const HEALTH_COLUMN_WIDTH: usize = 14;
+/// The marker and its trailing space, contributed by `components::list_row`.
+const ROW_MARKER_WIDTH: usize = 2;
+/// Below this, a Source column would only ever show an ellipsis.
+const MINIMUM_SOURCE_WIDTH: usize = 12;
+const MINIMUM_SKILL_WIDTH: usize = 8;
+
+fn inventory_columns(width: u16) -> InventoryColumns {
+    let fixed = ROW_MARKER_WIDTH + AGENT_COLUMN_WIDTHS.iter().sum::<usize>() + HEALTH_COLUMN_WIDTH;
+    let remaining = usize::from(width).saturating_sub(fixed);
+    let skill = (remaining * 6 / 10).max(MINIMUM_SKILL_WIDTH);
+    let source = remaining.saturating_sub(skill);
+    // A Source column too narrow to hold a label truncates every source to the
+    // same ellipsis, which distinguishes nothing. The whole column is dropped
+    // instead, and the detail region still names the source.
+    if source < MINIMUM_SOURCE_WIDTH {
+        return InventoryColumns {
+            skill: remaining.max(MINIMUM_SKILL_WIDTH),
+            source: 0,
+        };
+    }
+    InventoryColumns { skill, source }
+}
+
+fn render_inventory_skills(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
+    let rows = app.filtered_rows();
+    let mut header_lines = vec![components::focused_pane_header(
+        "Global inventory",
+        &inventory_subtitle(app, rows.len()),
+        app.inventory_pane() == InventoryPane::Skills,
+    )];
+    if app.inventory_filter_active() || !app.inventory_filter().is_empty() {
+        header_lines.push(inventory_filter_line(app));
+    }
+    header_lines.push(inventory_roots_line(app));
+    // A root that could not be read contributes nothing, so its reason is the
+    // only account the user gets of what is inside it. Every root that failed
+    // gets its own line: dropping the second would hide a second obstruction.
+    header_lines.extend(app.inventory().unreadable_roots().map(|(root, message)| {
+        let badge = components::badge(Tone::Critical, root.agent().display_name());
+        // The reason carries an operating-system message; two rows of it must
+        // not squeeze out the table it sits above.
+        let budget = usize::from(area.width)
+            .saturating_mul(2)
+            .saturating_sub(badge.width() + 2);
+        Line::from(vec![
+            badge,
+            Span::raw(format!(
+                ": {}",
+                terminal_safe_bounded_start(message, budget)
+            )),
+        ])
+    }));
+
+    // Measured after the lines exist, so a wrapped root status or a second
+    // failure reason cannot displace the rule that closes the header.
+    let header_height = detail_lines_height(&header_lines, area.width)
+        .saturating_add(1)
+        .min(usize::from(area.height.saturating_sub(1)));
+    let [header, body] = Layout::vertical([
+        Constraint::Length(u16::try_from(header_height).unwrap_or(u16::MAX)),
+        Constraint::Min(1),
+    ])
+    .areas(area);
+    header_lines.push(components::rule(header.width));
     frame.render_widget(
-        Paragraph::new(vec![
-            components::pane_header("Global inventory", "not scanned"),
-            components::rule(header.width),
-        ]),
+        Paragraph::new(header_lines).wrap(Wrap { trim: false }),
         header,
     );
 
-    // Nothing scans installation roots yet, so the only truthful inventory is
-    // an empty one. The copy points at the work the release does support.
-    let body = body.inner(Margin {
-        horizontal: 2,
-        vertical: 0,
-    });
-    frame.render_widget(
-        components::empty_state(
-            "⌕",
-            "Installation roots have not been scanned",
-            "Skilled has not looked at any installation root yet, so it cannot \
-             say what is installed. Register a local source in Sources to \
-             prepare for installation in a later release.",
-            body,
-        ),
-        body,
+    if rows.is_empty() {
+        let region = body.inner(Margin {
+            horizontal: 2,
+            vertical: 0,
+        });
+        let (headline, explanation) = inventory_empty_state(app);
+        frame.render_widget(
+            components::empty_state("⌕", &headline, &explanation, region),
+            region,
+        );
+        return;
+    }
+
+    let columns = inventory_columns(body.width);
+    let mut lines = vec![inventory_column_headings(columns)];
+    let capacity = usize::from(body.height.max(1)).saturating_sub(1);
+    let start = visible_window_start(app.focused_installation(), capacity);
+    lines.extend(
+        rows.iter()
+            .enumerate()
+            .skip(start)
+            .take(capacity)
+            .map(|(index, row)| {
+                inventory_row_line(
+                    row,
+                    columns,
+                    index == app.focused_installation(),
+                    body.width,
+                )
+            }),
     );
+    frame.render_widget(Paragraph::new(lines), body);
 }
 
-/// The detail region beside a wide Inventory.
-///
-/// There is nothing to select yet, so the region explains what it will show
-/// rather than standing empty or inventing a subject.
-fn render_inventory_detail(frame: &mut Frame<'_>, area: Rect) {
-    let [separator, region] =
-        Layout::horizontal([Constraint::Length(1), Constraint::Min(1)]).areas(area);
-    frame.render_widget(
-        Paragraph::new(vec![
-            Line::from(Span::styled("│", theme::rule()));
-            usize::from(separator.height)
-        ]),
-        separator,
-    );
+fn inventory_subtitle(app: &SkilledApp, shown: usize) -> String {
+    let inventory = app.inventory();
+    let total = inventory.rows().len();
+    if !app.inventory_filter().trim().is_empty() {
+        return format!("{shown} of {total} listed");
+    }
+    // A positive count is a claim about every selected root. When a root
+    // could not be read, the rows that were read are only "listed": stating
+    // "N skills" here would read as a complete total while part of the
+    // requested scope contributed nothing.
+    if total > 0 && !inventory.counts_are_complete() {
+        return format!("{total} listed · not fully read");
+    }
+    // Skills and stray content are counted apart: a root holding only a
+    // README must not be described as holding a skill.
+    let skills = inventory.skill_row_count();
+    let other = total - skills;
+    if other > 0 {
+        return format!(
+            "{skills} skill{} · {other} other entr{}",
+            if skills == 1 { "" } else { "s" },
+            if other == 1 { "y" } else { "ies" }
+        );
+    }
+    match total {
+        // A count of zero is a scan result. It may only be stated when every
+        // selected root was actually read.
+        0 if inventory
+            .roots()
+            .iter()
+            .all(|root| root.status() == &RootStatus::NotScanned) =>
+        {
+            "not scanned".to_owned()
+        }
+        0 if inventory.unreadable_roots().next().is_some() => "not fully read".to_owned(),
+        0 if !inventory
+            .roots()
+            .iter()
+            .any(|root| matches!(root.status(), RootStatus::Scanned { .. })) =>
+        {
+            "no root read".to_owned()
+        }
+        0 => "nothing installed".to_owned(),
+        1 => "1 skill".to_owned(),
+        total => format!("{total} skills"),
+    }
+}
 
-    // The header mirrors the primary pane's so both regions measure their
-    // centred content against the same remaining height.
-    let region = region.inner(Margin {
-        horizontal: 1,
-        vertical: 0,
-    });
+/// The query box, or the query that is still narrowing the list.
+///
+/// The query is bounded on entry, and bounded again here: the header must
+/// never grow at the expense of the table the query exists to narrow.
+fn inventory_filter_line(app: &SkilledApp) -> Line<'static> {
+    let query = terminal_safe_bounded_start(app.inventory_filter(), MAX_INVENTORY_FILTER);
+    if app.inventory_filter_active() {
+        return Line::from(vec![
+            Span::styled("/", theme::section_title()),
+            Span::raw(query),
+            Span::styled(components::FOCUS_MARKER, theme::focus_marker()),
+        ]);
+    }
+    Line::from(vec![
+        Span::styled("Filter: ", theme::pane_subtitle()),
+        Span::raw(query),
+    ])
+}
+
+/// What each agent's root contributed.
+///
+/// A `-` cell means no skill is installed under that name in that root, which
+/// covers both "nothing is there" and "something is there that is not a skill";
+/// the Health column names which. This line supplies the other half a `-` needs
+/// to be read: whether the root was scanned at all.
+fn inventory_roots_line(app: &SkilledApp) -> Line<'static> {
+    let mut spans = vec![Span::styled("Roots: ", theme::pane_subtitle())];
+    for (position, root) in app.inventory().roots().iter().enumerate() {
+        if position > 0 {
+            spans.push(Span::styled(" · ", theme::pane_subtitle()));
+        }
+        spans.push(Span::raw(format!("{} ", root.agent().display_name())));
+        spans.push(Span::styled(
+            root.status().short_summary(),
+            theme::tone_style(root_tone(root)),
+        ));
+    }
+    Line::from(spans)
+}
+
+fn root_tone(root: &RootScan) -> Tone {
+    match root.status() {
+        RootStatus::Scanned { .. } => Tone::Healthy,
+        RootStatus::NotScanned | RootStatus::NotSelected | RootStatus::Missing => Tone::Inactive,
+        RootStatus::Unreadable { .. } => Tone::Critical,
+    }
+}
+
+fn inventory_column_headings(columns: InventoryColumns) -> Line<'static> {
+    let mut heading = " ".repeat(ROW_MARKER_WIDTH);
+    heading.push_str(&padded("Skill", columns.skill));
+    heading.push_str(&padded("Source", columns.source));
+    for (label, width) in ["Claude", "Codex", "OpenCode"]
+        .into_iter()
+        .zip(AGENT_COLUMN_WIDTHS)
+    {
+        heading.push_str(&padded(label, width));
+    }
+    heading.push_str("Health");
+    Line::from(Span::styled(heading, theme::pane_subtitle()))
+}
+
+fn inventory_row_line(
+    row: &InventoryRow,
+    columns: InventoryColumns,
+    selected: bool,
+    width: u16,
+) -> Line<'static> {
+    let mut spans = vec![
+        Span::raw(padded(&terminal_safe(row.name()), columns.skill)),
+        Span::raw(padded(
+            &terminal_safe(row.provenance().label()),
+            columns.source,
+        )),
+    ];
+    for (agent, width) in AgentKind::ALL.into_iter().zip(AGENT_COLUMN_WIDTHS) {
+        let tone = row
+            .observation(agent)
+            .map_or(Tone::Inactive, |observation| {
+                installation_tone(observation.health())
+            });
+        spans.push(Span::styled(
+            padded(components::tone_glyph(tone), width),
+            theme::tone_style(tone),
+        ));
+    }
+    let tone = installation_tone(row.health());
+    spans.push(components::badge(tone, row.health().label()));
+    components::list_row(spans, selected, width)
+}
+
+fn installation_tone(health: InstallationHealth) -> Tone {
+    match health {
+        // Stray content is not a state of a skill, so it takes the inactive
+        // tone; the words "not a skill" beside it carry the meaning.
+        InstallationHealth::NotASkill => Tone::Inactive,
+        InstallationHealth::Healthy => Tone::Healthy,
+        // Unverified is in the unmanaged family: not known to be owned.
+        InstallationHealth::Unverified | InstallationHealth::Unmanaged => Tone::Unmanaged,
+        InstallationHealth::Broken => Tone::Critical,
+    }
+}
+
+/// What an empty table can honestly say, given what the scan observed.
+fn inventory_empty_state(app: &SkilledApp) -> (String, String) {
+    if !app.inventory_filter().trim().is_empty() {
+        return (
+            "No skills match the filter".to_owned(),
+            "Press Esc to clear the filter and show every installed skill again.".to_owned(),
+        );
+    }
+    let roots = app.inventory().roots();
+    if roots
+        .iter()
+        .all(|root| root.status() == &RootStatus::NotScanned)
+    {
+        return (
+            "Installation roots have not been scanned".to_owned(),
+            "Skilled reads them during setup, after you have chosen which \
+             agents it should configure."
+                .to_owned(),
+        );
+    }
+    if roots
+        .iter()
+        .any(|root| matches!(root.status(), RootStatus::Unreadable { .. }))
+    {
+        return (
+            "An agent skill root could not be read".to_owned(),
+            "Skilled reports nothing from a root it could not read in full \
+             rather than reporting part of it. Each root that failed names its \
+             reason above."
+                .to_owned(),
+        );
+    }
+    if roots
+        .iter()
+        .any(|root| matches!(root.status(), RootStatus::Scanned { .. }))
+    {
+        return (
+            "No skills are installed".to_owned(),
+            "The agent skill roots Skilled read hold no skill directories. \
+             Nothing was created or changed."
+                .to_owned(),
+        );
+    }
+    // Nothing was looked at, so nothing may be said about what exists.
+    if roots
+        .iter()
+        .all(|root| root.status() == &RootStatus::NotSelected)
+    {
+        return (
+            "No agent is configured".to_owned(),
+            "Skilled reads the skill root of the agents chosen during setup, \
+             and none are chosen, so it read nothing. Rerun setup from \
+             Settings to choose an agent."
+                .to_owned(),
+        );
+    }
+    (
+        "No agent skill root exists yet".to_owned(),
+        "Skilled looked for the documented global skill root of each selected \
+         agent and found none of them. It did not create one."
+            .to_owned(),
+    )
+}
+
+/// The detail region: everything observed about the selected installation.
+fn render_inventory_detail(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &SkilledApp,
+    beside_the_table: bool,
+) {
+    let region = if beside_the_table {
+        let [separator, region] =
+            Layout::horizontal([Constraint::Length(1), Constraint::Min(1)]).areas(area);
+        frame.render_widget(
+            Paragraph::new(vec![
+                Line::from(Span::styled("│", theme::rule()));
+                usize::from(separator.height)
+            ]),
+            separator,
+        );
+        region.inner(Margin {
+            horizontal: 1,
+            vertical: 0,
+        })
+    } else {
+        area.inner(Margin {
+            horizontal: 1,
+            vertical: 0,
+        })
+    };
+
+    let selected = app.selected_installation();
     let [header, body] =
         Layout::vertical([Constraint::Length(2), Constraint::Min(1)]).areas(region);
     frame.render_widget(
         Paragraph::new(vec![
-            components::pane_header("Details", "no selection"),
+            components::focused_pane_header(
+                "Details",
+                &selected.map_or_else(
+                    || "no selection".to_owned(),
+                    |row| terminal_safe(row.name()),
+                ),
+                app.inventory_pane() == InventoryPane::Details,
+            ),
             components::rule(header.width),
         ]),
         header,
     );
-    frame.render_widget(
-        components::empty_state(
-            "·",
-            "Nothing to show",
-            "Identity, provenance, and installation paths appear here once \
-             installation inventory exists.",
+
+    let Some(row) = selected else {
+        frame.render_widget(
+            components::empty_state(
+                "·",
+                "Nothing to show",
+                "Identity, provenance, and the observed object in every agent \
+                 root appear here once a skill is selected.",
+                body,
+            ),
             body,
-        ),
+        );
+        return;
+    };
+    // The detail region is the only place per-agent observations and findings
+    // exist, so content that does not fit is reported as missing rather than
+    // dropped off the bottom without a trace.
+    let lines = inventory_detail_lines(row, app.home(), body.width);
+    frame.render_widget(
+        Paragraph::new(bounded_detail_lines(lines, body.width, body.height))
+            .wrap(Wrap { trim: false }),
         body,
     );
+}
+
+/// Fit detail lines to a region, saying so when some do not fit.
+///
+/// The last rows are spent on a count of what was left out, because a region
+/// that silently ends mid-section reads as though there were nothing more. The
+/// notice is measured like any other line and shortened rather than wrapped
+/// off the bottom: the one string whose whole job is to report that content
+/// was cut must not itself be cut.
+fn bounded_detail_lines(lines: Vec<Line<'static>>, width: u16, height: u16) -> Vec<Line<'static>> {
+    let available = usize::from(height);
+    if width == 0 || available == 0 || detail_lines_height(&lines, width) <= available {
+        return lines;
+    }
+
+    // Rows hidden, not lines hidden: a dropped line that would have wrapped
+    // costs the reader more than one row of content.
+    let total_rows = detail_lines_height(&lines, width);
+    let notice = |hidden: usize| {
+        let plural = if hidden == 1 { "" } else { "s" };
+        [
+            format!("{hidden} more line{plural} — widen or lengthen the terminal"),
+            format!("{hidden} more line{plural}"),
+            format!("+{hidden}"),
+        ]
+        .into_iter()
+        .map(|label| Line::from(components::badge(Tone::Warning, &label)))
+        .find(|line| wrapped_line_count(line, width) == 1)
+        .unwrap_or_else(|| Line::from(components::badge(Tone::Warning, "…")))
+    };
+
+    let reserved = wrapped_line_count(&notice(total_rows), width);
+    let mut kept = Vec::new();
+    let mut used = 0;
+    for line in &lines {
+        let rows = wrapped_line_count(line, width);
+        if used + rows > available.saturating_sub(reserved) {
+            break;
+        }
+        kept.push(line.clone());
+        used += rows;
+    }
+    kept.push(notice(total_rows - used));
+    kept
+}
+
+fn inventory_detail_lines(row: &InventoryRow, home: &Path, width: u16) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    push_detail_section(&mut lines, "SKILL", width);
+    lines.push(detail_field("Name", row.name()));
+    lines.push(Line::from(vec![
+        Span::styled("Health: ", theme::pane_subtitle()),
+        components::badge(installation_tone(row.health()), row.health().label()),
+    ]));
+    if let Some(SkillValidation::Valid { description, .. }) = row
+        .observations()
+        .find_map(InstalledSkillObservation::validation)
+    {
+        lines.push(detail_field_bounded("Description", description, width, 3));
+    }
+
+    push_detail_section(&mut lines, "SOURCE", width);
+    match row.provenance() {
+        RowProvenance::Source(label) => lines.push(detail_field("Source", label)),
+        // Naming one of them would misstate the other, so each agent's section
+        // below names its own.
+        RowProvenance::Divergent => lines.push(Line::from(
+            "Installed from more than one registered source; each agent names its own below.",
+        )),
+        // A source line would claim the installation that resolved to none.
+        RowProvenance::Mixed => lines.push(Line::from(
+            "Registered for some agents but not others; each agent's section below says which.",
+        )),
+        // Not knowing where something came from is not the same as knowing it
+        // came from nowhere registered.
+        RowProvenance::Unverified => lines.push(Line::from(
+            "A registered source could not be read, so Skilled cannot tell whether \
+             this came from one.",
+        )),
+        // Unresolved content is observed, never adopted.
+        RowProvenance::Unregistered => lines.push(Line::from(
+            "Not resolved to any registered source; Skilled does not manage it.",
+        )),
+        // Stray content was never installed from anywhere, so no source
+        // question applies to it.
+        RowProvenance::NotApplicable => lines.push(Line::from(
+            "Not a skill installation, so no source applies.",
+        )),
+    }
+
+    for observation in row.observations() {
+        push_detail_section(
+            &mut lines,
+            &observation.agent().display_name().to_uppercase(),
+            width,
+        );
+        lines.extend(observation_lines(
+            observation,
+            home,
+            width,
+            matches!(
+                row.provenance(),
+                RowProvenance::Divergent | RowProvenance::Mixed
+            ),
+        ));
+    }
+
+    // The agents that carry nothing share one line rather than three empty
+    // sections, so the observations that exist keep the room.
+    let absent: Vec<&str> = AgentKind::ALL
+        .into_iter()
+        .filter(|agent| row.observation(*agent).is_none())
+        .map(AgentKind::display_name)
+        .collect();
+    if !absent.is_empty() {
+        push_detail_section(&mut lines, "NOT INSTALLED", width);
+        lines.push(Line::from(components::badge(
+            Tone::Inactive,
+            &absent.join(", "),
+        )));
+    }
+    lines
+}
+
+fn observation_lines(
+    observation: &InstalledSkillObservation,
+    home: &Path,
+    width: u16,
+    name_its_source: bool,
+) -> Vec<Line<'static>> {
+    // Findings come first. A region too short to hold the section truncates
+    // from the bottom, and the reason an installation is broken is the thing
+    // this view exists to report — losing it to a `Path` the table's own name
+    // column already implies would be the wrong trade.
+    let mut lines: Vec<Line<'static>> = observation
+        .findings()
+        .iter()
+        .flat_map(|finding| finding_lines(finding, width))
+        .collect();
+    lines.push(detail_field_bounded(
+        "Path",
+        &home_relative(observation.path(), home),
+        width,
+        2,
+    ));
+    lines.push(detail_field("Object", observation.object().description()));
+    if let Some(resolution) = observation.resolution() {
+        // Named here only when the agents disagree; otherwise the row's own
+        // SOURCE section above has already said it once.
+        if name_its_source {
+            lines.push(detail_field("Source", resolution.source_label()));
+        }
+        lines.push(detail_field_bounded(
+            "Variant",
+            &format!(
+                "{} · {}",
+                resolution.catalog_relative_path().display(),
+                resolution.variant_relative_path().display()
+            ),
+            width,
+            2,
+        ));
+    }
+    if let InstallationObject::Symlink { target } = observation.object() {
+        // An unreadable link renders as an empty target; an empty value beside
+        // a label reads as "nothing there" rather than "not known".
+        let target = if target.as_os_str().is_empty() {
+            "could not be read".to_owned()
+        } else {
+            home_relative(target, home)
+        };
+        lines.push(detail_field_bounded("Target", &target, width, 2));
+    }
+    lines.push(match observation.validation() {
+        Some(SkillValidation::Valid { name, .. }) => Line::from(vec![
+            Span::styled("Validation: ", theme::pane_subtitle()),
+            components::badge(Tone::Healthy, "valid"),
+            Span::raw(format!(" as {}", terminal_safe(name))),
+        ]),
+        Some(SkillValidation::Invalid { .. }) => Line::from(vec![
+            Span::styled("Validation: ", theme::pane_subtitle()),
+            components::badge(Tone::Critical, "invalid"),
+        ]),
+        None => Line::from(vec![
+            Span::styled("Validation: ", theme::pane_subtitle()),
+            components::badge(Tone::Inactive, "not attempted"),
+        ]),
+    });
+    lines
+}
+
+/// One finding: its stable code and severity, then the observation behind it.
+///
+/// The severity is spelled out beside the code, so the tone reinforces a word
+/// the reader already has rather than carrying the meaning alone.
+fn finding_lines(finding: &Finding, width: u16) -> [Line<'static>; 2] {
+    let tone = match finding.severity() {
+        FindingSeverity::Info => Tone::Inactive,
+        FindingSeverity::Warning => Tone::Warning,
+        FindingSeverity::Critical => Tone::Critical,
+    };
+    [
+        Line::from(vec![
+            Span::styled("Finding: ", theme::pane_subtitle()),
+            Span::styled(
+                format!("{} · {}", finding.code(), finding.severity().label()),
+                theme::tone_style(tone),
+            ),
+        ]),
+        Line::from(Span::raw(format!(
+            "  {}",
+            terminal_safe_bounded_start(
+                finding.evidence(),
+                usize::from(width).saturating_mul(3).saturating_sub(2)
+            )
+        ))),
+    ]
+}
+
+/// An installation path as the user speaks about it.
+///
+/// Global roots are documented relative to the home directory, and a detail
+/// region is too narrow to spend three wrapped lines on a prefix the reader
+/// already knows. Anything outside the home directory stays absolute.
+fn home_relative(path: &Path, home: &Path) -> String {
+    match path.strip_prefix(home) {
+        Ok(relative) => format!("~/{}", relative.display()),
+        Err(_) => path.display().to_string(),
+    }
+}
+
+/// Bound a value to `width` cells and pad it out to exactly that.
+fn padded(value: &str, width: usize) -> String {
+    let bounded = terminal_safe_bounded_start(value, width.saturating_sub(1));
+    let used = Span::raw(&bounded).width();
+    format!("{bounded}{}", " ".repeat(width.saturating_sub(used)))
 }
 
 fn render_sources(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
@@ -1729,28 +2388,64 @@ fn help_commands(context: View, app: &SkilledApp) -> Vec<HelpCommand> {
             ]);
             commands
         }
-        View::Inventory => vec![
-            HelpCommand {
-                key: "2",
-                label: "Sources",
-                description: "open registered sources",
-            },
-            HelpCommand {
-                key: "s",
-                label: "Settings",
-                description: "open global settings",
-            },
-            HelpCommand {
-                key: "?",
-                label: "Help",
-                description: "open this keyboard reference",
-            },
-            HelpCommand {
-                key: "q",
-                label: "Quit",
-                description: "quit when no dialog is open",
-            },
-        ],
+        View::Inventory => {
+            let mut commands = vec![HelpCommand {
+                key: "Tab / Shift-Tab",
+                label: "Region",
+                description: "move region focus forward or backward",
+            }];
+            if inventory_can_move_selection(app) {
+                commands.push(HelpCommand {
+                    key: "Up/Down or j/k",
+                    label: "Move",
+                    description: "move the selected skill",
+                });
+            }
+            if inventory_can_advance(app) {
+                commands.push(HelpCommand {
+                    key: "Enter",
+                    label: "Open details",
+                    description: "show everything observed about the selection",
+                });
+            }
+            if app.can_filter_inventory() {
+                commands.push(HelpCommand {
+                    key: "/",
+                    label: "Filter",
+                    description: "narrow by name, source, or health",
+                });
+            }
+            commands.extend([
+                HelpCommand {
+                    key: "2",
+                    label: "Sources",
+                    description: "open registered sources",
+                },
+                HelpCommand {
+                    key: "s",
+                    label: "Settings",
+                    description: "open global settings",
+                },
+                HelpCommand {
+                    key: "?",
+                    label: "Help",
+                    description: "open this keyboard reference",
+                },
+                HelpCommand {
+                    key: "q",
+                    label: "Quit",
+                    description: "quit when no dialog is open",
+                },
+            ]);
+            if inventory_can_go_back(app) {
+                commands.push(HelpCommand {
+                    key: "Esc",
+                    label: "Back",
+                    description: "clear the filter, then leave the detail region",
+                });
+            }
+            commands
+        }
         View::Sources => {
             let mut commands = vec![HelpCommand {
                 key: "Tab / Shift-Tab",
@@ -1841,8 +2536,8 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
 ///
 /// This mirrors [`crate::input`]. A hint that is not backed by a key mapping is
 /// a promise the application cannot keep, so unimplemented commands —
-/// installation, updates, repair, uninstall, forget, and filtering — are absent
-/// by construction.
+/// installation, updates, repair, uninstall, and forget — are absent by
+/// construction.
 fn key_hints(app: &SkilledApp) -> Vec<KeyHint> {
     if app.help_context().is_some() {
         return vec![
@@ -1854,6 +2549,13 @@ fn key_hints(app: &SkilledApp) -> Vec<KeyHint> {
         return vec![
             KeyHint::essential("Enter", "Inspect"),
             KeyHint::essential("Esc", "Cancel"),
+            KeyHint::new("Ctrl-C", "Quit"),
+        ];
+    }
+    if app.inventory_filter_active() {
+        return vec![
+            KeyHint::essential("Enter", "Apply"),
+            KeyHint::essential("Esc", "Clear"),
             KeyHint::new("Ctrl-C", "Quit"),
         ];
     }
@@ -1893,12 +2595,31 @@ fn key_hints(app: &SkilledApp) -> Vec<KeyHint> {
             hints.push(KeyHint::new("q", "Quit"));
             hints
         }
-        View::Inventory => vec![
-            KeyHint::new("2", "Sources"),
-            KeyHint::new("s", "Settings"),
-            KeyHint::new("?", "Help"),
-            KeyHint::new("q", "Quit"),
-        ],
+        View::Inventory => {
+            let mut hints = vec![KeyHint::new("Tab/Shift-Tab", "Region")];
+            if inventory_can_move_selection(app) {
+                hints.push(KeyHint::new("j/k", "Move"));
+            }
+            if inventory_can_advance(app) {
+                hints.push(KeyHint::essential("Enter", "Open"));
+            }
+            if app.can_filter_inventory() {
+                hints.push(KeyHint::new("/", "Filter"));
+            }
+            hints.extend([
+                KeyHint::new("2", "Sources"),
+                KeyHint::new("s", "Settings"),
+                KeyHint::new("?", "Help"),
+                // The Inventory is where the application opens, so it is the
+                // one view a user can reach without having passed a quit hint
+                // on the way. It survives a narrow row.
+                KeyHint::essential("q", "Quit"),
+            ]);
+            if inventory_can_go_back(app) {
+                hints.push(KeyHint::essential("Esc", "Back"));
+            }
+            hints
+        }
         View::Sources => {
             let mut hints = vec![KeyHint::new("Tab/Shift-Tab", "Region")];
             if sources_can_move_selection(app) {
@@ -1922,6 +2643,22 @@ fn key_hints(app: &SkilledApp) -> Vec<KeyHint> {
             KeyHint::essential("Esc", "Close"),
         ],
     }
+}
+
+/// Enter only drills in, so it advertises itself only where it can.
+fn inventory_can_advance(app: &SkilledApp) -> bool {
+    app.inventory_pane() == InventoryPane::Skills && app.selected_installation().is_some()
+}
+
+/// Selection only moves in the list region, and only when there is somewhere
+/// to move it to.
+fn inventory_can_move_selection(app: &SkilledApp) -> bool {
+    app.inventory_pane() == InventoryPane::Skills && app.filtered_installation_count() > 1
+}
+
+/// Back unwinds an applied filter, then a drilled-in detail region.
+fn inventory_can_go_back(app: &SkilledApp) -> bool {
+    !app.inventory_filter().is_empty() || app.inventory_pane() == InventoryPane::Details
 }
 
 fn sources_can_move_selection(app: &SkilledApp) -> bool {

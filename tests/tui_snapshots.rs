@@ -149,7 +149,9 @@ fn remaining_setup_steps_fit_at_minimum_supported_size() {
         "confirm_catalogs_at_minimum_supported_size",
         render(&app, 80, 24)
     );
-    app.update(Action::Continue);
+    // Step six is where the roots are read, so its effect has to run for the
+    // step to report anything.
+    dispatch(&mut app, Action::Continue);
     insta::assert_snapshot!(
         "scan_installations_at_minimum_supported_size",
         render(&app, 80, 24)
@@ -683,6 +685,236 @@ fn setup_catalog_confirmation_reserves_space_for_wrapped_focused_content() {
         "{rendered}"
     );
     insta::assert_snapshot!(rendered);
+}
+
+#[cfg(unix)]
+mod installed {
+    use super::*;
+    use skilled::InventoryPane;
+
+    #[test]
+    fn inventory_populated_at_minimum_supported_size() {
+        let temporary = tempfile::tempdir().expect("temporary application directory");
+        let app = inventory_app(&temporary);
+
+        insta::assert_snapshot!(normalize_inventory(&temporary, render(&app, 80, 24)));
+    }
+
+    #[test]
+    fn inventory_populated_at_wide_size() {
+        let temporary = tempfile::tempdir().expect("temporary application directory");
+        let app = inventory_app(&temporary);
+
+        insta::assert_snapshot!(normalize_inventory(&temporary, render(&app, 120, 40)));
+    }
+
+    /// The narrowest wide viewport, where the primary region is only sixty
+    /// columns and the Source column is dropped rather than truncated into an
+    /// ellipsis that distinguishes nothing.
+    #[test]
+    fn inventory_at_the_wide_breakpoint() {
+        let temporary = tempfile::tempdir().expect("temporary application directory");
+        let app = inventory_app(&temporary);
+
+        let screen = normalize_inventory(&temporary, render(&app, 100, 26));
+
+        assert!(!screen.contains("Source "), "{screen}");
+        assert!(screen.contains("unman"), "{screen}");
+        insta::assert_snapshot!(screen);
+    }
+
+    /// A root Skilled could not read reports the reason, because it
+    /// contributes nothing else.
+    #[test]
+    fn inventory_with_an_unreadable_root_at_minimum_supported_size() {
+        let temporary = tempfile::tempdir().expect("temporary application directory");
+        let home = temporary.path().join("home");
+        fs::create_dir_all(home.join(".claude")).expect("create Claude Code parent");
+        fs::write(home.join(".claude/skills"), "not a directory")
+            .expect("write a file where the root belongs");
+        let mut app = SkilledApp::open(AppEnvironment::new(
+            &home,
+            temporary.path().join("data"),
+            "",
+        ))
+        .expect("open application");
+        for _ in 0..7 {
+            dispatch(&mut app, Action::Continue);
+        }
+
+        insta::assert_snapshot!(normalize_inventory(&temporary, render(&app, 80, 24)));
+    }
+
+    /// Setup step six with something to report, and the summary that counts it.
+    #[test]
+    fn populated_scan_installations_and_summary_at_minimum_supported_size() {
+        let temporary = tempfile::tempdir().expect("temporary application directory");
+        let mut app = inventory_app(&temporary);
+        app.update(Action::OpenSettings);
+        dispatch(&mut app, Action::RerunSetup);
+        for _ in 0..5 {
+            dispatch(&mut app, Action::Continue);
+        }
+
+        let step_six = normalize_inventory(&temporary, render(&app, 80, 24));
+        assert!(step_six.contains("STEP 6 / 7"), "{step_six}");
+        insta::assert_snapshot!("populated_scan_installations", step_six);
+
+        dispatch(&mut app, Action::Continue);
+        let summary = normalize_inventory(&temporary, render(&app, 80, 24));
+        assert!(summary.contains("STEP 7 / 7"), "{summary}");
+        insta::assert_snapshot!("populated_summary", summary);
+    }
+
+    #[test]
+    fn inventory_broken_installation_detail_at_wide_size() {
+        let temporary = tempfile::tempdir().expect("temporary application directory");
+        let mut app = inventory_app(&temporary);
+        app.update(Action::MoveInventorySelection(1));
+
+        assert_eq!(
+            app.selected_installation().map(|row| row.name().to_owned()),
+            Some("broken".to_owned())
+        );
+        insta::assert_snapshot!(normalize_inventory(&temporary, render(&app, 120, 40)));
+    }
+
+    #[test]
+    fn inventory_detail_drill_in_at_minimum_supported_size() {
+        let temporary = tempfile::tempdir().expect("temporary application directory");
+        let mut app = inventory_app(&temporary);
+        app.update(Action::MoveInventorySelection(2));
+        app.update(Action::AdvanceInventoryPane);
+
+        assert_eq!(app.inventory_pane(), InventoryPane::Details);
+        insta::assert_snapshot!(normalize_inventory(&temporary, render(&app, 80, 24)));
+    }
+
+    /// Detail that outgrows the region says how much it left out, because a
+    /// pane that simply ends mid-section reads as though there were no more.
+    #[test]
+    fn inventory_detail_too_tall_for_the_region_reports_what_it_dropped() {
+        let temporary = tempfile::tempdir().expect("temporary application directory");
+        let mut app = inventory_app(&temporary);
+        app.update(Action::AdvanceInventoryPane);
+
+        let screen = normalize_inventory(&temporary, render(&app, 80, 24));
+        assert!(
+            screen.contains("! 7 more lines — widen or lengthen the terminal"),
+            "{screen}"
+        );
+        insta::assert_snapshot!(screen);
+
+        // The detail region is only thirty-seven cells wide at the breakpoint,
+        // so the notice takes its short form rather than wrapping off the
+        // bottom — the one line whose job is to report a cut must not be cut.
+        let narrow = normalize_inventory(&temporary, render(&app, 100, 26));
+        assert!(narrow.contains("! 5 more lines"), "{narrow}");
+        assert!(!narrow.contains("widen or lengthen"), "{narrow}");
+    }
+
+    #[test]
+    fn inventory_filter_entry_at_minimum_supported_size() {
+        let temporary = tempfile::tempdir().expect("temporary application directory");
+        let mut app = inventory_app(&temporary);
+        app.update(Action::BeginInventoryFilter);
+        for character in "unman".chars() {
+            app.update(Action::AppendInventoryFilter(character));
+        }
+
+        insta::assert_snapshot!(normalize_inventory(&temporary, render(&app, 80, 24)));
+    }
+
+    #[test]
+    fn inventory_filter_without_matches_at_minimum_supported_size() {
+        let temporary = tempfile::tempdir().expect("temporary application directory");
+        let mut app = inventory_app(&temporary);
+        app.update(Action::BeginInventoryFilter);
+        for character in "nothing".chars() {
+            app.update(Action::AppendInventoryFilter(character));
+        }
+        app.update(Action::SubmitInventoryFilter);
+
+        assert!(app.filtered_rows().is_empty());
+        insta::assert_snapshot!(normalize_inventory(&temporary, render(&app, 80, 24)));
+    }
+
+    /// One healthy skill installed for two agents, one dangling link, and one
+    /// physical copy, with the OpenCode root absent entirely.
+    ///
+    /// The source checkout lives inside the temporary home so every path the
+    /// screen shows is home-relative and therefore stable across machines.
+    fn inventory_app(temporary: &tempfile::TempDir) -> SkilledApp {
+        let repository = temporary.path().join("home/library");
+        for skill in ["alpha", "beta"] {
+            write_skill(&repository.join("skills").join(skill), skill);
+        }
+        create_repository(&repository);
+
+        let mut app = SkilledApp::open(AppEnvironment::new(
+            temporary.path().join("home"),
+            temporary.path().join("data"),
+            "",
+        ))
+        .expect("open application");
+        for _ in 0..7 {
+            dispatch(&mut app, Action::Continue);
+        }
+        let preview = app.preview_source(&repository).expect("preview source");
+        app.confirm_source(preview).expect("register source");
+
+        let claude = temporary.path().join("home/.claude/skills");
+        let codex = temporary.path().join("home/.agents/skills");
+        fs::create_dir_all(&claude).expect("create Claude Code root");
+        fs::create_dir_all(&codex).expect("create Codex root");
+        link(&repository.join("skills/alpha"), &claude.join("alpha"));
+        link(&temporary.path().join("home/gone"), &claude.join("broken"));
+        link(&repository.join("skills/alpha"), &codex.join("alpha"));
+        write_skill(&codex.join("copied"), "copied");
+
+        app.update(Action::OpenSources);
+        dispatch(&mut app, Action::OpenInventory);
+        app
+    }
+
+    fn link(target: &Path, at: &Path) {
+        std::os::unix::fs::symlink(target, at).expect("install symbolic link");
+    }
+
+    fn write_skill(directory: &Path, name: &str) {
+        fs::create_dir_all(directory).expect("create skill fixture");
+        fs::write(
+            directory.join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: {name} fixture\n---\n# {name}\n"),
+        )
+        .expect("write skill fixture");
+    }
+
+    fn create_repository(repository: &Path) {
+        git(repository, &["init", "-b", "main"]);
+        git(repository, &["config", "user.name", "Skilled Test"]);
+        git(
+            repository,
+            &["config", "user.email", "skilled@example.test"],
+        );
+        git(repository, &["add", "."]);
+        git(repository, &["commit", "-m", "fixture"]);
+    }
+
+    /// Temporary directories are named at random, so every path the screen
+    /// shows is rewritten to a stable placeholder of the same width.
+    fn normalize_inventory(temporary: &tempfile::TempDir, screen: String) -> String {
+        let raw = temporary.path().to_string_lossy().into_owned();
+        let canonical = temporary
+            .path()
+            .canonicalize()
+            .expect("canonical temporary directory")
+            .to_string_lossy()
+            .into_owned();
+        screen
+            .replace(&canonical, &padded_placeholder(&canonical, "[TEMP]"))
+            .replace(&raw, &padded_placeholder(&raw, "[TEMP]"))
+    }
 }
 
 fn render(app: &SkilledApp, width: u16, height: u16) -> String {

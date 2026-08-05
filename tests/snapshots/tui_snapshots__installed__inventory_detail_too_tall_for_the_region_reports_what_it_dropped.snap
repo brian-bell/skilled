@@ -1,0 +1,28 @@
+---
+source: tests/tui_snapshots.rs
+expression: screen
+---
+ ◆ skilled   global                               ● ready · 1 source registered
+▌Inventory  2 Sources  Updates (soon)  Doctor (soon)
+ ▌ Details  alpha
+ ──────────────────────────────────────────────────────────────────────────────
+ SKILL
+ ──────────────────────────────────────────────────────────────────────────────
+ Name: alpha
+ Health: ✓ healthy
+ Description: alpha fixture
+ SOURCE
+ ──────────────────────────────────────────────────────────────────────────────
+ Source: library
+ CLAUDE CODE
+ ──────────────────────────────────────────────────────────────────────────────
+ Path: ~/.claude/skills/alpha
+ Object: symbolic link
+ Variant: skills · skills/alpha
+ Target: ~/library/skills/alpha
+ Validation: ✓ valid as alpha
+ CODEX
+ ──────────────────────────────────────────────────────────────────────────────
+ Path: ~/.agents/skills/alpha
+ ! 7 more lines — widen or lengthen the terminal
+ Tab/Shift-Tab Region   2 Sources   s Settings   ? Help   q Quit   Esc Back

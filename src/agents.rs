@@ -20,7 +20,7 @@ impl AgentKind {
         adapter(self).display_name()
     }
 
-    fn index(self) -> usize {
+    pub(crate) fn index(self) -> usize {
         match self {
             Self::ClaudeCode => 0,
             Self::Codex => 1,

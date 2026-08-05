@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use crate::{
     AgentDetection, AgentKind, AppEnvironment, Result,
     agents::{detect_agents, detection_at},
+    inventory::{InventoryRow, InventorySnapshot, scan_installations},
     source::{RegisteredSource, SourcePreview, preview_local_source, revalidate_source_preview},
     store::Store,
 };
@@ -83,6 +84,16 @@ pub enum SourcesPane {
     Details,
 }
 
+/// The regions of the Inventory workspace, in reading order.
+///
+/// A wide terminal shows both at once and this is only focus; a compact one
+/// shows the focused region alone, so advancing is a drill-in.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InventoryPane {
+    Skills,
+    Details,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Action {
     Continue,
@@ -107,6 +118,13 @@ pub enum Action {
     MoveSourcesPane(i8),
     AdvanceSourcesPane,
     MoveSourcesSelection(i8),
+    MoveInventoryPane(i8),
+    AdvanceInventoryPane,
+    MoveInventorySelection(i8),
+    BeginInventoryFilter,
+    AppendInventoryFilter(char),
+    DeleteInventoryFilterCharacter,
+    SubmitInventoryFilter,
     RerunSetup,
     Quit,
 }
@@ -124,6 +142,7 @@ pub enum Effect {
     RedetectAgents { agent_selections: [bool; 3] },
     InspectSource { path: PathBuf },
     RegisterSource { preview: SourcePreview },
+    ScanInstallations,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -156,6 +175,29 @@ impl UpdateResult {
     }
 }
 
+/// The longest inventory filter query Skilled will hold.
+///
+/// The query is echoed in the workspace header, so an unbounded one would wrap
+/// until it squeezed the table it is meant to narrow down to nothing. No skill
+/// name approaches this length.
+pub(crate) const MAX_INVENTORY_FILTER: usize = 128;
+
+/// Step a selection through a list, wrapping at both ends.
+///
+/// The arithmetic stays in `usize` because a list long enough to overflow a
+/// narrower index would silently wrap into a zero modulus and panic.
+fn wrapped_index(current: usize, delta: i8, count: usize) -> usize {
+    if count == 0 {
+        return 0;
+    }
+    let magnitude = usize::from(delta.unsigned_abs()) % count;
+    if delta >= 0 {
+        (current + magnitude) % count
+    } else {
+        (current + count - magnitude) % count
+    }
+}
+
 pub struct SkilledApp {
     view: View,
     store: Store,
@@ -171,6 +213,16 @@ pub struct SkilledApp {
     sources_pane: SourcesPane,
     focused_source: usize,
     focused_variant: usize,
+    inventory: InventorySnapshot,
+    /// Indices into `inventory.rows()` that the filter admits.
+    ///
+    /// Recomputed whenever the snapshot or the query changes rather than on
+    /// every frame, because rendering and the key-hint bar both ask for it.
+    filtered_installations: Vec<usize>,
+    inventory_pane: InventoryPane,
+    focused_installation: usize,
+    inventory_filter: String,
+    inventory_filter_active: bool,
     help_context: Option<View>,
 }
 
@@ -189,7 +241,17 @@ impl SkilledApp {
             }
         }
         let sources = store.registered_sources()?;
-        Ok(Self {
+        // Setup reads the installation roots at its own step, after the user
+        // has chosen which agents Skilled should configure. Reading them
+        // before that would look at roots the user may be about to deselect.
+        // Once setup is complete the selections are known, so opening
+        // straight into the Inventory opens onto a real scan.
+        let inventory = if view == View::Inventory {
+            scan_installations(&agents, &sources)
+        } else {
+            InventorySnapshot::not_scanned(&agents)
+        };
+        let mut app = Self {
             view,
             store,
             environment,
@@ -204,8 +266,16 @@ impl SkilledApp {
             sources_pane: SourcesPane::Repositories,
             focused_source: 0,
             focused_variant: 0,
+            inventory,
+            filtered_installations: Vec::new(),
+            inventory_pane: InventoryPane::Skills,
+            focused_installation: 0,
+            inventory_filter: String::new(),
+            inventory_filter_active: false,
             help_context: None,
-        })
+        };
+        app.refilter_installations();
+        Ok(app)
     }
 
     pub fn view(&self) -> View {
@@ -264,6 +334,63 @@ impl SkilledApp {
         self.help_context
     }
 
+    pub fn inventory(&self) -> &InventorySnapshot {
+        &self.inventory
+    }
+
+    /// The home directory every agent root hangs off.
+    ///
+    /// Screens abbreviate installation paths against it, because a global
+    /// skill root is only ever spoken about as `~/.claude/skills`.
+    pub fn home(&self) -> &Path {
+        &self.environment.home_dir
+    }
+
+    pub fn inventory_pane(&self) -> InventoryPane {
+        self.inventory_pane
+    }
+
+    pub fn focused_installation(&self) -> usize {
+        self.focused_installation
+    }
+
+    pub fn inventory_filter(&self) -> &str {
+        &self.inventory_filter
+    }
+
+    pub fn inventory_filter_active(&self) -> bool {
+        self.inventory_filter_active
+    }
+
+    /// Whether the filter box can be opened from where the user is standing.
+    pub fn can_filter_inventory(&self) -> bool {
+        self.view == View::Inventory
+            && self.inventory_pane == InventoryPane::Skills
+            && !self.inventory.rows().is_empty()
+    }
+
+    /// The rows the current filter admits, in snapshot order.
+    pub fn filtered_rows(&self) -> Vec<&InventoryRow> {
+        let rows = self.inventory.rows();
+        self.filtered_installations
+            .iter()
+            .filter_map(|index| rows.get(*index))
+            .collect()
+    }
+
+    /// How many rows the filter admits, without materialising them.
+    ///
+    /// The key-hint bar asks this on every frame, so it must not allocate.
+    pub fn filtered_installation_count(&self) -> usize {
+        self.filtered_installations.len()
+    }
+
+    pub fn selected_installation(&self) -> Option<&InventoryRow> {
+        self.filtered_installations
+            .get(self.focused_installation)
+            .and_then(|index| self.inventory.rows().get(*index))
+    }
+
     pub fn selected_source(&self) -> Option<&RegisteredSource> {
         self.sources.get(self.focused_source)
     }
@@ -281,6 +408,7 @@ impl SkilledApp {
         self.store.register_source(&preview)?;
         self.sources = self.store.registered_sources()?;
         self.focus_registered_source(preview.inspected().git_top_level());
+        self.rescan_installations();
         Ok(())
     }
 
@@ -296,8 +424,21 @@ impl SkilledApp {
             };
         }
 
+        // The filter bar owns the keyboard while it is open, so a stray action
+        // cannot navigate out from under a half-typed query. Quitting is the
+        // one command no context may swallow.
+        if self.inventory_filter_active {
+            return match action {
+                Action::Quit => UpdateResult::quit(),
+                _ => {
+                    self.filter_input(action);
+                    UpdateResult::continuing(Vec::new())
+                }
+            };
+        }
+
         let effects = match action {
-            Action::Continue => self.advance_setup().into_iter().collect(),
+            Action::Continue => self.advance_setup(),
             Action::Back => return self.back(),
             Action::MoveSelection(delta) => {
                 self.move_selection(delta);
@@ -308,7 +449,10 @@ impl SkilledApp {
                 Vec::new()
             }
             Action::OpenHelp => {
-                if !self.source_path_input_active && self.pending_source.is_none() {
+                if !self.source_path_input_active
+                    && !self.inventory_filter_active
+                    && self.pending_source.is_none()
+                {
                     self.help_context = Some(self.view);
                 }
                 Vec::new()
@@ -322,10 +466,11 @@ impl SkilledApp {
                 Vec::new()
             }
             Action::OpenInventory => {
-                if matches!(self.view, View::Inventory | View::Sources) {
-                    self.view = View::Inventory;
+                if self.view == View::Sources {
+                    self.enter_inventory()
+                } else {
+                    Vec::new()
                 }
-                Vec::new()
             }
             Action::OpenSources => {
                 if self.view == View::Inventory {
@@ -366,12 +511,9 @@ impl SkilledApp {
                 Vec::new()
             }
             Action::MoveCatalogSelection(delta) => {
-                if let Some(preview) = &self.pending_source
-                    && !preview.catalogs().is_empty()
-                {
-                    self.focused_catalog = (self.focused_catalog as i16 + i16::from(delta))
-                        .rem_euclid(preview.catalogs().len() as i16)
-                        as usize;
+                if let Some(preview) = &self.pending_source {
+                    self.focused_catalog =
+                        wrapped_index(self.focused_catalog, delta, preview.catalogs().len());
                 }
                 Vec::new()
             }
@@ -413,7 +555,7 @@ impl SkilledApp {
                         SourcesPane::Variants => 1,
                         SourcesPane::Details => 2,
                     };
-                    self.sources_pane = match (index + i16::from(delta)).rem_euclid(3) {
+                    self.sources_pane = match wrapped_index(index, delta, 3) {
                         0 => SourcesPane::Repositories,
                         1 => SourcesPane::Variants,
                         _ => SourcesPane::Details,
@@ -439,6 +581,43 @@ impl SkilledApp {
                 self.move_sources_selection(delta);
                 Vec::new()
             }
+            Action::MoveInventoryPane(delta) => {
+                if self.view == View::Inventory {
+                    let index = match self.inventory_pane {
+                        InventoryPane::Skills => 0,
+                        InventoryPane::Details => 1,
+                    };
+                    self.inventory_pane = match wrapped_index(index, delta, 2) {
+                        0 => InventoryPane::Skills,
+                        _ => InventoryPane::Details,
+                    };
+                }
+                Vec::new()
+            }
+            Action::AdvanceInventoryPane => {
+                if self.view == View::Inventory && self.selected_installation().is_some() {
+                    self.inventory_pane = InventoryPane::Details;
+                }
+                Vec::new()
+            }
+            Action::MoveInventorySelection(delta) => {
+                self.move_installation_selection(delta);
+                Vec::new()
+            }
+            Action::BeginInventoryFilter => {
+                // The query box is drawn above the table, and a compact
+                // terminal showing the detail region has no table to draw it
+                // above. Opening it there would take every printable key for a
+                // field the user cannot see. Filtering an empty inventory is
+                // refused for the same reason: nothing would narrow.
+                if self.can_filter_inventory() {
+                    self.inventory_filter_active = true;
+                }
+                Vec::new()
+            }
+            Action::AppendInventoryFilter(_)
+            | Action::DeleteInventoryFilterCharacter
+            | Action::SubmitInventoryFilter => Vec::new(),
             Action::RerunSetup => self.rerun_setup(),
             Action::Quit => return UpdateResult::quit(),
         };
@@ -503,10 +682,100 @@ impl SkilledApp {
                     if self.view == View::Setup(SetupStep::ConfirmCatalogs) {
                         self.view = View::Setup(SetupStep::ScanInstallations);
                     }
+                    // A new source can turn unmanaged content into a resolved
+                    // installation, so the inventory is restated immediately.
+                    self.rescan_installations();
                 }
+                Effect::ScanInstallations => self.rescan_installations(),
             }
         }
         Ok(())
+    }
+
+    /// Replace the inventory with a fresh read-only pass over the native roots.
+    ///
+    /// This is the only place installation scanning happens; the reducer stays
+    /// free of filesystem work.
+    fn rescan_installations(&mut self) {
+        self.inventory = scan_installations(&self.agents, &self.sources);
+        self.refilter_installations();
+    }
+
+    /// Recompute which rows the query admits, and keep the selection on one.
+    ///
+    /// A row matches when the query appears in its name, the label of its
+    /// provenance or of any installation's own provenance, or the word naming
+    /// its health, so the same box narrows by identity, provenance, or state.
+    /// Matching each installation keeps a mixed row findable by the source it
+    /// partly came from and by "not registered" alike; stray content is not an
+    /// installation and answers for no provenance.
+    fn refilter_installations(&mut self) {
+        let needle = self.inventory_filter.trim().to_lowercase();
+        self.filtered_installations = self
+            .inventory
+            .rows()
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| {
+                needle.is_empty()
+                    || row.name().to_lowercase().contains(&needle)
+                    || row.provenance().label().to_lowercase().contains(&needle)
+                    || row.observations().any(|observation| {
+                        observation.object().is_installation()
+                            && observation
+                                .provenance()
+                                .label()
+                                .to_lowercase()
+                                .contains(&needle)
+                    })
+                    || row.health().label().contains(needle.as_str())
+            })
+            .map(|(index, _)| index)
+            .collect();
+        let last = self.filtered_installations.len().saturating_sub(1);
+        self.focused_installation = self.focused_installation.min(last);
+    }
+
+    fn enter_inventory(&mut self) -> Vec<Effect> {
+        self.view = View::Inventory;
+        self.inventory_pane = InventoryPane::Skills;
+        vec![Effect::ScanInstallations]
+    }
+
+    /// Apply one keystroke to the open filter bar.
+    ///
+    /// The query narrows the list as it is typed, so `Enter` only hands the
+    /// keyboard back and `Esc` clears the query as it closes.
+    fn filter_input(&mut self, action: Action) {
+        match action {
+            Action::AppendInventoryFilter(character)
+                if !character.is_control()
+                    && self.inventory_filter.chars().count() < MAX_INVENTORY_FILTER =>
+            {
+                self.inventory_filter.push(character);
+            }
+            Action::DeleteInventoryFilterCharacter => {
+                self.inventory_filter.pop();
+            }
+            Action::SubmitInventoryFilter => self.inventory_filter_active = false,
+            Action::Back | Action::CancelSourceFlow => {
+                self.inventory_filter.clear();
+                self.inventory_filter_active = false;
+            }
+            _ => return,
+        }
+        self.refilter_installations();
+    }
+
+    fn move_installation_selection(&mut self, delta: i8) {
+        if self.view != View::Inventory || self.inventory_pane != InventoryPane::Skills {
+            return;
+        }
+        self.focused_installation = wrapped_index(
+            self.focused_installation,
+            delta,
+            self.filtered_installations.len(),
+        );
     }
 
     pub fn open_settings(&mut self) {
@@ -542,13 +811,24 @@ impl SkilledApp {
                     self.view = View::Setup(previous);
                 }
             }
-            View::Settings => self.view = View::Inventory,
+            View::Settings => return UpdateResult::continuing(self.enter_inventory()),
             View::Sources => match self.sources_pane {
                 SourcesPane::Details => self.sources_pane = SourcesPane::Variants,
                 SourcesPane::Variants => self.sources_pane = SourcesPane::Repositories,
-                SourcesPane::Repositories => self.view = View::Inventory,
+                SourcesPane::Repositories => {
+                    return UpdateResult::continuing(self.enter_inventory());
+                }
             },
-            View::Inventory => {}
+            // Back unwinds the narrowest thing first: an applied filter, then
+            // a drilled-in detail region.
+            View::Inventory => {
+                if !self.inventory_filter.is_empty() {
+                    self.inventory_filter.clear();
+                    self.refilter_installations();
+                } else if self.inventory_pane == InventoryPane::Details {
+                    self.inventory_pane = InventoryPane::Skills;
+                }
+            }
         }
         UpdateResult::continuing(Vec::new())
     }
@@ -565,8 +845,7 @@ impl SkilledApp {
         if self.view != View::Setup(SetupStep::DetectAgents) {
             return;
         }
-        self.focused_agent = (self.focused_agent as i16 + i16::from(delta))
-            .rem_euclid(self.agents.len() as i16) as usize;
+        self.focused_agent = wrapped_index(self.focused_agent, delta, self.agents.len());
     }
 
     fn toggle_selection(&mut self) {
@@ -575,25 +854,31 @@ impl SkilledApp {
         }
     }
 
-    fn advance_setup(&mut self) -> Option<Effect> {
+    fn advance_setup(&mut self) -> Vec<Effect> {
         let View::Setup(step) = self.view else {
-            return None;
+            return Vec::new();
         };
 
         if step == SetupStep::ConfirmCatalogs && self.pending_source.is_some() {
-            return self.register_pending_source().into_iter().next();
+            return self.register_pending_source();
         }
 
         match step.next() {
             Some(next) => {
                 self.view = View::Setup(next);
-                None
+                // Step six reports what is installed, and the summary counts
+                // it, so both are backed by a scan taken on arrival.
+                if next == SetupStep::ScanInstallations {
+                    return vec![Effect::ScanInstallations];
+                }
+                Vec::new()
             }
             None => {
-                self.view = View::Inventory;
-                Some(Effect::PersistSetup {
+                let mut effects = self.enter_inventory();
+                effects.push(Effect::PersistSetup {
                     agent_selections: self.agents.each_ref().map(|agent| agent.selected()),
-                })
+                });
+                effects
             }
         }
     }
@@ -624,8 +909,7 @@ impl SkilledApp {
         }
         match self.sources_pane {
             SourcesPane::Repositories if !self.sources.is_empty() => {
-                let next = (self.focused_source as i16 + i16::from(delta))
-                    .rem_euclid(self.sources.len() as i16) as usize;
+                let next = wrapped_index(self.focused_source, delta, self.sources.len());
                 if next != self.focused_source {
                     self.focused_source = next;
                     self.focused_variant = 0;
@@ -638,11 +922,7 @@ impl SkilledApp {
                     .flat_map(RegisteredSource::catalogs)
                     .map(|catalog| catalog.candidates().len())
                     .sum::<usize>();
-                if count > 0 {
-                    self.focused_variant = (self.focused_variant as i16 + i16::from(delta))
-                        .rem_euclid(count as i16)
-                        as usize;
-                }
+                self.focused_variant = wrapped_index(self.focused_variant, delta, count);
             }
             SourcesPane::Repositories | SourcesPane::Details => {}
         }
