@@ -4,7 +4,8 @@ expression: "render(&app, 80, 24)"
 ---
  ◆ skilled   global                              ● ready · 0 sources registered
 ▌Inventory  2 Sources  Updates (soon)  Doctor (soon)
-Global inventory  not scanned
+▌ Global inventory  nothing installed
+Roots: Claude Code no root · Codex no root · OpenCode no root
 ────────────────────────────────────────────────────────────────────────────────
 
 
@@ -14,15 +15,14 @@ Global inventory  not scanned
 
                                         ⌕
 
-                    Installation roots have not been scanned
+                         No agent skill root exists yet
 
-   Skilled has not looked at any installation root yet, so it cannot say what
-  is installed. Register a local source in Sources to prepare for installation
-                               in a later release.
-
+   Skilled looked for the documented global skill root of each selected agent
+                 and found none of them. It did not create one.
 
 
 
 
 
- 2 Sources   s Settings   ? Help   q Quit
+
+ Tab/Shift-Tab Region   2 Sources   s Settings   ? Help   q Quit

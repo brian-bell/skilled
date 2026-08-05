@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Layout, Margin, Rect},
@@ -6,8 +8,12 @@ use ratatui::{
 };
 
 use crate::{
-    SetupStep, SkilledApp, SourcesPane, View,
+    AgentKind, InventoryPane, SetupStep, SkilledApp, SourcesPane, View,
     components::{self, KeyHint},
+    inventory::{
+        Finding, FindingSeverity, InstallationHealth, InstallationObject,
+        InstalledSkillObservation, InventoryRow, RootScan, RootStatus,
+    },
     source::{
         CatalogClassification, CatalogProposal, RegisteredSource, SkillCandidate, SkillValidation,
     },
@@ -40,10 +46,10 @@ pub fn render(frame: &mut Frame<'_>, app: &SkilledApp) {
     let body = workspace;
     match app.view() {
         View::Setup(step) => render_setup(frame, body, app, step),
-        View::Inventory => render_inventory(frame, body),
+        View::Inventory => render_inventory(frame, body, app),
         View::Sources => render_sources(frame, body, app),
         View::Settings => {
-            render_inventory(frame, body);
+            render_inventory(frame, body, app);
             render_settings(frame, body);
         }
     }
@@ -209,6 +215,14 @@ fn keyboard_owner(app: &SkilledApp) -> Option<(String, &'static str)> {
 
     if app.source_path_input_active() {
         return Some(("Add source".to_owned(), note));
+    }
+    // The filter is a text field rather than a dialog, but it still takes every
+    // printable key, so the destination digits would not work while it is open.
+    if app.inventory_filter_active() {
+        return Some((
+            "Filter inventory".to_owned(),
+            "navigation is locked while the filter is open",
+        ));
     }
     // Mirrors the render gate: the confirmation is only a dialog in Sources.
     if app.pending_source().is_some() && app.view() == View::Sources {
@@ -417,113 +431,512 @@ fn setup_lines(app: &SkilledApp, step: SetupStep, width: u16) -> Vec<Line<'stati
             Line::from("Catalog confirmation follows inspection of a local source."),
             Line::from("Registration records metadata only; it does not install skills."),
         ]),
-        SetupStep::ScanInstallations => lines.extend([
-            Line::from(components::badge(
-                Tone::Inactive,
-                "installation roots not scanned",
-            )),
-            Line::default(),
-            Line::from("This build cannot report installation or Doctor status."),
-            Line::from("Continue without reading or changing any agent skill root."),
-        ]),
-        SetupStep::Summary => lines.extend([
-            Line::from("Setup is ready to finish."),
-            Line::default(),
-            Line::from(format!(
-                "Configured agents: {}",
-                app.agents().iter().filter(|agent| agent.selected()).count()
-            )),
-            Line::from(format!(
-                "Sources: {}   Skills: {}",
-                app.sources().len(),
-                app.sources()
-                    .iter()
-                    .flat_map(|source| source.catalogs())
-                    .map(|catalog| catalog.candidates().len())
-                    .sum::<usize>()
-            )),
-            Line::default(),
-            Line::from("Unresolved findings never force a repair."),
-        ]),
+        SetupStep::ScanInstallations => {
+            lines.push(Line::from(
+                "Skilled read the global skill root of each selected agent.",
+            ));
+            lines.push(Line::default());
+            for root in app.inventory().roots() {
+                lines.push(Line::from(vec![
+                    components::badge(root_tone(root), &root.status().summary()),
+                    Span::raw(format!(
+                        "   {:<11}  {}",
+                        root.agent().display_name(),
+                        terminal_safe(&home_relative(root.path(), app.home()))
+                    )),
+                ]));
+            }
+            lines.extend([
+                Line::default(),
+                Line::from("Nothing outside those roots was read, and nothing was changed."),
+            ]);
+        }
+        SetupStep::Summary => {
+            let inventory = app.inventory();
+            lines.extend([
+                Line::from("Setup is ready to finish."),
+                Line::default(),
+                Line::from(format!(
+                    "Configured agents: {}",
+                    app.agents().iter().filter(|agent| agent.selected()).count()
+                )),
+                Line::from(format!(
+                    "Sources: {}   Skills: {}",
+                    app.sources().len(),
+                    app.sources()
+                        .iter()
+                        .flat_map(|source| source.catalogs())
+                        .map(|catalog| catalog.candidates().len())
+                        .sum::<usize>()
+                )),
+                Line::from(format!(
+                    "Installed: {}   Unmanaged: {}   Findings: {}",
+                    inventory.installation_count(),
+                    inventory.unmanaged_count(),
+                    inventory.finding_count()
+                )),
+                Line::default(),
+                Line::from("Unresolved findings never force a repair."),
+            ]);
+        }
     }
     lines
 }
 
-fn render_inventory(frame: &mut Frame<'_>, area: Rect) {
-    let (primary, detail) = viewport::workspace_regions(area);
-    if let Some(detail) = detail {
-        render_inventory_detail(frame, detail);
+/// The Inventory workspace: one row per installed skill, and its detail.
+///
+/// A wide terminal shows the table and the detail region together; a compact
+/// one shows whichever region has focus, so `Enter` is a drill-in and `Esc`
+/// comes back.
+fn render_inventory(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
+    match viewport::workspace_regions(area) {
+        (primary, Some(detail)) => {
+            render_inventory_skills(frame, primary, app);
+            render_inventory_detail(frame, detail, app, true);
+        }
+        (primary, None) => match app.inventory_pane() {
+            InventoryPane::Skills => render_inventory_skills(frame, primary, app),
+            InventoryPane::Details => render_inventory_detail(frame, primary, app, false),
+        },
     }
+}
 
-    let [header, body] =
-        Layout::vertical([Constraint::Length(2), Constraint::Min(1)]).areas(primary);
+/// Column widths for the installation table.
+///
+/// The three agent columns and the health column are sized by their headings,
+/// which never change; the identity columns divide whatever is left, so the
+/// table keeps its shape from a sixty-column detail split up to any width.
+#[derive(Clone, Copy)]
+struct InventoryColumns {
+    skill: usize,
+    source: usize,
+}
+
+const AGENT_COLUMN_WIDTHS: [usize; 3] = [8, 7, 10];
+const HEALTH_COLUMN_WIDTH: usize = 11;
+/// The marker and its trailing space, contributed by `components::list_row`.
+const ROW_MARKER_WIDTH: usize = 2;
+
+fn inventory_columns(width: u16) -> InventoryColumns {
+    let fixed = ROW_MARKER_WIDTH + AGENT_COLUMN_WIDTHS.iter().sum::<usize>() + HEALTH_COLUMN_WIDTH;
+    let remaining = usize::from(width).saturating_sub(fixed);
+    let skill = (remaining * 6 / 10).max(6);
+    InventoryColumns {
+        skill,
+        source: remaining.saturating_sub(skill).max(4),
+    }
+}
+
+fn render_inventory_skills(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
+    let rows = app.filtered_rows();
+    let roots = inventory_roots_line(app);
+    let roots_height = wrapped_line_count(&roots, area.width).min(2);
+    let filter_height =
+        u16::from(app.inventory_filter_active() || !app.inventory_filter().is_empty());
+    let [header, body] = Layout::vertical([
+        Constraint::Length(2 + u16::try_from(roots_height).unwrap_or(1) + filter_height),
+        Constraint::Min(1),
+    ])
+    .areas(area);
+
+    let mut header_lines = vec![components::focused_pane_header(
+        "Global inventory",
+        &inventory_subtitle(app, rows.len()),
+        app.inventory_pane() == InventoryPane::Skills,
+    )];
+    if filter_height == 1 {
+        header_lines.push(inventory_filter_line(app));
+    }
+    header_lines.push(roots);
+    header_lines.push(components::rule(header.width));
     frame.render_widget(
-        Paragraph::new(vec![
-            components::pane_header("Global inventory", "not scanned"),
-            components::rule(header.width),
-        ]),
+        Paragraph::new(header_lines).wrap(Wrap { trim: false }),
         header,
     );
 
-    // Nothing scans installation roots yet, so the only truthful inventory is
-    // an empty one. The copy points at the work the release does support.
-    let body = body.inner(Margin {
-        horizontal: 2,
-        vertical: 0,
-    });
-    frame.render_widget(
-        components::empty_state(
-            "⌕",
-            "Installation roots have not been scanned",
-            "Skilled has not looked at any installation root yet, so it cannot \
-             say what is installed. Register a local source in Sources to \
-             prepare for installation in a later release.",
-            body,
-        ),
-        body,
+    if rows.is_empty() {
+        let region = body.inner(Margin {
+            horizontal: 2,
+            vertical: 0,
+        });
+        let (headline, explanation) = inventory_empty_state(app);
+        frame.render_widget(
+            components::empty_state("⌕", &headline, &explanation, region),
+            region,
+        );
+        return;
+    }
+
+    let columns = inventory_columns(body.width);
+    let mut lines = vec![inventory_column_headings(columns)];
+    let capacity = usize::from(body.height.max(1)).saturating_sub(1);
+    let start = visible_window_start(app.focused_installation(), capacity);
+    lines.extend(
+        rows.iter()
+            .enumerate()
+            .skip(start)
+            .take(capacity)
+            .map(|(index, row)| {
+                inventory_row_line(
+                    row,
+                    columns,
+                    index == app.focused_installation(),
+                    body.width,
+                )
+            }),
     );
+    frame.render_widget(Paragraph::new(lines), body);
 }
 
-/// The detail region beside a wide Inventory.
-///
-/// There is nothing to select yet, so the region explains what it will show
-/// rather than standing empty or inventing a subject.
-fn render_inventory_detail(frame: &mut Frame<'_>, area: Rect) {
-    let [separator, region] =
-        Layout::horizontal([Constraint::Length(1), Constraint::Min(1)]).areas(area);
-    frame.render_widget(
-        Paragraph::new(vec![
-            Line::from(Span::styled("│", theme::rule()));
-            usize::from(separator.height)
-        ]),
-        separator,
-    );
+fn inventory_subtitle(app: &SkilledApp, shown: usize) -> String {
+    let total = app.inventory().rows().len();
+    if !app.inventory_filter().trim().is_empty() {
+        return format!("{shown} of {total} skills");
+    }
+    match total {
+        0 => "nothing installed".to_owned(),
+        1 => "1 skill".to_owned(),
+        total => format!("{total} skills"),
+    }
+}
 
-    // The header mirrors the primary pane's so both regions measure their
-    // centred content against the same remaining height.
-    let region = region.inner(Margin {
-        horizontal: 1,
-        vertical: 0,
-    });
+/// The query box, or the query that is still narrowing the list.
+fn inventory_filter_line(app: &SkilledApp) -> Line<'static> {
+    let query = terminal_safe(app.inventory_filter());
+    if app.inventory_filter_active() {
+        return Line::from(vec![
+            Span::styled("/", theme::section_title()),
+            Span::raw(query),
+            Span::styled(components::FOCUS_MARKER, theme::focus_marker()),
+        ]);
+    }
+    Line::from(vec![
+        Span::styled("Filter: ", theme::pane_subtitle()),
+        Span::raw(query),
+    ])
+}
+
+/// What each agent's root contributed, so a `-` cell can be read correctly.
+fn inventory_roots_line(app: &SkilledApp) -> Line<'static> {
+    let mut spans = vec![Span::styled("Roots: ", theme::pane_subtitle())];
+    for (position, root) in app.inventory().roots().iter().enumerate() {
+        if position > 0 {
+            spans.push(Span::styled(" · ", theme::pane_subtitle()));
+        }
+        spans.push(Span::raw(format!("{} ", root.agent().display_name())));
+        spans.push(Span::styled(
+            root.status().short_summary(),
+            theme::tone_style(root_tone(root)),
+        ));
+    }
+    Line::from(spans)
+}
+
+fn root_tone(root: &RootScan) -> Tone {
+    match root.status() {
+        RootStatus::Scanned { .. } => Tone::Healthy,
+        RootStatus::NotSelected | RootStatus::Missing => Tone::Inactive,
+        RootStatus::Unreadable { .. } => Tone::Critical,
+    }
+}
+
+fn inventory_column_headings(columns: InventoryColumns) -> Line<'static> {
+    let mut heading = " ".repeat(ROW_MARKER_WIDTH);
+    heading.push_str(&padded("Skill", columns.skill));
+    heading.push_str(&padded("Source", columns.source));
+    for (label, width) in ["Claude", "Codex", "OpenCode"]
+        .into_iter()
+        .zip(AGENT_COLUMN_WIDTHS)
+    {
+        heading.push_str(&padded(label, width));
+    }
+    heading.push_str("Health");
+    Line::from(Span::styled(heading, theme::pane_subtitle()))
+}
+
+fn inventory_row_line(
+    row: &InventoryRow,
+    columns: InventoryColumns,
+    selected: bool,
+    width: u16,
+) -> Line<'static> {
+    let mut spans = vec![
+        Span::raw(padded(&terminal_safe(row.name()), columns.skill)),
+        Span::raw(padded(
+            &terminal_safe(row.source_label().unwrap_or("unmanaged")),
+            columns.source,
+        )),
+    ];
+    for (agent, width) in AgentKind::ALL.into_iter().zip(AGENT_COLUMN_WIDTHS) {
+        let tone = row
+            .observation(agent)
+            .map_or(Tone::Inactive, |observation| {
+                installation_tone(observation.health())
+            });
+        spans.push(Span::styled(
+            padded(components::tone_glyph(tone), width),
+            theme::tone_style(tone),
+        ));
+    }
+    let tone = installation_tone(row.health());
+    spans.push(components::badge(tone, row.health().label()));
+    components::list_row(spans, selected, width)
+}
+
+fn installation_tone(health: InstallationHealth) -> Tone {
+    match health {
+        InstallationHealth::Healthy => Tone::Healthy,
+        InstallationHealth::Unmanaged => Tone::Unmanaged,
+        InstallationHealth::Broken => Tone::Critical,
+    }
+}
+
+/// What an empty table can honestly say, given what the scan observed.
+fn inventory_empty_state(app: &SkilledApp) -> (String, String) {
+    if !app.inventory_filter().trim().is_empty() {
+        return (
+            "No skills match the filter".to_owned(),
+            "Press Esc to clear the filter and show every installed skill again.".to_owned(),
+        );
+    }
+    let roots = app.inventory().roots();
+    if roots
+        .iter()
+        .any(|root| matches!(root.status(), RootStatus::Unreadable { .. }))
+    {
+        return (
+            "An agent skill root could not be read".to_owned(),
+            "Skilled reports nothing from a root it could not read in full \
+             rather than reporting part of it. The Roots line above names the \
+             root and what happened."
+                .to_owned(),
+        );
+    }
+    if roots
+        .iter()
+        .any(|root| matches!(root.status(), RootStatus::Scanned { .. }))
+    {
+        return (
+            "No skills are installed".to_owned(),
+            "The agent skill roots Skilled read hold no skill directories. \
+             Nothing was created or changed."
+                .to_owned(),
+        );
+    }
+    (
+        "No agent skill root exists yet".to_owned(),
+        "Skilled looked for the documented global skill root of each selected \
+         agent and found none of them. It did not create one."
+            .to_owned(),
+    )
+}
+
+/// The detail region: everything observed about the selected installation.
+fn render_inventory_detail(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &SkilledApp,
+    beside_the_table: bool,
+) {
+    let region = if beside_the_table {
+        let [separator, region] =
+            Layout::horizontal([Constraint::Length(1), Constraint::Min(1)]).areas(area);
+        frame.render_widget(
+            Paragraph::new(vec![
+                Line::from(Span::styled("│", theme::rule()));
+                usize::from(separator.height)
+            ]),
+            separator,
+        );
+        region.inner(Margin {
+            horizontal: 1,
+            vertical: 0,
+        })
+    } else {
+        area.inner(Margin {
+            horizontal: 1,
+            vertical: 0,
+        })
+    };
+
+    let selected = app.selected_installation();
     let [header, body] =
         Layout::vertical([Constraint::Length(2), Constraint::Min(1)]).areas(region);
     frame.render_widget(
         Paragraph::new(vec![
-            components::pane_header("Details", "no selection"),
+            components::focused_pane_header(
+                "Details",
+                &selected.map_or_else(
+                    || "no selection".to_owned(),
+                    |row| terminal_safe(row.name()),
+                ),
+                app.inventory_pane() == InventoryPane::Details,
+            ),
             components::rule(header.width),
         ]),
         header,
     );
-    frame.render_widget(
-        components::empty_state(
-            "·",
-            "Nothing to show",
-            "Identity, provenance, and installation paths appear here once \
-             installation inventory exists.",
+
+    let Some(row) = selected else {
+        frame.render_widget(
+            components::empty_state(
+                "·",
+                "Nothing to show",
+                "Identity, provenance, and the observed object in every agent \
+                 root appear here once a skill is selected.",
+                body,
+            ),
             body,
-        ),
+        );
+        return;
+    };
+    frame.render_widget(
+        Paragraph::new(inventory_detail_lines(row, app.home(), body.width))
+            .wrap(Wrap { trim: false }),
         body,
     );
+}
+
+fn inventory_detail_lines(row: &InventoryRow, home: &Path, width: u16) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    push_detail_section(&mut lines, "SKILL", width);
+    lines.push(detail_field("Name", row.name()));
+    lines.push(Line::from(vec![
+        Span::styled("Health: ", theme::pane_subtitle()),
+        components::badge(installation_tone(row.health()), row.health().label()),
+    ]));
+    if let Some(SkillValidation::Valid { description, .. }) = row
+        .observations()
+        .find_map(InstalledSkillObservation::validation)
+    {
+        lines.push(detail_field_bounded("Description", description, width, 3));
+    }
+
+    push_detail_section(&mut lines, "SOURCE", width);
+    match row
+        .observations()
+        .find_map(InstalledSkillObservation::resolution)
+    {
+        Some(resolution) => {
+            lines.push(detail_field("Source", resolution.source_label()));
+            lines.push(detail_field_bounded(
+                "Catalog",
+                &resolution.catalog_relative_path().display().to_string(),
+                width,
+                2,
+            ));
+            lines.push(detail_field_bounded(
+                "Variant",
+                &resolution.variant_relative_path().display().to_string(),
+                width,
+                2,
+            ));
+        }
+        // Unresolved content is observed, never adopted.
+        None => lines.push(Line::from(
+            "Not resolved to any registered source; Skilled does not manage it.",
+        )),
+    }
+
+    for agent in AgentKind::ALL {
+        push_detail_section(&mut lines, &agent.display_name().to_uppercase(), width);
+        match row.observation(agent) {
+            Some(observation) => lines.extend(observation_lines(observation, home, width)),
+            None => lines.push(Line::from(components::badge(
+                Tone::Inactive,
+                "not installed in this root",
+            ))),
+        }
+    }
+    lines
+}
+
+fn observation_lines(
+    observation: &InstalledSkillObservation,
+    home: &Path,
+    width: u16,
+) -> Vec<Line<'static>> {
+    let mut lines = vec![
+        detail_field_bounded("Path", &home_relative(observation.path(), home), width, 2),
+        detail_field("Object", observation.object().description()),
+    ];
+    if let InstallationObject::Symlink { target } = observation.object() {
+        lines.push(detail_field_bounded(
+            "Target",
+            &home_relative(target, home),
+            width,
+            2,
+        ));
+    }
+    lines.push(match observation.validation() {
+        Some(SkillValidation::Valid { name, .. }) => Line::from(vec![
+            Span::styled("Validation: ", theme::pane_subtitle()),
+            components::badge(Tone::Healthy, "valid"),
+            Span::raw(format!(" as {}", terminal_safe(name))),
+        ]),
+        Some(SkillValidation::Invalid { .. }) => Line::from(vec![
+            Span::styled("Validation: ", theme::pane_subtitle()),
+            components::badge(Tone::Critical, "invalid"),
+        ]),
+        None => Line::from(vec![
+            Span::styled("Validation: ", theme::pane_subtitle()),
+            components::badge(Tone::Inactive, "not attempted"),
+        ]),
+    });
+    lines.extend(
+        observation
+            .findings()
+            .iter()
+            .flat_map(|finding| finding_lines(finding, width)),
+    );
+    lines
+}
+
+/// One finding: its stable code and severity, then the observation behind it.
+///
+/// The severity is spelled out beside the code, so the tone reinforces a word
+/// the reader already has rather than carrying the meaning alone.
+fn finding_lines(finding: &Finding, width: u16) -> [Line<'static>; 2] {
+    let tone = match finding.severity() {
+        FindingSeverity::Info => Tone::Inactive,
+        FindingSeverity::Warning => Tone::Warning,
+        FindingSeverity::Critical => Tone::Critical,
+    };
+    [
+        Line::from(vec![
+            Span::styled("Finding: ", theme::pane_subtitle()),
+            Span::styled(
+                format!("{} · {}", finding.code(), finding.severity().label()),
+                theme::tone_style(tone),
+            ),
+        ]),
+        Line::from(Span::raw(format!(
+            "  {}",
+            terminal_safe_bounded_start(
+                finding.evidence(),
+                usize::from(width).saturating_mul(3).saturating_sub(2)
+            )
+        ))),
+    ]
+}
+
+/// An installation path as the user speaks about it.
+///
+/// Global roots are documented relative to the home directory, and a detail
+/// region is too narrow to spend three wrapped lines on a prefix the reader
+/// already knows. Anything outside the home directory stays absolute.
+fn home_relative(path: &Path, home: &Path) -> String {
+    match path.strip_prefix(home) {
+        Ok(relative) => format!("~/{}", relative.display()),
+        Err(_) => path.display().to_string(),
+    }
+}
+
+/// Bound a value to `width` cells and pad it out to exactly that.
+fn padded(value: &str, width: usize) -> String {
+    let bounded = terminal_safe_bounded_start(value, width.saturating_sub(1));
+    let used = Span::raw(&bounded).width();
+    format!("{bounded}{}", " ".repeat(width.saturating_sub(used)))
 }
 
 fn render_sources(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
@@ -1729,28 +2142,64 @@ fn help_commands(context: View, app: &SkilledApp) -> Vec<HelpCommand> {
             ]);
             commands
         }
-        View::Inventory => vec![
-            HelpCommand {
-                key: "2",
-                label: "Sources",
-                description: "open registered sources",
-            },
-            HelpCommand {
-                key: "s",
-                label: "Settings",
-                description: "open global settings",
-            },
-            HelpCommand {
-                key: "?",
-                label: "Help",
-                description: "open this keyboard reference",
-            },
-            HelpCommand {
-                key: "q",
-                label: "Quit",
-                description: "quit when no dialog is open",
-            },
-        ],
+        View::Inventory => {
+            let mut commands = vec![HelpCommand {
+                key: "Tab / Shift-Tab",
+                label: "Region",
+                description: "move region focus forward or backward",
+            }];
+            if app.filtered_rows().len() > 1 {
+                commands.push(HelpCommand {
+                    key: "Up/Down or j/k",
+                    label: "Move",
+                    description: "move the selected skill",
+                });
+            }
+            if inventory_can_advance(app) {
+                commands.push(HelpCommand {
+                    key: "Enter",
+                    label: "Open details",
+                    description: "show everything observed about the selection",
+                });
+            }
+            if !app.inventory().rows().is_empty() {
+                commands.push(HelpCommand {
+                    key: "/",
+                    label: "Filter",
+                    description: "narrow by name, source, or health",
+                });
+            }
+            commands.extend([
+                HelpCommand {
+                    key: "2",
+                    label: "Sources",
+                    description: "open registered sources",
+                },
+                HelpCommand {
+                    key: "s",
+                    label: "Settings",
+                    description: "open global settings",
+                },
+                HelpCommand {
+                    key: "?",
+                    label: "Help",
+                    description: "open this keyboard reference",
+                },
+                HelpCommand {
+                    key: "q",
+                    label: "Quit",
+                    description: "quit when no dialog is open",
+                },
+            ]);
+            if inventory_can_go_back(app) {
+                commands.push(HelpCommand {
+                    key: "Esc",
+                    label: "Back",
+                    description: "clear the filter, then leave the detail region",
+                });
+            }
+            commands
+        }
         View::Sources => {
             let mut commands = vec![HelpCommand {
                 key: "Tab / Shift-Tab",
@@ -1857,6 +2306,13 @@ fn key_hints(app: &SkilledApp) -> Vec<KeyHint> {
             KeyHint::new("Ctrl-C", "Quit"),
         ];
     }
+    if app.inventory_filter_active() {
+        return vec![
+            KeyHint::essential("Enter", "Apply"),
+            KeyHint::essential("Esc", "Clear"),
+            KeyHint::new("Ctrl-C", "Quit"),
+        ];
+    }
     if app.pending_source().is_some() {
         return vec![
             KeyHint::new("j/k", "Move"),
@@ -1893,12 +2349,28 @@ fn key_hints(app: &SkilledApp) -> Vec<KeyHint> {
             hints.push(KeyHint::new("q", "Quit"));
             hints
         }
-        View::Inventory => vec![
-            KeyHint::new("2", "Sources"),
-            KeyHint::new("s", "Settings"),
-            KeyHint::new("?", "Help"),
-            KeyHint::new("q", "Quit"),
-        ],
+        View::Inventory => {
+            let mut hints = vec![KeyHint::new("Tab/Shift-Tab", "Region")];
+            if app.filtered_rows().len() > 1 {
+                hints.push(KeyHint::new("j/k", "Move"));
+            }
+            if inventory_can_advance(app) {
+                hints.push(KeyHint::essential("Enter", "Open"));
+            }
+            if !app.inventory().rows().is_empty() {
+                hints.push(KeyHint::new("/", "Filter"));
+            }
+            hints.extend([
+                KeyHint::new("2", "Sources"),
+                KeyHint::new("s", "Settings"),
+                KeyHint::new("?", "Help"),
+                KeyHint::new("q", "Quit"),
+            ]);
+            if inventory_can_go_back(app) {
+                hints.push(KeyHint::essential("Esc", "Back"));
+            }
+            hints
+        }
         View::Sources => {
             let mut hints = vec![KeyHint::new("Tab/Shift-Tab", "Region")];
             if sources_can_move_selection(app) {
@@ -1922,6 +2394,16 @@ fn key_hints(app: &SkilledApp) -> Vec<KeyHint> {
             KeyHint::essential("Esc", "Close"),
         ],
     }
+}
+
+/// Enter only drills in, so it advertises itself only where it can.
+fn inventory_can_advance(app: &SkilledApp) -> bool {
+    app.inventory_pane() == InventoryPane::Skills && app.selected_installation().is_some()
+}
+
+/// Back unwinds an applied filter, then a drilled-in detail region.
+fn inventory_can_go_back(app: &SkilledApp) -> bool {
+    !app.inventory_filter().is_empty() || app.inventory_pane() == InventoryPane::Details
 }
 
 fn sources_can_move_selection(app: &SkilledApp) -> bool {

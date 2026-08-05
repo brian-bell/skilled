@@ -1,0 +1,44 @@
+---
+source: tests/tui_snapshots.rs
+expression: "normalize_inventory(&temporary, render(&app, 120, 40))"
+---
+ ◆ skilled   global                                                                       ● ready · 1 source registered
+▌Inventory  2 Sources  Updates (soon)  Doctor (soon)
+▌ Global inventory  3 skills                                                    │ Details  broken
+Roots: Claude Code 2 installed · Codex 2 installed · OpenCode no root           │ ─────────────────────────────────────
+────────────────────────────────────────────────────────────────────────────────│ SKILL
+  Skill                    Source           Claude  Codex  OpenCode  Health     │ ─────────────────────────────────────
+  alpha                    library          ✓       ✓      -         ✓ healthy  │ Name: broken
+▌ broken                   unmanaged        ×       -      -         × broken   │ Health: × broken
+  copied                   unmanaged        -       U      -         U unmanaged│ SOURCE
+                                                                                │ ─────────────────────────────────────
+                                                                                │ Not resolved to any registered
+                                                                                │ source; Skilled does not manage it.
+                                                                                │ CLAUDE CODE
+                                                                                │ ─────────────────────────────────────
+                                                                                │ Path: ~/.claude/skills/broken
+                                                                                │ Object: symbolic link
+                                                                                │ Target: ~/gone
+                                                                                │ Validation: - not attempted
+                                                                                │ Finding: install.dangling_symlink ·
+                                                                                │ critical
+                                                                                │   the link target does not exist
+                                                                                │ CODEX
+                                                                                │ ─────────────────────────────────────
+                                                                                │ - not installed in this root
+                                                                                │ OPENCODE
+                                                                                │ ─────────────────────────────────────
+                                                                                │ - not installed in this root
+                                                                                │
+                                                                                │
+                                                                                │
+                                                                                │
+                                                                                │
+                                                                                │
+                                                                                │
+                                                                                │
+                                                                                │
+                                                                                │
+                                                                                │
+                                                                                │
+ Tab/Shift-Tab Region   j/k Move   Enter Open   / Filter   2 Sources   s Settings   ? Help   q Quit

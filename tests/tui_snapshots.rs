@@ -685,6 +685,155 @@ fn setup_catalog_confirmation_reserves_space_for_wrapped_focused_content() {
     insta::assert_snapshot!(rendered);
 }
 
+#[cfg(unix)]
+mod installed {
+    use super::*;
+    use skilled::InventoryPane;
+
+    #[test]
+    fn inventory_populated_at_minimum_supported_size() {
+        let temporary = tempfile::tempdir().expect("temporary application directory");
+        let app = inventory_app(&temporary);
+
+        insta::assert_snapshot!(normalize_inventory(&temporary, render(&app, 80, 24)));
+    }
+
+    #[test]
+    fn inventory_populated_at_wide_size() {
+        let temporary = tempfile::tempdir().expect("temporary application directory");
+        let app = inventory_app(&temporary);
+
+        insta::assert_snapshot!(normalize_inventory(&temporary, render(&app, 120, 40)));
+    }
+
+    #[test]
+    fn inventory_broken_installation_detail_at_wide_size() {
+        let temporary = tempfile::tempdir().expect("temporary application directory");
+        let mut app = inventory_app(&temporary);
+        app.update(Action::MoveInventorySelection(1));
+
+        assert_eq!(
+            app.selected_installation().map(|row| row.name().to_owned()),
+            Some("broken".to_owned())
+        );
+        insta::assert_snapshot!(normalize_inventory(&temporary, render(&app, 120, 40)));
+    }
+
+    #[test]
+    fn inventory_detail_drill_in_at_minimum_supported_size() {
+        let temporary = tempfile::tempdir().expect("temporary application directory");
+        let mut app = inventory_app(&temporary);
+        app.update(Action::MoveInventorySelection(2));
+        app.update(Action::AdvanceInventoryPane);
+
+        assert_eq!(app.inventory_pane(), InventoryPane::Details);
+        insta::assert_snapshot!(normalize_inventory(&temporary, render(&app, 80, 24)));
+    }
+
+    #[test]
+    fn inventory_filter_entry_at_minimum_supported_size() {
+        let temporary = tempfile::tempdir().expect("temporary application directory");
+        let mut app = inventory_app(&temporary);
+        app.update(Action::BeginInventoryFilter);
+        for character in "unman".chars() {
+            app.update(Action::AppendInventoryFilter(character));
+        }
+
+        insta::assert_snapshot!(normalize_inventory(&temporary, render(&app, 80, 24)));
+    }
+
+    #[test]
+    fn inventory_filter_without_matches_at_minimum_supported_size() {
+        let temporary = tempfile::tempdir().expect("temporary application directory");
+        let mut app = inventory_app(&temporary);
+        app.update(Action::BeginInventoryFilter);
+        for character in "nothing".chars() {
+            app.update(Action::AppendInventoryFilter(character));
+        }
+        app.update(Action::SubmitInventoryFilter);
+
+        assert!(app.filtered_rows().is_empty());
+        insta::assert_snapshot!(normalize_inventory(&temporary, render(&app, 80, 24)));
+    }
+
+    /// One healthy skill installed for two agents, one dangling link, and one
+    /// physical copy, with the OpenCode root absent entirely.
+    ///
+    /// The source checkout lives inside the temporary home so every path the
+    /// screen shows is home-relative and therefore stable across machines.
+    fn inventory_app(temporary: &tempfile::TempDir) -> SkilledApp {
+        let repository = temporary.path().join("home/library");
+        for skill in ["alpha", "beta"] {
+            write_skill(&repository.join("skills").join(skill), skill);
+        }
+        create_repository(&repository);
+
+        let mut app = SkilledApp::open(AppEnvironment::new(
+            temporary.path().join("home"),
+            temporary.path().join("data"),
+            "",
+        ))
+        .expect("open application");
+        for _ in 0..7 {
+            dispatch(&mut app, Action::Continue);
+        }
+        let preview = app.preview_source(&repository).expect("preview source");
+        app.confirm_source(preview).expect("register source");
+
+        let claude = temporary.path().join("home/.claude/skills");
+        let codex = temporary.path().join("home/.agents/skills");
+        fs::create_dir_all(&claude).expect("create Claude Code root");
+        fs::create_dir_all(&codex).expect("create Codex root");
+        link(&repository.join("skills/alpha"), &claude.join("alpha"));
+        link(&temporary.path().join("home/gone"), &claude.join("broken"));
+        link(&repository.join("skills/alpha"), &codex.join("alpha"));
+        write_skill(&codex.join("copied"), "copied");
+
+        app.update(Action::OpenSources);
+        dispatch(&mut app, Action::OpenInventory);
+        app
+    }
+
+    fn link(target: &Path, at: &Path) {
+        std::os::unix::fs::symlink(target, at).expect("install symbolic link");
+    }
+
+    fn write_skill(directory: &Path, name: &str) {
+        fs::create_dir_all(directory).expect("create skill fixture");
+        fs::write(
+            directory.join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: {name} fixture\n---\n# {name}\n"),
+        )
+        .expect("write skill fixture");
+    }
+
+    fn create_repository(repository: &Path) {
+        git(repository, &["init", "-b", "main"]);
+        git(repository, &["config", "user.name", "Skilled Test"]);
+        git(
+            repository,
+            &["config", "user.email", "skilled@example.test"],
+        );
+        git(repository, &["add", "."]);
+        git(repository, &["commit", "-m", "fixture"]);
+    }
+
+    /// Temporary directories are named at random, so every path the screen
+    /// shows is rewritten to a stable placeholder of the same width.
+    fn normalize_inventory(temporary: &tempfile::TempDir, screen: String) -> String {
+        let raw = temporary.path().to_string_lossy().into_owned();
+        let canonical = temporary
+            .path()
+            .canonicalize()
+            .expect("canonical temporary directory")
+            .to_string_lossy()
+            .into_owned();
+        screen
+            .replace(&canonical, &padded_placeholder(&canonical, "[TEMP]"))
+            .replace(&raw, &padded_placeholder(&raw, "[TEMP]"))
+    }
+}
+
 fn render(app: &SkilledApp, width: u16, height: u16) -> String {
     let backend = TestBackend::new(width, height);
     let mut terminal = Terminal::new(backend).expect("create test terminal");

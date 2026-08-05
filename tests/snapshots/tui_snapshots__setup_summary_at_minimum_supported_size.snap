@@ -14,9 +14,9 @@ expression: "render(&app, 80, 24)"
   │                                                                          │
   │  Configured agents: 3                                                    │
   │  Sources: 0   Skills: 0                                                  │
+  │  Installed: 0   Unmanaged: 0   Findings: 0                               │
   │                                                                          │
   │  Unresolved findings never force a repair.                               │
-  │                                                                          │
   │                                                                          │
   │                                                                          │
   │                                                                          │

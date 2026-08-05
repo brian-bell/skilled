@@ -5,7 +5,11 @@ use ratatui::{
     buffer::Buffer,
     style::{Color, Modifier, Style},
 };
-use std::{fs, path::Path, process::Command};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 use skilled::{Action, AgentKind, AppEnvironment, SkilledApp};
 
@@ -132,9 +136,22 @@ fn placeholder_setup_steps_describe_only_observed_work() {
 
     app.update(Action::Continue);
     let installations = text(&buffer(&app, 80, 24));
-    assert!(installations.contains("not scanned"), "{installations}");
+    // Step six reads the roots, so it reports what it found at each documented
+    // path rather than announcing that it cannot look.
     assert!(
-        installations.contains("cannot report installation or Doctor status"),
+        installations.contains("Skilled read the global skill root"),
+        "{installations}"
+    );
+    for root in [
+        "~/.claude/skills",
+        "~/.agents/skills",
+        "~/.config/opencode/skills",
+    ] {
+        assert!(installations.contains(root), "{root} in\n{installations}");
+    }
+    assert_eq!(installations.matches("root not found").count(), 3);
+    assert!(
+        installations.contains("nothing was changed"),
         "{installations}"
     );
 
@@ -384,11 +401,11 @@ fn the_empty_state_styles_its_glyph_headline_and_body_distinctly() {
         style_at(&screen, "⌕").fg,
         Some(Color::Rgb(0x53, 0x61, 0x71))
     );
-    let headline = style_at(&screen, "Installation roots have not been");
+    let headline = style_at(&screen, "No agent skill root exists yet");
     assert_eq!(headline.fg, Some(Color::Rgb(0xd7, 0xde, 0xe7)));
     assert!(headline.add_modifier.contains(Modifier::BOLD));
 
-    let body = style_at(&screen, "Skilled has not looked");
+    let body = style_at(&screen, "Skilled looked for the documented");
     assert_eq!(body.fg, Some(Color::Rgb(0x84, 0x91, 0xa1)));
     assert!(!body.add_modifier.contains(Modifier::BOLD));
 }
@@ -845,7 +862,10 @@ fn complete_key_hints_render_at_compact_and_wide_sizes() {
             &setup,
             " j/k Move   Space Toggle   Enter Continue   Esc Back   ? Help   q Quit",
         ),
-        (&inventory, " 2 Sources   s Settings   ? Help   q Quit"),
+        (
+            &inventory,
+            " Tab/Shift-Tab Region   2 Sources   s Settings   ? Help   q Quit",
+        ),
         (&settings, " Enter Rerun setup   ? Help   Esc Close"),
     ];
 
@@ -932,57 +952,58 @@ fn key_caps_are_emphasised_apart_from_their_labels() {
 }
 
 #[test]
-fn inventory_subtitle_reports_not_scanned_in_a_readable_tone() {
-    let harness = Harness::new();
-    let screen = buffer(&harness.completed_setup(), 80, 24);
-
-    // "not scanned" is real status, not decoration, so it renders in the
-    // readable muted tone rather than the faint decorative one. Anchoring to
-    // the pane-header row keeps the assertion on the subtitle if another
-    // "not scanned" ever appears elsewhere on screen.
-    let header_row = row_containing(&screen, "Global inventory");
-    let subtitle = style_in_row(&screen, header_row, "not scanned");
-    assert_eq!(subtitle.fg, Some(Color::Rgb(0x84, 0x91, 0xa1)));
-}
-
-#[test]
-fn empty_inventory_states_what_is_known_without_inventing_data() {
+fn an_inventory_with_no_root_to_read_says_so_without_inventing_a_result() {
     let harness = Harness::new();
     let app = harness.completed_setup();
 
     let screen = text(&buffer(&app, 80, 24));
 
     assert!(screen.contains("Global inventory"), "{screen}");
-    assert!(screen.contains("not scanned"), "{screen}");
-    // The headline reports the absence of a scan, not the result of one.
-    assert!(
-        screen.contains("Installation roots have not been scanned"),
-        "{screen}"
-    );
-    assert!(!screen.contains("No installed skills found"), "{screen}");
-    // A zero count would itself be a scan result, and no scan has run.
+    // No root exists, so there is nothing to count and the subtitle says that
+    // rather than reporting a zero the scan never observed.
+    assert!(screen.contains("nothing installed"), "{screen}");
     assert!(!screen.contains("0 skills"), "{screen}");
     assert!(
-        screen.contains("Skilled has not looked at any installation root yet"),
+        screen.contains("No agent skill root exists yet"),
+        "{screen}"
+    );
+    assert!(
+        screen.contains("Skilled looked for the documented global skill root"),
+        "{screen}"
+    );
+    assert!(screen.contains("It did not create one"), "{screen}");
+    // The Roots line accounts for each agent, so absence is legible.
+    assert!(
+        screen.contains("Roots: Claude Code no root · Codex no root · OpenCode no root"),
         "{screen}"
     );
 
-    // Doctor, updates, and installation do not exist yet, so the empty state
-    // may not report their results or offer their actions.
-    for invented in [
-        "Doctor findings",
-        "findings:",
-        "Uninstall",
-        "Repair",
-        "Update available",
-        "healthy",
-    ] {
+    // Doctor, updates, installation, and repair do not exist yet, so nothing
+    // may report their results or offer their actions.
+    for invented in ["Doctor findings", "Uninstall", "Repair", "Update available"] {
         assert!(!screen.contains(invented), "{invented} in\n{screen}");
     }
     // No per-skill status either: there are no skills to carry one.
-    for glyph in ["✓", "×", "!"] {
+    for glyph in ["✓", "×", "U "] {
         assert!(!screen.contains(glyph), "{glyph} in\n{screen}");
     }
+}
+
+#[test]
+fn a_root_that_exists_but_holds_nothing_is_distinguished_from_a_missing_one() {
+    let harness = Harness::new();
+    fs::create_dir_all(harness.directory.path().join("home/.claude/skills"))
+        .expect("create an empty Claude Code root");
+    let app = harness.completed_setup();
+
+    let screen = text(&buffer(&app, 80, 24));
+
+    assert!(screen.contains("No skills are installed"), "{screen}");
+    assert!(screen.contains("hold no skill directories"), "{screen}");
+    assert!(
+        screen.contains("Roots: Claude Code 0 installed · Codex no root · OpenCode no root"),
+        "{screen}"
+    );
 }
 
 #[test]
@@ -992,22 +1013,166 @@ fn wide_terminals_gain_a_detail_region_and_compact_ones_do_not() {
 
     let wide = text(&buffer(&app, 120, 40));
     assert!(wide.contains("Details"), "{wide}");
+    assert!(wide.contains("no selection"), "{wide}");
     assert!(wide.contains("Nothing to show"), "{wide}");
     assert!(wide.contains("Identity, provenance, and"), "{wide}");
-    // Nothing is selectable yet, so the region must not imply that it is.
-    assert!(!wide.contains("Select a skill"), "{wide}");
     // Both regions are present, so the primary empty state still reads.
-    assert!(
-        wide.contains("Installation roots have not been scanned"),
-        "{wide}"
-    );
+    assert!(wide.contains("No agent skill root exists yet"), "{wide}");
 
     let compact = text(&buffer(&app, 80, 24));
     assert!(!compact.contains("Nothing to show"), "{compact}");
     assert!(
-        compact.contains("Installation roots have not been scanned"),
+        compact.contains("No agent skill root exists yet"),
         "{compact}"
     );
+}
+
+#[test]
+fn every_inventory_cell_pairs_its_colour_with_a_glyph_and_a_word() {
+    let harness = Harness::new();
+    let app = harness.installed_inventory();
+
+    let screen = buffer(&app, 80, 24);
+    let rendered = text(&screen);
+
+    // Each state appears as a glyph in the agent columns and as a glyph plus a
+    // word in the Health column, so nothing depends on colour alone.
+    for (name, glyph, word, colour) in [
+        ("alpha", "✓", "healthy", Color::Rgb(0x8b, 0xd4, 0x9c)),
+        ("broken", "×", "broken", Color::Rgb(0xee, 0x6b, 0x73)),
+        ("copied", "U", "unmanaged", Color::Rgb(0xc7, 0x9b, 0xf2)),
+    ] {
+        let row = row_containing(&screen, name);
+        let line = row_text(&screen, row);
+        assert!(line.contains(glyph), "{glyph} missing from {line:?}");
+        assert!(
+            line.contains(&format!("{glyph} {word}")),
+            "{glyph} {word} missing from {line:?}"
+        );
+        assert_eq!(
+            style_in_row(&screen, row, glyph).fg,
+            Some(colour),
+            "wrong tone for {name}"
+        );
+    }
+
+    // An agent with no installation of a row shows the inactive dash, in the
+    // readable muted tone rather than the faint decorative one.
+    let alpha = row_containing(&screen, "alpha");
+    assert_eq!(
+        style_in_row(&screen, alpha, "-").fg,
+        Some(Color::Rgb(0x84, 0x91, 0xa1))
+    );
+    assert!(rendered.contains("Skill "), "{rendered}");
+    for heading in ["Claude", "Codex", "OpenCode", "Health", "Source"] {
+        assert!(rendered.contains(heading), "{heading} in\n{rendered}");
+    }
+}
+
+#[test]
+fn the_roots_line_explains_what_a_dash_cell_means() {
+    let harness = Harness::new();
+    let app = harness.installed_inventory();
+
+    let screen = buffer(&app, 80, 24);
+    let row = row_starting_with(&screen, "Roots:");
+    let line = row_text(&screen, row);
+
+    assert!(line.contains("Claude Code 2 installed"), "{line}");
+    assert!(line.contains("Codex 2 installed"), "{line}");
+    assert!(line.contains("OpenCode no root"), "{line}");
+    // A scanned root reads as healthy; an absent one is inactive, not an error.
+    assert_eq!(
+        style_in_row(&screen, row, "2 installed").fg,
+        Some(Color::Rgb(0x8b, 0xd4, 0x9c))
+    );
+    assert_eq!(
+        style_in_row(&screen, row, "no root").fg,
+        Some(Color::Rgb(0x84, 0x91, 0xa1))
+    );
+}
+
+#[test]
+fn the_selected_installation_is_marked_and_its_detail_follows_the_selection() {
+    let harness = Harness::new();
+    let mut app = harness.installed_inventory();
+
+    let first = text(&buffer(&app, 120, 40));
+    assert!(first.contains("▌ alpha"), "{first}");
+    assert!(first.contains("Details  alpha"), "{first}");
+    assert!(first.contains("Source: library"), "{first}");
+    assert!(first.contains("Variant: skills/alpha"), "{first}");
+    assert!(first.contains("Path: ~/.claude/skills/alpha"), "{first}");
+    assert!(first.contains("Object: symbolic link"), "{first}");
+
+    app.update(Action::MoveInventorySelection(1));
+    let second = text(&buffer(&app, 120, 40));
+    assert!(second.contains("▌ broken"), "{second}");
+    assert!(second.contains("Details  broken"), "{second}");
+    // Unresolved content is reported, never adopted.
+    assert!(
+        second.contains("Not resolved to any registered"),
+        "{second}"
+    );
+    assert!(
+        second.contains("Finding: install.dangling_symlink"),
+        "{second}"
+    );
+    assert!(second.contains("critical"), "{second}");
+    assert!(second.contains("the link target"), "{second}");
+    assert!(second.contains("Validation: - not attempted"), "{second}");
+}
+
+#[test]
+fn the_filter_bar_shows_the_query_and_the_narrowed_count() {
+    let harness = Harness::new();
+    let mut app = harness.installed_inventory();
+    app.update(Action::BeginInventoryFilter);
+    for character in "cop".chars() {
+        app.update(Action::AppendInventoryFilter(character));
+    }
+
+    let screen = buffer(&app, 80, 24);
+    let rendered = text(&screen);
+
+    assert!(rendered.contains("/cop▌"), "{rendered}");
+    assert!(rendered.contains("1 of 3 skills"), "{rendered}");
+    assert!(rendered.contains("copied"), "{rendered}");
+    assert!(!rendered.contains("alpha"), "{rendered}");
+    // The filter takes every printable key, so the navigation row says so
+    // instead of advertising destination digits that would be typed as text.
+    assert!(
+        rendered.contains("navigation is locked while the filter is open"),
+        "{rendered}"
+    );
+    assert_eq!(
+        row_text(&screen, 23),
+        " Enter Apply   Esc Clear   Ctrl-C Quit"
+    );
+}
+
+#[test]
+fn compact_terminals_drill_into_the_detail_region_and_back_out() {
+    let harness = Harness::new();
+    let mut app = harness.installed_inventory();
+
+    let table = text(&buffer(&app, 80, 24));
+    assert!(table.contains("▌ Global inventory"), "{table}");
+    assert!(!table.contains("Object: symbolic link"), "{table}");
+
+    app.update(Action::AdvanceInventoryPane);
+    let detail = text(&buffer(&app, 80, 24));
+    assert!(detail.contains("▌ Details  alpha"), "{detail}");
+    assert!(detail.contains("Object: symbolic link"), "{detail}");
+    assert!(!detail.contains("Global inventory"), "{detail}");
+    assert_eq!(
+        row_text(&buffer(&app, 80, 24), 23),
+        " Tab/Shift-Tab Region   j/k Move   / Filter   2 Sources   Esc Back …"
+    );
+
+    app.update(Action::Back);
+    let back = text(&buffer(&app, 80, 24));
+    assert!(back.contains("▌ Global inventory"), "{back}");
 }
 
 #[test]
@@ -1802,6 +1967,60 @@ impl Harness {
         }
         app
     }
+
+    /// One healthy skill installed for two agents, one dangling link, and one
+    /// physical copy, with the OpenCode root absent entirely.
+    ///
+    /// The checkout lives inside the temporary home so every rendered path is
+    /// home-relative and stable.
+    fn installed_inventory(&self) -> SkilledApp {
+        let home = self.directory.path().join("home");
+        let repository = home.join("library");
+        for skill in ["alpha", "beta"] {
+            write_skill_fixture(&repository.join("skills").join(skill), skill);
+        }
+        git(&repository, &["init", "-b", "main"]);
+        git(&repository, &["config", "user.name", "Skilled Test"]);
+        git(
+            &repository,
+            &["config", "user.email", "skilled@example.test"],
+        );
+        git(&repository, &["add", "."]);
+        git(&repository, &["commit", "-m", "fixture"]);
+
+        let mut app = self.completed_setup();
+        let preview = app.preview_source(&repository).expect("preview source");
+        app.confirm_source(preview).expect("register source");
+
+        let claude = home.join(".claude/skills");
+        let codex = home.join(".agents/skills");
+        fs::create_dir_all(&claude).expect("create Claude Code root");
+        fs::create_dir_all(&codex).expect("create Codex root");
+        symlink(repository.join("skills/alpha"), claude.join("alpha"));
+        symlink(home.join("gone"), claude.join("broken"));
+        symlink(repository.join("skills/alpha"), codex.join("alpha"));
+        write_skill_fixture(&codex.join("copied"), "copied");
+
+        app.update(Action::OpenSources);
+        let update = app.update(Action::OpenInventory);
+        app.perform_effects(update.effects())
+            .expect("installation scan");
+        app
+    }
+}
+
+fn write_skill_fixture(directory: &Path, name: &str) {
+    fs::create_dir_all(directory).expect("create skill fixture");
+    fs::write(
+        directory.join("SKILL.md"),
+        format!("---\nname: {name}\ndescription: {name} fixture\n---\n# {name}\n"),
+    )
+    .expect("write skill fixture");
+}
+
+#[cfg(unix)]
+fn symlink(target: PathBuf, at: PathBuf) {
+    std::os::unix::fs::symlink(target, at).expect("install symbolic link");
 }
 
 fn buffer(app: &SkilledApp, width: u16, height: u16) -> Buffer {

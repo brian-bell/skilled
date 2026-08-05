@@ -10,13 +10,13 @@ expression: "render(&app, 80, 24)"
   │  STEP 6 / 7                                                              │
   │  Scan installations                                                      │
   │                                                                          │
-  │  - installation roots not scanned                                        │
+  │  Skilled read the global skill root of each selected agent.              │
   │                                                                          │
-  │  This build cannot report installation or Doctor status.                 │
-  │  Continue without reading or changing any agent skill root.              │
+  │  - root not found   Claude Code  ~/.claude/skills                        │
+  │  - root not found   Codex        ~/.agents/skills                        │
+  │  - root not found   OpenCode     ~/.config/opencode/skills               │
   │                                                                          │
-  │                                                                          │
-  │                                                                          │
+  │  Nothing outside those roots was read, and nothing was changed.          │
   │                                                                          │
   │                                                                          │
   │                                                                          │

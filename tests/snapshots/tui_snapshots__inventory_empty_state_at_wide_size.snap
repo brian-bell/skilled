@@ -4,8 +4,29 @@ expression: "render(&app, 120, 40)"
 ---
  ◆ skilled   global                                                                      ● ready · 0 sources registered
 ▌Inventory  2 Sources  Updates (soon)  Doctor (soon)
-Global inventory  not scanned                                                   │ Details  no selection
-────────────────────────────────────────────────────────────────────────────────│ ─────────────────────────────────────
+▌ Global inventory  nothing installed                                           │ Details  no selection
+Roots: Claude Code no root · Codex no root · OpenCode no root                   │ ─────────────────────────────────────
+────────────────────────────────────────────────────────────────────────────────│
+                                                                                │
+                                                                                │
+                                                                                │
+                                                                                │
+                                                                                │
+                                                                                │
+                                                                                │
+                                                                                │
+                                                                                │
+                                                                                │
+                                                                                │
+                                                                                │
+                                                                                │
+                                                                                │                   ·
+                                        ⌕                                       │
+                                                                                │            Nothing to show
+                         No agent skill root exists yet                         │
+                                                                                │     Identity, provenance, and the
+   Skilled looked for the documented global skill root of each selected agent   │  observed object in every agent root
+                 and found none of them. It did not create one.                 │ appear here once a skill is selected.
                                                                                 │
                                                                                 │
                                                                                 │
@@ -20,25 +41,4 @@ Global inventory  not scanned                                                   
                                                                                 │
                                                                                 │
                                                                                 │
-                                        ⌕                                       │                   ·
-                                                                                │
-                    Installation roots have not been scanned                    │            Nothing to show
-                                                                                │
-   Skilled has not looked at any installation root yet, so it cannot say what   │       Identity, provenance, and
-  is installed. Register a local source in Sources to prepare for installation  │  installation paths appear here once
-                               in a later release.                              │    installation inventory exists.
-                                                                                │
-                                                                                │
-                                                                                │
-                                                                                │
-                                                                                │
-                                                                                │
-                                                                                │
-                                                                                │
-                                                                                │
-                                                                                │
-                                                                                │
-                                                                                │
-                                                                                │
-                                                                                │
- 2 Sources   s Settings   ? Help   q Quit
+ Tab/Shift-Tab Region   2 Sources   s Settings   ? Help   q Quit

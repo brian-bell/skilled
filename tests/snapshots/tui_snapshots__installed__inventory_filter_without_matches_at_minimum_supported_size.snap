@@ -1,0 +1,28 @@
+---
+source: tests/tui_snapshots.rs
+expression: "normalize_inventory(&temporary, render(&app, 80, 24))"
+---
+ ◆ skilled   global                               ● ready · 1 source registered
+▌Inventory  2 Sources  Updates (soon)  Doctor (soon)
+▌ Global inventory  0 of 3 skills
+Filter: nothing
+Roots: Claude Code 2 installed · Codex 2 installed · OpenCode no root
+────────────────────────────────────────────────────────────────────────────────
+
+
+
+
+
+
+                                        ⌕
+
+                           No skills match the filter
+
+       Press Esc to clear the filter and show every installed skill again.
+
+
+
+
+
+
+ Tab/Shift-Tab Region   / Filter   2 Sources   s Settings   ? Help   Esc Back …

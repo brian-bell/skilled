@@ -35,15 +35,11 @@ pub(crate) enum Tone {
     Warning,
     /// Unusable, or blocked from a safe repair.
     Critical,
-    /// Present on disk but not owned by Skilled.
+    /// Present on disk and structurally sound, but not owned by Skilled.
     ///
-    /// No scanner reports this state yet. The tone is defined now so the
-    /// installation-inventory slice inherits a settled presentation instead of
-    /// inventing one, and its rendering is covered by component tests.
-    #[allow(
-        dead_code,
-        reason = "installation scanning, which produces this state, is a later slice"
-    )]
+    /// Distinct from every other tone because unmanaged content is neither a
+    /// problem to fix nor an installation to claim; it is observed and left
+    /// alone.
     Unmanaged,
     /// Absent, or not yet determined.
     Inactive,
