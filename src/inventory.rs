@@ -109,12 +109,22 @@ impl Finding {
 /// The registered source variant an installation was resolved to.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VariantResolution {
+    source_id: i64,
     source_label: String,
     catalog_relative_path: PathBuf,
     variant_relative_path: PathBuf,
 }
 
 impl VariantResolution {
+    /// The registered source's stable identity.
+    ///
+    /// Labels come from the checkout's directory name, so two repositories can
+    /// share one. Anything deciding whether two installations came from the
+    /// same source must compare this.
+    pub fn source_id(&self) -> i64 {
+        self.source_id
+    }
+
     pub fn source_label(&self) -> &str {
         &self.source_label
     }
@@ -241,13 +251,12 @@ impl InventoryRow {
     pub fn provenance(&self) -> RowProvenance<'_> {
         let mut resolved = self
             .observations()
-            .filter_map(|observation| observation.resolution())
-            .map(VariantResolution::source_label);
+            .filter_map(|observation| observation.resolution());
         let Some(first) = resolved.next() else {
             return RowProvenance::Unregistered;
         };
-        if resolved.all(|label| label == first) {
-            RowProvenance::Source(first)
+        if resolved.all(|resolution| resolution.source_id() == first.source_id()) {
+            RowProvenance::Source(first.source_label())
         } else {
             RowProvenance::Divergent
         }
@@ -815,6 +824,15 @@ impl ResolutionIndex {
     fn of(sources: &[RegisteredSource], budget: &mut InspectionBudget) -> (Self, bool) {
         let mut by_canonical_path = HashMap::new();
         for source in sources {
+            // Candidate paths were validated when the source was registered,
+            // but the filesystem has moved on since. A candidate that now
+            // resolves outside its checkout — because a directory along the
+            // way became a link elsewhere — is not that source's content, and
+            // adopting it would let anything outside the source be reported as
+            // managed by it.
+            let Ok(canonical_source) = source.git_top_level().canonicalize() else {
+                continue;
+            };
             for catalog in source
                 .catalogs()
                 .iter()
@@ -831,9 +849,13 @@ impl ResolutionIndex {
                     else {
                         continue;
                     };
+                    if !canonical.starts_with(&canonical_source) {
+                        continue;
+                    }
                     by_canonical_path
                         .entry(canonical)
                         .or_insert_with(|| VariantResolution {
+                            source_id: source.id(),
                             source_label: source.label().to_owned(),
                             catalog_relative_path: catalog.relative_path().to_path_buf(),
                             variant_relative_path: candidate.relative_path().to_path_buf(),

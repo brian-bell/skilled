@@ -2326,7 +2326,7 @@ fn help_commands(context: View, app: &SkilledApp) -> Vec<HelpCommand> {
                     description: "show everything observed about the selection",
                 });
             }
-            if !app.inventory().rows().is_empty() {
+            if app.can_filter_inventory() {
                 commands.push(HelpCommand {
                     key: "/",
                     label: "Filter",
@@ -2521,7 +2521,7 @@ fn key_hints(app: &SkilledApp) -> Vec<KeyHint> {
             if inventory_can_advance(app) {
                 hints.push(KeyHint::essential("Enter", "Open"));
             }
-            if !app.inventory().rows().is_empty() {
+            if app.can_filter_inventory() {
                 hints.push(KeyHint::new("/", "Filter"));
             }
             hints.extend([

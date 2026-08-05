@@ -665,6 +665,29 @@ mod installed {
         type_filter(&mut app, "unmanaged");
         assert_eq!(names(&app), ["foreign"]);
     }
+    /// The query box is drawn above the table, so a compact terminal showing
+    /// only the detail region has nowhere to draw it — and a field the user
+    /// cannot see must not take every printable key.
+    #[test]
+    fn the_detail_region_cannot_open_a_filter_it_has_nowhere_to_show() {
+        let temporary = tempfile::tempdir().expect("temporary application directory");
+        let mut app = inventory_app(&temporary);
+        app.update(Action::AdvanceInventoryPane);
+        assert_eq!(app.inventory_pane(), InventoryPane::Details);
+        assert!(!app.can_filter_inventory());
+
+        app.update(Action::BeginInventoryFilter);
+
+        assert!(!app.inventory_filter_active());
+        assert_eq!(app.inventory_filter(), "");
+
+        // Back in the list region it opens as usual.
+        app.update(Action::Back);
+        assert!(app.can_filter_inventory());
+        app.update(Action::BeginInventoryFilter);
+        assert!(app.inventory_filter_active());
+    }
+
     #[test]
     fn the_filter_bar_owns_the_keyboard_while_it_is_open() {
         let temporary = tempfile::tempdir().expect("temporary application directory");

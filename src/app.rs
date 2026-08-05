@@ -357,6 +357,13 @@ impl SkilledApp {
         self.inventory_filter_active
     }
 
+    /// Whether the filter box can be opened from where the user is standing.
+    pub fn can_filter_inventory(&self) -> bool {
+        self.view == View::Inventory
+            && self.inventory_pane == InventoryPane::Skills
+            && !self.inventory.rows().is_empty()
+    }
+
     /// The rows the current filter admits, in snapshot order.
     pub fn filtered_rows(&self) -> Vec<&InventoryRow> {
         let rows = self.inventory.rows();
@@ -593,9 +600,12 @@ impl SkilledApp {
                 Vec::new()
             }
             Action::BeginInventoryFilter => {
-                // Filtering an empty inventory would lock the keyboard on a
-                // list that cannot narrow.
-                if self.view == View::Inventory && !self.inventory.rows().is_empty() {
+                // The query box is drawn above the table, and a compact
+                // terminal showing the detail region has no table to draw it
+                // above. Opening it there would take every printable key for a
+                // field the user cannot see. Filtering an empty inventory is
+                // refused for the same reason: nothing would narrow.
+                if self.can_filter_inventory() {
                     self.inventory_filter_active = true;
                 }
                 Vec::new()

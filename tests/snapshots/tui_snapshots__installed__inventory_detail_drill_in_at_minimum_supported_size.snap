@@ -25,4 +25,4 @@ expression: "normalize_inventory(&temporary, render(&app, 80, 24))"
  ──────────────────────────────────────────────────────────────────────────────
  - Claude Code, OpenCode
 
- Tab/Shift-Tab Region   / Filter   2 Sources   s Settings   q Quit   Esc Back …
+ Tab/Shift-Tab Region   2 Sources   s Settings   ? Help   q Quit   Esc Back

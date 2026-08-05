@@ -2292,9 +2292,12 @@ mod installed {
         assert!(detail.contains("▌ Details  alpha"), "{detail}");
         assert!(detail.contains("Object: symbolic link"), "{detail}");
         assert!(!detail.contains("Global inventory"), "{detail}");
+        // Neither selection nor filtering acts in the detail region — the
+        // query box is drawn above the table, which is not on screen — so the
+        // bar must not advertise either.
         assert_eq!(
             row_text(&buffer(&app, 80, 24), 23),
-            " Tab/Shift-Tab Region   / Filter   2 Sources   s Settings   q Quit   Esc Back …"
+            " Tab/Shift-Tab Region   2 Sources   s Settings   ? Help   q Quit   Esc Back"
         );
 
         app.update(Action::Back);
