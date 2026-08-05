@@ -2173,6 +2173,41 @@ impl Harness {
         app
     }
 
+    /// One `gamma` skill linked from each of two registered checkouts, so
+    /// both installations resolve but to different sources.
+    ///
+    /// Naming either one would misstate the other, which is what the row
+    /// reports instead.
+    #[cfg(unix)]
+    fn divergent_provenance_inventory(&self) -> SkilledApp {
+        let home = self.directory.path().join("home");
+        let mut app = self.completed_setup();
+        let library = self.registered_gamma_source(&mut app, "library");
+        let annex = self.registered_gamma_source(&mut app, "annex");
+
+        let claude = home.join(".claude/skills");
+        let codex = home.join(".agents/skills");
+        fs::create_dir_all(&claude).expect("create Claude Code root");
+        fs::create_dir_all(&codex).expect("create Codex root");
+        symlink(library.join("skills/gamma"), claude.join("gamma"));
+        symlink(annex.join("skills/gamma"), codex.join("gamma"));
+
+        scan_installations(&mut app);
+        app
+    }
+
+    /// A committed checkout carrying `gamma`, registered as a source, whose
+    /// path the caller installs from.
+    #[cfg(unix)]
+    fn registered_gamma_source(&self, app: &mut SkilledApp, name: &str) -> PathBuf {
+        let repository = self.directory.path().join("home").join(name);
+        write_skill_fixture(&repository.join("skills/gamma"), "gamma");
+        create_repository(&repository);
+        let preview = app.preview_source(&repository).expect("preview source");
+        app.confirm_source(preview).expect("register source");
+        repository
+    }
+
     /// The registration and installations the two provenance fixtures share,
     /// stopping short of the scan so the checkout can still be moved.
     #[cfg(unix)]
@@ -2409,6 +2444,19 @@ mod installed {
             style_in_row(&mixed, gamma, "mixed").fg,
             Some(TEXT),
             "a mixed row places part of itself with a registered source"
+        );
+
+        // "multiple sources" names none of them either, but every one of its
+        // installations came from a registered source. Sixteen cells of label
+        // need a wider terminal than the rest of these: the Source column
+        // ellipsizes it at the minimum size, and the row is found by its
+        // marker because the detail region names the selected skill too.
+        let divergent = buffer(&Harness::new().divergent_provenance_inventory(), 180, 40);
+        let gamma = row_starting_with(&divergent, "▌ gamma");
+        assert_eq!(
+            style_in_row(&divergent, gamma, "multiple sources").fg,
+            Some(TEXT),
+            "a divergent row places all of itself with registered sources"
         );
 
         let unverified = buffer(&Harness::new().unverified_provenance_inventory(), 80, 24);
