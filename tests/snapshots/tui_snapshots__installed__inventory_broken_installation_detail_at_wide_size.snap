@@ -8,13 +8,13 @@ expression: "normalize_inventory(&temporary, render(&app, 120, 40))"
 Roots: Claude Code 2 installed · Codex 2 installed · OpenCode no root           │ ─────────────────────────────────────
 ────────────────────────────────────────────────────────────────────────────────│ SKILL
   SKILL                  SOURCE          CLAUDE  CODEX  OPENCODE  HEALTH        │ ─────────────────────────────────────
-  alpha                  library         ✓       ✓      -         ✓ healthy     │ Name: broken
-▌ broken                 not registered  ×       -      -         × broken      │ Health: × broken
+  alpha                  library         ✓       ✓      -         ✓ healthy     │ broken
+▌ broken                 not registered  ×       -      -         × broken      │ × broken
   copied                 not registered  -       U      -         U unmanaged   │ SOURCE
                                                                                 │ ─────────────────────────────────────
                                                                                 │ Not resolved to any registered
                                                                                 │ source; Skilled does not manage it.
-                                                                                │ CLAUDE CODE
+                                                                                │ CLAUDE CODE  × broken
                                                                                 │ ─────────────────────────────────────
                                                                                 │ Finding: install.dangling_symlink ·
                                                                                 │ critical

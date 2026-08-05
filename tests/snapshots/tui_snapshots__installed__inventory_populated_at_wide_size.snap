@@ -8,20 +8,20 @@ expression: "normalize_inventory(&temporary, render(&app, 120, 40))"
 Roots: Claude Code 2 installed · Codex 2 installed · OpenCode no root           │ ─────────────────────────────────────
 ────────────────────────────────────────────────────────────────────────────────│ SKILL
   SKILL                  SOURCE          CLAUDE  CODEX  OPENCODE  HEALTH        │ ─────────────────────────────────────
-▌ alpha                  library         ✓       ✓      -         ✓ healthy     │ Name: alpha
-  broken                 not registered  ×       -      -         × broken      │ Health: ✓ healthy
+▌ alpha                  library         ✓       ✓      -         ✓ healthy     │ alpha
+  broken                 not registered  ×       -      -         × broken      │ ✓ healthy
   copied                 not registered  -       U      -         U unmanaged   │ Description: alpha fixture
                                                                                 │ SOURCE
                                                                                 │ ─────────────────────────────────────
                                                                                 │ Source: library
-                                                                                │ CLAUDE CODE
+                                                                                │ CLAUDE CODE  ✓ healthy
                                                                                 │ ─────────────────────────────────────
                                                                                 │ Path: ~/.claude/skills/alpha
                                                                                 │ Object: symbolic link
                                                                                 │ Variant: skills · skills/alpha
                                                                                 │ Target: ~/library/skills/alpha
                                                                                 │ Validation: ✓ valid as alpha
-                                                                                │ CODEX
+                                                                                │ CODEX  ✓ healthy
                                                                                 │ ─────────────────────────────────────
                                                                                 │ Path: ~/.agents/skills/alpha
                                                                                 │ Object: symbolic link

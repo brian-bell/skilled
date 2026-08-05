@@ -161,6 +161,17 @@ pub(crate) fn section_title() -> Style {
     Style::default().fg(CYAN).add_modifier(Modifier::BOLD)
 }
 
+/// A section heading inside the detail region (prototype `.detail-kicker`).
+///
+/// The prototype sets its kickers in faint grey; a heading that names the
+/// section under it is information-bearing, so this deviates to `MUTED` to
+/// hold 4.5:1, the same reasoning recorded for the inventory table headings.
+/// Cyan stays reserved for focus and selection accents inside a pane, which is
+/// why this is a role of its own rather than [`section_title()`].
+pub(crate) fn detail_section_title() -> Style {
+    Style::default().fg(MUTED)
+}
+
 /// A setup step that the user has already completed.
 pub(crate) fn progress_complete() -> Style {
     Style::default().fg(GREEN)
@@ -206,13 +217,6 @@ pub(crate) fn dialog_surface() -> Style {
 ///
 /// Background only, like `chrome_band()`: the rows inside keep their own
 /// foreground roles and inherit this surface.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "consumed by the detail-pane slice (skilled-2k3.15.4)"
-    )
-)]
 pub(crate) fn detail_surface() -> Style {
     Style::default().bg(DETAIL_SURFACE)
 }
@@ -375,6 +379,7 @@ mod tests {
             ("nav_count()", nav_count()),
             ("nav_note()", nav_note()),
             ("section_title()", section_title()),
+            ("detail_section_title()", detail_section_title()),
             ("progress_complete()", progress_complete()),
             ("progress_active()", progress_active()),
             ("progress_pending()", progress_pending()),

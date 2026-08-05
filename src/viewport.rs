@@ -11,9 +11,18 @@ use ratatui::layout::{Constraint, Layout, Rect};
 /// side by side without either becoming unreadable.
 pub(crate) const WIDE_MINIMUM_WIDTH: u16 = 100;
 
-/// The detail region's share of a wide workspace, matching the prototype's
-/// fixed 400px aside.
+/// The detail region's share of a wide workspace.
 pub(crate) const DETAIL_REGION_WIDTH: u16 = 40;
+
+/// The workspace width from which the detail region takes its full share.
+pub(crate) const DETAIL_REGION_WIDE_THRESHOLD: u16 = 140;
+
+/// The detail region's share of a workspace wide enough to spare it, matching
+/// the prototype's fixed 400px aside at roughly eight pixels a cell.
+///
+/// Below the threshold the aside is narrowed instead of the table: the columns
+/// beside it are the reason the workspace is split at all.
+pub(crate) const DETAIL_REGION_WIDTH_WIDE: u16 = 50;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Viewport {
@@ -31,15 +40,26 @@ pub(crate) fn classify(area: Rect) -> Viewport {
     }
 }
 
+/// How many columns the detail region takes from a workspace of this width.
+pub(crate) fn detail_region_width(workspace_width: u16) -> u16 {
+    if workspace_width >= DETAIL_REGION_WIDE_THRESHOLD {
+        DETAIL_REGION_WIDTH_WIDE
+    } else {
+        DETAIL_REGION_WIDTH
+    }
+}
+
 /// Split a workspace into its primary region and, when the viewport allows it,
 /// a detail region.
 pub(crate) fn workspace_regions(area: Rect) -> (Rect, Option<Rect>) {
     match classify(area) {
         Viewport::Compact => (area, None),
         Viewport::Wide => {
-            let [primary, detail] =
-                Layout::horizontal([Constraint::Min(1), Constraint::Length(DETAIL_REGION_WIDTH)])
-                    .areas(area);
+            let [primary, detail] = Layout::horizontal([
+                Constraint::Min(1),
+                Constraint::Length(detail_region_width(area.width)),
+            ])
+            .areas(area);
             (primary, Some(detail))
         }
     }
@@ -85,5 +105,28 @@ mod tests {
         assert_eq!(detail.width, DETAIL_REGION_WIDTH);
         assert_eq!(primary.height, workspace.height);
         assert_eq!(detail.height, workspace.height);
+    }
+
+    #[test]
+    fn a_workspace_below_the_wide_detail_threshold_keeps_the_narrow_detail() {
+        assert_eq!(detail_region_width(100), DETAIL_REGION_WIDTH);
+        assert_eq!(detail_region_width(139), DETAIL_REGION_WIDTH);
+    }
+
+    #[test]
+    fn a_workspace_at_or_above_the_threshold_widens_the_detail() {
+        assert_eq!(detail_region_width(140), DETAIL_REGION_WIDTH_WIDE);
+        assert_eq!(detail_region_width(180), DETAIL_REGION_WIDTH_WIDE);
+    }
+
+    #[test]
+    fn the_widened_detail_still_tiles_the_workspace() {
+        let workspace = area(180);
+        let (primary, detail) = workspace_regions(workspace);
+        let detail = detail.expect("wide workspace has a detail region");
+
+        assert_eq!(detail.width, DETAIL_REGION_WIDTH_WIDE);
+        assert_eq!(primary.width + detail.width, workspace.width);
+        assert_eq!(detail.x, primary.x + primary.width);
     }
 }

@@ -2527,10 +2527,7 @@ mod installed {
         // columns for width, both are given whole.
         app.update(Action::AdvanceInventoryPane);
         let detail = text(&buffer(&app, 80, 24));
-        assert!(
-            detail.contains(&format!("Name: {LONG_SKILL_NAME}")),
-            "{detail}"
-        );
+        assert!(detail.contains(LONG_SKILL_NAME), "{detail}");
         assert!(
             detail.contains(&format!("Source: {LONG_SOURCE_DIRECTORY}")),
             "{detail}"
@@ -2679,6 +2676,121 @@ mod installed {
             style_in_row(&screen, row, "- not a skill").fg,
             Some(Color::Rgb(0x84, 0x91, 0xa1))
         );
+    }
+
+    /// The detail region leads with the skill's own name, set as a title, and
+    /// the health badge beneath it: the badge words say what they mean, so
+    /// neither line needs a field label repeating the column headings.
+    #[test]
+    fn the_detail_region_leads_with_the_skill_name_and_its_health() {
+        const TEXT_STRONG: Color = Color::Rgb(0xf2, 0xf6, 0xfa);
+        const GREEN: Color = Color::Rgb(0x8b, 0xd4, 0x9c);
+
+        let harness = Harness::new();
+        let app = harness.installed_inventory();
+
+        let screen = buffer(&app, 120, 40);
+        let rendered = text(&screen);
+        assert!(!rendered.contains("Name: alpha"), "{rendered}");
+        assert!(!rendered.contains("Health: "), "{rendered}");
+
+        // The title sits between its kicker and the badge.
+        let kicker = row_containing(&screen, "│ SKILL");
+        let title = row_containing(&screen, "│ alpha");
+        let badge = row_containing(&screen, "│ ✓ healthy");
+        assert_eq!(title, kicker + 2, "{rendered}");
+        assert_eq!(badge, title + 1, "{rendered}");
+
+        // By position after the separator: the table beside the detail region
+        // names the same skill on the same row.
+        let title_style = style_following(&screen, title, "│ ");
+        assert_eq!(title_style.fg, Some(TEXT_STRONG));
+        assert!(title_style.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(style_following(&screen, badge, "│ ").fg, Some(GREEN));
+    }
+
+    /// The detail region sits on its own surface, so the split reads as two
+    /// regions rather than one table with an annotation beside it. The
+    /// prototype keeps that surface in its narrow layout too, so the compact
+    /// drill-in carries it as well.
+    #[test]
+    fn the_detail_region_sits_on_its_own_surface() {
+        const DETAIL_SURFACE: Color = Color::Rgb(0x0c, 0x11, 0x17);
+
+        let harness = Harness::new();
+        let mut app = harness.installed_inventory();
+
+        let screen = buffer(&app, 120, 40);
+        let row = row_containing(&screen, "│ SKILL");
+        let line = row_text(&screen, row);
+        let separator = line.find('│').expect("detail separator");
+        let separator = line[..separator].chars().count() as u16;
+        assert_eq!(
+            screen[(separator + 2, row)].style().bg,
+            Some(DETAIL_SURFACE)
+        );
+        // The table keeps the application surface: the separator is a boundary
+        // between two backgrounds, not a line drawn on one.
+        assert_ne!(screen[(2, row)].style().bg, Some(DETAIL_SURFACE));
+
+        app.update(Action::AdvanceInventoryPane);
+        let drilled = buffer(&app, 80, 24);
+        let row = row_containing(&drilled, "SKILL");
+        assert_eq!(drilled[(2, row)].style().bg, Some(DETAIL_SURFACE));
+    }
+
+    /// Each agent's section says how that agent's own installation stands, the
+    /// terminal equivalent of the prototype's tone-coloured section borders.
+    /// The heading naming the agent stays muted; only the badge carries tone.
+    #[test]
+    fn each_agent_section_heading_carries_that_agents_own_health() {
+        const MUTED: Color = Color::Rgb(0x84, 0x91, 0xa1);
+        const VIOLET: Color = Color::Rgb(0xc7, 0x9b, 0xf2);
+        const RED: Color = Color::Rgb(0xee, 0x6b, 0x73);
+
+        let harness = Harness::new();
+        let mut app = harness.installed_inventory();
+
+        // `broken`: one Claude Code installation whose link dangles.
+        app.update(Action::MoveInventorySelection(1));
+        let screen = buffer(&app, 120, 40);
+        let heading = row_containing(&screen, "│ CLAUDE CODE");
+        let line = row_text(&screen, heading);
+        assert!(line.contains("CLAUDE CODE  × broken"), "{line:?}");
+        assert_eq!(
+            style_in_row(&screen, heading, "CLAUDE CODE").fg,
+            Some(MUTED)
+        );
+        assert_eq!(style_in_row(&screen, heading, "× broken").fg, Some(RED));
+
+        // `copied`: a Codex installation that resolved to no registered source.
+        app.update(Action::MoveInventorySelection(1));
+        let screen = buffer(&app, 120, 40);
+        let heading = row_containing(&screen, "│ CODEX");
+        let line = row_text(&screen, heading);
+        assert!(line.contains("CODEX  U unmanaged"), "{line:?}");
+        assert_eq!(style_in_row(&screen, heading, "CODEX").fg, Some(MUTED));
+        assert_eq!(
+            style_in_row(&screen, heading, "U unmanaged").fg,
+            Some(VIOLET)
+        );
+    }
+
+    /// The detail region's kickers name their sections, so they are set in the
+    /// readable muted grey rather than the cyan reserved for focus accents.
+    #[test]
+    fn detail_section_headings_are_muted_rather_than_a_focus_accent() {
+        const MUTED: Color = Color::Rgb(0x84, 0x91, 0xa1);
+
+        let harness = Harness::new();
+        let app = harness.installed_inventory();
+
+        let screen = buffer(&app, 120, 40);
+        let kicker = row_containing(&screen, "│ SKILL");
+        assert_eq!(style_in_row(&screen, kicker, "SKILL").fg, Some(MUTED));
+
+        let source = row_containing(&screen, "│ SOURCE");
+        assert_eq!(style_in_row(&screen, source, "SOURCE").fg, Some(MUTED));
     }
 
     /// Detail that outgrows its region says so in words and in a tone, and
