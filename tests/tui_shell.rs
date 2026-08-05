@@ -1786,6 +1786,34 @@ fn sources_distinguish_clean_and_unavailable_repositories_semantically() {
     );
 }
 
+/// The generic empty state is reserved for a source with no catalogs at all.
+/// A catalog that scanned clean but holds nothing is still named, with the
+/// `no variants` line beneath its label: flattening it into the empty state
+/// would hide which catalogs the source has and that each was read.
+#[test]
+fn an_emptied_catalog_is_named_rather_than_flattened_into_the_empty_state() {
+    let harness = Harness::new();
+    let repository = harness.directory.path().join("source");
+    create_source_fixture(&repository);
+    let environment = harness.environment();
+    let mut app = harness.completed_setup();
+    let preview = app.preview_source(&repository).expect("preview source");
+    app.confirm_source(preview).expect("register source");
+    drop(app);
+    fs::remove_dir_all(repository.join("skills/portable")).expect("empty the catalog");
+    let mut reopened = SkilledApp::open(environment).expect("reopen application");
+    reopened.update(Action::OpenSources);
+    reopened.update(Action::AdvanceSourcesPane);
+
+    let rendered = text(&buffer(&reopened, 80, 24));
+    assert!(rendered.contains("skills · "), "{rendered}");
+    assert!(rendered.contains("no variants"), "{rendered}");
+    assert!(!rendered.contains("No variants found"), "{rendered}");
+    // The hint belongs to catalog errors, and this catalog read cleanly.
+    assert!(!rendered.contains("Open Details"), "{rendered}");
+    assert!(rendered.contains("0 found"), "{rendered}");
+}
+
 #[test]
 fn sources_surface_catalog_scan_errors_in_variants_and_details() {
     let harness = Harness::new();

@@ -1566,12 +1566,20 @@ fn render_source_variants(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
         return;
     }
 
-    if variants.is_empty() && catalog_error_count == 0 {
+    // Reserved for a source with no catalogs at all: a catalog that scanned
+    // clean but holds nothing is still named by the grouping below, with the
+    // `no variants` line beneath its label, because flattening it into this
+    // state would hide which catalogs the source has and that each was read.
+    // Registration refuses a source with no included catalog, so this is a
+    // defensive fallback — and it says nowhere to look, not nothing found,
+    // because a source with no roots was never scanned at all.
+    if source.catalogs().is_empty() {
         frame.render_widget(
             components::empty_state(
                 "·",
-                "No variants found",
-                "The selected source contains no immediate skill definitions.",
+                "No catalog roots registered",
+                "This source has no confirmed catalog roots, so there was \
+                 nowhere to look for variants.",
                 inner,
             ),
             inner,
@@ -1630,7 +1638,11 @@ fn render_source_variants(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
     );
 
     if variants.is_empty() {
-        lines.push(Line::from("Open Details for the catalog error."));
+        // The hint belongs to catalog errors: an all-empty source that read
+        // cleanly has nothing further for Details to explain.
+        if catalog_error_count > 0 {
+            lines.push(Line::from("Open Details for the catalog error."));
+        }
         frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
         return;
     }
