@@ -2318,10 +2318,37 @@ mod installed {
             style_in_row(&screen, alpha, "-").fg,
             Some(Color::Rgb(0x84, 0x91, 0xa1))
         );
-        assert!(rendered.contains("Skill "), "{rendered}");
-        for heading in ["Claude", "Codex", "OpenCode", "Health", "Source"] {
+        assert!(rendered.contains("SKILL "), "{rendered}");
+        for heading in ["CLAUDE", "CODEX", "OPENCODE", "HEALTH", "SOURCE"] {
             assert!(rendered.contains(heading), "{heading} in\n{rendered}");
         }
+    }
+
+    /// A placeholder in the Source column is not a source name, so it is set
+    /// back in the muted tone; a real source label keeps the body text.
+    #[test]
+    fn the_source_column_sets_back_what_is_not_a_source_name() {
+        const MUTED: Color = Color::Rgb(0x84, 0x91, 0xa1);
+        const TEXT: Color = Color::Rgb(0xd7, 0xde, 0xe7);
+
+        let harness = Harness::new();
+        let app = harness.installed_inventory();
+
+        let screen = buffer(&app, 80, 24);
+
+        let copied = row_containing(&screen, "copied");
+        assert_eq!(
+            style_in_row(&screen, copied, "not registered").fg,
+            Some(MUTED),
+            "an unregistered row should not read as a source name"
+        );
+
+        let alpha = row_containing(&screen, "alpha");
+        assert_eq!(
+            style_in_row(&screen, alpha, "library").fg,
+            Some(TEXT),
+            "a registered source label keeps the body text"
+        );
     }
 
     #[test]

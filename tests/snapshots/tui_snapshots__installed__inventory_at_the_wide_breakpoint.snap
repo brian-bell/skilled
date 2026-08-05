@@ -8,7 +8,7 @@ expression: screen
 Roots: Claude Code 2 installed · Codex 2 installed ·        │ ─────────────────────────────────────
 OpenCode no root                                            │ SKILL
 ────────────────────────────────────────────────────────────│ ─────────────────────────────────────
-  Skill              Claude  Codex  OpenCode  Health        │ Name: alpha
+  SKILL              CLAUDE  CODEX  OPENCODE  HEALTH        │ Name: alpha
 ▌ alpha              ✓       ✓      -         ✓ healthy     │ Health: ✓ healthy
   broken             ×       -      -         × broken      │ Description: alpha fixture
   copied             -       U      -         U unmanaged   │ SOURCE
