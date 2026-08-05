@@ -67,7 +67,10 @@ not an acceptable cue.
 - `src/theme.rs`: semantic presentation tokens translated from the prototype
   palette. Every colour in the application is defined here; a screen asks for a
   role such as `Tone::Warning` or `nav_active()` rather than naming a colour. A
-  test enforces that `Color::` appears in no other module.
+  test enforces that `Color::` appears in no other module. Information-bearing
+  text must meet WCAG 4.5:1 against its surface; a theme unit test guards
+  every such role, and the two accepted `FAINT` exemptions (`empty_glyph`,
+  `nav_disabled`) are recorded on their doc comments.
 - `src/viewport.rs`: responsive viewport classes and workspace region geometry.
   Screens ask whether the terminal is `Compact` or `Wide` instead of comparing
   raw widths.
