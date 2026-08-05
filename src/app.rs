@@ -175,13 +175,6 @@ impl UpdateResult {
     }
 }
 
-/// The Source column's word for a row no registered source accounts for.
-///
-/// Distinct from the health word "unmanaged", which describes the state of the
-/// content rather than its provenance: a broken installation is unregistered
-/// too, but it is not unmanaged.
-pub(crate) const UNREGISTERED_SOURCE: &str = "not registered";
-
 /// The longest inventory filter query Skilled will hold.
 ///
 /// The query is echoed in the workspace header, so an unbounded one would wrap
@@ -708,11 +701,7 @@ impl SkilledApp {
             .filter(|(_, row)| {
                 needle.is_empty()
                     || row.name().to_lowercase().contains(&needle)
-                    || row
-                        .source_label()
-                        .unwrap_or(UNREGISTERED_SOURCE)
-                        .to_lowercase()
-                        .contains(&needle)
+                    || row.provenance().label().to_lowercase().contains(&needle)
                     || row.health().label().contains(needle.as_str())
             })
             .map(|(index, _)| index)

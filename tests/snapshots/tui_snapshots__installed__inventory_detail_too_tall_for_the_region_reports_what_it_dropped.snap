@@ -14,15 +14,15 @@ expression: screen
  SOURCE
  ──────────────────────────────────────────────────────────────────────────────
  Source: library
- Catalog: skills
- Variant: skills/alpha
  CLAUDE CODE
  ──────────────────────────────────────────────────────────────────────────────
  Path: ~/.claude/skills/alpha
  Object: symbolic link
+ Variant: skills · skills/alpha
  Target: ~/library/skills/alpha
  Validation: ✓ valid as alpha
  CODEX
  ──────────────────────────────────────────────────────────────────────────────
+ Path: ~/.agents/skills/alpha
  ! 7 more lines — widen or lengthen the terminal
  Tab/Shift-Tab Region   / Filter   2 Sources   s Settings   q Quit   Esc Back …

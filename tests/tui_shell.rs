@@ -2228,7 +2228,9 @@ mod installed {
         assert!(first.contains("▌ alpha"), "{first}");
         assert!(first.contains("Details  alpha"), "{first}");
         assert!(first.contains("Source: library"), "{first}");
-        assert!(first.contains("Variant: skills/alpha"), "{first}");
+        // Each agent section names the variant it carries, so two agents
+        // installing the same name from different sources cannot be collapsed.
+        assert!(first.contains("Variant: skills · skills/alpha"), "{first}");
         assert!(first.contains("Path: ~/.claude/skills/alpha"), "{first}");
         assert!(first.contains("Object: symbolic link"), "{first}");
 

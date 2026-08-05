@@ -14,18 +14,18 @@ Roots: Claude Code 2 installed · Codex 2 installed · OpenCode no root         
                                                                                 │ SOURCE
                                                                                 │ ─────────────────────────────────────
                                                                                 │ Source: library
-                                                                                │ Catalog: skills
-                                                                                │ Variant: skills/alpha
                                                                                 │ CLAUDE CODE
                                                                                 │ ─────────────────────────────────────
                                                                                 │ Path: ~/.claude/skills/alpha
                                                                                 │ Object: symbolic link
+                                                                                │ Variant: skills · skills/alpha
                                                                                 │ Target: ~/library/skills/alpha
                                                                                 │ Validation: ✓ valid as alpha
                                                                                 │ CODEX
                                                                                 │ ─────────────────────────────────────
                                                                                 │ Path: ~/.agents/skills/alpha
                                                                                 │ Object: symbolic link
+                                                                                │ Variant: skills · skills/alpha
                                                                                 │ Target: ~/library/skills/alpha
                                                                                 │ Validation: ✓ valid as alpha
                                                                                 │ NOT INSTALLED

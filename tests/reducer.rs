@@ -619,10 +619,8 @@ mod installed {
             Some(InstallationHealth::Healthy)
         );
         assert_eq!(
-            app.inventory()
-                .row("variant-0")
-                .and_then(|row| row.source_label()),
-            Some("library")
+            app.inventory().row("variant-0").map(|row| row.provenance()),
+            Some(skilled::inventory::RowProvenance::Source("library"))
         );
     }
     #[test]

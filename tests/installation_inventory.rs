@@ -14,7 +14,9 @@ use std::{
 
 use skilled::{
     AgentKind, AppEnvironment, SkilledApp,
-    inventory::{Finding, FindingSeverity, InstallationHealth, InstallationObject, RootStatus},
+    inventory::{
+        Finding, FindingSeverity, InstallationHealth, InstallationObject, RootStatus, RowProvenance,
+    },
 };
 
 /// The exact global roots documented by each agent adapter.
@@ -42,7 +44,7 @@ fn a_symlink_to_a_registered_variant_resolves_to_its_source_catalog_and_variant(
 
     let row = inventory.row("portable").expect("portable row");
     assert_eq!(row.health(), InstallationHealth::Healthy);
-    assert_eq!(row.source_label(), Some("library"));
+    assert_eq!(row.provenance(), RowProvenance::Source("library"));
     let observation = row
         .observation(AgentKind::ClaudeCode)
         .expect("Claude Code observation");
@@ -165,7 +167,7 @@ fn a_dangling_symlink_is_broken_and_reports_a_critical_finding() {
     let row = app.inventory().row("vanished").expect("dangling row");
 
     assert_eq!(row.health(), InstallationHealth::Broken);
-    assert_eq!(row.source_label(), None);
+    assert_eq!(row.provenance(), RowProvenance::Unregistered);
     let observation = row
         .observation(AgentKind::ClaudeCode)
         .expect("dangling observation");
@@ -198,7 +200,7 @@ fn a_symlink_to_a_valid_directory_outside_every_registered_source_is_unmanaged()
     let row = app.inventory().row("foreign").expect("foreign row");
 
     assert_eq!(row.health(), InstallationHealth::Unmanaged);
-    assert_eq!(row.source_label(), None);
+    assert_eq!(row.provenance(), RowProvenance::Unregistered);
     let observation = row
         .observation(AgentKind::ClaudeCode)
         .expect("foreign observation");
@@ -221,7 +223,7 @@ fn a_symlink_into_a_registered_source_at_a_non_candidate_path_is_never_claimed_a
     let row = app.inventory().row("stray").expect("stray row");
 
     assert_eq!(row.health(), InstallationHealth::Unmanaged);
-    assert_eq!(row.source_label(), None);
+    assert_eq!(row.provenance(), RowProvenance::Unregistered);
     assert!(
         row.observation(AgentKind::ClaudeCode)
             .expect("stray observation")
@@ -326,6 +328,45 @@ fn a_plain_file_child_is_listed_without_being_read_as_a_broken_skill() {
 }
 
 #[test]
+fn a_name_installed_from_two_sources_names_neither_as_the_row_source() {
+    let fixture = Fixture::new();
+    let first = fixture.source("library", &["shared"]);
+    let second = fixture.source("archive", &["shared"]);
+    let mut app = fixture.registered(&first);
+    let preview = app.preview_source(&second).expect("preview second source");
+    app.confirm_source(preview).expect("register second source");
+    drop(app);
+    // The same name, installed for two agents, from two different registered
+    // sources. Both are healthy; neither is the row's source.
+    fixture.install_symlink(
+        AgentKind::ClaudeCode,
+        "shared",
+        &first.join("skills/shared"),
+    );
+    fixture.install_symlink(AgentKind::Codex, "shared", &second.join("skills/shared"));
+
+    let app = fixture.app();
+    let row = app.inventory().row("shared").expect("shared row");
+
+    assert_eq!(row.provenance(), RowProvenance::Divergent);
+    assert_eq!(row.provenance().label(), "multiple sources");
+    assert_eq!(row.health(), InstallationHealth::Healthy);
+    // Each agent still names the source it actually carries.
+    assert_eq!(
+        row.observation(AgentKind::ClaudeCode)
+            .and_then(|observation| observation.resolution())
+            .map(|resolution| resolution.source_label()),
+        Some("library")
+    );
+    assert_eq!(
+        row.observation(AgentKind::Codex)
+            .and_then(|observation| observation.resolution())
+            .map(|resolution| resolution.source_label()),
+        Some("archive")
+    );
+}
+
+#[test]
 fn a_row_takes_the_worst_state_of_the_agents_that_carry_it() {
     let fixture = Fixture::new();
     let repository = fixture.source("library", &["shared"]);
@@ -350,8 +391,9 @@ fn a_row_takes_the_worst_state_of_the_agents_that_carry_it() {
         Some(InstallationHealth::Broken)
     );
     assert_eq!(row.health(), InstallationHealth::Broken);
-    // The healthy installation still names its source.
-    assert_eq!(row.source_label(), Some("library"));
+    // The healthy installation still names its source; the dangling one has
+    // none, and one resolved source is not a disagreement.
+    assert_eq!(row.provenance(), RowProvenance::Source("library"));
 }
 
 #[test]

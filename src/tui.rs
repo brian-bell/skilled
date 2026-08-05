@@ -9,11 +9,11 @@ use ratatui::{
 
 use crate::{
     AgentKind, InventoryPane, SetupStep, SkilledApp, SourcesPane, View,
-    app::{MAX_INVENTORY_FILTER, UNREGISTERED_SOURCE},
+    app::MAX_INVENTORY_FILTER,
     components::{self, KeyHint},
     inventory::{
         Finding, FindingSeverity, InstallationHealth, InstallationObject,
-        InstalledSkillObservation, InventoryRow, RootScan, RootStatus,
+        InstalledSkillObservation, InventoryRow, RootScan, RootStatus, RowProvenance,
     },
     source::{
         CatalogClassification, CatalogProposal, RegisteredSource, SkillCandidate, SkillValidation,
@@ -731,7 +731,7 @@ fn inventory_row_line(
     let mut spans = vec![
         Span::raw(padded(&terminal_safe(row.name()), columns.skill)),
         Span::raw(padded(
-            &terminal_safe(row.source_label().unwrap_or(UNREGISTERED_SOURCE)),
+            &terminal_safe(row.provenance().label()),
             columns.source,
         )),
     ];
@@ -945,27 +945,15 @@ fn inventory_detail_lines(row: &InventoryRow, home: &Path, width: u16) -> Vec<Li
     }
 
     push_detail_section(&mut lines, "SOURCE", width);
-    match row
-        .observations()
-        .find_map(InstalledSkillObservation::resolution)
-    {
-        Some(resolution) => {
-            lines.push(detail_field("Source", resolution.source_label()));
-            lines.push(detail_field_bounded(
-                "Catalog",
-                &resolution.catalog_relative_path().display().to_string(),
-                width,
-                2,
-            ));
-            lines.push(detail_field_bounded(
-                "Variant",
-                &resolution.variant_relative_path().display().to_string(),
-                width,
-                2,
-            ));
-        }
+    match row.provenance() {
+        RowProvenance::Source(label) => lines.push(detail_field("Source", label)),
+        // Naming one of them would misstate the other, so each agent's section
+        // below names its own.
+        RowProvenance::Divergent => lines.push(Line::from(
+            "Installed from more than one registered source; each agent names its own below.",
+        )),
         // Unresolved content is observed, never adopted.
-        None => lines.push(Line::from(
+        RowProvenance::Unregistered => lines.push(Line::from(
             "Not resolved to any registered source; Skilled does not manage it.",
         )),
     }
@@ -976,7 +964,12 @@ fn inventory_detail_lines(row: &InventoryRow, home: &Path, width: u16) -> Vec<Li
             &observation.agent().display_name().to_uppercase(),
             width,
         );
-        lines.extend(observation_lines(observation, home, width));
+        lines.extend(observation_lines(
+            observation,
+            home,
+            width,
+            row.provenance() == RowProvenance::Divergent,
+        ));
     }
 
     // The agents that carry nothing share one line rather than three empty
@@ -1000,6 +993,7 @@ fn observation_lines(
     observation: &InstalledSkillObservation,
     home: &Path,
     width: u16,
+    name_its_source: bool,
 ) -> Vec<Line<'static>> {
     // Findings come first. A region too short to hold the section truncates
     // from the bottom, and the reason an installation is broken is the thing
@@ -1017,6 +1011,23 @@ fn observation_lines(
         2,
     ));
     lines.push(detail_field("Object", observation.object().description()));
+    if let Some(resolution) = observation.resolution() {
+        // Named here only when the agents disagree; otherwise the row's own
+        // SOURCE section above has already said it once.
+        if name_its_source {
+            lines.push(detail_field("Source", resolution.source_label()));
+        }
+        lines.push(detail_field_bounded(
+            "Variant",
+            &format!(
+                "{} · {}",
+                resolution.catalog_relative_path().display(),
+                resolution.variant_relative_path().display()
+            ),
+            width,
+            2,
+        ));
+    }
     if let InstallationObject::Symlink { target } = observation.object() {
         // An unreadable link renders as an empty target; an empty value beside
         // a label reads as "nothing there" rather than "not known".

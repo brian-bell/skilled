@@ -232,14 +232,25 @@ impl InventoryRow {
         self.health
     }
 
-    /// The registered source this row was resolved to, if any.
+    /// Where this row's installations came from, taken together.
     ///
-    /// Agents are consulted in their declared order, so the answer is stable.
-    /// Disagreement between agents is a conflict a later slice reports.
-    pub fn source_label(&self) -> Option<&str> {
-        self.observations()
-            .find_map(|observation| observation.resolution())
-            .map(VariantResolution::source_label)
+    /// A single answer is only given when every resolved installation agrees.
+    /// Two agents carrying the same name from different sources is a real
+    /// arrangement, and naming one of them would misstate the other; which of
+    /// them ought to win is a conflict a later slice decides.
+    pub fn provenance(&self) -> RowProvenance<'_> {
+        let mut resolved = self
+            .observations()
+            .filter_map(|observation| observation.resolution())
+            .map(VariantResolution::source_label);
+        let Some(first) = resolved.next() else {
+            return RowProvenance::Unregistered;
+        };
+        if resolved.all(|label| label == first) {
+            RowProvenance::Source(first)
+        } else {
+            RowProvenance::Divergent
+        }
     }
 
     pub fn findings(&self) -> impl Iterator<Item = &Finding> {
@@ -259,6 +270,28 @@ impl InventoryRow {
                 InstallationObject::Symlink { .. } | InstallationObject::Directory
             )
         })
+    }
+}
+
+/// Where a row's installations came from, taken together.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RowProvenance<'a> {
+    /// No installation resolved to a registered source.
+    Unregistered,
+    /// Every resolved installation came from this source.
+    Source(&'a str),
+    /// Resolved installations came from more than one source.
+    Divergent,
+}
+
+impl RowProvenance<'_> {
+    /// The word the Source column shows, and the filter matches against.
+    pub fn label(&self) -> &str {
+        match self {
+            Self::Unregistered => "not registered",
+            Self::Source(label) => label,
+            Self::Divergent => "multiple sources",
+        }
     }
 }
 
@@ -419,7 +452,11 @@ fn scan_with_budget(
     let (index, complete) = ResolutionIndex::of(sources, &mut budget);
     let mut observations = Vec::new();
     let roots = agents.each_ref().map(|agent| {
-        let status = if !complete {
+        // Selection is checked first: a root the user asked Skilled to leave
+        // alone stays left alone whatever else went wrong.
+        let status = if !agent.selected() {
+            RootStatus::NotSelected
+        } else if !complete {
             // An index that ran out of budget is missing registered variants,
             // and an installation pointing at one of those would be reported
             // as belonging to no source at all. Rather than invent that
@@ -427,7 +464,7 @@ fn scan_with_budget(
             RootStatus::Unreadable {
                 message: EXHAUSTED.to_owned(),
             }
-        } else if agent.selected() {
+        } else {
             match scan_root(agent, &index, &mut budget) {
                 Ok(found) => {
                     let installed = found
@@ -439,8 +476,6 @@ fn scan_with_budget(
                 }
                 Err(message) => RootStatus::Unreadable { message },
             }
-        } else {
-            RootStatus::NotSelected
         };
         RootScan {
             agent: agent.kind(),
@@ -463,14 +498,16 @@ fn scan_with_budget(
 /// The check is on the link itself, so a root that is a dangling symbolic link
 /// is something the user put there and stays unreadable.
 fn root_status_for(agent: &AgentDetection, status: RootStatus) -> RootStatus {
+    let RootStatus::Unreadable { .. } = status else {
+        // Nothing else needs the distinction, and a deselected root must not
+        // be touched even to ask whether it exists.
+        return status;
+    };
     let absent = matches!(
         fs::symlink_metadata(agent.root()),
         Err(error) if error.kind() == io::ErrorKind::NotFound
     );
-    match status {
-        RootStatus::Unreadable { .. } if absent => RootStatus::Missing,
-        other => other,
-    }
+    if absent { RootStatus::Missing } else { status }
 }
 
 fn scan_root(

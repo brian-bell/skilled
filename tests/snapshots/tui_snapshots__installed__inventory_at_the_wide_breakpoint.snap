@@ -14,17 +14,17 @@ OpenCode no root                                            │ SKILL
   copied             -       U      -         U unmanaged   │ SOURCE
                                                             │ ─────────────────────────────────────
                                                             │ Source: library
-                                                            │ Catalog: skills
-                                                            │ Variant: skills/alpha
                                                             │ CLAUDE CODE
                                                             │ ─────────────────────────────────────
                                                             │ Path: ~/.claude/skills/alpha
                                                             │ Object: symbolic link
+                                                            │ Variant: skills · skills/alpha
                                                             │ Target: ~/library/skills/alpha
                                                             │ Validation: ✓ valid as alpha
                                                             │ CODEX
                                                             │ ─────────────────────────────────────
                                                             │ Path: ~/.agents/skills/alpha
                                                             │ Object: symbolic link
+                                                            │ Variant: skills · skills/alpha
                                                             │ ! 5 more lines
  Tab/Shift-Tab Region   j/k Move   Enter Open   / Filter   2 Sources   s Settings   ? Help   q Quit
