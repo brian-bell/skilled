@@ -21,14 +21,25 @@ prototype-aligned seven-step first-run setup with segmented progress, agent
 detection and selection, SQLite-backed setup persistence, local Git source
 registration with catalog confirmation, responsive three-region Sources
 browsing of registered repositories, skill variants, and structured details,
-an empty Inventory view, shared-dialog Settings setup reset, reducer-owned
-contextual help, responsive size handling, and guarded terminal restoration.
+a read-only installation inventory of the documented native agent skill roots
+with per-agent status, detail, filtering, and health findings, shared-dialog
+Settings setup reset, reducer-owned contextual help, responsive size handling,
+and guarded terminal restoration.
 
-Installation inventory, Doctor findings, Updates, and every filesystem or
-network mutation beyond the private metadata database are not implemented yet.
-Do not turn the current placeholders into behavior unless the active Beads
-issue places that work in scope, and do not display a count, finding, status,
-or key hint the code cannot currently produce.
+Doctor findings, Updates, and every filesystem or network mutation beyond the
+private metadata database are not implemented yet. Do not turn the current
+placeholders into behavior unless the active Beads issue places that work in
+scope, and do not display a count, finding, status, or key hint the code
+cannot currently produce.
+
+Truthfulness is a hard requirement of the inventory in particular. The scanner
+keeps apart what it read, what it could not read, what does not exist, and what
+it was never asked to look at, and every rendered count and phrase must follow
+that distinction rather than flattening it. A root that could not be read in
+full contributes nothing and says why; a stray file beside the skill
+directories is listed as not a skill rather than counted as a broken
+installation; a symbolic link is claimed as managed only when it resolves by
+canonical path to a registered source variant.
 [GitHub issue #3](https://github.com/brian-bell/skilled/issues/3) is the
 product and technical source of truth. The tracked `spec/tui-prototype.html` is
 the visual design reference.
@@ -61,6 +72,12 @@ not an acceptable cue.
   snapshots belong here.
 - `src/source.rs`: local Git source inspection, catalog discovery, and skill
   candidate validation.
+- `src/inventory.rs`: read-only scan of the three native agent skill roots.
+  Classifies immediate children only — it never recurses, never spawns a
+  process, and never writes. Resolution to a registered source is canonical
+  path equality against that source's included catalog candidates and nothing
+  else, so content that merely resembles a variant is never adopted. Owns the
+  stable finding codes and the per-root and per-row state vocabulary.
 - `src/validation.rs`: portable `SKILL.md` front-matter validation.
 - `src/store.rs`: private versioned SQLite metadata and migrations. Newer
   unknown schemas fail closed.
@@ -89,7 +106,8 @@ not an acceptable cue.
   paths.
 
 Keep `update` free of filesystem and database work. New external work should be
-represented as typed effects and performed outside the reducer. Keep agent
+represented as typed effects and performed outside the reducer; the
+installation scan runs as `Effect::ScanInstallations` for this reason. Keep agent
 conventions behind adapters rather than spreading paths or enablement rules
 through UI and scanner code. Build new screens from `components` primitives and
 `theme` tokens rather than ad hoc styles. The key-hint bar and the navigation

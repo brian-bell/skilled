@@ -5,8 +5,8 @@ coding agents and keep skills in local Git repositories. It is being built in
 Rust with Ratatui and Crossterm.
 
 The project is early in version-one development. The current build establishes
-the setup, terminal, and local source-registration foundation; it does not yet
-install, repair, update, or uninstall skills.
+the setup, terminal, source-registration, and read-only inspection foundation;
+it does not yet install, repair, update, or uninstall skills.
 
 ## Design references
 
@@ -19,8 +19,7 @@ install, repair, update, or uninstall skills.
 ## What works today
 
 - A prototype-aligned seven-step first-run setup flow with explicit segmented
-  progress, truthful placeholders for scans that do not exist yet, and
-  responsive shared-dialog layouts.
+  progress, per-root scan results, and responsive shared-dialog layouts.
 - Detection of Claude Code, Codex, and OpenCode roots and executables without
   launching an agent.
 - Agent selection, with all three agents selected by default.
@@ -38,6 +37,23 @@ install, repair, update, or uninstall skills.
   focused region.
 - Versioned SQLite persistence for setup, configured agents, source metadata,
   and confirmed catalog roots.
+- A read-only inventory of the documented global skill roots — `~/.claude/skills`,
+  `~/.agents/skills`, and `~/.config/opencode/skills` — with one row per skill,
+  a per-agent cell for each, and a health word. Skilled reads the immediate
+  children of each root only: it never recurses, never launches an agent, and
+  never writes.
+- Resolution of an installed symbolic link to the registered source, catalog,
+  and variant it points at, by canonical path equality. A physical copy, or a
+  link into anything Skilled does not manage, stays explicitly unmanaged rather
+  than being claimed.
+- Health findings with stable codes for dangling and unresolvable links,
+  unreadable entries, and every portable-validation failure, each carrying the
+  observation behind it. A stray file beside the skill directories is reported
+  as not a skill rather than as a broken installation.
+- Per-root accounting that distinguishes a root that was read from one that
+  does not exist, one that could not be read in full, and one belonging to an
+  agent that was never selected.
+- Filtering the inventory by skill name, source, or health.
 - Direct startup into Inventory after setup is complete.
 - A shared-dialog Settings action for rerunning setup. Rerunning refreshes agent
   root and executable detection while retaining current agent selections and
@@ -55,10 +71,10 @@ install, repair, update, or uninstall skills.
 - Terminal restoration on normal exit, startup failure, panic unwinding, and
   the Ctrl-C key path used in raw mode.
 
-Installation inventory, Doctor, planning, installation, repair, update, remote
-fetching, and uninstall behavior are still future work. Registration is
-deliberately read-only: it catalogs local checkouts but does not copy, link, or
-modify skills in agent roots.
+Doctor, planning, installation, repair, update, remote fetching, and uninstall
+behavior are still future work. Registration and inventory are deliberately
+read-only: they catalog local checkouts and observe agent roots, but never
+copy, link, or modify anything in them.
 
 ## Requirements
 
@@ -98,6 +114,11 @@ In catalog confirmation:
 - `c` switches between common and agent-specific classification.
 - `1`, `2`, and `3` toggle Claude Code, Codex, and OpenCode compatibility.
 - Enter registers the selected metadata; Esc cancels.
+
+In Inventory, Tab and Shift-Tab move between the skill table and its details;
+Enter opens the details of the selected skill on a compact terminal, and Esc
+returns. `j` / `k` or arrow keys move the selection, and `/` filters by name,
+source, or health — Enter applies the query and Esc clears it.
 
 From Inventory, press `2` to open Sources. In Sources, Tab and Shift-Tab move
 forward and backward through Repositories, Variants, and Details; Enter advances
@@ -139,6 +160,8 @@ under `tests/snapshots/` and cell-level style assertions in
 - `src/store.rs` owns versioned SQLite metadata and migrations.
 - `src/source.rs` performs bounded catalog discovery and read-only Git
   inspection.
+- `src/inventory.rs` performs the bounded, read-only scan of the native agent
+  skill roots and owns the finding codes it reports.
 - `src/validation.rs` validates the portable `SKILL.md` subset used during
   source browsing.
 - `src/terminal.rs` guards raw mode and alternate-screen restoration.
