@@ -290,19 +290,16 @@ impl Destination {
     /// What this destination can honestly say it holds, if anything.
     ///
     /// The registry is always fully known, so Sources always has a count, zero
-    /// included. The inventory is an observation of the filesystem: its count
-    /// is stated only when every root Skilled was asked to look at was read or
-    /// found absent, the same gate [`inventory_subtitle`] enforces. A
-    /// destination this release cannot open has nothing to count and renders
-    /// nothing — an em dash would read as a measurement that came back empty.
+    /// included. The inventory is an observation of the filesystem, and
+    /// whether that observation may be stated as a number is decided by
+    /// [`InventorySnapshot::stated_skill_count`] — the same decision
+    /// [`inventory_subtitle`] defers to, so the tab and the subtitle beneath it
+    /// cannot disagree. A destination this release cannot open has nothing to
+    /// count and renders nothing: an em dash would read as a measurement that
+    /// came back empty.
     fn count(self, app: &SkilledApp) -> Option<usize> {
         match self {
-            Self::Inventory => {
-                let inventory = app.inventory();
-                inventory
-                    .counts_are_complete()
-                    .then(|| inventory.skill_row_count())
-            }
+            Self::Inventory => app.inventory().stated_skill_count(),
             Self::Sources => Some(app.sources().len()),
             Self::Updates | Self::Doctor => None,
         }
@@ -708,7 +705,11 @@ fn inventory_subtitle(app: &SkilledApp, shown: usize) -> String {
     // could not be read, the rows that were read are only "listed": stating
     // "N skills" here would read as a complete total while part of the
     // requested scope contributed nothing.
-    if total > 0 && !inventory.counts_are_complete() {
+    //
+    // Rows only come from a root that was read, so a withheld count means an
+    // incomplete scope here and never an unread one: this branch cannot be
+    // reached by the "nothing was read at all" half of the rule below.
+    if total > 0 && inventory.stated_skill_count().is_none() {
         return format!("{total} listed · not fully read");
     }
     // Skills and stray content are counted apart: a root holding only a
@@ -722,27 +723,23 @@ fn inventory_subtitle(app: &SkilledApp, shown: usize) -> String {
             if other == 1 { "y" } else { "ies" }
         );
     }
-    match total {
-        // A count of zero is a scan result. It may only be stated when every
-        // selected root was actually read.
-        0 if inventory
+    // Whether a number may be stated at all is decided once, in the snapshot.
+    // What is left here is the wording: a stated count says how much was
+    // found, and a withheld one says which of the three reasons it was
+    // withheld for.
+    match inventory.stated_skill_count() {
+        Some(0) => "nothing installed".to_owned(),
+        Some(1) => "1 skill".to_owned(),
+        Some(skills) => format!("{skills} skills"),
+        None if inventory
             .roots()
             .iter()
             .all(|root| root.status() == &RootStatus::NotScanned) =>
         {
             "not scanned".to_owned()
         }
-        0 if inventory.unreadable_roots().next().is_some() => "not fully read".to_owned(),
-        0 if !inventory
-            .roots()
-            .iter()
-            .any(|root| matches!(root.status(), RootStatus::Scanned { .. })) =>
-        {
-            "no root read".to_owned()
-        }
-        0 => "nothing installed".to_owned(),
-        1 => "1 skill".to_owned(),
-        total => format!("{total} skills"),
+        None if inventory.unreadable_roots().next().is_some() => "not fully read".to_owned(),
+        None => "no root read".to_owned(),
     }
 }
 
