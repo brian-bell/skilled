@@ -202,6 +202,38 @@ fn add_source_path_entry_at_minimum_supported_size() {
     }
 
     insta::assert_snapshot!(render(&app, 80, 24));
+    insta::assert_snapshot!("add_source_path_entry_at_wide_size", render(&app, 120, 40));
+}
+
+#[test]
+fn add_source_wrapped_inspection_error_at_minimum_supported_size() {
+    let temporary = tempfile::tempdir().expect("temporary application directory");
+    let mut app = SkilledApp::open(AppEnvironment::new(
+        temporary.path().join("home"),
+        temporary.path().join("data"),
+        "",
+    ))
+    .expect("open application");
+    for _ in 0..7 {
+        dispatch(&mut app, Action::Continue);
+    }
+    app.update(Action::OpenSources);
+    app.update(Action::BeginAddSource);
+    let missing = temporary
+        .path()
+        .join("a-deliberately-long-missing-repository-directory")
+        .join("and-an-equally-long-nested-path");
+    for character in missing.to_string_lossy().chars() {
+        app.update(Action::AppendSourcePath(character));
+    }
+    dispatch(&mut app, Action::SubmitSourcePath);
+
+    let temporary_path = temporary.path().to_string_lossy().into_owned();
+    let rendered = render(&app, 80, 24).replace(
+        &temporary_path,
+        &padded_placeholder(&temporary_path, "[TEMP]"),
+    );
+    insta::assert_snapshot!(rendered);
 }
 
 #[test]
@@ -229,18 +261,28 @@ fn catalog_confirmation_at_minimum_supported_size() {
     dispatch(&mut app, Action::SubmitSourcePath);
 
     let preview = app.pending_source().expect("pending source preview");
+    let temporary_path = temporary
+        .path()
+        .canonicalize()
+        .expect("canonical temporary directory")
+        .to_string_lossy()
+        .into_owned();
+    let short_head = &preview.inspected().head()[..8];
     let rendered = render(&app, 80, 24)
         .replace(
-            temporary
-                .path()
-                .canonicalize()
-                .expect("canonical temporary directory")
-                .to_string_lossy()
-                .as_ref(),
-            "[TEMP]",
+            &temporary_path,
+            &padded_placeholder(&temporary_path, "[TEMP]"),
         )
-        .replace(&preview.inspected().head()[..8], "[HEAD]");
+        .replace(short_head, &padded_placeholder(short_head, "[HEAD]"));
     insta::assert_snapshot!(rendered);
+
+    let rendered = render(&app, 120, 40)
+        .replace(
+            &temporary_path,
+            &padded_placeholder(&temporary_path, "[TEMP]"),
+        )
+        .replace(short_head, &padded_placeholder(short_head, "[HEAD]"));
+    insta::assert_snapshot!("catalog_confirmation_at_wide_size", rendered);
 }
 
 #[test]
@@ -562,13 +604,17 @@ fn wrapped_catalog_confirmation_keeps_focus_error_and_actions_visible() {
     let screen = render(&app, 80, 24);
 
     assert_eq!(app.focused_catalog(), 1);
-    assert!(screen.contains("> [ ]"), "{screen}");
+    assert!(screen.contains("▌ Excluded"), "{screen}");
     assert!(screen.contains("catalogs/set-1"), "{screen}");
     assert!(
         screen.contains("Select at least one catalog root to register."),
         "{screen}"
     );
-    assert!(screen.contains("Enter registers metadata only"), "{screen}");
+    assert!(
+        screen.contains("Registration records metadata only"),
+        "{screen}"
+    );
+    assert!(screen.contains("Esc Cancel   Enter Register"), "{screen}");
 }
 
 #[test]
@@ -620,23 +666,20 @@ fn setup_catalog_confirmation_reserves_space_for_wrapped_focused_content() {
     }
 
     let preview = app.pending_source().expect("pending source preview");
-    let rendered = render(&app, 80, 24)
-        .replace(
-            temporary
-                .path()
-                .canonicalize()
-                .expect("canonical temporary directory")
-                .to_string_lossy()
-                .as_ref(),
-            "[TEMP]",
-        )
-        .replace(&preview.inspected().head()[..8], "[HEAD]");
+    let short_head = &preview.inspected().head()[..8];
+    let rendered =
+        normalize_snapshot_field(render(&app, 80, 24), "Repository: ", "[TEMP]/long-source")
+            .replace(short_head, &padded_placeholder(short_head, "[HEAD]"));
 
     assert_eq!(app.focused_catalog(), 5);
-    assert!(rendered.contains("> [x]"), "{rendered}");
+    assert!(rendered.contains("▌ Included"), "{rendered}");
     assert!(rendered.contains("catalogs/set-5"), "{rendered}");
     assert!(
-        rendered.contains("Enter registers metadata only"),
+        rendered.contains("Repository: [TEMP]/long-source"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("Registration records metadata only"),
         "{rendered}"
     );
     insta::assert_snapshot!(rendered);
@@ -694,6 +737,30 @@ fn padded_placeholder(value: &str, placeholder: &str) -> String {
         "{placeholder}{}",
         " ".repeat(value.len().saturating_sub(placeholder.len()))
     )
+}
+
+fn normalize_snapshot_field(screen: String, label: &str, placeholder: &str) -> String {
+    screen
+        .lines()
+        .map(|line| {
+            let Some(value_start) = line.find(label).map(|index| index + label.len()) else {
+                return line.to_owned();
+            };
+            let Some(value_end) = line[value_start..]
+                .rfind("  │")
+                .map(|index| value_start + index)
+            else {
+                return line.to_owned();
+            };
+            format!(
+                "{}{}{}",
+                &line[..value_start],
+                padded_placeholder(&line[value_start..value_end], placeholder),
+                &line[value_end..]
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn buffer_text(buffer: &Buffer) -> String {

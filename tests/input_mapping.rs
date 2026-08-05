@@ -244,6 +244,16 @@ fn source_path_entry_treats_printable_keys_as_text_and_keeps_ctrl_c_as_quit() {
         ),
         Some(Action::Quit)
     );
+    assert_eq!(
+        action_for_app_key(&app, repeat(KeyCode::Char('x'))),
+        Some(Action::AppendSourcePath('x'))
+    );
+    assert_eq!(
+        action_for_app_key(&app, repeat(KeyCode::Backspace)),
+        Some(Action::DeleteSourcePathCharacter)
+    );
+    assert_eq!(action_for_app_key(&app, repeat(KeyCode::Enter)), None);
+    assert_eq!(action_for_app_key(&app, repeat(KeyCode::Esc)), None);
 }
 
 #[test]

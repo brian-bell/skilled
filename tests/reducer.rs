@@ -382,6 +382,25 @@ fn sources_add_flow_collects_a_path_before_requesting_inspection() {
     );
 }
 
+#[test]
+fn empty_source_path_submission_is_an_effect_free_no_op() {
+    let temporary = tempfile::tempdir().expect("temporary application directory");
+    let mut app = app_in(&temporary);
+    finish_setup(&mut app);
+    app.update(Action::OpenSources);
+    app.update(Action::BeginAddSource);
+    for character in "   ".chars() {
+        app.update(Action::AppendSourcePath(character));
+    }
+
+    let update = app.update(Action::SubmitSourcePath);
+
+    assert!(update.effects().is_empty());
+    assert!(app.source_path_input_active());
+    assert_eq!(app.source_path(), "   ");
+    assert_eq!(app.view(), View::Sources);
+}
+
 fn app_in(directory: &tempfile::TempDir) -> SkilledApp {
     SkilledApp::open(AppEnvironment::new(
         directory.path().join("home"),

@@ -460,8 +460,9 @@ fn surfaces_are_painted_where_the_design_calls_for_them() {
     let screen = buffer(&dialog, 120, 40);
     let branch = row_containing(&screen, "Branch: main   HEAD:");
     assert_eq!(style_in_row(&screen, branch, "Branch:").bg, Some(SURFACE));
+    let worktree = row_containing(&screen, "Worktree:");
     assert_eq!(
-        style_in_row(&screen, branch, "✓ clean").bg,
+        style_in_row(&screen, worktree, "✓ clean").bg,
         Some(SURFACE),
         "a badge should inherit the dialog surface, not repaint it"
     );
@@ -1401,6 +1402,265 @@ fn the_source_dialogs_use_the_same_frame_as_settings() {
     assert_eq!(
         style_in_row(&screen, border, "┌").fg,
         Some(Color::Rgb(0x43, 0x52, 0x64))
+    );
+}
+
+#[test]
+fn add_source_uses_the_shared_dialog_body_divider_and_footer() {
+    let harness = Harness::new();
+    let mut app = harness.completed_setup();
+    app.update(Action::OpenSources);
+    app.update(Action::BeginAddSource);
+
+    let screen = buffer(&app, 80, 24);
+    let rendered = text(&screen);
+
+    assert!(rendered.contains("Local Git repository"), "{rendered}");
+    assert!(
+        rendered.contains("Read-only checkout and catalog scan"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("Esc Cancel   Enter Inspect"),
+        "{rendered}"
+    );
+    assert_eq!(
+        rendered.matches("Enter Inspect").count(),
+        2,
+        "the dialog and global key-hint bar should both name the required action\n{rendered}"
+    );
+    assert!(
+        rendered.contains("────────────────────────────────"),
+        "the dialog footer needs a visible divider\n{rendered}"
+    );
+}
+
+#[test]
+fn add_source_keeps_a_wrapped_inspection_error_and_actions_visible_at_minimum_size() {
+    let harness = Harness::new();
+    let mut app = harness.completed_setup();
+    app.update(Action::OpenSources);
+    app.update(Action::BeginAddSource);
+    let missing = harness
+        .directory
+        .path()
+        .join("a-deliberately-long-missing-repository-directory")
+        .join("and-an-equally-long-nested-path");
+    for character in missing.to_string_lossy().chars() {
+        app.update(Action::AppendSourcePath(character));
+    }
+    let update = app.update(Action::SubmitSourcePath);
+    app.perform_effects(update.effects())
+        .expect("failed inspection remains recoverable");
+
+    assert!(app.source_path_input_active());
+    assert!(app.source_error().is_some());
+    let rendered = text(&buffer(&app, 80, 24));
+
+    assert!(rendered.contains("×"), "{rendered}");
+    assert!(rendered.contains("No such file"), "{rendered}");
+    assert!(
+        rendered.contains("Esc Cancel   Enter Inspect"),
+        "{rendered}"
+    );
+}
+
+#[test]
+fn catalog_confirmation_names_repository_and_catalog_metadata_without_abbreviations() {
+    let harness = Harness::new();
+    let repository = harness.directory.path().join("source");
+    create_source_fixture(&repository);
+    git(
+        &repository,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://secret@example.test/team/source.git",
+        ],
+    );
+    let mut app = harness.completed_setup();
+    app.update(Action::OpenSources);
+    app.update(Action::BeginAddSource);
+    for character in repository.to_string_lossy().chars() {
+        app.update(Action::AppendSourcePath(character));
+    }
+    let update = app.update(Action::SubmitSourcePath);
+    app.perform_effects(update.effects())
+        .expect("inspect source");
+    let preview = app.pending_source().expect("pending source");
+    let head = &preview.inspected().head()[..8];
+
+    let rendered = text(&buffer(&app, 120, 40));
+
+    assert!(
+        rendered.contains(&format!(
+            "Repository: {}",
+            repository
+                .canonicalize()
+                .expect("canonical repository")
+                .display()
+        )),
+        "{rendered}"
+    );
+    assert!(rendered.contains("Branch: main"), "{rendered}");
+    assert!(rendered.contains(&format!("HEAD: {head}")), "{rendered}");
+    assert!(
+        rendered.contains("Remote: https://example.test/team/source.git"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("Worktree: ✓ clean"), "{rendered}");
+    assert!(
+        rendered.contains("▌ Included · skills · 1 candidate"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("Common catalog"), "{rendered}");
+    assert!(rendered.contains("Claude Code: yes"), "{rendered}");
+    assert!(rendered.contains("Codex: yes"), "{rendered}");
+    assert!(rendered.contains("OpenCode: yes"), "{rendered}");
+    for unsupported in ["Install", "Forget", "Rescan", "operation plan", "toast"] {
+        assert!(
+            !rendered.contains(unsupported),
+            "{unsupported}:\n{rendered}"
+        );
+    }
+}
+
+#[test]
+fn catalog_confirmation_uses_one_shared_body_and_owner_dialog_footer() {
+    let harness = Harness::new();
+    let repository = harness.directory.path().join("source");
+    create_source_fixture(&repository);
+
+    let mut sources = harness.completed_setup();
+    sources.update(Action::OpenSources);
+    sources.update(Action::BeginAddSource);
+    for character in repository.to_string_lossy().chars() {
+        sources.update(Action::AppendSourcePath(character));
+    }
+    let update = sources.update(Action::SubmitSourcePath);
+    sources
+        .perform_effects(update.effects())
+        .expect("inspect source from Sources");
+
+    let setup_harness = Harness::new();
+    let mut setup = setup_harness.first_run();
+    for _ in 0..3 {
+        setup.update(Action::Continue);
+    }
+    setup.update(Action::BeginAddSource);
+    for character in repository.to_string_lossy().chars() {
+        setup.update(Action::AppendSourcePath(character));
+    }
+    let update = setup.update(Action::SubmitSourcePath);
+    setup
+        .perform_effects(update.effects())
+        .expect("inspect source from Setup");
+
+    for (owner, app) in [("Sources", &sources), ("Setup", &setup)] {
+        let rendered = text(&buffer(app, 80, 24));
+        assert!(
+            rendered.contains("Registration records metadata only"),
+            "{owner}:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("Esc Cancel   Enter Register"),
+            "{owner}:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("Enter registers metadata only"),
+            "body commands should not duplicate the owner footer for {owner}:\n{rendered}"
+        );
+    }
+
+    let sources_rendered = text(&buffer(&sources, 80, 24));
+    assert_eq!(
+        sources_rendered.matches("Enter Register").count(),
+        2,
+        "the Sources dialog and global key-hint bar should both keep Register visible\n{sources_rendered}"
+    );
+}
+
+#[test]
+fn catalog_confirmation_bounds_pathological_paths_without_hiding_required_sections() {
+    let harness = Harness::new();
+    let repository = harness
+        .directory
+        .path()
+        .join(format!("source-{}", "r".repeat(120)));
+    for index in 0..2 {
+        let name = format!("skill-{index}");
+        let first = format!("set-{index}-{}", "a".repeat(170));
+        let second = format!("nested-{index}-{}", "b".repeat(165));
+        let skill = repository
+            .join("catalogs")
+            .join(first)
+            .join(second)
+            .join("claude-code/skills")
+            .join(&name);
+        fs::create_dir_all(&skill).expect("create long catalog fixture");
+        fs::write(
+            skill.join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: fixture\n---\n# Fixture\n"),
+        )
+        .expect("write long catalog fixture");
+    }
+    git(&repository, &["init", "-b", "main"]);
+    git(&repository, &["config", "user.name", "Skilled Test"]);
+    git(
+        &repository,
+        &["config", "user.email", "skilled@example.test"],
+    );
+    git(&repository, &["add", "."]);
+    git(&repository, &["commit", "-m", "fixture"]);
+    let long_branch = format!("branch-{}", "c".repeat(120));
+    git(&repository, &["branch", "-m", &long_branch]);
+    let long_remote = format!("https://example.test/{}/source.git", "d".repeat(180));
+    git(&repository, &["remote", "add", "origin", &long_remote]);
+
+    let mut app = harness.completed_setup();
+    app.update(Action::OpenSources);
+    app.update(Action::BeginAddSource);
+    for character in repository.to_string_lossy().chars() {
+        app.update(Action::AppendSourcePath(character));
+    }
+    let update = app.update(Action::SubmitSourcePath);
+    app.perform_effects(update.effects())
+        .expect("inspect long source");
+    app.update(Action::ToggleCatalogIncluded);
+    app.update(Action::MoveCatalogSelection(1));
+    app.update(Action::ToggleCatalogIncluded);
+    app.update(Action::ConfirmPendingSource);
+
+    let screen = buffer(&app, 80, 24);
+    let rendered = text(&screen);
+
+    assert!(rendered.contains("Repository:"), "{rendered}");
+    assert!(rendered.contains("source-"), "{rendered}");
+    assert!(rendered.contains("Worktree: ✓ clean"), "{rendered}");
+    assert!(rendered.contains("▌ Excluded"), "{rendered}");
+    let focused_catalog = row_containing(&screen, "▌ Excluded");
+    assert_eq!(
+        style_in_row(&screen, focused_catalog, "▌").fg,
+        Some(Color::Rgb(0x73, 0xd7, 0xee)),
+        "{rendered}"
+    );
+    assert!(rendered.contains("set-1-"), "{rendered}");
+    assert!(rendered.contains("Agent-specific"), "{rendered}");
+    assert!(rendered.contains("Claude Code: yes"), "{rendered}");
+    assert!(rendered.contains("Codex: no"), "{rendered}");
+    assert!(rendered.contains("OpenCode: no"), "{rendered}");
+    assert!(
+        rendered.contains("Select at least one catalog root to register."),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("Registration records metadata only"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("Esc Cancel   Enter Register"),
+        "{rendered}"
     );
 }
 

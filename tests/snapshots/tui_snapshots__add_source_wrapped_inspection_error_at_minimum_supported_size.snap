@@ -1,6 +1,6 @@
 ---
 source: tests/tui_snapshots.rs
-expression: "render(&app, 80, 24)"
+expression: rendered
 ---
  ◆ skilled   global                              ● ready · 0 sources registered
  Add source   navigation is locked while this dialog is open
@@ -11,11 +11,11 @@ expression: "render(&app, 80, 24)"
 │ ┌ Add source ────────────────────────────────────────── local Git checkout ┐ │
 │ │                                                                          │ │
 │ │  Local Git repository                                                    │ │
-│ │  Enter a path inside a local Git checkout:                               │ │
+│ │  >                                                                       │ │
+│ │  [TEMP]                                                     /a-delibera  │ │
+│ │  tely-long-missing-repository-directory/and-an-equally-long-nested-path  │ │
 │ │                                                                          │ │
-│ │  > /Users/example/dev/skills                                             │ │
-│ │                                                                          │ │
-│ │                                                                          │ │
+│ │  × filesystem operation failed: No such file or directory (os error 2)   │ │
 │ │  ──────────────────────────────────────────────────────────────────────  │ │
 │ │  Read-only checkout and catalog scan         Esc Cancel   Enter Inspect  │ │
 │ │                                                                          │ │
