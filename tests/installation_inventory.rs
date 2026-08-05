@@ -308,6 +308,10 @@ fn a_plain_file_child_is_listed_without_being_read_as_a_broken_skill() {
     // An agent ignores a stray file, so calling it broken would manufacture an
     // alarm out of a README or a platform artefact.
     assert_eq!(row.health(), InstallationHealth::NotASkill);
+    // A stray file was never installed from anywhere, so where it came from
+    // is not a question it can answer — least of all with "not registered".
+    assert_eq!(row.provenance(), RowProvenance::NotApplicable);
+    assert_eq!(row.provenance().label(), "");
     let observation = row
         .observation(AgentKind::OpenCode)
         .expect("plain file observation");

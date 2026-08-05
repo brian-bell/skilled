@@ -698,6 +698,35 @@ mod installed {
         type_filter(&mut app, "not registered");
         assert_eq!(names(&app), ["variant-0"]);
     }
+    /// Stray content is not an installation, so the provenance query must not
+    /// present it as content that came from nowhere registered.
+    #[test]
+    fn the_filter_does_not_present_stray_content_as_not_registered() {
+        let temporary = tempfile::tempdir().expect("temporary application directory");
+        let repository = temporary.path().join("library");
+        let mut app = app_in(&temporary);
+        finish_setup(&mut app);
+        register_source(&mut app, &repository, 1);
+        install_link(
+            &temporary,
+            AgentKind::ClaudeCode,
+            "variant-0",
+            &repository.join("skills/variant-0"),
+        );
+        fs::write(
+            temporary.path().join("home/.claude/skills/readme.md"),
+            "not a skill",
+        )
+        .expect("write stray file");
+        let update = app.update(Action::OpenSources);
+        app.perform_effects(update.effects()).expect("effects");
+        let update = app.update(Action::OpenInventory);
+        app.perform_effects(update.effects())
+            .expect("installation scan");
+
+        type_filter(&mut app, "not registered");
+        assert_eq!(names(&app), Vec::<String>::new());
+    }
     /// The query box is drawn above the table, so a compact terminal showing
     /// only the detail region has nowhere to draw it — and a field the user
     /// cannot see must not take every printable key.

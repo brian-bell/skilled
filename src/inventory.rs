@@ -290,6 +290,15 @@ impl InventoryRow {
     /// arrangement, and naming one of them would misstate the other; which of
     /// them ought to win is a conflict a later slice decides.
     pub fn provenance(&self) -> RowProvenance<'_> {
+        // A row of nothing but stray content holds no installation, so where
+        // one came from is not a question it can answer; "not registered"
+        // would state a provenance fact about something that has none.
+        if self
+            .observations()
+            .all(|observation| !observation.object().is_installation())
+        {
+            return RowProvenance::NotApplicable;
+        }
         // One unknown is enough: a row summary that named the source of the
         // installations it could place would imply the same source for the one
         // it could not.
@@ -351,6 +360,9 @@ impl InventoryRow {
 /// Where a row's installations came from, taken together.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RowProvenance<'a> {
+    /// The row holds no installation at all — only stray content — so no
+    /// source question applies.
+    NotApplicable,
     /// No installation resolved, and a registered source could not be read, so
     /// whether they came from one is not known.
     Unverified,
@@ -367,8 +379,12 @@ pub enum RowProvenance<'a> {
 
 impl RowProvenance<'_> {
     /// The word the Source column shows, and the filter matches against.
+    ///
+    /// A row that no source question applies to shows nothing: any word in
+    /// the column would be an answer to that question.
     pub fn label(&self) -> &str {
         match self {
+            Self::NotApplicable => "",
             Self::Unverified => "unverified",
             Self::Unregistered => "not registered",
             Self::Source(label) => label,

@@ -1030,6 +1030,11 @@ fn inventory_detail_lines(row: &InventoryRow, home: &Path, width: u16) -> Vec<Li
         RowProvenance::Unregistered => lines.push(Line::from(
             "Not resolved to any registered source; Skilled does not manage it.",
         )),
+        // Stray content was never installed from anywhere, so no source
+        // question applies to it.
+        RowProvenance::NotApplicable => lines.push(Line::from(
+            "Not a skill installation, so no source applies.",
+        )),
     }
 
     for observation in row.observations() {
