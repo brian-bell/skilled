@@ -2208,6 +2208,28 @@ impl Harness {
         repository
     }
 
+    /// One skill, installed from a registered source, whose name and whose
+    /// source's name both outrun the capped identity columns.
+    #[cfg(unix)]
+    fn long_name_inventory(&self) -> SkilledApp {
+        let home = self.directory.path().join("home");
+        let repository = home.join(LONG_SOURCE_DIRECTORY);
+        let variant = repository.join("skills").join(LONG_SKILL_NAME);
+        write_skill_fixture(&variant, LONG_SKILL_NAME);
+        create_repository(&repository);
+
+        let mut app = self.completed_setup();
+        let preview = app.preview_source(&repository).expect("preview source");
+        app.confirm_source(preview).expect("register source");
+
+        let claude = home.join(".claude/skills");
+        fs::create_dir_all(&claude).expect("create Claude Code root");
+        symlink(variant, claude.join(LONG_SKILL_NAME));
+
+        scan_installations(&mut app);
+        app
+    }
+
     /// The registration and installations the two provenance fixtures share,
     /// stopping short of the scan so the checkout can still be moved.
     #[cfg(unix)]
@@ -2238,6 +2260,13 @@ fn scan_installations(app: &mut SkilledApp) {
     app.perform_effects(update.effects())
         .expect("installation scan");
 }
+
+/// Longer than the thirty-five cells the capped Skill column can show, and
+/// still a valid skill name: lowercase letters with single hyphen separators.
+const LONG_SKILL_NAME: &str = "an-installed-skill-with-a-deliberately-long-name";
+/// Longer than the twenty-three cells the capped Source column can show. A
+/// source's label is its checkout's directory name.
+const LONG_SOURCE_DIRECTORY: &str = "a-deliberately-long-source-checkout-name";
 
 /// Commit a fixture checkout so it can be registered as a source.
 fn create_repository(repository: &Path) {
@@ -2465,6 +2494,46 @@ mod installed {
             style_in_row(&unverified, gamma, "unverified").fg,
             Some(MUTED),
             "a row that places nothing should not read as a source name"
+        );
+    }
+
+    /// Both halves of what the caps trade: the table ellipsizes what outruns
+    /// a capped column, and the detail region is where the whole name and the
+    /// whole source label still are.
+    #[test]
+    fn what_outruns_the_capped_columns_is_ellipsized_and_kept_in_the_detail() {
+        let harness = Harness::new();
+        let mut app = harness.long_name_inventory();
+
+        let table = buffer(&app, 180, 40);
+        let row = row_starting_with(&table, "▌ an-installed-skill");
+        let line = row_text(&table, row);
+
+        // `padded` bounds a cell to one less than its column, so thirty-five
+        // cells of skill and twenty-three of source survive, the last three of
+        // each spent on the ellipsis.
+        assert!(
+            line.contains(&format!("{}...", &LONG_SKILL_NAME[..32])),
+            "{line:?}"
+        );
+        assert!(
+            line.contains(&format!("{}...", &LONG_SOURCE_DIRECTORY[..20])),
+            "{line:?}"
+        );
+        assert!(!line.contains(LONG_SKILL_NAME), "{line:?}");
+        assert!(!line.contains(LONG_SOURCE_DIRECTORY), "{line:?}");
+
+        // Drilled into, where the fields are not competing with five other
+        // columns for width, both are given whole.
+        app.update(Action::AdvanceInventoryPane);
+        let detail = text(&buffer(&app, 80, 24));
+        assert!(
+            detail.contains(&format!("Name: {LONG_SKILL_NAME}")),
+            "{detail}"
+        );
+        assert!(
+            detail.contains(&format!("Source: {LONG_SOURCE_DIRECTORY}")),
+            "{detail}"
         );
     }
 
