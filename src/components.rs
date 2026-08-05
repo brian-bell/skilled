@@ -520,6 +520,22 @@ mod tests {
         assert_ne!(text(&active), text(&inactive));
     }
 
+    /// A caller bounding a subtitle to its pane has to know what the header
+    /// spends around it. That arithmetic lives here, so it is stated here:
+    /// a two-cell marker only when focused, and a two-cell gap always.
+    #[test]
+    fn a_pane_header_spends_a_marker_when_focused_and_a_gap_of_two_always() {
+        for (focused, marker) in [(false, 0), (true, 2)] {
+            for (heading, subtitle) in [("Repositories", "2 registered"), ("あ", "")] {
+                assert_eq!(
+                    focused_pane_header(heading, subtitle, focused).width(),
+                    marker + Span::raw(heading).width() + 2 + Span::raw(subtitle).width(),
+                    "{heading:?} {subtitle:?} focused={focused}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn dialog_regions_are_bounded_and_non_overlapping() {
         let inner = Rect::new(10, 5, 30, 10);

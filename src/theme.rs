@@ -236,6 +236,12 @@ pub(crate) fn pane_subtitle() -> Style {
 /// group header. The text on it names the group and says how its contents are
 /// classified, which is information, so it is `MUTED` rather than the
 /// prototype's faint grey.
+///
+/// The tint is barely above the terminal background — as it is in the
+/// prototype, whose `.catalog-title` sits at `#0b1016` against `#0b0f14` — so
+/// it is a surface, not a cue. What separates a group label from the rows
+/// under it is that the label is muted and starts flush where the rows are
+/// indented past their marker column.
 pub(crate) fn group_label() -> Style {
     Style::default().fg(MUTED).bg(BAND)
 }

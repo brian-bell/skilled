@@ -504,8 +504,17 @@ fn sources_keeps_a_variant_selection_and_details_visible_beyond_the_first_viewpo
     assert_eq!(app.focused_variant(), 25);
     assert!(variants.contains(&format!("▌ ✓ valid {expected}")));
     // The catalog is named once, by the group label above its variants, so a
-    // row deep in the list does not repeat the path it sits in.
+    // row deep in the list does not repeat the path it sits in. Which means
+    // the label has to stay on screen once the list scrolls past it: pinned to
+    // the first row of the pane, under the header and its rule.
     assert!(!variants.contains("(skills/"), "{variants}");
+    assert!(
+        variants
+            .lines()
+            .nth(4)
+            .is_some_and(|line| line.starts_with("skills · Common · all agents")),
+        "{variants}"
+    );
 
     app.update(Action::AdvanceSourcesPane);
     let details = render(&app, 80, 24);
@@ -1013,12 +1022,18 @@ fn normalize_sources_screen(
     if !normalized.contains(head) && head.len() > SHORTEST_RECOGNISABLE_SPLIT {
         for split in (SHORTEST_RECOGNISABLE_SPLIT..head.len()).rev() {
             let (wrapped, remainder) = head.split_at(split);
-            if normalized.contains(wrapped) {
-                normalized = normalized
-                    .replace(wrapped, &padded_placeholder(wrapped, "[HEAD]"))
-                    .replace(remainder, &" ".repeat(remainder.len()));
-                break;
-            }
+            let Some(index) = normalized.find(wrapped) else {
+                continue;
+            };
+            // The tail after the wrap can be a couple of characters, which
+            // could occur anywhere on the screen, so only the occurrence
+            // continuing this revision is blanked.
+            let (head_of_screen, rest) = normalized.split_at(index + wrapped.len());
+            let rest = rest.replacen(remainder, &" ".repeat(remainder.len()), 1);
+            let head_of_screen =
+                head_of_screen.replacen(wrapped, &padded_placeholder(wrapped, "[HEAD]"), 1);
+            normalized = format!("{head_of_screen}{rest}");
+            break;
         }
     }
     // The repository rows carry the abbreviated revision, which is as

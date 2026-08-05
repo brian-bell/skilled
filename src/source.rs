@@ -62,10 +62,10 @@ impl Compatibility {
         self == Self::ALL
     }
 
-    /// Whether the catalog claims to support one agent.
+    /// Whether this compatibility covers one agent.
     ///
-    /// A claim, not an observation: it reports what the catalog declared and
-    /// Skilled stored.
+    /// A record, not an observation: it reports what was proposed, confirmed
+    /// and stored, and no agent was asked.
     pub fn supports(self, agent: AgentKind) -> bool {
         match agent {
             AgentKind::ClaudeCode => self.claude_code,

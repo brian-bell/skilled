@@ -1376,6 +1376,21 @@ fn sources_regions_use_the_shared_unboxed_pane_scaffold() {
         "{:?}",
         row_text(&screen, header + 1)
     );
+
+    // The border that used to carry focus is gone, so the header has to carry
+    // it: a cyan marker and an emphasised heading on the focused region, and
+    // no marker at all on the regions beside it.
+    const CYAN: Color = Color::Rgb(0x73, 0xd7, 0xee);
+    const TEXT_STRONG: Color = Color::Rgb(0xf2, 0xf6, 0xfa);
+    assert_eq!(style_in_row(&screen, header, "▌").fg, Some(CYAN));
+    let heading = style_in_row(&screen, header, "Repositories");
+    assert_eq!(heading.fg, Some(TEXT_STRONG));
+    assert!(heading.add_modifier.contains(Modifier::BOLD), "{heading:?}");
+    assert_eq!(
+        heading_row.matches('▌').count(),
+        1,
+        "only the focused region is marked: {heading_row:?}"
+    );
 }
 
 /// A repository entry carries the prototype's `.source-row` anatomy: the
@@ -1521,6 +1536,87 @@ fn variants_are_grouped_under_a_label_naming_their_catalog() {
     let variant = row_text(&screen, row_containing(&screen, "✓ valid portable"));
     assert!(!variant.contains("(skills/portable)"), "{variant:?}");
     assert!(!variant.contains("(experimental"), "{variant:?}");
+
+    // A pane too narrow for all three keeps the path whole and sheds the
+    // qualifiers, classification first: the path is which catalog, and the
+    // rows beneath the label no longer carry that themselves. Which of the
+    // qualifiers survives at a given width is the unit tests' subject; that
+    // widening only ever adds is the promise being kept here.
+    let narrow = buffer(&app, 100, 40);
+    let label = row_text(
+        &narrow,
+        row_containing(&narrow, "experimental/claude-code/skills"),
+    );
+    assert!(!label.contains("Agent-specific"), "{label:?}");
+    let wider = buffer(&app, 120, 40);
+    let label = row_text(
+        &wider,
+        row_containing(&wider, "experimental/claude-code/skills"),
+    );
+    assert!(label.contains("skills · Claude Code"), "{label:?}");
+}
+
+/// A variant row is bounded to its pane as well as to the name cap. At the
+/// narrowest wide terminal the variants pane is 33 columns, and a row that
+/// wrapped would carry its marker and the head of its band on one line and
+/// the name they identify on the next.
+#[test]
+fn a_variant_row_is_bounded_to_its_pane_and_never_wraps() {
+    const SURFACE_3: Color = Color::Rgb(0x17, 0x21, 0x2c);
+
+    let harness = Harness::new();
+    let repository = harness.directory.path().join("source");
+    let variant = "portable-variant-with-a-very-long-directory-name";
+    let directory = repository.join("skills").join(variant);
+    fs::create_dir_all(&directory).expect("create variant fixture");
+    fs::write(
+        directory.join("SKILL.md"),
+        format!("---\nname: {variant}\ndescription: Bounded fixture\n---\n# Fixture\n"),
+    )
+    .expect("write variant fixture");
+    create_repository(&repository);
+    let mut app = harness.completed_setup();
+    let preview = app.preview_source(&repository).expect("preview source");
+    app.confirm_source(preview).expect("register source");
+    app.update(Action::OpenSources);
+
+    let screen = buffer(&app, 100, 40);
+    let selected = row_containing(&screen, "▌ ✓ valid");
+    // The variants region of one row, read between the rules that divide the
+    // three regions.
+    let region = |y: u16| {
+        let line = row_text(&screen, y);
+        let dividers = line
+            .char_indices()
+            .filter(|(_, character)| *character == '│')
+            .map(|(byte_index, _)| byte_index)
+            .collect::<Vec<_>>();
+        line[dividers[0] + '│'.len_utf8()..dividers[1]].to_owned()
+    };
+
+    let row = region(selected);
+    assert!(
+        row.trim_start().starts_with("▌ ✓ valid portable-variant"),
+        "{row:?}"
+    );
+    assert!(
+        region(selected + 1).trim().is_empty(),
+        "the name spilled onto the row beneath it: {:?}",
+        region(selected + 1)
+    );
+
+    let line = row_text(&screen, selected);
+    let divider = line
+        .char_indices()
+        .filter(|(_, character)| *character == '│')
+        .nth(1)
+        .map(|(byte_index, _)| u16::try_from(line[..byte_index].chars().count()).expect("column"))
+        .expect("variants region divider");
+    assert_eq!(
+        screen[(divider - 1, selected)].style().bg,
+        Some(SURFACE_3),
+        "the band should reach the end of the pane: {line:?}"
+    );
 }
 
 /// The aside takes its full share at 151 columns. The Sources panes are
@@ -1533,8 +1629,11 @@ fn crossing_the_wide_detail_threshold_never_shrinks_the_sources_panes() {
         .directory
         .path()
         .join("source-checkout-with-a-long-directory-name");
-    let catalog = "experimental/claude-code/skills";
-    let variant = "portable-variant-with-a-very-long-directory-name";
+    // Both bounds have to bind for the comparison to mean anything: a catalog
+    // path and a variant name short enough to fit the pane on either side of
+    // the crossing would read the same however the panes were laid out.
+    let catalog = "experimental/nested/claude-code/skills";
+    let variant = "portable-variant-with-a-very-long-and-descriptive-directory-name";
     let directory = repository.join(catalog).join(variant);
     fs::create_dir_all(&directory).expect("create crossing fixture");
     fs::write(
@@ -1569,7 +1668,7 @@ fn crossing_the_wide_detail_threshold_never_shrinks_the_sources_panes() {
     for (index, needle) in [
         (0, "source-checkout"),
         (0, "@"),
-        (1, "· Agent-specific ·"),
+        (1, "skills · Claude Code"),
         (1, "✓ valid"),
     ] {
         assert_eq!(
