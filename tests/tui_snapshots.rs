@@ -149,7 +149,9 @@ fn remaining_setup_steps_fit_at_minimum_supported_size() {
         "confirm_catalogs_at_minimum_supported_size",
         render(&app, 80, 24)
     );
-    app.update(Action::Continue);
+    // Step six is where the roots are read, so its effect has to run for the
+    // step to report anything.
+    dispatch(&mut app, Action::Continue);
     insta::assert_snapshot!(
         "scan_installations_at_minimum_supported_size",
         render(&app, 80, 24)

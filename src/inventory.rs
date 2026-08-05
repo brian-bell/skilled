@@ -151,6 +151,9 @@ pub enum InstallationHealth {
     NotASkill,
     /// A registered variant, installed as a link, that validates.
     Healthy,
+    /// Structurally sound, but Skilled could not establish where it came from
+    /// because a registered source could not be read.
+    Unverified,
     /// Structurally sound content Skilled does not own.
     Unmanaged,
     /// Content an agent cannot load.
@@ -162,6 +165,7 @@ impl InstallationHealth {
         match self {
             Self::NotASkill => "not a skill",
             Self::Healthy => "healthy",
+            Self::Unverified => "unverified",
             Self::Unmanaged => "unmanaged",
             Self::Broken => "broken",
         }
@@ -307,6 +311,8 @@ impl RowProvenance<'_> {
 /// What Skilled was able to observe about one agent's native root.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RootStatus {
+    /// Nothing has been read yet. Setup reads the roots at its own step.
+    NotScanned,
     /// The agent is not configured, so its root was left alone.
     NotSelected,
     /// The root does not exist. Absence is not a finding.
@@ -326,6 +332,7 @@ impl RootStatus {
     pub fn summary(&self) -> String {
         match self {
             Self::Missing => "root not found".to_owned(),
+            Self::NotScanned => "not scanned yet".to_owned(),
             Self::Unreadable { .. } => "root unreadable".to_owned(),
             other => other.short_summary(),
         }
@@ -334,6 +341,7 @@ impl RootStatus {
     /// The same state, for a line that has to hold all three roots at once.
     pub fn short_summary(&self) -> String {
         match self {
+            Self::NotScanned => "not scanned".to_owned(),
             Self::NotSelected => "not selected".to_owned(),
             Self::Missing => "no root".to_owned(),
             Self::Scanned { installed: 1 } => "1 installed".to_owned(),
@@ -408,6 +416,23 @@ impl InventorySnapshot {
         self.installations()
             .filter(|observation| observation.health() == InstallationHealth::Broken)
             .count()
+    }
+
+    /// The snapshot of a session that has not read any root yet.
+    ///
+    /// First-run setup reads the installation roots at its own step, after the
+    /// user has chosen which agents Skilled should configure. Until then there
+    /// is nothing to report, and this says so rather than reporting an empty
+    /// result that would look like a scan finding nothing.
+    pub(crate) fn not_scanned(agents: &[AgentDetection; 3]) -> Self {
+        Self {
+            rows: Vec::new(),
+            roots: agents.each_ref().map(|agent| RootScan {
+                agent: agent.kind(),
+                path: agent.root().to_path_buf(),
+                status: RootStatus::NotScanned,
+            }),
+        }
     }
 
     /// Every observation that is actually shaped like an installation.
@@ -630,6 +655,7 @@ fn observe(
             path,
             InstallationObject::Symlink { target },
             resolution,
+            index.accounts_for_every_source,
             budget,
         );
     }
@@ -641,6 +667,7 @@ fn observe(
             path,
             InstallationObject::Directory,
             None,
+            index.accounts_for_every_source,
             budget,
         );
     }
@@ -676,11 +703,35 @@ fn classify(
     path: PathBuf,
     object: InstallationObject,
     resolution: Option<VariantResolution>,
+    accountable: bool,
     budget: &mut InspectionBudget,
 ) -> Result<InstalledSkillObservation, String> {
     match validate_portable_skill_with_budget(&path, budget) {
         Ok(validated) => {
-            let managed = resolution.is_some();
+            // Absence from the index only proves non-membership when the index
+            // accounts for every registered source.
+            let state = match (&resolution, accountable) {
+                (Some(_), _) => None,
+                (None, true) => Some((
+                    InstallationHealth::Unmanaged,
+                    Finding {
+                        code: "install.unmanaged",
+                        severity: FindingSeverity::Info,
+                        evidence: "this installation does not come from a registered source"
+                            .to_owned(),
+                    },
+                )),
+                (None, false) => Some((
+                    InstallationHealth::Unverified,
+                    Finding {
+                        code: "install.provenance_unverified",
+                        severity: FindingSeverity::Warning,
+                        evidence: "a registered source could not be read, so Skilled cannot \
+                                   tell whether this came from one"
+                            .to_owned(),
+                    },
+                )),
+            };
             Ok(InstalledSkillObservation {
                 agent,
                 name,
@@ -691,21 +742,8 @@ fn classify(
                     name: validated.name().to_owned(),
                     description: validated.description().to_owned(),
                 }),
-                findings: if managed {
-                    Vec::new()
-                } else {
-                    vec![Finding {
-                        code: "install.unmanaged",
-                        severity: FindingSeverity::Info,
-                        evidence: "this installation does not come from a registered source"
-                            .to_owned(),
-                    }]
-                },
-                health: if managed {
-                    InstallationHealth::Healthy
-                } else {
-                    InstallationHealth::Unmanaged
-                },
+                findings: state.iter().map(|(_, finding)| finding.clone()).collect(),
+                health: state.map_or(InstallationHealth::Healthy, |(health, _)| health),
             })
         }
         Err(PortableValidationError::SourceInspectionLimitExceeded) => {
@@ -811,6 +849,13 @@ fn assemble_rows(observations: Vec<InstalledSkillObservation>) -> Vec<InventoryR
 /// that merely resembles a registered variant is never claimed as managed.
 struct ResolutionIndex {
     by_canonical_path: HashMap<PathBuf, VariantResolution>,
+    /// Whether every registered source could be accounted for.
+    ///
+    /// A source whose checkout is unavailable, or a catalog whose scan failed,
+    /// contributes no candidates. Absence from the index is then not evidence
+    /// of non-membership, and an installation that fails to resolve cannot be
+    /// called unmanaged.
+    accounts_for_every_source: bool,
 }
 
 impl ResolutionIndex {
@@ -823,6 +868,14 @@ impl ResolutionIndex {
     /// entry that would have resolved it may be one of the ones missing.
     fn of(sources: &[RegisteredSource], budget: &mut InspectionBudget) -> (Self, bool) {
         let mut by_canonical_path = HashMap::new();
+        let mut accounts_for_every_source = sources.iter().all(|source| {
+            source.source_error().is_none()
+                && source
+                    .catalogs()
+                    .iter()
+                    .filter(|catalog| catalog.included())
+                    .all(|catalog| catalog.scan_error().is_none())
+        });
         for source in sources {
             // Candidate paths were validated when the source was registered,
             // but the filesystem has moved on since. A candidate that now
@@ -831,6 +884,7 @@ impl ResolutionIndex {
             // adopting it would let anything outside the source be reported as
             // managed by it.
             let Ok(canonical_source) = source.git_top_level().canonicalize() else {
+                accounts_for_every_source = false;
                 continue;
             };
             for catalog in source
@@ -840,7 +894,13 @@ impl ResolutionIndex {
             {
                 for candidate in catalog.candidates() {
                     if !budget.consume_entry() {
-                        return (Self { by_canonical_path }, false);
+                        return (
+                            Self {
+                                by_canonical_path,
+                                accounts_for_every_source,
+                            },
+                            false,
+                        );
                     }
                     let Ok(canonical) = source
                         .git_top_level()
@@ -850,6 +910,7 @@ impl ResolutionIndex {
                         continue;
                     };
                     if !canonical.starts_with(&canonical_source) {
+                        accounts_for_every_source = false;
                         continue;
                     }
                     by_canonical_path
@@ -863,7 +924,13 @@ impl ResolutionIndex {
                 }
             }
         }
-        (Self { by_canonical_path }, true)
+        (
+            Self {
+                by_canonical_path,
+                accounts_for_every_source,
+            },
+            true,
+        )
     }
 
     fn resolve(&self, canonical: &Path) -> Option<VariantResolution> {

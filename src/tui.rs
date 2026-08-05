@@ -646,6 +646,13 @@ fn inventory_subtitle(app: &SkilledApp, shown: usize) -> String {
     match total {
         // A count of zero is a scan result. It may only be stated when every
         // selected root was actually read.
+        0 if inventory
+            .roots()
+            .iter()
+            .all(|root| root.status() == &RootStatus::NotScanned) =>
+        {
+            "not scanned".to_owned()
+        }
         0 if inventory.unreadable_roots().next().is_some() => "not fully read".to_owned(),
         0 if !inventory
             .roots()
@@ -703,7 +710,7 @@ fn inventory_roots_line(app: &SkilledApp) -> Line<'static> {
 fn root_tone(root: &RootScan) -> Tone {
     match root.status() {
         RootStatus::Scanned { .. } => Tone::Healthy,
-        RootStatus::NotSelected | RootStatus::Missing => Tone::Inactive,
+        RootStatus::NotScanned | RootStatus::NotSelected | RootStatus::Missing => Tone::Inactive,
         RootStatus::Unreadable { .. } => Tone::Critical,
     }
 }
@@ -757,7 +764,8 @@ fn installation_tone(health: InstallationHealth) -> Tone {
         // tone; the words "not a skill" beside it carry the meaning.
         InstallationHealth::NotASkill => Tone::Inactive,
         InstallationHealth::Healthy => Tone::Healthy,
-        InstallationHealth::Unmanaged => Tone::Unmanaged,
+        // Unverified is in the unmanaged family: not known to be owned.
+        InstallationHealth::Unverified | InstallationHealth::Unmanaged => Tone::Unmanaged,
         InstallationHealth::Broken => Tone::Critical,
     }
 }
@@ -771,6 +779,17 @@ fn inventory_empty_state(app: &SkilledApp) -> (String, String) {
         );
     }
     let roots = app.inventory().roots();
+    if roots
+        .iter()
+        .all(|root| root.status() == &RootStatus::NotScanned)
+    {
+        return (
+            "Installation roots have not been scanned".to_owned(),
+            "Skilled reads them during setup, after you have chosen which \
+             agents it should configure."
+                .to_owned(),
+        );
+    }
     if roots
         .iter()
         .any(|root| matches!(root.status(), RootStatus::Unreadable { .. }))

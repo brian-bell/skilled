@@ -241,11 +241,16 @@ impl SkilledApp {
             }
         }
         let sources = store.registered_sources()?;
-        // Every screen that reads the inventory reads a real scan, so the
-        // first one is taken before the application exists rather than
-        // leaving a "not yet looked" state that nothing could render
-        // truthfully.
-        let inventory = scan_installations(&agents, &sources);
+        // Setup reads the installation roots at its own step, after the user
+        // has chosen which agents Skilled should configure. Reading them
+        // before that would look at roots the user may be about to deselect.
+        // Once setup is complete the selections are known, so opening
+        // straight into the Inventory opens onto a real scan.
+        let inventory = if view == View::Inventory {
+            scan_installations(&agents, &sources)
+        } else {
+            InventorySnapshot::not_scanned(&agents)
+        };
         let mut app = Self {
             view,
             store,

@@ -135,10 +135,14 @@ fn placeholder_setup_steps_describe_only_observed_work() {
         "{catalogs}"
     );
 
-    app.update(Action::Continue);
+    // Step six is where the roots are read, so its effect has to run for the
+    // step to report anything.
+    let update = app.update(Action::Continue);
+    app.perform_effects(update.effects())
+        .expect("installation scan");
     let installations = text(&buffer(&app, 80, 24));
-    // Step six reads the roots, so it reports what it found at each documented
-    // path rather than announcing that it cannot look.
+    // It reports what it found at each documented path rather than announcing
+    // that it cannot look.
     assert!(
         installations.contains("Skilled read the global skill root"),
         "{installations}"

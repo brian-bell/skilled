@@ -367,6 +367,81 @@ fn a_name_installed_from_two_sources_names_neither_as_the_row_source() {
 }
 
 #[test]
+fn nothing_is_read_until_setup_reaches_the_step_that_reads_it() {
+    let fixture = Fixture::new();
+    let root = fixture.create_root(AgentKind::ClaudeCode);
+    write_skill(&root.join("installed"), "installed");
+
+    // A first run opens on Welcome, before the user has said which agents
+    // Skilled should configure.
+    let mut app = fixture.app();
+    let inventory = app.inventory();
+    for agent in AgentKind::ALL {
+        assert_eq!(inventory.root(agent).status(), &RootStatus::NotScanned);
+    }
+    assert!(inventory.rows().is_empty());
+
+    // Step six is where the roots are read.
+    for _ in 0..5 {
+        let update = app.update(skilled::Action::Continue);
+        app.perform_effects(update.effects())
+            .expect("setup effects");
+    }
+    assert_eq!(
+        app.view(),
+        skilled::View::Setup(skilled::SetupStep::ScanInstallations)
+    );
+    assert_eq!(
+        app.inventory().root(AgentKind::ClaudeCode).status(),
+        &RootStatus::Scanned { installed: 1 }
+    );
+}
+
+#[test]
+fn an_unreadable_registered_source_leaves_provenance_unverified_rather_than_denied() {
+    let fixture = Fixture::new();
+    let repository = fixture.source("library", &["portable"]);
+    drop(fixture.registered(&repository));
+    // Content installed from somewhere Skilled cannot see into.
+    let elsewhere = fixture.path().join("elsewhere/portable");
+    write_skill(&elsewhere, "portable");
+    fixture.install_symlink(AgentKind::ClaudeCode, "portable", &elsewhere);
+
+    // With every source readable, the link plainly comes from none of them.
+    let app = fixture.app();
+    let row = app.inventory().row("portable").expect("portable row");
+    assert_eq!(row.health(), InstallationHealth::Unmanaged);
+    assert_eq!(
+        row.observation(AgentKind::ClaudeCode)
+            .expect("observation")
+            .findings()[0]
+            .code(),
+        "install.unmanaged"
+    );
+    drop(app);
+
+    // Take the registered checkout away. Its candidates are now unknown, so
+    // absence from the index is no longer proof the link came from elsewhere.
+    fs::rename(&repository, fixture.path().join("moved-away")).expect("move the checkout away");
+
+    let app = fixture.app();
+    let row = app.inventory().row("portable").expect("portable row");
+
+    assert_eq!(row.health(), InstallationHealth::Unverified);
+    let finding = &row
+        .observation(AgentKind::ClaudeCode)
+        .expect("observation")
+        .findings()[0];
+    assert_eq!(finding.code(), "install.provenance_unverified");
+    assert_eq!(finding.severity(), FindingSeverity::Warning);
+    // Nothing claims the installation is unowned.
+    assert!(
+        !finding.evidence().contains("does not come from"),
+        "{finding:?}"
+    );
+}
+
+#[test]
 fn a_row_takes_the_worst_state_of_the_agents_that_carry_it() {
     let fixture = Fixture::new();
     let repository = fixture.source("library", &["shared"]);
