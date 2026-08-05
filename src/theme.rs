@@ -6,8 +6,13 @@
 
 use ratatui::style::{Color, Modifier, Style};
 
-// Prototype `:root` palette.
+// Prototype palette: the `:root` variables plus the selector-local surfaces.
 pub(crate) const TERMINAL: Color = Color::Rgb(0x0b, 0x0f, 0x14);
+/// Prototype `.terminal-titlebar` / `.keybar` background: the band the
+/// persistent chrome rows sit on.
+pub(crate) const BAND: Color = Color::Rgb(0x0d, 0x12, 0x18);
+/// Prototype `.detail-pane` background: the wide-viewport detail region.
+pub(crate) const DETAIL_SURFACE: Color = Color::Rgb(0x0c, 0x11, 0x17);
 pub(crate) const SURFACE: Color = Color::Rgb(0x0f, 0x15, 0x1d);
 pub(crate) const SURFACE_2: Color = Color::Rgb(0x12, 0x1a, 0x24);
 pub(crate) const SURFACE_3: Color = Color::Rgb(0x17, 0x21, 0x2c);
@@ -74,6 +79,23 @@ pub(crate) fn chrome() -> Style {
     Style::default().fg(MUTED)
 }
 
+/// The band the title bar and key-hint bar sit on (prototype
+/// `.terminal-titlebar` and `.keybar`).
+///
+/// Background only, mirroring `nav_surface()`: the text on it keeps its own
+/// role — `chrome()` and `key_label()` inherit the band, `key_cap()` carries
+/// its own local emphasis.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "consumed by the persistent-chrome slice (skilled-2k3.15.2)"
+    )
+)]
+pub(crate) fn chrome_band() -> Style {
+    Style::default().bg(BAND)
+}
+
 /// The product mark in the title bar.
 pub(crate) fn product_mark() -> Style {
     Style::default().fg(GREEN)
@@ -102,6 +124,24 @@ pub(crate) fn nav_active() -> Style {
 /// A navigation entry the user can reach but is not currently viewing.
 pub(crate) fn nav_inactive() -> Style {
     Style::default().fg(MUTED).bg(SURFACE)
+}
+
+/// The count beside a navigation entry (prototype `.tab-count`).
+///
+/// No background of its own: the count sits inside an entry and inherits that
+/// entry's surface, so it reads the same on an active (`SURFACE_2`) and an
+/// inactive (`SURFACE`) tab. A count may only be rendered when the underlying
+/// condition it summarises actually holds; this token styles it, it does not
+/// license it.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "consumed by the persistent-chrome slice (skilled-2k3.15.2)"
+    )
+)]
+pub(crate) fn nav_count() -> Style {
+    Style::default().fg(AMBER)
 }
 
 /// The surface behind the focused row of a list.
@@ -170,6 +210,21 @@ pub(crate) fn dialog_scope() -> Style {
 /// The interior of a modal dialog.
 pub(crate) fn dialog_surface() -> Style {
     Style::default().fg(TEXT).bg(SURFACE)
+}
+
+/// The wide-viewport detail region's surface (prototype `.detail-pane`).
+///
+/// Background only, like `chrome_band()`: the rows inside keep their own
+/// foreground roles and inherit this surface.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "consumed by the detail-pane slice (skilled-2k3.15.4)"
+    )
+)]
+pub(crate) fn detail_surface() -> Style {
+    Style::default().bg(DETAIL_SURFACE)
 }
 
 /// The title of a workspace pane.
@@ -274,8 +329,17 @@ mod tests {
     }
 
     /// Every surface a span of workspace or dialog text can sit on. Selected
-    /// rows put `SURFACE_3` under any tone, so it is the binding constraint.
-    const SURFACES: [Color; 4] = [TERMINAL, SURFACE, SURFACE_2, SURFACE_3];
+    /// rows put `SURFACE_3` under any tone, so it is the binding constraint;
+    /// `BAND` and `DETAIL_SURFACE` sit between `TERMINAL` and `SURFACE` in
+    /// luminance.
+    const SURFACES: [Color; 6] = [
+        TERMINAL,
+        BAND,
+        DETAIL_SURFACE,
+        SURFACE,
+        SURFACE_2,
+        SURFACE_3,
+    ];
 
     /// A role that paints its own background is read against it; one that
     /// inherits is read against every surface it can land on.
@@ -318,6 +382,7 @@ mod tests {
             ("product_name()", product_name()),
             ("nav_active()", nav_active()),
             ("nav_inactive()", nav_inactive()),
+            ("nav_count()", nav_count()),
             ("nav_note()", nav_note()),
             ("section_title()", section_title()),
             ("progress_complete()", progress_complete()),
@@ -334,6 +399,25 @@ mod tests {
             ("key_label()", key_label()),
         ] {
             assert_readable(role, style);
+        }
+    }
+
+    /// A role that only paints a background must paint one of the surfaces
+    /// the readability sweep covers, or text landing on it would escape the
+    /// contrast guarantee.
+    #[test]
+    fn background_roles_paint_covered_surfaces() {
+        for (role, style) in [
+            ("nav_surface()", nav_surface()),
+            ("chrome_band()", chrome_band()),
+            ("detail_surface()", detail_surface()),
+            ("selected_row()", selected_row()),
+        ] {
+            let background = style.bg.expect("surface roles set a background");
+            assert!(
+                SURFACES.contains(&background),
+                "{role} paints {background:?}, which the readability test does not cover"
+            );
         }
     }
 }
