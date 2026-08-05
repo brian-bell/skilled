@@ -406,11 +406,28 @@ pub(crate) fn scan_installations(
     agents: &[AgentDetection; 3],
     sources: &[RegisteredSource],
 ) -> InventorySnapshot {
-    let mut budget = InspectionBudget::installation_scan();
-    let index = ResolutionIndex::of(sources, &mut budget);
+    scan_with_budget(agents, sources, InspectionBudget::installation_scan())
+}
+
+fn scan_with_budget(
+    agents: &[AgentDetection; 3],
+    sources: &[RegisteredSource],
+    mut budget: InspectionBudget,
+) -> InventorySnapshot {
+    const EXHAUSTED: &str = "the scan exceeded its bounded inspection limit";
+
+    let (index, complete) = ResolutionIndex::of(sources, &mut budget);
     let mut observations = Vec::new();
     let roots = agents.each_ref().map(|agent| {
-        let status = if agent.selected() {
+        let status = if !complete {
+            // An index that ran out of budget is missing registered variants,
+            // and an installation pointing at one of those would be reported
+            // as belonging to no source at all. Rather than invent that
+            // provenance, nothing is reported from any root.
+            RootStatus::Unreadable {
+                message: EXHAUSTED.to_owned(),
+            }
+        } else if agent.selected() {
             match scan_root(agent, &index, &mut budget) {
                 Ok(found) => {
                     let installed = found
@@ -440,13 +457,18 @@ pub(crate) fn scan_installations(
 
 /// A root that does not exist is missing, not unreadable: absence is expected.
 ///
-/// The check is on the link itself. A root that is a dangling symbolic link is
-/// something the user put there, so it is unreadable rather than absent.
+/// Only absence qualifies. A root Skilled was denied — an unsearchable parent,
+/// say — was not observed to be missing, and reporting it as missing would
+/// both assert something unobserved and suppress the reason the scan failed.
+/// The check is on the link itself, so a root that is a dangling symbolic link
+/// is something the user put there and stays unreadable.
 fn root_status_for(agent: &AgentDetection, status: RootStatus) -> RootStatus {
+    let absent = matches!(
+        fs::symlink_metadata(agent.root()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound
+    );
     match status {
-        RootStatus::Unreadable { .. } if fs::symlink_metadata(agent.root()).is_err() => {
-            RootStatus::Missing
-        }
+        RootStatus::Unreadable { .. } if absent => RootStatus::Missing,
         other => other,
     }
 }
@@ -750,8 +772,10 @@ impl ResolutionIndex {
     ///
     /// The candidate count comes from what the user registered, so this walk
     /// is bounded like every other filesystem walk in the module rather than
-    /// trusted to be small.
-    fn of(sources: &[RegisteredSource], budget: &mut InspectionBudget) -> Self {
+    /// trusted to be small. Returns whether the index is complete: a partial
+    /// one cannot be used to decide that anything is unmanaged, because the
+    /// entry that would have resolved it may be one of the ones missing.
+    fn of(sources: &[RegisteredSource], budget: &mut InspectionBudget) -> (Self, bool) {
         let mut by_canonical_path = HashMap::new();
         for source in sources {
             for catalog in source
@@ -761,7 +785,7 @@ impl ResolutionIndex {
             {
                 for candidate in catalog.candidates() {
                     if !budget.consume_entry() {
-                        return Self { by_canonical_path };
+                        return (Self { by_canonical_path }, false);
                     }
                     let Ok(canonical) = source
                         .git_top_level()
@@ -780,10 +804,86 @@ impl ResolutionIndex {
                 }
             }
         }
-        Self { by_canonical_path }
+        (Self { by_canonical_path }, true)
     }
 
     fn resolve(&self, canonical: &Path) -> Option<VariantResolution> {
         self.by_canonical_path.get(canonical).cloned()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{AppEnvironment, agents::detect_agents};
+
+    /// A scan whose resolution index could not be finished cannot decide that
+    /// anything is unmanaged, because the entry that would have resolved an
+    /// installation may be one of the ones the budget cut off. It must
+    /// therefore report nothing at all rather than false provenance.
+    ///
+    /// The production budget is far too large to exhaust from a fixture, so
+    /// the invariant is pinned here rather than left to emerge from the order
+    /// in which the scan happens to spend it.
+    #[test]
+    fn an_unfinished_resolution_index_reports_no_root_as_scanned() {
+        let temporary = tempfile::tempdir().expect("temporary home");
+        let home = temporary.path().join("home");
+        let root = home.join(".claude/skills/installed");
+        fs::create_dir_all(&root).expect("create an installed skill");
+        fs::write(
+            root.join("SKILL.md"),
+            "---\nname: installed\ndescription: fixture\n---\n# Installed\n",
+        )
+        .expect("write SKILL.md");
+        let environment = AppEnvironment::new(&home, temporary.path().join("data"), "");
+        let agents = detect_agents(&environment);
+
+        let snapshot = scan_with_budget(&agents, &[], InspectionBudget::exhausted());
+
+        assert!(
+            snapshot.rows().is_empty(),
+            "an unfinished index must not produce rows"
+        );
+        // A root that exists cannot be reported as read. One that does not
+        // exist is still absent, which the index has no bearing on.
+        assert!(matches!(
+            snapshot.root(AgentKind::ClaudeCode).status(),
+            RootStatus::Unreadable { .. }
+        ));
+        for root in snapshot.roots() {
+            assert!(
+                !matches!(root.status(), RootStatus::Scanned { .. }),
+                "{:?} claimed a scan result: {:?}",
+                root.agent(),
+                root.status()
+            );
+        }
+    }
+
+    /// The same scan with a whole budget sees the installation, so the test
+    /// above is measuring the budget and not a broken fixture.
+    #[test]
+    fn the_same_fixture_is_reported_when_the_budget_is_whole() {
+        let temporary = tempfile::tempdir().expect("temporary home");
+        let home = temporary.path().join("home");
+        let root = home.join(".claude/skills/installed");
+        fs::create_dir_all(&root).expect("create an installed skill");
+        fs::write(
+            root.join("SKILL.md"),
+            "---\nname: installed\ndescription: fixture\n---\n# Installed\n",
+        )
+        .expect("write SKILL.md");
+        let environment = AppEnvironment::new(&home, temporary.path().join("data"), "");
+        let agents = detect_agents(&environment);
+
+        let snapshot = scan_with_budget(&agents, &[], InspectionBudget::installation_scan());
+
+        assert_eq!(snapshot.rows().len(), 1);
+        assert_eq!(snapshot.rows()[0].name(), "installed");
+        assert_eq!(
+            snapshot.root(AgentKind::ClaudeCode).status(),
+            &RootStatus::Scanned { installed: 1 }
+        );
     }
 }

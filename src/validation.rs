@@ -41,6 +41,15 @@ impl InspectionBudget {
         }
     }
 
+    /// A budget with nothing left, for exercising the fail-closed paths.
+    #[cfg(test)]
+    pub(crate) fn exhausted() -> Self {
+        Self {
+            remaining_entries: 0,
+            remaining_bytes: 0,
+        }
+    }
+
     pub(crate) fn consume_entry(&mut self) -> bool {
         if self.remaining_entries == 0 {
             return false;

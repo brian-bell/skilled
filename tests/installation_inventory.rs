@@ -569,6 +569,36 @@ fn a_link_to_a_file_is_a_broken_installation_while_a_bare_file_is_not_one() {
 }
 
 #[test]
+fn a_root_behind_a_denied_parent_is_unreadable_rather_than_reported_missing() {
+    let fixture = Fixture::new();
+    let repository = fixture.source("library", &["portable"]);
+    drop(fixture.registered(&repository));
+    // The root exists, but its parent cannot be searched, so Skilled cannot
+    // observe it at all — which is not the same as observing that it is absent.
+    let root = fixture.create_root(AgentKind::ClaudeCode);
+    let parent = root.parent().expect("root parent").to_path_buf();
+    if running_as_root() {
+        return;
+    }
+    fs::set_permissions(&parent, fs::Permissions::from_mode(0o444))
+        .expect("drop search permission on the parent");
+
+    let inventory_owner = fixture.app();
+    let status = inventory_owner
+        .inventory()
+        .root(AgentKind::ClaudeCode)
+        .status()
+        .clone();
+    fs::set_permissions(&parent, fs::Permissions::from_mode(0o755)).expect("restore permissions");
+
+    assert!(
+        matches!(status, RootStatus::Unreadable { .. }),
+        "a denied root must not be reported as missing: {status:?}"
+    );
+    assert_ne!(status, RootStatus::Missing);
+}
+
+#[test]
 fn a_root_that_is_not_a_directory_is_unreadable_and_names_the_reason() {
     let fixture = Fixture::new();
     let repository = fixture.source("library", &["portable"]);
