@@ -15,7 +15,8 @@ use std::{
 use skilled::{
     AgentKind, AppEnvironment, SkilledApp,
     inventory::{
-        Finding, FindingSeverity, InstallationHealth, InstallationObject, RootStatus, RowProvenance,
+        Finding, FindingSeverity, InstallationHealth, InstallationObject, Provenance, RootStatus,
+        RowProvenance,
     },
 };
 
@@ -442,6 +443,68 @@ fn an_unreadable_registered_source_leaves_provenance_unverified_rather_than_deni
     );
     assert_eq!(row.provenance(), RowProvenance::Unverified);
     assert_eq!(row.provenance().label(), "unverified");
+}
+
+#[test]
+fn an_invalid_installation_keeps_the_provenance_uncertainty_of_a_valid_one() {
+    let fixture = Fixture::new();
+    let repository = fixture.source("library", &["portable"]);
+    drop(fixture.registered(&repository));
+    // Content that will not validate, installed from somewhere unknown.
+    let elsewhere = fixture.path().join("elsewhere/malformed");
+    fs::create_dir_all(&elsewhere).expect("create malformed content");
+    fs::write(elsewhere.join("SKILL.md"), "no frontmatter here\n").expect("write malformed");
+    fixture.install_symlink(AgentKind::ClaudeCode, "malformed", &elsewhere);
+    fs::rename(&repository, fixture.path().join("moved-away")).expect("move the checkout away");
+
+    let app = fixture.app();
+    let row = app.inventory().row("malformed").expect("malformed row");
+
+    // Failing validation says nothing about where the content came from, so
+    // the row must not fall back to claiming Skilled does not manage it.
+    assert_eq!(row.health(), InstallationHealth::Broken);
+    assert_eq!(row.provenance(), RowProvenance::Unverified);
+    assert_eq!(
+        row.observation(AgentKind::ClaudeCode)
+            .expect("observation")
+            .provenance(),
+        &Provenance::Unverified
+    );
+}
+
+#[test]
+fn one_unknown_provenance_stops_a_row_naming_the_source_of_the_others() {
+    let fixture = Fixture::new();
+    let repository = fixture.source("library", &["shared"]);
+    let vanishing = fixture.source("archive", &["shared"]);
+    let mut app = fixture.registered(&repository);
+    let preview = app.preview_source(&vanishing).expect("preview second");
+    app.confirm_source(preview).expect("register second");
+    drop(app);
+    // One agent's installation resolves to a source that is still there; the
+    // other's cannot be placed because a registered checkout is gone.
+    fixture.install_symlink(
+        AgentKind::ClaudeCode,
+        "shared",
+        &repository.join("skills/shared"),
+    );
+    let elsewhere = fixture.path().join("elsewhere/shared");
+    write_skill(&elsewhere, "shared");
+    fixture.install_symlink(AgentKind::Codex, "shared", &elsewhere);
+    fs::rename(&vanishing, fixture.path().join("gone")).expect("move the second checkout away");
+
+    let app = fixture.app();
+    let row = app.inventory().row("shared").expect("shared row");
+
+    // Naming the source that did resolve would imply the same source for the
+    // installation that did not.
+    assert_eq!(row.provenance(), RowProvenance::Unverified);
+    assert_eq!(
+        row.observation(AgentKind::ClaudeCode)
+            .and_then(|observation| observation.resolution())
+            .map(|resolution| resolution.source_label()),
+        Some("library")
+    );
 }
 
 #[test]

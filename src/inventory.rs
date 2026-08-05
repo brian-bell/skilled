@@ -172,6 +172,22 @@ impl InstallationHealth {
     }
 }
 
+/// Where one installation came from.
+///
+/// Recorded rather than inferred, so it survives every outcome: an
+/// installation that fails validation still has whatever provenance the scan
+/// was able to establish, and one whose provenance could not be established
+/// says so instead of defaulting to "from nowhere registered".
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Provenance {
+    /// It came from this registered source variant.
+    Resolved(VariantResolution),
+    /// Every registered source was accounted for and none contains it.
+    Unregistered,
+    /// A registered source could not be read, so this is not known.
+    Unverified,
+}
+
 /// One installation slot in one agent's root.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InstalledSkillObservation {
@@ -179,7 +195,7 @@ pub struct InstalledSkillObservation {
     name: String,
     path: PathBuf,
     object: InstallationObject,
-    resolution: Option<VariantResolution>,
+    provenance: Provenance,
     validation: Option<SkillValidation>,
     findings: Vec<Finding>,
     health: InstallationHealth,
@@ -202,8 +218,15 @@ impl InstalledSkillObservation {
         &self.object
     }
 
+    pub fn provenance(&self) -> &Provenance {
+        &self.provenance
+    }
+
     pub fn resolution(&self) -> Option<&VariantResolution> {
-        self.resolution.as_ref()
+        match &self.provenance {
+            Provenance::Resolved(resolution) => Some(resolution),
+            _ => None,
+        }
     }
 
     /// The portable validation of the installed content, or `None` when the
@@ -253,20 +276,20 @@ impl InventoryRow {
     /// arrangement, and naming one of them would misstate the other; which of
     /// them ought to win is a conflict a later slice decides.
     pub fn provenance(&self) -> RowProvenance<'_> {
+        // One unknown is enough: a row summary that named the source of the
+        // installations it could place would imply the same source for the one
+        // it could not.
+        if self
+            .observations()
+            .any(|observation| observation.provenance() == &Provenance::Unverified)
+        {
+            return RowProvenance::Unverified;
+        }
         let mut resolved = self
             .observations()
             .filter_map(|observation| observation.resolution());
         let Some(first) = resolved.next() else {
-            // Nothing resolved. Whether that means "from nowhere registered"
-            // depends on whether every source could be read.
-            return if self
-                .observations()
-                .any(|observation| observation.health() == InstallationHealth::Unverified)
-            {
-                RowProvenance::Unverified
-            } else {
-                RowProvenance::Unregistered
-            };
+            return RowProvenance::Unregistered;
         };
         if resolved.all(|resolution| resolution.source_id() == first.source_id()) {
             RowProvenance::Source(first.source_label())
@@ -280,11 +303,13 @@ impl InventoryRow {
             .flat_map(|observation| observation.findings())
     }
 
-    /// Whether this row is a skill, rather than other content a root happens to
-    /// hold beside its skills.
+    /// Whether this row is a skill installation, rather than other content a
+    /// root happens to hold beside its skills.
     ///
-    /// Only a directory or a link to one is a skill. An entry Skilled could not
-    /// read is not claimed as one.
+    /// A directory or a symbolic link is one, whether or not it currently
+    /// works: a dangling link is a broken installation, not stray content, and
+    /// the health column says so. An entry Skilled could not read is not
+    /// claimed as an installation either way.
     pub fn is_skill(&self) -> bool {
         self.observations().any(|observation| {
             matches!(
@@ -611,6 +636,7 @@ fn observe(
                     path,
                     object: InstallationObject::Unknown,
                 },
+                Provenance::Unverified,
                 Finding {
                     code: "install.unreadable_entry",
                     severity: FindingSeverity::Critical,
@@ -639,6 +665,7 @@ fn observe(
                         path,
                         object: InstallationObject::Symlink { target },
                     },
+                    Provenance::Unregistered,
                     Finding {
                         code: "install.dangling_symlink",
                         severity: FindingSeverity::Critical,
@@ -654,6 +681,7 @@ fn observe(
                         path,
                         object: InstallationObject::Symlink { target },
                     },
+                    Provenance::Unverified,
                     Finding {
                         code: "install.unresolvable_symlink",
                         severity: FindingSeverity::Critical,
@@ -706,7 +734,7 @@ fn observe(
         name,
         path,
         object: InstallationObject::NotADirectory,
-        resolution: None,
+        provenance: Provenance::Unregistered,
         validation: None,
         findings: vec![Finding {
             code: "install.not_a_skill",
@@ -775,7 +803,7 @@ fn classify(
                 name,
                 path,
                 object,
-                resolution,
+                provenance: provenance_of(&resolution, accountable),
                 validation: Some(SkillValidation::Valid {
                     name: validated.name().to_owned(),
                     description: validated.description().to_owned(),
@@ -794,7 +822,9 @@ fn classify(
                 name,
                 path,
                 object,
-                resolution,
+                // A failed validation says nothing about where the content
+                // came from, so whatever the scan established is kept.
+                provenance: provenance_of(&resolution, accountable),
                 validation: Some(SkillValidation::Invalid {
                     message: message.clone(),
                 }),
@@ -809,6 +839,15 @@ fn classify(
     }
 }
 
+/// What the scan was able to establish about where an installation came from.
+fn provenance_of(resolution: &Option<VariantResolution>, accountable: bool) -> Provenance {
+    match (resolution, accountable) {
+        (Some(resolution), _) => Provenance::Resolved(resolution.clone()),
+        (None, true) => Provenance::Unregistered,
+        (None, false) => Provenance::Unverified,
+    }
+}
+
 /// The identity of one installation slot, before anything is known about it.
 struct Slot {
     agent: AgentKind,
@@ -817,13 +856,17 @@ struct Slot {
     object: InstallationObject,
 }
 
-fn broken_object(slot: Slot, finding: Finding) -> InstalledSkillObservation {
+fn broken_object(
+    slot: Slot,
+    provenance: Provenance,
+    finding: Finding,
+) -> InstalledSkillObservation {
     InstalledSkillObservation {
         agent: slot.agent,
         name: slot.name,
         path: slot.path,
         object: slot.object,
-        resolution: None,
+        provenance,
         validation: None,
         findings: vec![finding],
         health: InstallationHealth::Broken,
