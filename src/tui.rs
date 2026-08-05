@@ -476,13 +476,17 @@ fn setup_lines(app: &SkilledApp, step: SetupStep, width: u16) -> Vec<Line<'stati
                         .map(|catalog| catalog.candidates().len())
                         .sum::<usize>()
                 )),
-                if inventory.unreadable_roots().next().is_some() {
-                    // A root that could not be read contributes nothing, so a
-                    // total taken across the roots would read as "none
-                    // installed" when it means "not known".
+                if !inventory.counts_are_complete() {
+                    // A root that was not read contributes nothing, so a total
+                    // taken across the roots would read as "none installed"
+                    // when it means "not known".
                     Line::from(components::badge(
-                        Tone::Critical,
-                        "installation counts unavailable: a skill root could not be read",
+                        Tone::Inactive,
+                        if inventory.unreadable_roots().next().is_some() {
+                            "installation counts unavailable: a skill root could not be read"
+                        } else {
+                            "installation counts unavailable: no skill root was read"
+                        },
                     ))
                 } else {
                     Line::from(format!(

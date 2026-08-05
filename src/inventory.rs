@@ -494,6 +494,25 @@ impl InventorySnapshot {
         self.rows.iter().filter(|row| row.is_skill()).count()
     }
 
+    /// Whether the counts taken across the roots describe the whole picture.
+    ///
+    /// A count is an observation. It may only be stated when every root
+    /// Skilled was asked to look at was either read or found absent — not when
+    /// one could not be read, and not when it was never asked to look at any.
+    pub fn counts_are_complete(&self) -> bool {
+        self.roots.iter().all(|root| {
+            matches!(
+                root.status(),
+                RootStatus::Scanned { .. } | RootStatus::Missing | RootStatus::NotSelected
+            )
+        }) && self.roots.iter().any(|root| {
+            matches!(
+                root.status(),
+                RootStatus::Scanned { .. } | RootStatus::Missing
+            )
+        })
+    }
+
     /// The message behind an unreadable root, if any root could not be read.
     ///
     /// A root Skilled could not read in full contributes nothing, so the reason
@@ -665,7 +684,11 @@ fn observe(
                         path,
                         object: InstallationObject::Symlink { target },
                     },
-                    Provenance::Unregistered,
+                    // A link into a checkout that has since been moved away is
+                    // dangling and unplaceable at once; claiming it came from
+                    // no registered source would be the second thing Skilled
+                    // cannot know about it.
+                    provenance_of(&None, index.accounts_for_every_source),
                     Finding {
                         code: "install.dangling_symlink",
                         severity: FindingSeverity::Critical,

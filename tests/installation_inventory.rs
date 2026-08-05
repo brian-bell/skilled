@@ -508,6 +508,67 @@ fn one_unknown_provenance_stops_a_row_naming_the_source_of_the_others() {
 }
 
 #[test]
+fn a_link_into_a_checkout_that_moved_away_is_not_declared_unregistered() {
+    let fixture = Fixture::new();
+    let repository = fixture.source("library", &["portable"]);
+    drop(fixture.registered(&repository));
+    fixture.install_symlink(
+        AgentKind::ClaudeCode,
+        "portable",
+        &repository.join("skills/portable"),
+    );
+    // The link now dangles and its source cannot be read: two things Skilled
+    // does not know, not one it does.
+    fs::rename(&repository, fixture.path().join("moved-away")).expect("move the checkout away");
+
+    let app = fixture.app();
+    let row = app.inventory().row("portable").expect("portable row");
+
+    assert_eq!(row.health(), InstallationHealth::Broken);
+    let observation = row
+        .observation(AgentKind::ClaudeCode)
+        .expect("dangling observation");
+    assert_eq!(observation.findings()[0].code(), "install.dangling_symlink");
+    assert_eq!(observation.provenance(), &Provenance::Unverified);
+    assert_eq!(row.provenance(), RowProvenance::Unverified);
+}
+
+#[test]
+fn counts_are_withheld_until_some_root_has_actually_been_looked_at() {
+    let fixture = Fixture::new();
+    let root = fixture.create_root(AgentKind::ClaudeCode);
+    write_skill(&root.join("installed"), "installed");
+
+    // Nothing read yet: a zero would be a result the scan never produced.
+    let mut app = fixture.app();
+    assert!(!app.inventory().counts_are_complete());
+
+    // Every agent deselected: the roots were deliberately not looked at.
+    app.update(skilled::Action::Continue);
+    for _ in 0..3 {
+        app.update(skilled::Action::ToggleSelection);
+        app.update(skilled::Action::MoveSelection(1));
+    }
+    for _ in 0..4 {
+        let update = app.update(skilled::Action::Continue);
+        app.perform_effects(update.effects())
+            .expect("setup effects");
+    }
+    assert!(!app.inventory().counts_are_complete());
+
+    // A root that exists and one that does not are both observations.
+    let fixture = Fixture::new();
+    fixture.create_root(AgentKind::ClaudeCode);
+    let mut app = fixture.app();
+    for _ in 0..5 {
+        let update = app.update(skilled::Action::Continue);
+        app.perform_effects(update.effects())
+            .expect("setup effects");
+    }
+    assert!(app.inventory().counts_are_complete());
+}
+
+#[test]
 fn a_row_takes_the_worst_state_of_the_agents_that_carry_it() {
     let fixture = Fixture::new();
     let repository = fixture.source("library", &["shared"]);
