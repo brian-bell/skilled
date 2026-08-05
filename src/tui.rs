@@ -292,7 +292,7 @@ impl Destination {
     /// The registry is always fully known, so Sources always has a count, zero
     /// included. The inventory is an observation of the filesystem, and
     /// whether that observation may be stated as a number is decided by
-    /// [`InventorySnapshot::stated_skill_count`] — the same decision
+    /// [`crate::inventory::InventorySnapshot::stated_skill_count`] — the same decision
     /// [`inventory_subtitle`] defers to, so the tab and the subtitle beneath it
     /// cannot disagree. A destination this release cannot open has nothing to
     /// count and renders nothing: an em dash would read as a measurement that
