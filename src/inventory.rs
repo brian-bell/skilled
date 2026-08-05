@@ -257,7 +257,16 @@ impl InventoryRow {
             .observations()
             .filter_map(|observation| observation.resolution());
         let Some(first) = resolved.next() else {
-            return RowProvenance::Unregistered;
+            // Nothing resolved. Whether that means "from nowhere registered"
+            // depends on whether every source could be read.
+            return if self
+                .observations()
+                .any(|observation| observation.health() == InstallationHealth::Unverified)
+            {
+                RowProvenance::Unverified
+            } else {
+                RowProvenance::Unregistered
+            };
         };
         if resolved.all(|resolution| resolution.source_id() == first.source_id()) {
             RowProvenance::Source(first.source_label())
@@ -289,6 +298,9 @@ impl InventoryRow {
 /// Where a row's installations came from, taken together.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RowProvenance<'a> {
+    /// No installation resolved, and a registered source could not be read, so
+    /// whether they came from one is not known.
+    Unverified,
     /// No installation resolved to a registered source.
     Unregistered,
     /// Every resolved installation came from this source.
@@ -301,6 +313,7 @@ impl RowProvenance<'_> {
     /// The word the Source column shows, and the filter matches against.
     pub fn label(&self) -> &str {
         match self {
+            Self::Unverified => "unverified",
             Self::Unregistered => "not registered",
             Self::Source(label) => label,
             Self::Divergent => "multiple sources",
@@ -592,10 +605,12 @@ fn observe(
         // erase everything Skilled had already observed there.
         Err(error) => {
             return Ok(broken_object(
-                agent,
-                name,
-                path,
-                InstallationObject::Unknown,
+                Slot {
+                    agent,
+                    name,
+                    path,
+                    object: InstallationObject::Unknown,
+                },
                 Finding {
                     code: "install.unreadable_entry",
                     severity: FindingSeverity::Critical,
@@ -618,10 +633,12 @@ fn observe(
             // already shows in the reader's own notation.
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 return Ok(broken_object(
-                    agent,
-                    name,
-                    path,
-                    InstallationObject::Symlink { target },
+                    Slot {
+                        agent,
+                        name,
+                        path,
+                        object: InstallationObject::Symlink { target },
+                    },
                     Finding {
                         code: "install.dangling_symlink",
                         severity: FindingSeverity::Critical,
@@ -631,10 +648,12 @@ fn observe(
             }
             Err(error) => {
                 return Ok(broken_object(
-                    agent,
-                    name,
-                    path,
-                    InstallationObject::Symlink { target },
+                    Slot {
+                        agent,
+                        name,
+                        path,
+                        object: InstallationObject::Symlink { target },
+                    },
                     Finding {
                         code: "install.unresolvable_symlink",
                         severity: FindingSeverity::Critical,
@@ -650,11 +669,14 @@ fn observe(
         // to the agent root, so it is recorded rather than locked against.
         let resolution = index.resolve(&canonical);
         return classify(
-            agent,
-            name,
-            path,
-            InstallationObject::Symlink { target },
+            Slot {
+                agent,
+                name,
+                path,
+                object: InstallationObject::Symlink { target },
+            },
             resolution,
+            Some(canonical),
             index.accounts_for_every_source,
             budget,
         );
@@ -662,10 +684,13 @@ fn observe(
 
     if file_type.is_dir() {
         return classify(
-            agent,
-            name,
-            path,
-            InstallationObject::Directory,
+            Slot {
+                agent,
+                name,
+                path,
+                object: InstallationObject::Directory,
+            },
+            None,
             None,
             index.accounts_for_every_source,
             budget,
@@ -698,16 +723,29 @@ fn observe(
 /// so the declared name is compared against the name the agent will load the
 /// skill under.
 fn classify(
-    agent: AgentKind,
-    name: String,
-    path: PathBuf,
-    object: InstallationObject,
+    slot: Slot,
     resolution: Option<VariantResolution>,
+    resolved_from: Option<PathBuf>,
     accountable: bool,
     budget: &mut InspectionBudget,
 ) -> Result<InstalledSkillObservation, String> {
+    let Slot {
+        agent,
+        name,
+        path,
+        object,
+    } = slot;
     match validate_portable_skill_with_budget(&path, budget) {
         Ok(validated) => {
+            // Resolution and validation each canonicalized the path for
+            // themselves. A link swapped between the two would carry a source
+            // label describing content that is no longer there, so the target
+            // is confirmed to be the one that was resolved before the label is
+            // kept. A mismatch is not an error — it is simply not a resolution.
+            let resolution = match resolved_from {
+                Some(expected) if path.canonicalize().ok().as_ref() != Some(&expected) => None,
+                _ => resolution,
+            };
             // Absence from the index only proves non-membership when the index
             // accounts for every registered source.
             let state = match (&resolution, accountable) {
@@ -771,18 +809,20 @@ fn classify(
     }
 }
 
-fn broken_object(
+/// The identity of one installation slot, before anything is known about it.
+struct Slot {
     agent: AgentKind,
     name: String,
     path: PathBuf,
     object: InstallationObject,
-    finding: Finding,
-) -> InstalledSkillObservation {
+}
+
+fn broken_object(slot: Slot, finding: Finding) -> InstalledSkillObservation {
     InstalledSkillObservation {
-        agent,
-        name,
-        path,
-        object,
+        agent: slot.agent,
+        name: slot.name,
+        path: slot.path,
+        object: slot.object,
         resolution: None,
         validation: None,
         findings: vec![finding],

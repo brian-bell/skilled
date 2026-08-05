@@ -434,11 +434,14 @@ fn an_unreadable_registered_source_leaves_provenance_unverified_rather_than_deni
         .findings()[0];
     assert_eq!(finding.code(), "install.provenance_unverified");
     assert_eq!(finding.severity(), FindingSeverity::Warning);
-    // Nothing claims the installation is unowned.
+    // Nothing claims the installation is unowned — including the row's own
+    // provenance, which the Source column and the detail pane both read.
     assert!(
         !finding.evidence().contains("does not come from"),
         "{finding:?}"
     );
+    assert_eq!(row.provenance(), RowProvenance::Unverified);
+    assert_eq!(row.provenance().label(), "unverified");
 }
 
 #[test]

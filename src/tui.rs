@@ -476,12 +476,22 @@ fn setup_lines(app: &SkilledApp, step: SetupStep, width: u16) -> Vec<Line<'stati
                         .map(|catalog| catalog.candidates().len())
                         .sum::<usize>()
                 )),
-                Line::from(format!(
-                    "Installed: {}   Unmanaged: {}   Broken: {}",
-                    inventory.installation_count(),
-                    inventory.unmanaged_count(),
-                    inventory.broken_count()
-                )),
+                if inventory.unreadable_roots().next().is_some() {
+                    // A root that could not be read contributes nothing, so a
+                    // total taken across the roots would read as "none
+                    // installed" when it means "not known".
+                    Line::from(components::badge(
+                        Tone::Critical,
+                        "installation counts unavailable: a skill root could not be read",
+                    ))
+                } else {
+                    Line::from(format!(
+                        "Installed: {}   Unmanaged: {}   Broken: {}",
+                        inventory.installation_count(),
+                        inventory.unmanaged_count(),
+                        inventory.broken_count()
+                    ))
+                },
                 Line::default(),
                 Line::from("Unresolved findings never force a repair."),
             ]);
@@ -970,6 +980,12 @@ fn inventory_detail_lines(row: &InventoryRow, home: &Path, width: u16) -> Vec<Li
         // below names its own.
         RowProvenance::Divergent => lines.push(Line::from(
             "Installed from more than one registered source; each agent names its own below.",
+        )),
+        // Not knowing where something came from is not the same as knowing it
+        // came from nowhere registered.
+        RowProvenance::Unverified => lines.push(Line::from(
+            "A registered source could not be read, so Skilled cannot tell whether \
+             this came from one.",
         )),
         // Unresolved content is observed, never adopted.
         RowProvenance::Unregistered => lines.push(Line::from(
