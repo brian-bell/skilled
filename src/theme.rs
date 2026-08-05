@@ -13,6 +13,8 @@ pub(crate) const SURFACE_2: Color = Color::Rgb(0x12, 0x1a, 0x24);
 pub(crate) const SURFACE_3: Color = Color::Rgb(0x17, 0x21, 0x2c);
 pub(crate) const TEXT_STRONG: Color = Color::Rgb(0xf2, 0xf6, 0xfa);
 pub(crate) const MUTED: Color = Color::Rgb(0x84, 0x91, 0xa1);
+/// Below 4.5:1 on every surface; reserved for decorative or WCAG-exempt
+/// roles. Information-bearing text uses `MUTED` or brighter.
 pub(crate) const FAINT: Color = Color::Rgb(0x53, 0x61, 0x71);
 pub(crate) const LINE: Color = Color::Rgb(0x29, 0x34, 0x40);
 pub(crate) const LINE_STRONG: Color = Color::Rgb(0x43, 0x52, 0x64);
@@ -53,7 +55,10 @@ pub(crate) fn tone_style(tone: Tone) -> Style {
         Tone::Warning => AMBER,
         Tone::Critical => RED,
         Tone::Unmanaged => VIOLET,
-        Tone::Inactive => FAINT,
+        // An absent or undetermined status is still information; MUTED keeps
+        // it above the 4.5:1 threshold on every surface, including selected
+        // rows, where the prototype's faint grey falls to about 2.6:1.
+        Tone::Inactive => MUTED,
     };
     Style::default().fg(colour)
 }
@@ -141,8 +146,11 @@ pub(crate) fn progress_active() -> Style {
 }
 
 /// A setup step that has not been reached yet.
+///
+/// The names of the remaining steps are information, so this deviates from the
+/// prototype's faint grey to stay readable on the dialog surface.
 pub(crate) fn progress_pending() -> Style {
-    Style::default().fg(FAINT)
+    Style::default().fg(MUTED)
 }
 
 /// The border of a modal dialog.
@@ -175,9 +183,12 @@ pub(crate) fn pane_heading() -> Style {
         .add_modifier(Modifier::BOLD)
 }
 
-/// The count or qualifier beside a pane title.
+/// The count or qualifier beside a pane title, and detail-field labels.
+///
+/// These carry real status ("not scanned", counts), so this deviates from the
+/// prototype's faint grey to meet 4.5:1 on the terminal surface.
 pub(crate) fn pane_subtitle() -> Style {
-    Style::default().fg(FAINT)
+    Style::default().fg(MUTED)
 }
 
 /// A horizontal rule separating regions.
@@ -186,6 +197,10 @@ pub(crate) fn rule() -> Style {
 }
 
 /// The glyph above an empty-state headline.
+///
+/// Accepted contrast deviation (skilled-2k3.13.6): the glyph is decoration;
+/// the headline and body beside it carry the meaning, so WCAG's 4.5:1
+/// body-text threshold does not apply and the prototype's faint grey stays.
 pub(crate) fn empty_glyph() -> Style {
     Style::default().fg(FAINT)
 }
@@ -218,6 +233,74 @@ pub(crate) fn key_label() -> Style {
 /// The faint colour is the only style cue; stacking `DIM` on top pushes the
 /// text towards illegibility. The unavailability is spelled out in words
 /// beside the entry, so nothing depends on this colour being perceived.
+///
+/// Accepted contrast deviation (skilled-2k3.13.6): WCAG 1.4.3 exempts text in
+/// inactive interface components, and a compliant grey would blur the
+/// distinction from reachable `MUTED` entries, so the faint grey stays.
 pub(crate) fn nav_disabled() -> Style {
     Style::default().fg(FAINT).bg(SURFACE)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// WCAG 2.x relative luminance of an sRGB colour.
+    fn relative_luminance(colour: Color) -> f64 {
+        let Color::Rgb(red, green, blue) = colour else {
+            panic!("theme colours are RGB; got {colour:?}");
+        };
+        let linear = |channel: u8| {
+            let srgb = f64::from(channel) / 255.0;
+            if srgb <= 0.039_28 {
+                srgb / 12.92
+            } else {
+                ((srgb + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * linear(red) + 0.7152 * linear(green) + 0.0722 * linear(blue)
+    }
+
+    /// WCAG 2.x contrast ratio between two colours, from 1.0 to 21.0.
+    fn contrast_ratio(foreground: Color, background: Color) -> f64 {
+        let lighter = relative_luminance(foreground).max(relative_luminance(background));
+        let darker = relative_luminance(foreground).min(relative_luminance(background));
+        (lighter + 0.05) / (darker + 0.05)
+    }
+
+    /// Every surface a span of workspace or dialog text can sit on. Selected
+    /// rows put `SURFACE_3` under any tone, so it is the binding constraint.
+    const SURFACES: [Color; 4] = [TERMINAL, SURFACE, SURFACE_2, SURFACE_3];
+
+    fn assert_readable(role: &str, style: Style) {
+        let foreground = style
+            .fg
+            .expect("information-bearing roles set a foreground");
+        for background in SURFACES {
+            let ratio = contrast_ratio(foreground, background);
+            assert!(
+                ratio >= 4.5,
+                "{role} is {ratio:.2}:1 against {background:?}; \
+                 information-bearing text needs 4.5:1"
+            );
+        }
+    }
+
+    /// Acceptance criterion of skilled-2k3.13.6: text that carries information
+    /// meets WCAG 4.5:1 on every surface it renders over. `empty_glyph` and
+    /// `nav_disabled` are exempt by decision recorded on their doc comments.
+    #[test]
+    fn information_bearing_text_meets_wcag_contrast_on_every_surface() {
+        for tone in [
+            Tone::Healthy,
+            Tone::Warning,
+            Tone::Critical,
+            Tone::Unmanaged,
+            Tone::Inactive,
+        ] {
+            assert_readable(&format!("tone_style({tone:?})"), tone_style(tone));
+        }
+        assert_readable("pane_subtitle()", pane_subtitle());
+        assert_readable("progress_pending()", progress_pending());
+    }
 }
