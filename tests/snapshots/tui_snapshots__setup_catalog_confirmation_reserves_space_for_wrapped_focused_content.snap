@@ -10,7 +10,7 @@ expression: rendered
   │  STEP 5 / 7                                                              │
   │  Confirm catalogs                                                        │
   │                                                                          │
-  │  Repository: a-deliberately-long-s... · /private/var/f...directory-name  │
+  │  Repository: [TEMP]/long-source                                           │
   │  Branch: main   HEAD: [HEAD]                                             │
   │  Remote: not configured                                                  │
   │  Worktree: ✓ clean                                                       │

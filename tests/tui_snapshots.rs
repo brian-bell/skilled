@@ -666,23 +666,18 @@ fn setup_catalog_confirmation_reserves_space_for_wrapped_focused_content() {
     }
 
     let preview = app.pending_source().expect("pending source preview");
-    let temporary_path = temporary
-        .path()
-        .canonicalize()
-        .expect("canonical temporary directory")
-        .to_string_lossy()
-        .into_owned();
     let short_head = &preview.inspected().head()[..8];
-    let rendered = render(&app, 80, 24)
-        .replace(
-            &temporary_path,
-            &padded_placeholder(&temporary_path, "[TEMP]"),
-        )
-        .replace(short_head, &padded_placeholder(short_head, "[HEAD]"));
+    let rendered =
+        normalize_snapshot_field(render(&app, 80, 24), "Repository: ", "[TEMP]/long-source")
+            .replace(short_head, &padded_placeholder(short_head, "[HEAD]"));
 
     assert_eq!(app.focused_catalog(), 5);
     assert!(rendered.contains("▌ Included"), "{rendered}");
     assert!(rendered.contains("catalogs/set-5"), "{rendered}");
+    assert!(
+        rendered.contains("Repository: [TEMP]/long-source"),
+        "{rendered}"
+    );
     assert!(
         rendered.contains("Registration records metadata only"),
         "{rendered}"
@@ -742,6 +737,30 @@ fn padded_placeholder(value: &str, placeholder: &str) -> String {
         "{placeholder}{}",
         " ".repeat(value.len().saturating_sub(placeholder.len()))
     )
+}
+
+fn normalize_snapshot_field(screen: String, label: &str, placeholder: &str) -> String {
+    screen
+        .lines()
+        .map(|line| {
+            let Some(value_start) = line.find(label).map(|index| index + label.len()) else {
+                return line.to_owned();
+            };
+            let Some(value_end) = line[value_start..]
+                .rfind("  │")
+                .map(|index| value_start + index)
+            else {
+                return line.to_owned();
+            };
+            format!(
+                "{}{}{}",
+                &line[..value_start],
+                padded_placeholder(&line[value_start..value_end], placeholder),
+                &line[value_end..]
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn buffer_text(buffer: &Buffer) -> String {
