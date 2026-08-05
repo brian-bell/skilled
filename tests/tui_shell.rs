@@ -363,6 +363,12 @@ fn setup_says_navigation_waits_for_setup_not_for_a_dialog() {
     assert!(row.contains("Setup · Confirm catalogs"), "{row}");
     assert!(row.contains("locked during setup"), "{row}");
     assert!(!row.contains("this dialog"), "{row}");
+    // The lock note is status, not a disabled entry, so it must render in the
+    // readable muted tone rather than the faint decorative one.
+    assert_eq!(
+        style_in_row(&screen, 1, "locked during setup").fg,
+        Some(Color::Rgb(0x84, 0x91, 0xa1))
+    );
     let rendered = text(&screen);
     assert!(rendered.contains("Enter Register"), "{rendered}");
     assert!(rendered.contains("Esc Cancel"), "{rendered}");
@@ -931,8 +937,11 @@ fn inventory_subtitle_reports_not_scanned_in_a_readable_tone() {
     let screen = buffer(&harness.completed_setup(), 80, 24);
 
     // "not scanned" is real status, not decoration, so it renders in the
-    // readable muted tone rather than the faint decorative one.
-    let subtitle = style_at(&screen, "not scanned");
+    // readable muted tone rather than the faint decorative one. Anchoring to
+    // the pane-header row keeps the assertion on the subtitle if another
+    // "not scanned" ever appears elsewhere on screen.
+    let header_row = row_containing(&screen, "Global inventory");
+    let subtitle = style_in_row(&screen, header_row, "not scanned");
     assert_eq!(subtitle.fg, Some(Color::Rgb(0x84, 0x91, 0xa1)));
 }
 

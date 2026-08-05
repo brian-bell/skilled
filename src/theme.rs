@@ -228,6 +228,15 @@ pub(crate) fn key_label() -> Style {
     Style::default().fg(MUTED)
 }
 
+/// The note beside a keyboard owner's name in the navigation row.
+///
+/// It explains why the destination shortcuts are absent, which is status the
+/// user must be able to read, so it uses the readable muted tone rather than
+/// the disabled-entry grey.
+pub(crate) fn nav_note() -> Style {
+    Style::default().fg(MUTED).bg(SURFACE)
+}
+
 /// A navigation entry the user cannot open right now.
 ///
 /// The faint colour is the only style cue; stacking `DIM` on top pushes the
@@ -272,11 +281,17 @@ mod tests {
     /// rows put `SURFACE_3` under any tone, so it is the binding constraint.
     const SURFACES: [Color; 4] = [TERMINAL, SURFACE, SURFACE_2, SURFACE_3];
 
+    /// A role that paints its own background is read against it; one that
+    /// inherits is read against every surface it can land on.
     fn assert_readable(role: &str, style: Style) {
         let foreground = style
             .fg
             .expect("information-bearing roles set a foreground");
-        for background in SURFACES {
+        let backgrounds = match style.bg {
+            Some(background) => vec![background],
+            None => SURFACES.to_vec(),
+        };
+        for background in backgrounds {
             let ratio = contrast_ratio(foreground, background);
             assert!(
                 ratio >= 4.5,
@@ -287,10 +302,10 @@ mod tests {
     }
 
     /// Acceptance criterion of skilled-2k3.13.6: text that carries information
-    /// meets WCAG 4.5:1 on every surface it renders over. `empty_glyph` and
-    /// `nav_disabled` are exempt by decision recorded on their doc comments.
+    /// meets WCAG 4.5:1 against its surface. `empty_glyph` and `nav_disabled`
+    /// are exempt by decision recorded on their doc comments.
     #[test]
-    fn information_bearing_text_meets_wcag_contrast_on_every_surface() {
+    fn information_bearing_text_meets_wcag_contrast_against_its_surface() {
         for tone in [
             Tone::Healthy,
             Tone::Warning,
@@ -300,7 +315,29 @@ mod tests {
         ] {
             assert_readable(&format!("tone_style({tone:?})"), tone_style(tone));
         }
-        assert_readable("pane_subtitle()", pane_subtitle());
-        assert_readable("progress_pending()", progress_pending());
+        for (role, style) in [
+            ("app_surface()", app_surface()),
+            ("chrome()", chrome()),
+            ("product_mark()", product_mark()),
+            ("product_name()", product_name()),
+            ("nav_active()", nav_active()),
+            ("nav_inactive()", nav_inactive()),
+            ("nav_note()", nav_note()),
+            ("section_title()", section_title()),
+            ("progress_complete()", progress_complete()),
+            ("progress_active()", progress_active()),
+            ("progress_pending()", progress_pending()),
+            ("dialog_title()", dialog_title()),
+            ("dialog_scope()", dialog_scope()),
+            ("dialog_surface()", dialog_surface()),
+            ("pane_heading()", pane_heading()),
+            ("pane_subtitle()", pane_subtitle()),
+            ("empty_headline()", empty_headline()),
+            ("empty_body()", empty_body()),
+            ("key_cap()", key_cap()),
+            ("key_label()", key_label()),
+        ] {
+            assert_readable(role, style);
+        }
     }
 }

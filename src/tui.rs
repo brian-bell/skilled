@@ -136,7 +136,7 @@ fn render_navigation(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
         frame.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled(format!(" {owner} "), theme::nav_active()),
-                Span::styled(format!("  {note}"), theme::nav_disabled()),
+                Span::styled(format!("  {note}"), theme::nav_note()),
             ])),
             area,
         );
