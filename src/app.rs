@@ -703,9 +703,12 @@ impl SkilledApp {
 
     /// Recompute which rows the query admits, and keep the selection on one.
     ///
-    /// A row matches when the query appears in its name, its resolved source
-    /// label, or the word naming its health, so the same box narrows by
-    /// identity, provenance, or state.
+    /// A row matches when the query appears in its name, the label of its
+    /// provenance or of any installation's own provenance, or the word naming
+    /// its health, so the same box narrows by identity, provenance, or state.
+    /// Matching each installation keeps a mixed row findable by the source it
+    /// partly came from and by "not registered" alike; stray content is not an
+    /// installation and answers for no provenance.
     fn refilter_installations(&mut self) {
         let needle = self.inventory_filter.trim().to_lowercase();
         self.filtered_installations = self
@@ -717,6 +720,14 @@ impl SkilledApp {
                 needle.is_empty()
                     || row.name().to_lowercase().contains(&needle)
                     || row.provenance().label().to_lowercase().contains(&needle)
+                    || row.observations().any(|observation| {
+                        observation.object().is_installation()
+                            && observation
+                                .provenance()
+                                .label()
+                                .to_lowercase()
+                                .contains(&needle)
+                    })
                     || row.health().label().contains(needle.as_str())
             })
             .map(|(index, _)| index)

@@ -188,6 +188,20 @@ pub enum Provenance {
     Unverified,
 }
 
+impl Provenance {
+    /// The word the filter matches this installation's provenance against.
+    ///
+    /// A row that mixes provenances answers a query with the provenance of
+    /// each installation it holds, not only with its single summary word.
+    pub fn label(&self) -> &str {
+        match self {
+            Self::Resolved(resolution) => resolution.source_label(),
+            Self::Unregistered => "not registered",
+            Self::Unverified => "unverified",
+        }
+    }
+}
+
 /// One installation slot in one agent's root.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InstalledSkillObservation {
@@ -291,6 +305,20 @@ impl InventoryRow {
         let Some(first) = resolved.next() else {
             return RowProvenance::Unregistered;
         };
+        // A valid installation that resolved to no registered source, sitting
+        // beside one that did: naming the source would claim the unmanaged
+        // installation too. Broken content takes no position — a dangling
+        // link may be the moved-away remains of the very source the resolved
+        // installation names — and stray content is not an installation.
+        if self.observations().any(|observation| {
+            observation.provenance() == &Provenance::Unregistered
+                && matches!(
+                    observation.validation(),
+                    Some(SkillValidation::Valid { .. })
+                )
+        }) {
+            return RowProvenance::Mixed;
+        }
         if resolved.all(|resolution| resolution.source_id() == first.source_id()) {
             RowProvenance::Source(first.source_label())
         } else {
@@ -330,6 +358,9 @@ pub enum RowProvenance<'a> {
     Unregistered,
     /// Every resolved installation came from this source.
     Source(&'a str),
+    /// Some installations resolved to a registered source and others to none,
+    /// so no single answer describes the row.
+    Mixed,
     /// Resolved installations came from more than one source.
     Divergent,
 }
@@ -341,6 +372,7 @@ impl RowProvenance<'_> {
             Self::Unverified => "unverified",
             Self::Unregistered => "not registered",
             Self::Source(label) => label,
+            Self::Mixed => "mixed",
             Self::Divergent => "multiple sources",
         }
     }

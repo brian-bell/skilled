@@ -187,6 +187,16 @@ fn the_setup_scan_step_names_the_reason_a_root_could_not_be_read() {
 
     assert!(rendered.contains("STEP 6 / 7"), "{rendered}");
     assert!(rendered.contains("root unreadable"), "{rendered}");
+    // A root that could not be read was attempted, not read; saying "read"
+    // above the failure row would flatten the failure into a success.
+    assert!(
+        rendered.contains("Skilled attempted to read the global skill root"),
+        "{rendered}"
+    );
+    assert!(
+        !rendered.contains("Skilled read the global skill root"),
+        "{rendered}"
+    );
     // The root contributed nothing, so its reason is the only account of it.
     let reason = row_containing(&screen, "the skill root is not a directory");
     let line = row_text(&screen, reason);

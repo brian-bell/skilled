@@ -368,6 +368,64 @@ fn a_name_installed_from_two_sources_names_neither_as_the_row_source() {
 }
 
 #[test]
+fn a_name_managed_for_one_agent_and_unmanaged_for_another_is_mixed() {
+    let fixture = Fixture::new();
+    let repository = fixture.source("library", &["shared"]);
+    drop(fixture.registered(&repository));
+    fixture.install_symlink(
+        AgentKind::ClaudeCode,
+        "shared",
+        &repository.join("skills/shared"),
+    );
+    // The same name, carried for Codex as a plain directory that resolves to
+    // no registered source.
+    let codex_root = fixture.create_root(AgentKind::Codex);
+    write_skill(&codex_root.join("shared"), "shared");
+
+    let app = fixture.app();
+    let row = app.inventory().row("shared").expect("shared row");
+
+    // Naming the source would claim the unmanaged installation too, and the
+    // label must not say "library" for a row the library only half explains.
+    assert_eq!(row.provenance(), RowProvenance::Mixed);
+    assert_eq!(row.provenance().label(), "mixed");
+    assert_eq!(row.health(), InstallationHealth::Unmanaged);
+    // Each observation still says what is known about its own provenance.
+    assert_eq!(
+        row.observation(AgentKind::ClaudeCode)
+            .and_then(|observation| observation.resolution())
+            .map(|resolution| resolution.source_label()),
+        Some("library")
+    );
+    assert_eq!(
+        row.observation(AgentKind::Codex)
+            .map(|observation| observation.provenance()),
+        Some(&Provenance::Unregistered)
+    );
+}
+
+#[test]
+fn a_stray_file_beside_a_managed_installation_does_not_make_the_row_mixed() {
+    let fixture = Fixture::new();
+    let repository = fixture.source("library", &["shared"]);
+    drop(fixture.registered(&repository));
+    fixture.install_symlink(
+        AgentKind::ClaudeCode,
+        "shared",
+        &repository.join("skills/shared"),
+    );
+    // A stray file is not an installation, so it carries no provenance the
+    // row summary has to answer for.
+    let codex_root = fixture.create_root(AgentKind::Codex);
+    fs::write(codex_root.join("shared"), "not a skill").expect("write plain file");
+
+    let app = fixture.app();
+    let row = app.inventory().row("shared").expect("shared row");
+
+    assert_eq!(row.provenance(), RowProvenance::Source("library"));
+}
+
+#[test]
 fn nothing_is_read_until_setup_reaches_the_step_that_reads_it() {
     let fixture = Fixture::new();
     let root = fixture.create_root(AgentKind::ClaudeCode);

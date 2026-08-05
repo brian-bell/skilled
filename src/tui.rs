@@ -433,8 +433,15 @@ fn setup_lines(app: &SkilledApp, step: SetupStep, width: u16) -> Vec<Line<'stati
             Line::from("Registration records metadata only; it does not install skills."),
         ]),
         SetupStep::ScanInstallations => {
+            // A root that could not be read was attempted, not read; the
+            // sentence follows the statuses below it rather than asserting a
+            // success the scan did not have.
             lines.push(Line::from(
-                "Skilled read the global skill root of each selected agent.",
+                if app.inventory().unreadable_roots().next().is_some() {
+                    "Skilled attempted to read the global skill root of each selected agent."
+                } else {
+                    "Skilled read the global skill root of each selected agent."
+                },
             ));
             lines.push(Line::default());
             // The status badges vary in width, so they are padded to a column
@@ -1009,6 +1016,10 @@ fn inventory_detail_lines(row: &InventoryRow, home: &Path, width: u16) -> Vec<Li
         RowProvenance::Divergent => lines.push(Line::from(
             "Installed from more than one registered source; each agent names its own below.",
         )),
+        // A source line would claim the installation that resolved to none.
+        RowProvenance::Mixed => lines.push(Line::from(
+            "Registered for some agents but not others; each agent's section below says which.",
+        )),
         // Not knowing where something came from is not the same as knowing it
         // came from nowhere registered.
         RowProvenance::Unverified => lines.push(Line::from(
@@ -1031,7 +1042,10 @@ fn inventory_detail_lines(row: &InventoryRow, home: &Path, width: u16) -> Vec<Li
             observation,
             home,
             width,
-            row.provenance() == RowProvenance::Divergent,
+            matches!(
+                row.provenance(),
+                RowProvenance::Divergent | RowProvenance::Mixed
+            ),
         ));
     }
 

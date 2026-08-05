@@ -665,6 +665,39 @@ mod installed {
         type_filter(&mut app, "unmanaged");
         assert_eq!(names(&app), ["foreign"]);
     }
+    /// A row that mixes a managed installation with an unmanaged one still
+    /// holds an installation that resolved to no registered source, so the
+    /// provenance query that surfaces unmanaged installations must admit it.
+    #[test]
+    fn the_filter_surfaces_the_unmanaged_installation_inside_a_mixed_row() {
+        let temporary = tempfile::tempdir().expect("temporary application directory");
+        let repository = temporary.path().join("library");
+        let mut app = app_in(&temporary);
+        finish_setup(&mut app);
+        register_source(&mut app, &repository, 1);
+        install_link(
+            &temporary,
+            AgentKind::ClaudeCode,
+            "variant-0",
+            &repository.join("skills/variant-0"),
+        );
+        write_skill_fixture(
+            &temporary.path().join("home/.agents/skills/variant-0"),
+            "variant-0",
+        );
+        let update = app.update(Action::OpenSources);
+        app.perform_effects(update.effects()).expect("effects");
+        let update = app.update(Action::OpenInventory);
+        app.perform_effects(update.effects())
+            .expect("installation scan");
+        assert_eq!(
+            app.inventory().row("variant-0").map(|row| row.provenance()),
+            Some(skilled::inventory::RowProvenance::Mixed)
+        );
+
+        type_filter(&mut app, "not registered");
+        assert_eq!(names(&app), ["variant-0"]);
+    }
     /// The query box is drawn above the table, so a compact terminal showing
     /// only the detail region has nowhere to draw it — and a field the user
     /// cannot see must not take every printable key.
