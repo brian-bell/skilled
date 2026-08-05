@@ -23,6 +23,11 @@ pub(crate) const DETAIL_REGION_WIDTH: u16 = 40;
 /// columns the table was still using, so widening the terminal past it would
 /// ellipsize names that fit just before — the opposite of what widening
 /// should do.
+///
+/// The split is one geometry for every screen, so the aside does not jump
+/// when the user switches tabs. The Sources panes, whose columns are not
+/// capped, therefore do yield width at the crossing; that recorded cost
+/// stands until the Sources region rework bounds them (skilled-2k3.15.5).
 pub(crate) const DETAIL_REGION_WIDE_THRESHOLD: u16 = 151;
 
 /// The detail region's share of a workspace wide enough to spare it, matching

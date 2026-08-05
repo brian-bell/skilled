@@ -177,7 +177,10 @@ take ten columns the table was still using, and widening the terminal from 139
 to 140 would ellipsize skill names that fit just before — the opposite of what
 widening should do. That reasoning is recorded on
 `DETAIL_REGION_WIDE_THRESHOLD` and pinned by a rendering test that fails if the
-threshold is lowered.
+threshold is lowered. The split is one geometry for every screen so the aside
+does not jump between tabs, which means the Sources panes — whose columns are
+not capped — do yield width at the crossing; that cost is accepted and stands
+until the Sources region rework bounds its panes.
 
 ## Quick Reference
 
