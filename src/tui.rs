@@ -999,7 +999,7 @@ const SUBTITLE_GAP: usize = 2;
 /// The heading names the pane and is never cut — a pane whose name did not fit
 /// would have nothing left to say.
 fn pane_header(heading: &str, subtitle: &str, focused: bool, width: u16) -> Line<'static> {
-    let subtitle = terminal_safe_bounded_start(
+    let subtitle = bounded_subtitle(
         subtitle,
         usize::from(width)
             .saturating_sub(Span::raw(heading).width())
@@ -1007,6 +1007,27 @@ fn pane_header(heading: &str, subtitle: &str, focused: bool, width: u16) -> Line
             .saturating_sub(SUBTITLE_GAP),
     );
     components::focused_pane_header(heading, &subtitle, focused)
+}
+
+/// Bound a subtitle by shedding whole ` · ` clauses from its end, the way a
+/// group label sheds its qualifiers: `scan error · 3 found` in a narrow pane
+/// says `scan error`, not `scan erro...`, because the clauses lead with the
+/// fact the pane cannot restate and a cut word destroys exactly that fact. A
+/// shed clause leaves no mark; nothing on the row claims it was stated. Only
+/// a first clause too long for the pane on its own is cut, ellipsized so the
+/// row still says there was more.
+fn bounded_subtitle(subtitle: &str, budget: usize) -> String {
+    let safe = terminal_safe(subtitle);
+    let mut clauses = safe.as_str();
+    loop {
+        if Span::raw(clauses).width() <= budget {
+            return clauses.to_owned();
+        }
+        match clauses.rfind(" · ") {
+            Some(cut) => clauses = &clauses[..cut],
+            None => return terminal_safe_bounded_start(clauses, budget),
+        }
+    }
 }
 
 /// The detail region's frame, shared by every screen that has one.
@@ -3193,6 +3214,42 @@ mod tests {
             .collect::<String>()
             .trim_end()
             .to_owned()
+    }
+
+    /// A subtitle that does not fit sheds its trailing ` · ` clauses whole
+    /// before any word is cut: `scan error · 3 found` in a narrow pane says
+    /// `scan error`, never `scan erro...`, because a cut word says neither
+    /// what it was nor that there was more of it. Only a first clause too
+    /// long for the pane on its own falls back to the ellipsized cut.
+    #[test]
+    fn a_bounded_subtitle_sheds_whole_clauses_before_cutting_a_word() {
+        let heading = "Available variants";
+        let width = |budget: usize| {
+            u16::try_from(Span::raw(heading).width() + SUBTITLE_GAP + budget)
+                .expect("test widths fit a terminal")
+        };
+        let subtitle = |budget: usize| {
+            label_text(&pane_header(
+                heading,
+                "scan error · 3 found",
+                false,
+                width(budget),
+            ))
+        };
+
+        // Room for the whole phrase: nothing is shed.
+        assert!(
+            subtitle(20).ends_with("scan error · 3 found"),
+            "{:?}",
+            subtitle(20)
+        );
+        // Room for the warning but not the count: the count is shed whole
+        // rather than the warning cut mid-word.
+        assert!(subtitle(10).ends_with("scan error"), "{:?}", subtitle(10));
+        assert!(!subtitle(10).contains("..."), "{:?}", subtitle(10));
+        // Not even room for the warning: the ellipsized cut remains, so the
+        // row still says there was more.
+        assert!(subtitle(9).ends_with("scan e..."), "{:?}", subtitle(9));
     }
 
     /// The label is padded to the pane so its band crosses the region, which
