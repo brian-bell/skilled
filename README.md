@@ -45,14 +45,16 @@ it does not yet install, repair, update, or uninstall skills.
 - Resolution of an installed symbolic link to the registered source, catalog,
   and variant it points at, by canonical path equality. A physical copy, or a
   link into anything Skilled does not manage, stays explicitly unmanaged rather
-  than being claimed.
+  than being claimed. When a registered checkout cannot be read, provenance is
+  reported as unverified rather than denied.
 - Health findings with stable codes for dangling and unresolvable links,
   unreadable entries, and every portable-validation failure, each carrying the
   observation behind it. A stray file beside the skill directories is reported
   as not a skill rather than as a broken installation.
 - Per-root accounting that distinguishes a root that was read from one that
-  does not exist, one that could not be read in full, and one belonging to an
-  agent that was never selected.
+  does not exist, one that could not be read in full, one belonging to an agent
+  that was never selected, and one that has not been scanned yet. Counts are
+  withheld rather than reported as zero whenever a root was not read.
 - Filtering the inventory by skill name, source, or health.
 - Direct startup into Inventory after setup is complete.
 - A shared-dialog Settings action for rerunning setup. Rerunning refreshes agent

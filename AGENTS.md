@@ -33,9 +33,12 @@ scope, and do not display a count, finding, status, or key hint the code
 cannot currently produce.
 
 Truthfulness is a hard requirement of the inventory in particular. The scanner
-keeps apart what it read, what it could not read, what does not exist, and what
-it was never asked to look at, and every rendered count and phrase must follow
-that distinction rather than flattening it. A root that could not be read in
+keeps apart what it read, what it could not read, what does not exist, what it
+was never asked to look at, and what it has not looked at yet; and it keeps
+"came from no registered source" apart from "could not tell". Every rendered
+count and phrase must follow those distinctions rather than flattening them,
+and a count may only be shown when every root it covers was read or found
+absent. A root that could not be read in
 full contributes nothing and says why; a stray file beside the skill
 directories is listed as not a skill rather than counted as a broken
 installation; a symbolic link is claimed as managed only when it resolves by
