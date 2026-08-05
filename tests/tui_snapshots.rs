@@ -726,10 +726,10 @@ mod installed {
         insta::assert_snapshot!(screen);
     }
 
-    /// On a very wide terminal the identity columns stop growing, so the
-    /// Source column does not become a field of repeated placeholders. The
-    /// slack falls to the right of Health, as it does in the prototype's
-    /// bounded grid.
+    /// On a very wide terminal the identity columns stop growing, so a short
+    /// label is not stranded in the middle of a very wide field. The slack
+    /// falls to the right of Health, which is where this departs from the
+    /// prototype: that grid grows these columns without bound.
     #[test]
     fn inventory_capped_columns_at_a_very_wide_size() {
         let temporary = tempfile::tempdir().expect("temporary application directory");
@@ -743,12 +743,15 @@ mod installed {
         insta::assert_snapshot!(screen);
     }
 
-    /// The table's heading row, which is the only line carrying HEALTH.
+    /// The table side of the heading row, cut at the detail region's
+    /// separator so nothing the detail pane happens to render can answer for
+    /// the table's columns.
     fn heading_row(screen: &str) -> &str {
-        screen
+        let row = screen
             .lines()
             .find(|line| line.contains("HEALTH"))
-            .unwrap_or_else(|| panic!("no heading row in\n{screen}"))
+            .unwrap_or_else(|| panic!("no heading row in\n{screen}"));
+        row.split('│').next().unwrap_or(row)
     }
 
     /// The screen column a heading starts at, counted in characters because

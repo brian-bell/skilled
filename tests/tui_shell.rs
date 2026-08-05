@@ -2125,14 +2125,7 @@ impl Harness {
         for skill in ["alpha", "beta"] {
             write_skill_fixture(&repository.join("skills").join(skill), skill);
         }
-        git(&repository, &["init", "-b", "main"]);
-        git(&repository, &["config", "user.name", "Skilled Test"]);
-        git(
-            &repository,
-            &["config", "user.email", "skilled@example.test"],
-        );
-        git(&repository, &["add", "."]);
-        git(&repository, &["commit", "-m", "fixture"]);
+        create_repository(&repository);
 
         let mut app = self.completed_setup();
         let preview = app.preview_source(&repository).expect("preview source");
@@ -2153,6 +2146,74 @@ impl Harness {
             .expect("installation scan");
         app
     }
+
+    /// One `gamma` skill installed two ways: linked from the registered
+    /// checkout for Claude Code, and copied outright for Codex.
+    ///
+    /// The link resolves to a registered source and the copy resolves to
+    /// none, which is the arrangement no single source describes.
+    #[cfg(unix)]
+    fn mixed_provenance_inventory(&self) -> SkilledApp {
+        let mut app = self.gamma_installed_two_ways();
+        scan_installations(&mut app);
+        app
+    }
+
+    /// The same two installations, with the checkout moved away between
+    /// registration and the scan.
+    ///
+    /// No registered source can then be accounted for, so an installation
+    /// that resolves to none is undetermined rather than unregistered.
+    #[cfg(unix)]
+    fn unverified_provenance_inventory(&self) -> SkilledApp {
+        let mut app = self.gamma_installed_two_ways();
+        let home = self.directory.path().join("home");
+        fs::rename(home.join("library"), home.join("moved-away")).expect("move the checkout away");
+        scan_installations(&mut app);
+        app
+    }
+
+    /// The registration and installations the two provenance fixtures share,
+    /// stopping short of the scan so the checkout can still be moved.
+    #[cfg(unix)]
+    fn gamma_installed_two_ways(&self) -> SkilledApp {
+        let home = self.directory.path().join("home");
+        let repository = home.join("library");
+        write_skill_fixture(&repository.join("skills/gamma"), "gamma");
+        create_repository(&repository);
+
+        let mut app = self.completed_setup();
+        let preview = app.preview_source(&repository).expect("preview source");
+        app.confirm_source(preview).expect("register source");
+
+        let claude = home.join(".claude/skills");
+        let codex = home.join(".agents/skills");
+        fs::create_dir_all(&claude).expect("create Claude Code root");
+        fs::create_dir_all(&codex).expect("create Codex root");
+        symlink(repository.join("skills/gamma"), claude.join("gamma"));
+        write_skill_fixture(&codex.join("gamma"), "gamma");
+        app
+    }
+}
+
+#[cfg(unix)]
+fn scan_installations(app: &mut SkilledApp) {
+    app.update(Action::OpenSources);
+    let update = app.update(Action::OpenInventory);
+    app.perform_effects(update.effects())
+        .expect("installation scan");
+}
+
+/// Commit a fixture checkout so it can be registered as a source.
+fn create_repository(repository: &Path) {
+    git(repository, &["init", "-b", "main"]);
+    git(repository, &["config", "user.name", "Skilled Test"]);
+    git(
+        repository,
+        &["config", "user.email", "skilled@example.test"],
+    );
+    git(repository, &["add", "."]);
+    git(repository, &["commit", "-m", "fixture"]);
 }
 
 #[cfg(unix)]
@@ -2254,14 +2315,7 @@ fn create_source_fixture(repository: &Path) {
         "---\nname: portable\ndescription: Portable fixture\n---\n# Portable\n",
     )
     .expect("write source fixture");
-    git(repository, &["init", "-b", "main"]);
-    git(repository, &["config", "user.name", "Skilled Test"]);
-    git(
-        repository,
-        &["config", "user.email", "skilled@example.test"],
-    );
-    git(repository, &["add", "."]);
-    git(repository, &["commit", "-m", "fixture"]);
+    create_repository(repository);
 }
 
 fn git(repository: &Path, arguments: &[&str]) {
@@ -2324,31 +2378,85 @@ mod installed {
         }
     }
 
-    /// A placeholder in the Source column is not a source name, so it is set
-    /// back in the muted tone; a real source label keeps the body text.
+    /// The Source column sets back the labels that place content with no
+    /// registered source — `not registered` and `unverified` — while the ones
+    /// that place it with at least one, a source name or `mixed`, keep the
+    /// body text.
     #[test]
-    fn the_source_column_sets_back_what_is_not_a_source_name() {
+    fn the_source_column_sets_back_labels_that_place_content_with_no_source() {
         const MUTED: Color = Color::Rgb(0x84, 0x91, 0xa1);
         const TEXT: Color = Color::Rgb(0xd7, 0xde, 0xe7);
+
+        let installed = buffer(&Harness::new().installed_inventory(), 80, 24);
+        let copied = row_containing(&installed, "copied");
+        assert_eq!(
+            style_in_row(&installed, copied, "not registered").fg,
+            Some(MUTED),
+            "an unregistered row should not read as a source name"
+        );
+        let alpha = row_containing(&installed, "alpha");
+        assert_eq!(
+            style_in_row(&installed, alpha, "library").fg,
+            Some(TEXT),
+            "a registered source label keeps the body text"
+        );
+
+        // "mixed" names no single source, but it still reports that one of the
+        // installations came from a registered one.
+        let mixed = buffer(&Harness::new().mixed_provenance_inventory(), 80, 24);
+        let gamma = row_containing(&mixed, "gamma");
+        assert_eq!(
+            style_in_row(&mixed, gamma, "mixed").fg,
+            Some(TEXT),
+            "a mixed row places part of itself with a registered source"
+        );
+
+        let unverified = buffer(&Harness::new().unverified_provenance_inventory(), 80, 24);
+        let gamma = row_containing(&unverified, "gamma");
+        assert_eq!(
+            style_in_row(&unverified, gamma, "unverified").fg,
+            Some(MUTED),
+            "a row that places nothing should not read as a source name"
+        );
+    }
+
+    /// Capping the columns leaves slack to the right of Health, and the
+    /// selection band still crosses it: a band that stopped where the content
+    /// did would read as a row ending mid-region.
+    #[test]
+    fn the_selected_row_band_crosses_the_slack_left_by_the_capped_columns() {
+        const SURFACE_3: Color = Color::Rgb(0x17, 0x21, 0x2c);
 
         let harness = Harness::new();
         let app = harness.installed_inventory();
 
-        let screen = buffer(&app, 80, 24);
+        // By its marker, because the detail region names the selected skill
+        // too and its header sits above the table.
+        let screen = buffer(&app, 180, 40);
+        let alpha = row_starting_with(&screen, "▌ alpha");
+        let line = row_text(&screen, alpha);
 
-        let copied = row_containing(&screen, "copied");
-        assert_eq!(
-            style_in_row(&screen, copied, "not registered").fg,
-            Some(MUTED),
-            "an unregistered row should not read as a source name"
+        // The table region ends at the detail separator; its content ends at
+        // the health badge, and everything between the two is slack.
+        let separator = line.find('│').expect("detail separator");
+        let separator = line[..separator].chars().count() as u16;
+        let content = line.find("healthy").expect("health badge") + "healthy".len();
+        let content = line[..content].chars().count() as u16;
+        assert!(
+            separator > content + 10,
+            "expected slack beside the capped columns: {line:?}"
         );
 
-        let alpha = row_containing(&screen, "alpha");
-        assert_eq!(
-            style_in_row(&screen, alpha, "library").fg,
-            Some(TEXT),
-            "a registered source label keeps the body text"
-        );
+        for column in [content + 1, separator - 1] {
+            assert_eq!(
+                screen[(column, alpha)].style().bg,
+                Some(SURFACE_3),
+                "the band should reach column {column} of {line:?}"
+            );
+        }
+        // It stops at the table region, though: the detail region beside it is
+        // not part of the row.
+        assert_ne!(screen[(separator, alpha)].style().bg, Some(SURFACE_3));
     }
 
     #[test]

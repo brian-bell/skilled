@@ -599,12 +599,20 @@ const ROW_MARKER_WIDTH: usize = 2;
 /// Below this, a Source column would only ever show an ellipsis.
 const MINIMUM_SOURCE_WIDTH: usize = 12;
 const MINIMUM_SKILL_WIDTH: usize = 8;
-/// Past these, an identity column is only padding: a wider Skill column shows
-/// no more of a name than it already did, and a wider Source column turns a
-/// short label such as `not registered` into a field of repeated placeholder.
-/// The prototype bounds the same two columns — `minmax(145px, 1.5fr)` and
-/// `minmax(110px, 1fr)` in a 1480px page — and leaves the slack to the right
-/// of Health.
+/// Past these, an identity column stops earning its width: a short label such
+/// as `not registered` is left stranded in whitespace, and every row is pulled
+/// so far apart that a name and its health verdict no longer read as one line.
+/// The cap bounds that measure instead.
+///
+/// It is not free. A name or source label longer than the cap is ellipsized
+/// here where a wider terminal could have shown it whole; the detail region
+/// beside the table still gives both in full, so nothing is only knowable from
+/// this column.
+///
+/// This is a deliberate departure from the prototype rather than a translation
+/// of it: that grid gives the same columns floors that grow without bound
+/// (`minmax(145px, 1.5fr)`, `minmax(110px, 1fr)`), and grows its Health column
+/// too (`minmax(92px, .8fr)`), so it never leaves the slack this does.
 const MAX_SKILL_WIDTH: usize = 36;
 const MAX_SOURCE_WIDTH: usize = 24;
 
@@ -618,7 +626,7 @@ fn inventory_columns(width: u16) -> InventoryColumns {
     // instead, and the detail region still names the source.
     if source < MINIMUM_SOURCE_WIDTH {
         return InventoryColumns {
-            skill: remaining.max(MINIMUM_SKILL_WIDTH),
+            skill: remaining.clamp(MINIMUM_SKILL_WIDTH, MAX_SKILL_WIDTH),
             source: 0,
         };
     }
@@ -830,9 +838,13 @@ fn inventory_row_line(
     let source = padded(&terminal_safe(provenance.label()), columns.source);
     let mut spans = vec![
         Span::raw(padded(&terminal_safe(row.name()), columns.skill)),
-        // "not registered" and "unverified" answer the source question without
-        // naming a source, so they are set back from the labels that do
-        // (prototype `.source-name` against its placeholder).
+        // A label that places content with a registered source is body text.
+        // A source name does that outright, and so do "mixed" and "multiple
+        // sources": each reports at least one installation that resolved to
+        // one. "not registered" and "unverified" place nothing with a source,
+        // and are set back — the two are still different answers, and the
+        // words keep them apart. The prototype mutes every source cell alike
+        // (`.source-name`); this narrows that to the two that place nothing.
         match provenance {
             RowProvenance::Unregistered | RowProvenance::Unverified => {
                 Span::styled(source, theme::pane_subtitle())
@@ -856,6 +868,9 @@ fn inventory_row_line(
     }
     let tone = installation_tone(row.health());
     spans.push(components::badge(tone, row.health().label()));
+    // `width` is the whole table region, not the width the capped columns
+    // happen to use, so the selection band crosses the slack rather than
+    // stopping where the health badge does.
     components::list_row(spans, selected, width)
 }
 
