@@ -970,11 +970,15 @@ fn render_inventory_detail(
             ]),
             separator,
         );
+        // Painted whole, before the margin: the surface is what makes the
+        // region read as a region, so it reaches the edges the text does not.
+        frame.render_widget(Block::new().style(theme::detail_surface()), region);
         region.inner(Margin {
             horizontal: 1,
             vertical: 0,
         })
     } else {
+        frame.render_widget(Block::new().style(theme::detail_surface()), area);
         area.inner(Margin {
             horizontal: 1,
             vertical: 0,
@@ -1069,12 +1073,20 @@ fn bounded_detail_lines(lines: Vec<Line<'static>>, width: u16, height: u16) -> V
 
 fn inventory_detail_lines(row: &InventoryRow, home: &Path, width: u16) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
+    // Kicker, then the skill's own name as the title, then its health: the
+    // badge words already say what they mean, so no field label repeats the
+    // column headings the table has just shown. The pane header above still
+    // names the same skill — that repetition is kept, because the header is
+    // the focus contract and this title belongs to the section anatomy.
     push_detail_section(&mut lines, "SKILL", width);
-    lines.push(detail_field("Name", row.name()));
-    lines.push(Line::from(vec![
-        Span::styled("Health: ", theme::pane_subtitle()),
-        components::badge(installation_tone(row.health()), row.health().label()),
-    ]));
+    lines.push(Line::styled(
+        terminal_safe(row.name()),
+        theme::pane_heading(),
+    ));
+    lines.push(Line::from(components::badge(
+        installation_tone(row.health()),
+        row.health().label(),
+    )));
     if let Some(SkillValidation::Valid { description, .. }) = row
         .observations()
         .find_map(InstalledSkillObservation::validation)
@@ -1112,9 +1124,15 @@ fn inventory_detail_lines(row: &InventoryRow, home: &Path, width: u16) -> Vec<Li
     }
 
     for observation in row.observations() {
-        push_detail_section(
+        // The row's own health is a rollup across the agents; each section
+        // states the one installation it describes.
+        push_detail_section_badge(
             &mut lines,
             &observation.agent().display_name().to_uppercase(),
+            components::badge(
+                installation_tone(observation.health()),
+                observation.health().label(),
+            ),
             width,
         );
         lines.extend(observation_lines(
@@ -1727,7 +1745,36 @@ fn source_status_badge(source: &RegisteredSource) -> Span<'static> {
 }
 
 fn push_detail_section(lines: &mut Vec<Line<'static>>, title: &str, width: u16) {
-    lines.push(Line::styled(title.to_owned(), theme::section_title()));
+    push_detail_section_line(
+        lines,
+        Line::styled(title.to_owned(), theme::detail_section_title()),
+        width,
+    );
+}
+
+/// A detail section whose heading carries a status of its own.
+///
+/// The prototype tones the whole section by colouring its left border; a
+/// terminal has no border to tone, so the badge sits in the heading.
+fn push_detail_section_badge(
+    lines: &mut Vec<Line<'static>>,
+    title: &str,
+    badge: Span<'static>,
+    width: u16,
+) {
+    push_detail_section_line(
+        lines,
+        Line::from(vec![
+            Span::styled(title.to_owned(), theme::detail_section_title()),
+            Span::raw("  "),
+            badge,
+        ]),
+        width,
+    );
+}
+
+fn push_detail_section_line(lines: &mut Vec<Line<'static>>, heading: Line<'static>, width: u16) {
+    lines.push(heading);
     lines.push(components::rule(width));
 }
 

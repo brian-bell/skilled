@@ -8,20 +8,20 @@ expression: screen
 Roots: Claude Code 2 installed · Codex 2 installed ·        │ ─────────────────────────────────────
 OpenCode no root                                            │ SKILL
 ────────────────────────────────────────────────────────────│ ─────────────────────────────────────
-  SKILL              CLAUDE  CODEX  OPENCODE  HEALTH        │ Name: alpha
-▌ alpha              ✓       ✓      -         ✓ healthy     │ Health: ✓ healthy
+  SKILL              CLAUDE  CODEX  OPENCODE  HEALTH        │ alpha
+▌ alpha              ✓       ✓      -         ✓ healthy     │ ✓ healthy
   broken             ×       -      -         × broken      │ Description: alpha fixture
   copied             -       U      -         U unmanaged   │ SOURCE
                                                             │ ─────────────────────────────────────
                                                             │ Source: library
-                                                            │ CLAUDE CODE
+                                                            │ CLAUDE CODE  ✓ healthy
                                                             │ ─────────────────────────────────────
                                                             │ Path: ~/.claude/skills/alpha
                                                             │ Object: symbolic link
                                                             │ Variant: skills · skills/alpha
                                                             │ Target: ~/library/skills/alpha
                                                             │ Validation: ✓ valid as alpha
-                                                            │ CODEX
+                                                            │ CODEX  ✓ healthy
                                                             │ ─────────────────────────────────────
                                                             │ Path: ~/.agents/skills/alpha
                                                             │ Object: symbolic link

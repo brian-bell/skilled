@@ -99,7 +99,8 @@ not an acceptable cue.
   `nav_disabled`) are recorded on their doc comments.
 - `src/viewport.rs`: responsive viewport classes and workspace region geometry.
   Screens ask whether the terminal is `Compact` or `Wide` instead of comparing
-  raw widths.
+  raw widths, and the detail region's two width tiers are decided here rather
+  than by the screen that draws into it.
 - `src/components.rs`: pure shared primitives — status badges, list rows, pane
   headers, empty states, segmented setup progress, the modal dialog frame and
   footer regions, and the key-hint bar.
@@ -143,6 +144,43 @@ with at least one registered installation — a source name, `mixed`, `multiple
 sources` — stays body text while `not registered` and `unverified` are muted,
 which narrows the prototype's blanket muting of every source cell; the shared
 style does not merge two answers the words keep apart.
+
+The detail region beside that table records departures of its own. Its section
+kickers are uppercase as the prototype sets them but muted rather than faint,
+for the same reason the table headings are: a kicker that names the section
+under it is information-bearing and has to meet 4.5:1. That is
+`theme::detail_section_title()` and not `section_title()`, so cyan stays
+reserved for focus and selection accents inside a pane; the Sources detail
+sections — REPOSITORY, CATALOG, VARIANT — read in the same language, because
+one kicker style across the detail regions is the point. Each per-agent section
+heading carries that agent's own health badge, standing in for the prototype's
+tone-coloured `.path-line` left borders: a terminal has no border to tone, so
+the tone moves into the words. The cost is accepted rather than hidden — for a
+row installed under a single agent the same badge appears under the title and
+again in that agent's heading, beside the table's Health column. The section
+leads with the skill name in `pane_heading()` and a bare badge, dropping the
+`Name:` and `Health:` field labels, because the badge words already say what
+they mean and the labels only repeated column headings the table has just
+shown; the Details pane header still names the same skill, and that repetition
+is deliberate, since the header is the focus contract and the title belongs to
+the section anatomy. The region is painted on its own `DETAIL_SURFACE`
+background before the text margin, so the surface reaches edges the text does
+not, in the wide aside and the compact drill-in alike — the prototype keeps
+`.detail-pane`'s background in its narrow media query too.
+
+Where the prototype fixes that aside at 400px, the region has two width tiers:
+40 columns, and 50 from a workspace of 151 columns up. The threshold is 151 and
+not the ~140 the issue suggested because 151 is the least width at which the
+table's 36- and 24-cell identity caps bind on both sides of the crossing, so
+every table column is identical either side of it. At 140 the wider aside would
+take ten columns the table was still using, and widening the terminal from 139
+to 140 would ellipsize skill names that fit just before — the opposite of what
+widening should do. That reasoning is recorded on
+`DETAIL_REGION_WIDE_THRESHOLD` and pinned by a rendering test that fails if the
+threshold is lowered. The split is one geometry for every screen so the aside
+does not jump between tabs, which means the Sources panes — whose columns are
+not capped — do yield width at the crossing; that cost is accepted and stands
+until the Sources region rework bounds its panes.
 
 ## Quick Reference
 
