@@ -625,6 +625,9 @@ fn inventory_columns(width: u16) -> InventoryColumns {
     // same ellipsis, which distinguishes nothing. The whole column is dropped
     // instead, and the detail region still names the source.
     if source < MINIMUM_SOURCE_WIDTH {
+        // The clamp mirrors the exit below so the two agree about the cap;
+        // its upper bound cannot bind here, because this branch is only
+        // reached when `remaining` is well under `MAX_SKILL_WIDTH`.
         return InventoryColumns {
             skill: remaining.clamp(MINIMUM_SKILL_WIDTH, MAX_SKILL_WIDTH),
             source: 0,
