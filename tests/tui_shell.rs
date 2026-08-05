@@ -1595,7 +1595,8 @@ fn sources_details_render_stored_repository_catalog_and_variant_metadata() {
     app.update(Action::AdvanceSourcesPane);
     app.update(Action::AdvanceSourcesPane);
 
-    let rendered = text(&buffer(&app, 80, 24));
+    let screen = buffer(&app, 80, 24);
+    let rendered = text(&screen);
 
     for expected in [
         "REPOSITORY",
@@ -1623,6 +1624,16 @@ fn sources_details_render_stored_repository_catalog_and_variant_metadata() {
         rendered.contains(&canonical.display().to_string()),
         "{rendered}"
     );
+    // The shared section helper restyled these kickers with the Inventory
+    // ones; the words alone would not notice a colour regression here.
+    const MUTED: Color = Color::Rgb(0x84, 0x91, 0xa1);
+    for heading in ["REPOSITORY", "CATALOG", "VARIANT"] {
+        assert_eq!(
+            style_in_row(&screen, row_containing(&screen, heading), heading).fg,
+            Some(MUTED),
+            "{heading} should be a muted kicker"
+        );
+    }
 }
 
 #[test]
@@ -2524,13 +2535,49 @@ mod installed {
         assert!(!line.contains(LONG_SOURCE_DIRECTORY), "{line:?}");
 
         // Drilled into, where the fields are not competing with five other
-        // columns for width, both are given whole.
+        // columns for width, both are given whole. The name is probed on the
+        // title row under the SKILL kicker, not the whole screen: the pane
+        // header names the skill too, and a bare `contains` would pass with
+        // the title line deleted.
         app.update(Action::AdvanceInventoryPane);
-        let detail = text(&buffer(&app, 80, 24));
-        assert!(detail.contains(LONG_SKILL_NAME), "{detail}");
+        let drilled = buffer(&app, 80, 24);
+        let kicker = row_containing(&drilled, "SKILL");
+        assert_eq!(row_text(&drilled, kicker + 2).trim(), LONG_SKILL_NAME);
+        let detail = text(&drilled);
         assert!(
             detail.contains(&format!("Source: {LONG_SOURCE_DIRECTORY}")),
             "{detail}"
+        );
+    }
+
+    /// The aside takes its full share only where the table has nothing left
+    /// to gain: every table column is the same on both sides of the
+    /// threshold, so widening the terminal never ellipsizes a name that fit
+    /// just before.
+    #[test]
+    fn crossing_the_wide_detail_threshold_never_shrinks_the_table() {
+        let harness = Harness::new();
+        let app = harness.long_name_inventory();
+
+        let table_row = |width: u16| {
+            let screen = buffer(&app, width, 40);
+            let row = row_starting_with(&screen, "▌ an-installed-skill");
+            let line = row_text(&screen, row);
+            let separator = line.find('│').expect("detail separator");
+            line[..separator].trim_end().to_owned()
+        };
+
+        let narrow_side = table_row(150);
+        let wide_side = table_row(151);
+        assert_eq!(
+            narrow_side, wide_side,
+            "the table gave up columns to the aside at the crossing"
+        );
+        // Both identity caps bind there, so the capped prefix is the same one
+        // the very-wide screen shows.
+        assert!(
+            narrow_side.contains(&format!("{}...", &LONG_SKILL_NAME[..32])),
+            "{narrow_side:?}"
         );
     }
 
@@ -2726,17 +2773,32 @@ mod installed {
         let separator = line.find('│').expect("detail separator");
         let separator = line[..separator].chars().count() as u16;
         assert_eq!(
-            screen[(separator + 2, row)].style().bg,
+            screen[(screen.area.x + separator + 2, row)].style().bg,
+            Some(DETAIL_SURFACE)
+        );
+        // The surface is painted before the margin, so it reaches the last
+        // column of the region — an inset paint would leave a stripe of the
+        // application surface down the edge and this cell would catch it.
+        assert_eq!(
+            screen[(screen.area.x + screen.area.width - 1, row)]
+                .style()
+                .bg,
             Some(DETAIL_SURFACE)
         );
         // The table keeps the application surface: the separator is a boundary
         // between two backgrounds, not a line drawn on one.
-        assert_ne!(screen[(2, row)].style().bg, Some(DETAIL_SURFACE));
+        assert_ne!(
+            screen[(screen.area.x + 2, row)].style().bg,
+            Some(DETAIL_SURFACE)
+        );
 
         app.update(Action::AdvanceInventoryPane);
         let drilled = buffer(&app, 80, 24);
         let row = row_containing(&drilled, "SKILL");
-        assert_eq!(drilled[(2, row)].style().bg, Some(DETAIL_SURFACE));
+        assert_eq!(
+            drilled[(drilled.area.x + 2, row)].style().bg,
+            Some(DETAIL_SURFACE)
+        );
     }
 
     /// Each agent's section says how that agent's own installation stands, the
@@ -2757,11 +2819,14 @@ mod installed {
         let heading = row_containing(&screen, "│ CLAUDE CODE");
         let line = row_text(&screen, heading);
         assert!(line.contains("CLAUDE CODE  × broken"), "{line:?}");
+        // Probed past the separator, not by bare text: the table beside the
+        // region sets the same words in the same colours, and a probe that
+        // searched the whole row could drift onto them and test nothing.
+        assert_eq!(style_following(&screen, heading, "│ ").fg, Some(MUTED));
         assert_eq!(
-            style_in_row(&screen, heading, "CLAUDE CODE").fg,
-            Some(MUTED)
+            style_following(&screen, heading, "CLAUDE CODE  ").fg,
+            Some(RED)
         );
-        assert_eq!(style_in_row(&screen, heading, "× broken").fg, Some(RED));
 
         // `copied`: a Codex installation that resolved to no registered source.
         app.update(Action::MoveInventorySelection(1));
@@ -2769,9 +2834,9 @@ mod installed {
         let heading = row_containing(&screen, "│ CODEX");
         let line = row_text(&screen, heading);
         assert!(line.contains("CODEX  U unmanaged"), "{line:?}");
-        assert_eq!(style_in_row(&screen, heading, "CODEX").fg, Some(MUTED));
+        assert_eq!(style_following(&screen, heading, "│ ").fg, Some(MUTED));
         assert_eq!(
-            style_in_row(&screen, heading, "U unmanaged").fg,
+            style_following(&screen, heading, "CODEX  ").fg,
             Some(VIOLET)
         );
     }
@@ -2786,11 +2851,13 @@ mod installed {
         let app = harness.installed_inventory();
 
         let screen = buffer(&app, 120, 40);
+        // Probed past the separator: the table's own SKILL heading is muted
+        // too, and a whole-row search could land on it instead.
         let kicker = row_containing(&screen, "│ SKILL");
-        assert_eq!(style_in_row(&screen, kicker, "SKILL").fg, Some(MUTED));
+        assert_eq!(style_following(&screen, kicker, "│ ").fg, Some(MUTED));
 
         let source = row_containing(&screen, "│ SOURCE");
-        assert_eq!(style_in_row(&screen, source, "SOURCE").fg, Some(MUTED));
+        assert_eq!(style_following(&screen, source, "│ ").fg, Some(MUTED));
     }
 
     /// Detail that outgrows its region says so in words and in a tone, and

@@ -1075,7 +1075,9 @@ fn inventory_detail_lines(row: &InventoryRow, home: &Path, width: u16) -> Vec<Li
     let mut lines = Vec::new();
     // Kicker, then the skill's own name as the title, then its health: the
     // badge words already say what they mean, so no field label repeats the
-    // column headings the table has just shown.
+    // column headings the table has just shown. The pane header above still
+    // names the same skill — that repetition is kept, because the header is
+    // the focus contract and this title belongs to the section anatomy.
     push_detail_section(&mut lines, "SKILL", width);
     lines.push(Line::styled(
         terminal_safe(row.name()),

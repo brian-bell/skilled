@@ -15,7 +15,15 @@ pub(crate) const WIDE_MINIMUM_WIDTH: u16 = 100;
 pub(crate) const DETAIL_REGION_WIDTH: u16 = 40;
 
 /// The workspace width from which the detail region takes its full share.
-pub(crate) const DETAIL_REGION_WIDE_THRESHOLD: u16 = 140;
+///
+/// The threshold is where the inventory table's capped identity columns have
+/// nothing left to gain: at 151 columns the primary region keeps 101 even
+/// beside the wide aside, both caps bind, and every table column is identical
+/// on either side of the crossing. Any lower threshold would hand the aside
+/// columns the table was still using, so widening the terminal past it would
+/// ellipsize names that fit just before — the opposite of what widening
+/// should do.
+pub(crate) const DETAIL_REGION_WIDE_THRESHOLD: u16 = 151;
 
 /// The detail region's share of a workspace wide enough to spare it, matching
 /// the prototype's fixed 400px aside at roughly eight pixels a cell.
@@ -110,12 +118,12 @@ mod tests {
     #[test]
     fn a_workspace_below_the_wide_detail_threshold_keeps_the_narrow_detail() {
         assert_eq!(detail_region_width(100), DETAIL_REGION_WIDTH);
-        assert_eq!(detail_region_width(139), DETAIL_REGION_WIDTH);
+        assert_eq!(detail_region_width(150), DETAIL_REGION_WIDTH);
     }
 
     #[test]
     fn a_workspace_at_or_above_the_threshold_widens_the_detail() {
-        assert_eq!(detail_region_width(140), DETAIL_REGION_WIDTH_WIDE);
+        assert_eq!(detail_region_width(151), DETAIL_REGION_WIDTH_WIDE);
         assert_eq!(detail_region_width(180), DETAIL_REGION_WIDTH_WIDE);
     }
 

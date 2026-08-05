@@ -11,7 +11,8 @@ pub(crate) const TERMINAL: Color = Color::Rgb(0x0b, 0x0f, 0x14);
 /// Prototype `.terminal-titlebar` / `.keybar` background: the band the
 /// persistent chrome rows sit on.
 pub(crate) const BAND: Color = Color::Rgb(0x0d, 0x12, 0x18);
-/// Prototype `.detail-pane` background: the wide-viewport detail region.
+/// Prototype `.detail-pane` background: the detail region's surface, in the
+/// wide aside and the compact drill-in alike.
 pub(crate) const DETAIL_SURFACE: Color = Color::Rgb(0x0c, 0x11, 0x17);
 pub(crate) const SURFACE: Color = Color::Rgb(0x0f, 0x15, 0x1d);
 pub(crate) const SURFACE_2: Color = Color::Rgb(0x12, 0x1a, 0x24);
@@ -213,10 +214,12 @@ pub(crate) fn dialog_surface() -> Style {
     Style::default().fg(TEXT).bg(SURFACE)
 }
 
-/// The wide-viewport detail region's surface (prototype `.detail-pane`).
+/// The detail region's surface (prototype `.detail-pane`).
 ///
-/// Background only, like `chrome_band()`: the rows inside keep their own
-/// foreground roles and inherit this surface.
+/// Carried by the wide-viewport aside and by the compact drill-in alike: the
+/// prototype's narrow layout keeps `.detail-pane`'s background too. Background
+/// only, like `chrome_band()`: the rows inside keep their own foreground roles
+/// and inherit this surface.
 pub(crate) fn detail_surface() -> Style {
     Style::default().bg(DETAIL_SURFACE)
 }
