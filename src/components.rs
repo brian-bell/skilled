@@ -412,7 +412,7 @@ mod tests {
             (Tone::Warning, "!", theme::AMBER),
             (Tone::Critical, "×", theme::RED),
             (Tone::Unmanaged, "U", theme::VIOLET),
-            (Tone::Inactive, "-", theme::FAINT),
+            (Tone::Inactive, "-", theme::MUTED),
         ];
 
         for (tone, glyph, colour) in tones {
