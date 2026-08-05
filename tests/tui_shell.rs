@@ -2125,14 +2125,7 @@ impl Harness {
         for skill in ["alpha", "beta"] {
             write_skill_fixture(&repository.join("skills").join(skill), skill);
         }
-        git(&repository, &["init", "-b", "main"]);
-        git(&repository, &["config", "user.name", "Skilled Test"]);
-        git(
-            &repository,
-            &["config", "user.email", "skilled@example.test"],
-        );
-        git(&repository, &["add", "."]);
-        git(&repository, &["commit", "-m", "fixture"]);
+        create_repository(&repository);
 
         let mut app = self.completed_setup();
         let preview = app.preview_source(&repository).expect("preview source");
@@ -2153,6 +2146,138 @@ impl Harness {
             .expect("installation scan");
         app
     }
+
+    /// One `gamma` skill installed two ways: linked from the registered
+    /// checkout for Claude Code, and copied outright for Codex.
+    ///
+    /// The link resolves to a registered source and the copy resolves to
+    /// none, which is the arrangement no single source describes.
+    #[cfg(unix)]
+    fn mixed_provenance_inventory(&self) -> SkilledApp {
+        let mut app = self.gamma_installed_two_ways();
+        scan_installations(&mut app);
+        app
+    }
+
+    /// The same two installations, with the checkout moved away between
+    /// registration and the scan.
+    ///
+    /// No registered source can then be accounted for, so an installation
+    /// that resolves to none is undetermined rather than unregistered.
+    #[cfg(unix)]
+    fn unverified_provenance_inventory(&self) -> SkilledApp {
+        let mut app = self.gamma_installed_two_ways();
+        let home = self.directory.path().join("home");
+        fs::rename(home.join("library"), home.join("moved-away")).expect("move the checkout away");
+        scan_installations(&mut app);
+        app
+    }
+
+    /// One `gamma` skill linked from each of two registered checkouts, so
+    /// both installations resolve but to different sources.
+    ///
+    /// Naming either one would misstate the other, which is what the row
+    /// reports instead.
+    #[cfg(unix)]
+    fn divergent_provenance_inventory(&self) -> SkilledApp {
+        let home = self.directory.path().join("home");
+        let mut app = self.completed_setup();
+        let library = self.registered_gamma_source(&mut app, "library");
+        let annex = self.registered_gamma_source(&mut app, "annex");
+
+        let claude = home.join(".claude/skills");
+        let codex = home.join(".agents/skills");
+        fs::create_dir_all(&claude).expect("create Claude Code root");
+        fs::create_dir_all(&codex).expect("create Codex root");
+        symlink(library.join("skills/gamma"), claude.join("gamma"));
+        symlink(annex.join("skills/gamma"), codex.join("gamma"));
+
+        scan_installations(&mut app);
+        app
+    }
+
+    /// A committed checkout carrying `gamma`, registered as a source, whose
+    /// path the caller installs from.
+    #[cfg(unix)]
+    fn registered_gamma_source(&self, app: &mut SkilledApp, name: &str) -> PathBuf {
+        let repository = self.directory.path().join("home").join(name);
+        write_skill_fixture(&repository.join("skills/gamma"), "gamma");
+        create_repository(&repository);
+        let preview = app.preview_source(&repository).expect("preview source");
+        app.confirm_source(preview).expect("register source");
+        repository
+    }
+
+    /// One skill, installed from a registered source, whose name and whose
+    /// source's name both outrun the capped identity columns.
+    #[cfg(unix)]
+    fn long_name_inventory(&self) -> SkilledApp {
+        let home = self.directory.path().join("home");
+        let repository = home.join(LONG_SOURCE_DIRECTORY);
+        let variant = repository.join("skills").join(LONG_SKILL_NAME);
+        write_skill_fixture(&variant, LONG_SKILL_NAME);
+        create_repository(&repository);
+
+        let mut app = self.completed_setup();
+        let preview = app.preview_source(&repository).expect("preview source");
+        app.confirm_source(preview).expect("register source");
+
+        let claude = home.join(".claude/skills");
+        fs::create_dir_all(&claude).expect("create Claude Code root");
+        symlink(variant, claude.join(LONG_SKILL_NAME));
+
+        scan_installations(&mut app);
+        app
+    }
+
+    /// The registration and installations the two provenance fixtures share,
+    /// stopping short of the scan so the checkout can still be moved.
+    #[cfg(unix)]
+    fn gamma_installed_two_ways(&self) -> SkilledApp {
+        let home = self.directory.path().join("home");
+        let repository = home.join("library");
+        write_skill_fixture(&repository.join("skills/gamma"), "gamma");
+        create_repository(&repository);
+
+        let mut app = self.completed_setup();
+        let preview = app.preview_source(&repository).expect("preview source");
+        app.confirm_source(preview).expect("register source");
+
+        let claude = home.join(".claude/skills");
+        let codex = home.join(".agents/skills");
+        fs::create_dir_all(&claude).expect("create Claude Code root");
+        fs::create_dir_all(&codex).expect("create Codex root");
+        symlink(repository.join("skills/gamma"), claude.join("gamma"));
+        write_skill_fixture(&codex.join("gamma"), "gamma");
+        app
+    }
+}
+
+#[cfg(unix)]
+fn scan_installations(app: &mut SkilledApp) {
+    app.update(Action::OpenSources);
+    let update = app.update(Action::OpenInventory);
+    app.perform_effects(update.effects())
+        .expect("installation scan");
+}
+
+/// Longer than the thirty-five cells the capped Skill column can show, and
+/// still a valid skill name: lowercase letters with single hyphen separators.
+const LONG_SKILL_NAME: &str = "an-installed-skill-with-a-deliberately-long-name";
+/// Longer than the twenty-three cells the capped Source column can show. A
+/// source's label is its checkout's directory name.
+const LONG_SOURCE_DIRECTORY: &str = "a-deliberately-long-source-checkout-name";
+
+/// Commit a fixture checkout so it can be registered as a source.
+fn create_repository(repository: &Path) {
+    git(repository, &["init", "-b", "main"]);
+    git(repository, &["config", "user.name", "Skilled Test"]);
+    git(
+        repository,
+        &["config", "user.email", "skilled@example.test"],
+    );
+    git(repository, &["add", "."]);
+    git(repository, &["commit", "-m", "fixture"]);
 }
 
 #[cfg(unix)]
@@ -2254,14 +2379,7 @@ fn create_source_fixture(repository: &Path) {
         "---\nname: portable\ndescription: Portable fixture\n---\n# Portable\n",
     )
     .expect("write source fixture");
-    git(repository, &["init", "-b", "main"]);
-    git(repository, &["config", "user.name", "Skilled Test"]);
-    git(
-        repository,
-        &["config", "user.email", "skilled@example.test"],
-    );
-    git(repository, &["add", "."]);
-    git(repository, &["commit", "-m", "fixture"]);
+    create_repository(repository);
 }
 
 fn git(repository: &Path, arguments: &[&str]) {
@@ -2318,10 +2436,144 @@ mod installed {
             style_in_row(&screen, alpha, "-").fg,
             Some(Color::Rgb(0x84, 0x91, 0xa1))
         );
-        assert!(rendered.contains("Skill "), "{rendered}");
-        for heading in ["Claude", "Codex", "OpenCode", "Health", "Source"] {
+        assert!(rendered.contains("SKILL "), "{rendered}");
+        for heading in ["CLAUDE", "CODEX", "OPENCODE", "HEALTH", "SOURCE"] {
             assert!(rendered.contains(heading), "{heading} in\n{rendered}");
         }
+    }
+
+    /// The Source column sets back the labels that place content with no
+    /// registered source — `not registered` and `unverified` — while the ones
+    /// that place it with at least one, a source name or `mixed`, keep the
+    /// body text.
+    #[test]
+    fn the_source_column_sets_back_labels_that_place_content_with_no_source() {
+        const MUTED: Color = Color::Rgb(0x84, 0x91, 0xa1);
+        const TEXT: Color = Color::Rgb(0xd7, 0xde, 0xe7);
+
+        let installed = buffer(&Harness::new().installed_inventory(), 80, 24);
+        let copied = row_containing(&installed, "copied");
+        assert_eq!(
+            style_in_row(&installed, copied, "not registered").fg,
+            Some(MUTED),
+            "an unregistered row should not read as a source name"
+        );
+        let alpha = row_containing(&installed, "alpha");
+        assert_eq!(
+            style_in_row(&installed, alpha, "library").fg,
+            Some(TEXT),
+            "a registered source label keeps the body text"
+        );
+
+        // "mixed" names no single source, but it still reports that one of the
+        // installations came from a registered one.
+        let mixed = buffer(&Harness::new().mixed_provenance_inventory(), 80, 24);
+        let gamma = row_containing(&mixed, "gamma");
+        assert_eq!(
+            style_in_row(&mixed, gamma, "mixed").fg,
+            Some(TEXT),
+            "a mixed row places part of itself with a registered source"
+        );
+
+        // "multiple sources" names none of them either, but every one of its
+        // installations came from a registered source. Sixteen cells of label
+        // need a wider terminal than the rest of these: the Source column
+        // ellipsizes it at the minimum size, and the row is found by its
+        // marker because the detail region names the selected skill too.
+        let divergent = buffer(&Harness::new().divergent_provenance_inventory(), 180, 40);
+        let gamma = row_starting_with(&divergent, "▌ gamma");
+        assert_eq!(
+            style_in_row(&divergent, gamma, "multiple sources").fg,
+            Some(TEXT),
+            "a divergent row places all of itself with registered sources"
+        );
+
+        let unverified = buffer(&Harness::new().unverified_provenance_inventory(), 80, 24);
+        let gamma = row_containing(&unverified, "gamma");
+        assert_eq!(
+            style_in_row(&unverified, gamma, "unverified").fg,
+            Some(MUTED),
+            "a row that places nothing should not read as a source name"
+        );
+    }
+
+    /// Both halves of what the caps trade: the table ellipsizes what outruns
+    /// a capped column, and the detail region is where the whole name and the
+    /// whole source label still are.
+    #[test]
+    fn what_outruns_the_capped_columns_is_ellipsized_and_kept_in_the_detail() {
+        let harness = Harness::new();
+        let mut app = harness.long_name_inventory();
+
+        let table = buffer(&app, 180, 40);
+        let row = row_starting_with(&table, "▌ an-installed-skill");
+        let line = row_text(&table, row);
+
+        // `padded` bounds a cell to one less than its column, so thirty-five
+        // cells of skill and twenty-three of source survive, the last three of
+        // each spent on the ellipsis.
+        assert!(
+            line.contains(&format!("{}...", &LONG_SKILL_NAME[..32])),
+            "{line:?}"
+        );
+        assert!(
+            line.contains(&format!("{}...", &LONG_SOURCE_DIRECTORY[..20])),
+            "{line:?}"
+        );
+        assert!(!line.contains(LONG_SKILL_NAME), "{line:?}");
+        assert!(!line.contains(LONG_SOURCE_DIRECTORY), "{line:?}");
+
+        // Drilled into, where the fields are not competing with five other
+        // columns for width, both are given whole.
+        app.update(Action::AdvanceInventoryPane);
+        let detail = text(&buffer(&app, 80, 24));
+        assert!(
+            detail.contains(&format!("Name: {LONG_SKILL_NAME}")),
+            "{detail}"
+        );
+        assert!(
+            detail.contains(&format!("Source: {LONG_SOURCE_DIRECTORY}")),
+            "{detail}"
+        );
+    }
+
+    /// Capping the columns leaves slack to the right of Health, and the
+    /// selection band still crosses it: a band that stopped where the content
+    /// did would read as a row ending mid-region.
+    #[test]
+    fn the_selected_row_band_crosses_the_slack_left_by_the_capped_columns() {
+        const SURFACE_3: Color = Color::Rgb(0x17, 0x21, 0x2c);
+
+        let harness = Harness::new();
+        let app = harness.installed_inventory();
+
+        // By its marker, because the detail region names the selected skill
+        // too and its header sits above the table.
+        let screen = buffer(&app, 180, 40);
+        let alpha = row_starting_with(&screen, "▌ alpha");
+        let line = row_text(&screen, alpha);
+
+        // The table region ends at the detail separator; its content ends at
+        // the health badge, and everything between the two is slack.
+        let separator = line.find('│').expect("detail separator");
+        let separator = line[..separator].chars().count() as u16;
+        let content = line.find("healthy").expect("health badge") + "healthy".len();
+        let content = line[..content].chars().count() as u16;
+        assert!(
+            separator > content + 10,
+            "expected slack beside the capped columns: {line:?}"
+        );
+
+        for column in [content + 1, separator - 1] {
+            assert_eq!(
+                screen[(column, alpha)].style().bg,
+                Some(SURFACE_3),
+                "the band should reach column {column} of {line:?}"
+            );
+        }
+        // It stops at the table region, though: the detail region beside it is
+        // not part of the row.
+        assert_ne!(screen[(separator, alpha)].style().bg, Some(SURFACE_3));
     }
 
     #[test]

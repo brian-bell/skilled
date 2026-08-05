@@ -7,7 +7,7 @@ expression: "normalize_inventory(&temporary, render(&app, 120, 40))"
 ▌ Global inventory  3 skills                                                    │ Details  alpha
 Roots: Claude Code 2 installed · Codex 2 installed · OpenCode no root           │ ─────────────────────────────────────
 ────────────────────────────────────────────────────────────────────────────────│ SKILL
-  Skill                  Source          Claude  Codex  OpenCode  Health        │ ─────────────────────────────────────
+  SKILL                  SOURCE          CLAUDE  CODEX  OPENCODE  HEALTH        │ ─────────────────────────────────────
 ▌ alpha                  library         ✓       ✓      -         ✓ healthy     │ Name: alpha
   broken                 not registered  ×       -      -         × broken      │ Health: ✓ healthy
   copied                 not registered  -       U      -         U unmanaged   │ Description: alpha fixture

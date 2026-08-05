@@ -1,0 +1,44 @@
+---
+source: tests/tui_snapshots.rs
+expression: screen
+---
+ ◆ skilled   global                                                                                                                                   ● ready · 1 source registered
+▌Inventory 3  2 Sources 1  Updates (soon)  Doctor (soon)
+▌ Global inventory  3 skills                                                                                                                │ Details  alpha
+Roots: Claude Code 2 installed · Codex 2 installed · OpenCode no root                                                                       │ ─────────────────────────────────────
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────│ SKILL
+  SKILL                               SOURCE                  CLAUDE  CODEX  OPENCODE  HEALTH                                               │ ─────────────────────────────────────
+▌ alpha                               library                 ✓       ✓      -         ✓ healthy                                            │ Name: alpha
+  broken                              not registered          ×       -      -         × broken                                             │ Health: ✓ healthy
+  copied                              not registered          -       U      -         U unmanaged                                          │ Description: alpha fixture
+                                                                                                                                            │ SOURCE
+                                                                                                                                            │ ─────────────────────────────────────
+                                                                                                                                            │ Source: library
+                                                                                                                                            │ CLAUDE CODE
+                                                                                                                                            │ ─────────────────────────────────────
+                                                                                                                                            │ Path: ~/.claude/skills/alpha
+                                                                                                                                            │ Object: symbolic link
+                                                                                                                                            │ Variant: skills · skills/alpha
+                                                                                                                                            │ Target: ~/library/skills/alpha
+                                                                                                                                            │ Validation: ✓ valid as alpha
+                                                                                                                                            │ CODEX
+                                                                                                                                            │ ─────────────────────────────────────
+                                                                                                                                            │ Path: ~/.agents/skills/alpha
+                                                                                                                                            │ Object: symbolic link
+                                                                                                                                            │ Variant: skills · skills/alpha
+                                                                                                                                            │ Target: ~/library/skills/alpha
+                                                                                                                                            │ Validation: ✓ valid as alpha
+                                                                                                                                            │ NOT INSTALLED
+                                                                                                                                            │ ─────────────────────────────────────
+                                                                                                                                            │ - OpenCode
+                                                                                                                                            │
+                                                                                                                                            │
+                                                                                                                                            │
+                                                                                                                                            │
+                                                                                                                                            │
+                                                                                                                                            │
+                                                                                                                                            │
+                                                                                                                                            │
+                                                                                                                                            │
+                                                                                                                                            │
+ Tab/Shift-Tab Region   j/k Move   Enter Open   / Filter   2 Sources   s Settings   ? Help   q Quit

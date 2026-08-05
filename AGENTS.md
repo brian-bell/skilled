@@ -129,6 +129,21 @@ always fully known; Inventory asks the snapshot; and a destination this release
 cannot open renders no count at all, where the prototype fakes one. Production
 dependencies require explicit review.
 
+The inventory table departs from the prototype in several recorded ways. Its
+column headings are uppercase as in the prototype's grid head, but muted rather
+than faint, because a heading that names a column is information-bearing and has
+to meet 4.5:1. Its Skill and Source columns stop growing at 36 and 24 cells, so
+a very wide terminal ends the table after Health and leaves slack instead of
+stretching the identity columns around short labels; the prototype's grid grows
+the same columns without bound, and a name longer than the cap is still read in
+full in the detail region beside the table. The selected row's highlight band
+crosses that slack all the same — a band stopping at the health badge would read
+as a row ending mid-region. And in the Source column a label that places content
+with at least one registered installation — a source name, `mixed`, `multiple
+sources` — stays body text while `not registered` and `unverified` are muted,
+which narrows the prototype's blanket muting of every source cell; the shared
+style does not merge two answers the words keep apart.
+
 ## Quick Reference
 
 ```bash

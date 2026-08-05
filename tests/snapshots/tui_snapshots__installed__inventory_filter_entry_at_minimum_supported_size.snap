@@ -8,7 +8,7 @@ expression: "normalize_inventory(&temporary, render(&app, 80, 24))"
 /unman▌
 Roots: Claude Code 2 installed · Codex 2 installed · OpenCode no root
 ────────────────────────────────────────────────────────────────────────────────
-  Skill                  Source          Claude  Codex  OpenCode  Health
+  SKILL                  SOURCE          CLAUDE  CODEX  OPENCODE  HEALTH
 ▌ copied                 not registered  -       U      -         U unmanaged
 
 

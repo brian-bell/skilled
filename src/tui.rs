@@ -581,7 +581,8 @@ fn render_inventory(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
 /// Column widths for the installation table.
 ///
 /// The three agent columns and the health column are sized by their headings,
-/// which never change; the identity columns divide whatever is left.
+/// which never change; the identity columns divide whatever is left, up to a
+/// cap.
 #[derive(Clone, Copy)]
 struct InventoryColumns {
     skill: usize,
@@ -598,18 +599,37 @@ const ROW_MARKER_WIDTH: usize = 2;
 /// Below this, a Source column would only ever show an ellipsis.
 const MINIMUM_SOURCE_WIDTH: usize = 12;
 const MINIMUM_SKILL_WIDTH: usize = 8;
+/// Past these, an identity column stops earning its width: a short label such
+/// as `not registered` is left stranded in whitespace, and every row is pulled
+/// so far apart that a name and its health verdict no longer read as one line.
+/// The cap bounds that measure instead.
+///
+/// It is not free. A name or source label longer than the cap is ellipsized
+/// here where a wider terminal could have shown it whole; the detail region
+/// beside the table still gives both in full, so nothing is only knowable from
+/// this column.
+///
+/// This is a deliberate departure from the prototype rather than a translation
+/// of it: that grid gives the same columns floors that grow without bound
+/// (`minmax(145px, 1.5fr)`, `minmax(110px, 1fr)`), and grows its Health column
+/// too (`minmax(92px, .8fr)`), so it never leaves the slack this does.
+const MAX_SKILL_WIDTH: usize = 36;
+const MAX_SOURCE_WIDTH: usize = 24;
 
 fn inventory_columns(width: u16) -> InventoryColumns {
     let fixed = ROW_MARKER_WIDTH + AGENT_COLUMN_WIDTHS.iter().sum::<usize>() + HEALTH_COLUMN_WIDTH;
     let remaining = usize::from(width).saturating_sub(fixed);
-    let skill = (remaining * 6 / 10).max(MINIMUM_SKILL_WIDTH);
-    let source = remaining.saturating_sub(skill);
+    let skill = (remaining * 6 / 10).clamp(MINIMUM_SKILL_WIDTH, MAX_SKILL_WIDTH);
+    let source = remaining.saturating_sub(skill).min(MAX_SOURCE_WIDTH);
     // A Source column too narrow to hold a label truncates every source to the
     // same ellipsis, which distinguishes nothing. The whole column is dropped
     // instead, and the detail region still names the source.
     if source < MINIMUM_SOURCE_WIDTH {
+        // The clamp mirrors the exit below so the two agree about the cap;
+        // its upper bound cannot bind here, because this branch is only
+        // reached when `remaining` is well under `MAX_SKILL_WIDTH`.
         return InventoryColumns {
-            skill: remaining.max(MINIMUM_SKILL_WIDTH),
+            skill: remaining.clamp(MINIMUM_SKILL_WIDTH, MAX_SKILL_WIDTH),
             source: 0,
         };
     }
@@ -792,17 +812,22 @@ fn root_tone(root: &RootScan) -> Tone {
     }
 }
 
+/// The table's column headings, uppercased as in the prototype's `.grid-head`.
+///
+/// The prototype sets that row in its faint grey; MUTED is the recorded
+/// substitution, because a heading that names a column is information-bearing
+/// and has to meet 4.5:1.
 fn inventory_column_headings(columns: InventoryColumns) -> Line<'static> {
     let mut heading = " ".repeat(ROW_MARKER_WIDTH);
-    heading.push_str(&padded("Skill", columns.skill));
-    heading.push_str(&padded("Source", columns.source));
-    for (label, width) in ["Claude", "Codex", "OpenCode"]
+    heading.push_str(&padded("SKILL", columns.skill));
+    heading.push_str(&padded("SOURCE", columns.source));
+    for (label, width) in ["CLAUDE", "CODEX", "OPENCODE"]
         .into_iter()
         .zip(AGENT_COLUMN_WIDTHS)
     {
         heading.push_str(&padded(label, width));
     }
-    heading.push_str("Health");
+    heading.push_str("HEALTH");
     Line::from(Span::styled(heading, theme::pane_subtitle()))
 }
 
@@ -812,12 +837,26 @@ fn inventory_row_line(
     selected: bool,
     width: u16,
 ) -> Line<'static> {
+    let provenance = row.provenance();
+    let source = padded(&terminal_safe(provenance.label()), columns.source);
     let mut spans = vec![
         Span::raw(padded(&terminal_safe(row.name()), columns.skill)),
-        Span::raw(padded(
-            &terminal_safe(row.provenance().label()),
-            columns.source,
-        )),
+        // A label that places content with a registered source is body text.
+        // A source name does that outright, and so do "mixed" and "multiple
+        // sources": each reports at least one installation that resolved to
+        // one. "not registered" and "unverified" place nothing with a source,
+        // and are set back — the two are still different answers, and the
+        // words keep them apart. The prototype mutes every source cell alike
+        // (`.source-name`); this narrows that to the two that place nothing.
+        match provenance {
+            RowProvenance::Unregistered | RowProvenance::Unverified => {
+                Span::styled(source, theme::pane_subtitle())
+            }
+            RowProvenance::NotApplicable
+            | RowProvenance::Source(_)
+            | RowProvenance::Mixed
+            | RowProvenance::Divergent => Span::raw(source),
+        },
     ];
     for (agent, width) in AgentKind::ALL.into_iter().zip(AGENT_COLUMN_WIDTHS) {
         let tone = row
@@ -832,6 +871,9 @@ fn inventory_row_line(
     }
     let tone = installation_tone(row.health());
     spans.push(components::badge(tone, row.health().label()));
+    // `width` is the whole table region, not the width the capped columns
+    // happen to use, so the selection band crosses the slack rather than
+    // stopping where the health badge does.
     components::list_row(spans, selected, width)
 }
 

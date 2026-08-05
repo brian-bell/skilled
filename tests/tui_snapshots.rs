@@ -718,9 +718,49 @@ mod installed {
 
         let screen = normalize_inventory(&temporary, render(&app, 100, 26));
 
-        assert!(!screen.contains("Source "), "{screen}");
+        // Scoped to the table's heading row: the detail region beside it has a
+        // SOURCE section of its own, which is exactly where the dropped column
+        // still names the source.
+        assert!(!heading_row(&screen).contains("SOURCE"), "{screen}");
         assert!(screen.contains("unman"), "{screen}");
         insta::assert_snapshot!(screen);
+    }
+
+    /// On a very wide terminal the identity columns stop growing, so a short
+    /// label is not stranded in the middle of a very wide field. The slack
+    /// falls to the right of Health, which is where this departs from the
+    /// prototype: that grid grows these columns without bound.
+    #[test]
+    fn inventory_capped_columns_at_a_very_wide_size() {
+        let temporary = tempfile::tempdir().expect("temporary application directory");
+        let app = inventory_app(&temporary);
+
+        let screen = normalize_inventory(&temporary, render(&app, 180, 40));
+
+        let headings = heading_row(&screen);
+        assert_eq!(column_of(headings, "SOURCE"), 38, "{headings:?}");
+        assert_eq!(column_of(headings, "CLAUDE"), 62, "{headings:?}");
+        insta::assert_snapshot!(screen);
+    }
+
+    /// The table side of the heading row, cut at the detail region's
+    /// separator so nothing the detail pane happens to render can answer for
+    /// the table's columns.
+    fn heading_row(screen: &str) -> &str {
+        let row = screen
+            .lines()
+            .find(|line| line.contains("HEALTH"))
+            .unwrap_or_else(|| panic!("no heading row in\n{screen}"));
+        row.split('│').next().unwrap_or(row)
+    }
+
+    /// The screen column a heading starts at, counted in characters because
+    /// the chrome around the table is single width.
+    fn column_of(line: &str, needle: &str) -> usize {
+        let byte_index = line
+            .find(needle)
+            .unwrap_or_else(|| panic!("{needle:?} not found in {line:?}"));
+        line[..byte_index].chars().count()
     }
 
     /// A root Skilled could not read reports the reason, because it

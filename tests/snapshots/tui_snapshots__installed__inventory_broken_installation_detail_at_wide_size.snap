@@ -7,7 +7,7 @@ expression: "normalize_inventory(&temporary, render(&app, 120, 40))"
 ▌ Global inventory  3 skills                                                    │ Details  broken
 Roots: Claude Code 2 installed · Codex 2 installed · OpenCode no root           │ ─────────────────────────────────────
 ────────────────────────────────────────────────────────────────────────────────│ SKILL
-  Skill                  Source          Claude  Codex  OpenCode  Health        │ ─────────────────────────────────────
+  SKILL                  SOURCE          CLAUDE  CODEX  OPENCODE  HEALTH        │ ─────────────────────────────────────
   alpha                  library         ✓       ✓      -         ✓ healthy     │ Name: broken
 ▌ broken                 not registered  ×       -      -         × broken      │ Health: × broken
   copied                 not registered  -       U      -         U unmanaged   │ SOURCE
