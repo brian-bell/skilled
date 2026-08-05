@@ -531,10 +531,11 @@ fn setup_lines(app: &SkilledApp, step: SetupStep, width: u16) -> Vec<Line<'stati
                         .map(|catalog| catalog.candidates().len())
                         .sum::<usize>()
                 )),
-                if !inventory.counts_are_complete() {
-                    // A root that was not read contributes nothing, so a total
-                    // taken across the roots would read as "none installed"
-                    // when it means "not known".
+                if inventory.stated_skill_count().is_none() {
+                    // The same verdict the Inventory surfaces defer to: a total
+                    // taken across roots that were not read would read as
+                    // "none installed" when it means "not known", and a scan
+                    // that only found roots absent earns a phrase, not a zero.
                     Line::from(components::badge(
                         Tone::Inactive,
                         if inventory.unreadable_roots().next().is_some() {

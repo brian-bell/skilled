@@ -14,7 +14,7 @@ expression: "render(&app, 80, 24)"
   │                                                                          │
   │  Configured agents: 3                                                    │
   │  Sources: 0   Skills: 0                                                  │
-  │  Installed: 0   Unmanaged: 0   Broken: 0                                 │
+  │  - installation counts unavailable: no skill root was read               │
   │                                                                          │
   │  Unresolved findings never force a repair.                               │
   │                                                                          │

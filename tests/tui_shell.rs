@@ -584,6 +584,14 @@ fn the_setup_summary_counts_only_what_exists() {
     // Nothing scans installations and nothing produces findings yet.
     assert!(!screen.contains("Installations:"), "{screen}");
     assert!(!screen.contains("Doctor findings"), "{screen}");
+    // Every root of this home was found absent, so the scan is complete but
+    // read nothing. That earns the same refusal the Inventory surfaces give:
+    // a phrase, not a measured zero.
+    assert!(!screen.contains("Installed:"), "{screen}");
+    assert!(
+        screen.contains("installation counts unavailable: no skill root was read"),
+        "{screen}"
+    );
 }
 
 #[test]
