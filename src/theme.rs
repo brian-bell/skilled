@@ -6,7 +6,7 @@
 
 use ratatui::style::{Color, Modifier, Style};
 
-// Prototype `:root` palette.
+// Prototype palette: the `:root` variables plus the selector-local surfaces.
 pub(crate) const TERMINAL: Color = Color::Rgb(0x0b, 0x0f, 0x14);
 /// Prototype `.terminal-titlebar` / `.keybar` background: the band the
 /// persistent chrome rows sit on.
@@ -128,8 +128,11 @@ pub(crate) fn nav_inactive() -> Style {
 
 /// The count beside a navigation entry (prototype `.tab-count`).
 ///
-/// A count may only be rendered when the underlying condition it summarises
-/// actually holds; this token styles it, it does not license it.
+/// No background of its own: the count sits inside an entry and inherits that
+/// entry's surface, so it reads the same on an active (`SURFACE_2`) and an
+/// inactive (`SURFACE`) tab. A count may only be rendered when the underlying
+/// condition it summarises actually holds; this token styles it, it does not
+/// license it.
 #[cfg_attr(
     not(test),
     expect(
@@ -138,7 +141,7 @@ pub(crate) fn nav_inactive() -> Style {
     )
 )]
 pub(crate) fn nav_count() -> Style {
-    Style::default().fg(AMBER).bg(SURFACE)
+    Style::default().fg(AMBER)
 }
 
 /// The surface behind the focused row of a list.
