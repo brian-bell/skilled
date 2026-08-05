@@ -168,6 +168,32 @@ fn placeholder_setup_steps_describe_only_observed_work() {
 }
 
 #[test]
+fn the_setup_scan_step_names_the_reason_a_root_could_not_be_read() {
+    let harness = Harness::new();
+    let home = harness.directory.path().join("home");
+    fs::create_dir_all(home.join(".claude")).expect("create Claude Code parent");
+    fs::write(home.join(".claude/skills"), "not a directory")
+        .expect("write a file where the root belongs");
+    let mut app = harness.first_run();
+    for _ in 0..4 {
+        app.update(Action::Continue);
+    }
+    let update = app.update(Action::Continue);
+    app.perform_effects(update.effects())
+        .expect("installation scan");
+
+    let screen = buffer(&app, 80, 24);
+    let rendered = text(&screen);
+
+    assert!(rendered.contains("STEP 6 / 7"), "{rendered}");
+    assert!(rendered.contains("root unreadable"), "{rendered}");
+    // The root contributed nothing, so its reason is the only account of it.
+    let reason = row_containing(&screen, "the skill root is not a directory");
+    let line = row_text(&screen, reason);
+    assert!(line.contains("× Claude Code:"), "{line}");
+}
+
+#[test]
 fn summary_names_inventory_as_the_next_destination_everywhere() {
     let harness = Harness::new();
     let mut app = harness.first_run();
@@ -1084,6 +1110,29 @@ fn an_unreadable_root_names_its_reason_in_a_critical_tone() {
     assert!(rendered.contains("──────"), "{rendered}");
     assert!(
         rendered.contains("An agent skill root could not be read"),
+        "{rendered}"
+    );
+}
+
+#[test]
+fn a_partially_read_inventory_lists_rows_without_claiming_a_total() {
+    let harness = Harness::new();
+    let home = harness.directory.path().join("home");
+    write_skill_fixture(&home.join(".claude/skills/alpha"), "alpha");
+    fs::create_dir_all(home.join(".agents")).expect("create Codex root parent");
+    fs::write(home.join(".agents/skills"), "not a directory")
+        .expect("write a file where the root belongs");
+    let app = harness.completed_setup();
+
+    let rendered = text(&buffer(&app, 80, 24));
+
+    // One root was read and holds a skill, but another could not be read, so
+    // the subtitle describes what is listed rather than claiming a total that
+    // would read as covering every root.
+    assert!(rendered.contains("1 listed · not fully read"), "{rendered}");
+    assert!(!rendered.contains("1 skill"), "{rendered}");
+    assert!(
+        rendered.contains("the skill root is not a directory"),
         "{rendered}"
     );
 }

@@ -452,6 +452,23 @@ fn setup_lines(app: &SkilledApp, step: SetupStep, width: u16) -> Vec<Line<'stati
                         terminal_safe(&home_relative(root.path(), app.home()))
                     )),
                 ]));
+                // A root that could not be read contributed nothing above, so
+                // its reason is the only account of it — same as the Inventory
+                // header. The message is bounded so an operating-system error
+                // cannot displace the line that closes the step.
+                if let RootStatus::Unreadable { message } = root.status() {
+                    let badge = components::badge(Tone::Critical, root.agent().display_name());
+                    let budget = usize::from(width)
+                        .saturating_mul(2)
+                        .saturating_sub(badge.width() + 2);
+                    lines.push(Line::from(vec![
+                        badge,
+                        Span::raw(format!(
+                            ": {}",
+                            terminal_safe_bounded_start(message, budget)
+                        )),
+                    ]));
+                }
             }
             lines.extend([
                 Line::default(),
@@ -645,6 +662,13 @@ fn inventory_subtitle(app: &SkilledApp, shown: usize) -> String {
     let total = inventory.rows().len();
     if !app.inventory_filter().trim().is_empty() {
         return format!("{shown} of {total} listed");
+    }
+    // A positive count is a claim about every selected root. When a root
+    // could not be read, the rows that were read are only "listed": stating
+    // "N skills" here would read as a complete total while part of the
+    // requested scope contributed nothing.
+    if total > 0 && !inventory.counts_are_complete() {
+        return format!("{total} listed · not fully read");
     }
     // Skills and stray content are counted apart: a root holding only a
     // README must not be described as holding a skill.
