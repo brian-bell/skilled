@@ -145,18 +145,6 @@ pub(crate) fn focus_marker() -> Style {
     Style::default().fg(CYAN)
 }
 
-/// The border of a workspace pane.
-///
-/// Focus is also carried by a marker on the focused row, so the accent colour
-/// is reinforcement rather than the only cue.
-pub(crate) fn pane_border(focused: bool) -> Style {
-    if focused {
-        Style::default().fg(CYAN)
-    } else {
-        Style::default().fg(LINE)
-    }
-}
-
 /// A section heading inside a pane or dialog body.
 pub(crate) fn section_title() -> Style {
     Style::default().fg(CYAN).add_modifier(Modifier::BOLD)
@@ -237,6 +225,19 @@ pub(crate) fn pane_heading() -> Style {
 /// prototype's faint grey to meet 4.5:1 on the terminal surface.
 pub(crate) fn pane_subtitle() -> Style {
     Style::default().fg(MUTED)
+}
+
+/// The line that names the group a run of list rows belongs to (prototype
+/// `.catalog-title`).
+///
+/// The prototype tints its group headers with a band of their own, so this
+/// takes the band the persistent chrome already uses rather than minting a
+/// colour: one band across the application, whether it carries chrome or a
+/// group header. The text on it names the group and says how its contents are
+/// classified, which is information, so it is `MUTED` rather than the
+/// prototype's faint grey.
+pub(crate) fn group_label() -> Style {
+    Style::default().fg(MUTED).bg(BAND)
 }
 
 /// A horizontal rule separating regions.
@@ -391,6 +392,7 @@ mod tests {
             ("dialog_surface()", dialog_surface()),
             ("pane_heading()", pane_heading()),
             ("pane_subtitle()", pane_subtitle()),
+            ("group_label()", group_label()),
             ("empty_headline()", empty_headline()),
             ("empty_body()", empty_body()),
             ("key_cap()", key_cap()),

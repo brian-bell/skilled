@@ -62,6 +62,18 @@ impl Compatibility {
         self == Self::ALL
     }
 
+    /// Whether the catalog claims to support one agent.
+    ///
+    /// A claim, not an observation: it reports what the catalog declared and
+    /// Skilled stored.
+    pub fn supports(self, agent: AgentKind) -> bool {
+        match agent {
+            AgentKind::ClaudeCode => self.claude_code,
+            AgentKind::Codex => self.codex,
+            AgentKind::OpenCode => self.opencode,
+        }
+    }
+
     pub(crate) fn from_flags(claude_code: bool, codex: bool, opencode: bool) -> Self {
         Self {
             claude_code,
@@ -262,6 +274,23 @@ impl RegisteredSource {
 
     pub fn head(&self) -> &str {
         self.inspected.head()
+    }
+
+    /// The recorded revision in the abbreviated form Git itself prints.
+    ///
+    /// A row that names a repository has room for a revision the reader can
+    /// recognise, not for forty characters of one. Seven is Git's own default
+    /// abbreviation, and a shorter revision is given whole rather than padded:
+    /// this reports what was stored, it does not resolve anything.
+    pub fn short_head(&self) -> &str {
+        const SHORT_HEAD_LENGTH: usize = 7;
+
+        let head = self.head();
+        // By character, not by byte: a stored revision that is not the hex Git
+        // produces must still cut on a boundary rather than panicking.
+        head.char_indices()
+            .nth(SHORT_HEAD_LENGTH)
+            .map_or(head, |(index, _)| &head[..index])
     }
 
     pub fn remote_url(&self) -> Option<&str> {
@@ -1042,5 +1071,50 @@ fn git_error(repository: &Path, arguments: &[&str], output: &Output) -> Error {
         repository: repository.to_path_buf(),
         arguments: arguments.iter().map(|value| (*value).to_owned()).collect(),
         stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn registered(head: &str) -> RegisteredSource {
+        RegisteredSource::new(
+            1,
+            "fixture".to_owned(),
+            InspectedSource::from_stored(
+                PathBuf::from("/fixture"),
+                Some("main".to_owned()),
+                head.to_owned(),
+                None,
+                None,
+            ),
+            Vec::new(),
+            0,
+            None,
+        )
+    }
+
+    #[test]
+    fn a_short_head_is_the_first_seven_characters_of_the_revision() {
+        assert_eq!(
+            registered("0123456789abcdef0123456789abcdef01234567").short_head(),
+            "0123456"
+        );
+    }
+
+    #[test]
+    fn a_revision_no_longer_than_the_short_form_is_given_whole() {
+        assert_eq!(registered("0123456").short_head(), "0123456");
+        assert_eq!(registered("abc").short_head(), "abc");
+        assert_eq!(registered("").short_head(), "");
+    }
+
+    /// Stored revisions come from Git, but the column is bounded by characters
+    /// rather than bytes so a corrupted or hand-edited row cannot panic the
+    /// renderer on a multi-byte boundary.
+    #[test]
+    fn a_multi_byte_revision_is_cut_on_a_character_boundary() {
+        assert_eq!(registered("äöüäöüäöü").short_head(), "äöüäöüä");
     }
 }

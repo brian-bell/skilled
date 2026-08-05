@@ -16,7 +16,8 @@ use crate::{
         InstalledSkillObservation, InventoryRow, RootScan, RootStatus, RowProvenance,
     },
     source::{
-        CatalogClassification, CatalogProposal, RegisteredSource, SkillCandidate, SkillValidation,
+        CatalogClassification, CatalogProposal, Compatibility, RegisteredSource, SkillCandidate,
+        SkillValidation,
     },
     theme::{self, Tone},
     viewport,
@@ -953,23 +954,57 @@ fn inventory_empty_state(app: &SkilledApp) -> (String, String) {
     )
 }
 
-/// The detail region: everything observed about the selected installation.
-fn render_inventory_detail(
+/// The column of vertical rule that divides one workspace region from the
+/// next.
+fn render_region_separator(frame: &mut Frame<'_>, area: Rect) {
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(Span::styled("│", theme::rule()));
+            usize::from(area.height)
+        ]),
+        area,
+    );
+}
+
+/// A workspace pane: its header, the rule that closes it, and the body left
+/// for the pane's own content.
+fn render_pane_scaffold(
     frame: &mut Frame<'_>,
     area: Rect,
-    app: &SkilledApp,
-    beside_the_table: bool,
-) {
-    let region = if beside_the_table {
+    heading: &str,
+    subtitle: &str,
+    focused: bool,
+) -> Rect {
+    let [header, body] = Layout::vertical([Constraint::Length(2), Constraint::Min(1)]).areas(area);
+    frame.render_widget(
+        Paragraph::new(vec![
+            components::focused_pane_header(heading, subtitle, focused),
+            components::rule(header.width),
+        ]),
+        header,
+    );
+    body
+}
+
+/// The detail region's frame, shared by every screen that has one.
+///
+/// Beside a primary region it opens with the dividing rule; drilled into on a
+/// compact terminal it fills the workspace. Either way the surface is painted
+/// whole, before the text margin, and the header and its rule sit inside —
+/// the two screens' detail regions cannot drift apart because they are the
+/// same scaffold. The body left for the caller's lines is returned.
+fn render_detail_scaffold(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    heading: &str,
+    subtitle: &str,
+    focused: bool,
+    beside_the_primary_region: bool,
+) -> Rect {
+    let region = if beside_the_primary_region {
         let [separator, region] =
             Layout::horizontal([Constraint::Length(1), Constraint::Min(1)]).areas(area);
-        frame.render_widget(
-            Paragraph::new(vec![
-                Line::from(Span::styled("│", theme::rule()));
-                usize::from(separator.height)
-            ]),
-            separator,
-        );
+        render_region_separator(frame, separator);
         // Painted whole, before the margin: the surface is what makes the
         // region read as a region, so it reaches the edges the text does not.
         frame.render_widget(Block::new().style(theme::detail_surface()), region);
@@ -984,23 +1019,27 @@ fn render_inventory_detail(
             vertical: 0,
         })
     };
+    render_pane_scaffold(frame, region, heading, subtitle, focused)
+}
 
+/// The detail region: everything observed about the selected installation.
+fn render_inventory_detail(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &SkilledApp,
+    beside_the_table: bool,
+) {
     let selected = app.selected_installation();
-    let [header, body] =
-        Layout::vertical([Constraint::Length(2), Constraint::Min(1)]).areas(region);
-    frame.render_widget(
-        Paragraph::new(vec![
-            components::focused_pane_header(
-                "Details",
-                &selected.map_or_else(
-                    || "no selection".to_owned(),
-                    |row| terminal_safe(row.name()),
-                ),
-                app.inventory_pane() == InventoryPane::Details,
-            ),
-            components::rule(header.width),
-        ]),
-        header,
+    let body = render_detail_scaffold(
+        frame,
+        area,
+        "Details",
+        &selected.map_or_else(
+            || "no selection".to_owned(),
+            |row| terminal_safe(row.name()),
+        ),
+        app.inventory_pane() == InventoryPane::Details,
+        beside_the_table,
     );
 
     let Some(row) = selected else {
@@ -1277,52 +1316,70 @@ fn padded(value: &str, width: usize) -> String {
     format!("{bounded}{}", " ".repeat(width.saturating_sub(used)))
 }
 
+/// The Repositories pane's share of a wide primary region, matching the
+/// prototype's fixed 270px column at roughly eight pixels a cell.
+///
+/// The cap is what makes the workspace's wide-detail crossing
+/// ([`viewport::DETAIL_REGION_WIDE_THRESHOLD`]) cost this pane nothing: it
+/// binds from a primary region of 81 columns, and the crossing takes the
+/// primary from 110 columns to 101, so the pane is 34 either side of it and
+/// every repository entry is laid out identically. Below 81 the share is
+/// proportional, because a pane that took its full 34 out of a narrow primary
+/// would leave the variants beside it too little to read.
+const REPOSITORIES_PANE_MAX_WIDTH: u16 = 34;
+
+fn repositories_pane_width(primary_width: u16) -> u16 {
+    u16::try_from(u32::from(primary_width) * 42 / 100)
+        .unwrap_or(u16::MAX)
+        .min(REPOSITORIES_PANE_MAX_WIDTH)
+}
+
+/// Past this a variant name stops earning width, exactly as a skill name does
+/// in the inventory table; the detail region beside the list still gives the
+/// name in full.
+const MAX_VARIANT_WIDTH: usize = MAX_SKILL_WIDTH;
+
+/// The widest content the variants pane lays out.
+///
+/// This is what the pane keeps on the far side of the wide-detail crossing:
+/// at 151 columns the primary region is 101, less 34 for the Repositories
+/// pane and one for the rule between them. Bounding the pane's content here
+/// rather than at its own width means widening the terminal past the
+/// threshold takes the columns out of slack — which the group label's band
+/// and a selected row's band still cross — and never out of a catalog path or
+/// a variant name that was readable a column earlier.
+const VARIANTS_CONTENT_MAX_WIDTH: usize = 66;
+
 fn render_sources(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
-    match viewport::classify(area) {
-        viewport::Viewport::Wide => {
-            let (primary, details) = viewport::workspace_regions(area);
-            let details = details.expect("wide Sources workspace has a detail region");
-            let [repositories, _, variants] = Layout::horizontal([
-                Constraint::Percentage(42),
+    match viewport::workspace_regions(area) {
+        (primary, Some(details)) => {
+            let [repositories, separator, variants] = Layout::horizontal([
+                Constraint::Length(repositories_pane_width(primary.width)),
                 Constraint::Length(1),
                 Constraint::Min(1),
             ])
             .areas(primary);
+            render_region_separator(frame, separator);
             render_source_repositories(frame, repositories, app);
             render_source_variants(frame, variants, app);
-            render_source_details(frame, details, app);
+            render_source_details(frame, details, app, true);
         }
-        viewport::Viewport::Compact => match app.sources_pane() {
-            SourcesPane::Repositories => render_source_repositories(frame, area, app),
-            SourcesPane::Variants => render_source_variants(frame, area, app),
-            SourcesPane::Details => render_source_details(frame, area, app),
+        (primary, None) => match app.sources_pane() {
+            SourcesPane::Repositories => render_source_repositories(frame, primary, app),
+            SourcesPane::Variants => render_source_variants(frame, primary, app),
+            SourcesPane::Details => render_source_details(frame, primary, app, false),
         },
     }
 }
 
-fn source_region_block(
-    heading: &str,
-    subtitle: &str,
-    pane: SourcesPane,
-    app: &SkilledApp,
-) -> Block<'static> {
-    let focused = app.sources_pane() == pane;
-    Block::default()
-        .title(components::focused_pane_header(heading, subtitle, focused))
-        .borders(Borders::ALL)
-        .border_style(theme::pane_border(focused))
-        .padding(Padding::horizontal(1))
-}
-
 fn render_source_repositories(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
-    let block = source_region_block(
+    let inner = render_pane_scaffold(
+        frame,
+        area,
         "Repositories",
         &format!("{} registered", app.sources().len()),
-        SourcesPane::Repositories,
-        app,
+        app.sources_pane() == SourcesPane::Repositories,
     );
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
 
     if app.sources().is_empty() {
         frame.render_widget(
@@ -1337,7 +1394,10 @@ fn render_source_repositories(frame: &mut Frame<'_>, area: Rect, app: &SkilledAp
         return;
     }
 
-    let capacity = usize::from(inner.height.max(1));
+    // Entries are three lines tall, so the pane holds a third as many of them
+    // as it has rows. A pane too short for one still shows the top of the
+    // focused entry rather than nothing.
+    let capacity = (usize::from(inner.height) / REPOSITORY_ENTRY_LINES).max(1);
     let start = visible_window_start(app.focused_source(), capacity);
     let lines = app
         .sources()
@@ -1345,18 +1405,58 @@ fn render_source_repositories(frame: &mut Frame<'_>, area: Rect, app: &SkilledAp
         .enumerate()
         .skip(start)
         .take(capacity)
-        .map(|(index, source)| {
-            components::list_row(
-                vec![
-                    Span::raw(format!("{}  ", terminal_safe(source.label()))),
-                    source_status_badge(source),
-                ],
-                index == app.focused_source(),
-                inner.width,
-            )
+        .flat_map(|(index, source)| {
+            repository_entry_lines(source, index == app.focused_source(), inner.width)
         })
         .collect::<Vec<_>>();
     frame.render_widget(Paragraph::new(lines), inner);
+}
+
+/// How many lines one repository entry occupies.
+const REPOSITORY_ENTRY_LINES: usize = 3;
+
+/// One registered repository, in the prototype's `.source-row` anatomy: what
+/// the source is called, the checkout it names, and the state it was last seen
+/// in.
+///
+/// Every line is bounded to the pane rather than wrapped. A wrapped path would
+/// push the state line of one entry into the next and leave the list without a
+/// fixed entry height, so the row could no longer be windowed or banded; the
+/// detail region beside the list still gives the path in full.
+fn repository_entry_lines(
+    source: &RegisteredSource,
+    selected: bool,
+    width: u16,
+) -> Vec<Line<'static>> {
+    let budget = usize::from(width).saturating_sub(ROW_MARKER_WIDTH);
+    let state = source_status_badge(source);
+    let state_width = state.width();
+    let revision = format!(
+        " {}@{}",
+        terminal_safe(source.branch().unwrap_or("detached")),
+        terminal_safe(source.short_head())
+    );
+    components::list_row_lines(
+        vec![
+            vec![Span::raw(terminal_safe_bounded_start(
+                source.label(),
+                budget,
+            ))],
+            vec![Span::styled(
+                terminal_safe_bounded_middle(&source.git_top_level().display().to_string(), budget),
+                theme::pane_subtitle(),
+            )],
+            vec![
+                state,
+                Span::styled(
+                    terminal_safe_bounded_start(&revision, budget.saturating_sub(state_width)),
+                    theme::pane_subtitle(),
+                ),
+            ],
+        ],
+        selected,
+        width,
+    )
 }
 
 fn render_source_variants(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
@@ -1377,9 +1477,13 @@ fn render_source_variants(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
         Some(_) => format!("{} found", variants.len()),
         None => "no source".to_owned(),
     };
-    let block = source_region_block("Available variants", &subtitle, SourcesPane::Variants, app);
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
+    let inner = render_pane_scaffold(
+        frame,
+        area,
+        "Available variants",
+        &subtitle,
+        app.sources_pane() == SourcesPane::Variants,
+    );
 
     let Some(source) = app.selected_source() else {
         frame.render_widget(
@@ -1406,80 +1510,132 @@ fn render_source_variants(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
         return;
     }
 
-    let catalog_errors = source
-        .catalogs()
-        .iter()
-        .filter_map(|catalog| {
-            catalog.scan_error().map(|error| {
-                Line::from(vec![
-                    components::badge(Tone::Critical, "unavailable"),
-                    Span::raw(format!(
-                        " {}: {}",
-                        terminal_safe(&catalog.relative_path().display().to_string()),
-                        terminal_safe(error)
-                    )),
-                ])
-            })
-        })
-        .collect::<Vec<_>>();
-
-    if variants.is_empty() {
-        if catalog_errors.is_empty() {
-            frame.render_widget(
-                components::empty_state(
-                    "·",
-                    "No variants found",
-                    "The selected source contains no immediate skill definitions.",
-                    inner,
-                ),
+    if variants.is_empty() && catalog_error_count == 0 {
+        frame.render_widget(
+            components::empty_state(
+                "·",
+                "No variants found",
+                "The selected source contains no immediate skill definitions.",
                 inner,
-            );
-        } else {
-            frame.render_widget(
-                Paragraph::new(
-                    catalog_errors
-                        .into_iter()
-                        .chain([Line::from("Open Details for the catalog error.")])
-                        .collect::<Vec<_>>(),
-                )
-                .wrap(Wrap { trim: false }),
-                inner,
-            );
-        }
+            ),
+            inner,
+        );
         return;
     }
 
-    let mut lines = catalog_errors;
-    lines.extend(variants.iter().enumerate().map(|(index, variant)| {
-        let valid = variant.candidate.validation().is_valid();
-        components::list_row(
-            vec![
-                components::badge(
-                    if valid { Tone::Healthy } else { Tone::Critical },
-                    if valid { "valid" } else { "invalid" },
-                ),
-                Span::raw(format!(
-                    " {}  ({})",
-                    terminal_safe(variant.candidate.directory_name()),
-                    terminal_safe(&variant.candidate.relative_path().display().to_string())
-                )),
-            ],
-            index == app.focused_variant(),
-            inner.width,
-        )
-    }));
-    let error_count = source
-        .catalogs()
-        .iter()
-        .filter(|catalog| catalog.scan_error().is_some())
-        .count();
-    let focused_line = error_count.saturating_add(app.focused_variant());
+    // Each catalog states its own path once, above the variants it holds, and
+    // keeps its own scan failure beneath that label: an error stacked above
+    // the whole list would not say which catalog could not be read.
+    //
+    // The focused line is recorded as the lines are built rather than
+    // computed from the selection, because group labels and error lines sit
+    // between the rows and only this loop knows where they fell.
+    let mut lines = Vec::new();
+    let mut focused_line = 0;
+    let mut position = 0;
+    for catalog in source.catalogs() {
+        lines.push(catalog_group_label(catalog, inner.width));
+        if let Some(error) = catalog.scan_error() {
+            lines.push(Line::from(vec![
+                components::badge(Tone::Critical, "unavailable"),
+                Span::raw(format!(" {}", terminal_safe(error))),
+            ]));
+        }
+        for candidate in catalog.candidates() {
+            let selected = position == app.focused_variant();
+            if selected {
+                focused_line = lines.len();
+            }
+            lines.push(variant_row(candidate, selected, inner.width));
+            position += 1;
+        }
+    }
+
+    if variants.is_empty() {
+        lines.push(Line::from("Open Details for the catalog error."));
+        frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+        return;
+    }
+
     let visible =
         visible_wrapped_lines(&lines, focused_line, inner.width, usize::from(inner.height));
     frame.render_widget(Paragraph::new(visible).wrap(Wrap { trim: false }), inner);
 }
 
-fn render_source_details(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
+/// One variant: its validation state and the directory it lives in.
+///
+/// The directory name alone, because the catalog above the row already gives
+/// the path it sits in and the detail region gives the path in full.
+fn variant_row(candidate: &SkillCandidate, selected: bool, width: u16) -> Line<'static> {
+    let valid = candidate.validation().is_valid();
+    components::list_row(
+        vec![
+            components::badge(
+                if valid { Tone::Healthy } else { Tone::Critical },
+                if valid { "valid" } else { "invalid" },
+            ),
+            Span::raw(format!(
+                " {}",
+                terminal_safe_bounded_start(candidate.directory_name(), MAX_VARIANT_WIDTH)
+            )),
+        ],
+        selected,
+        width,
+    )
+}
+
+/// The line naming the catalog a run of variants belongs to (prototype
+/// `.catalog-title`): where it is, how it is classified, and which agents it
+/// claims.
+fn catalog_group_label(catalog: &CatalogProposal, width: u16) -> Line<'static> {
+    let qualifiers = format!(
+        " · {} · {}",
+        catalog_classification(catalog),
+        compatibility_claim(catalog.compatibility())
+    );
+    let budget = usize::from(width).min(VARIANTS_CONTENT_MAX_WIDTH);
+    let label = format!(
+        "{}{qualifiers}",
+        terminal_safe_bounded_middle(
+            &catalog.relative_path().display().to_string(),
+            budget.saturating_sub(Span::raw(&qualifiers).width())
+        )
+    );
+    // Padded to the pane so the band crosses the whole region, the way a
+    // selected row's band does, rather than stopping at the words.
+    let padding = usize::from(width).saturating_sub(Span::raw(&label).width());
+    Line::styled(
+        format!("{label}{}", " ".repeat(padding)),
+        theme::group_label(),
+    )
+}
+
+/// Which agents a catalog claims.
+///
+/// This is the compatibility the catalog declares and Skilled stored, not an
+/// observation of any agent, so it names the claim and nothing else. A catalog
+/// claiming none says so rather than rendering an empty phrase.
+fn compatibility_claim(compatibility: Compatibility) -> String {
+    if compatibility.all_supported() {
+        return "all agents".to_owned();
+    }
+    let claimed = AgentKind::ALL
+        .into_iter()
+        .filter(|agent| compatibility.supports(*agent))
+        .map(AgentKind::display_name)
+        .collect::<Vec<_>>();
+    if claimed.is_empty() {
+        return "no agents".to_owned();
+    }
+    claimed.join(" + ")
+}
+
+fn render_source_details(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &SkilledApp,
+    beside_the_primary_region: bool,
+) {
     let selected = selected_variant(app);
     let subtitle = selected
         .map(|variant| terminal_safe(variant.candidate.directory_name()))
@@ -1488,9 +1644,14 @@ fn render_source_details(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
                 .map(|source| terminal_safe(source.label()))
         })
         .unwrap_or_else(|| "no selection".to_owned());
-    let block = source_region_block("Details", &subtitle, SourcesPane::Details, app);
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
+    let inner = render_detail_scaffold(
+        frame,
+        area,
+        "Details",
+        &subtitle,
+        app.sources_pane() == SourcesPane::Details,
+        beside_the_primary_region,
+    );
 
     let Some(source) = app.selected_source() else {
         frame.render_widget(

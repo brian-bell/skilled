@@ -4,25 +4,25 @@ expression: "normalize_sources_screen(&app, &temporary, render(&app, 80, 24))"
 ---
  ◆ skilled   global                               ● ready · 1 source registered
  1 Inventory ▌Sources 1  Updates (soon)  Doctor (soon)
-┌▌ Available variants  2 found─────────────────────────────────────────────────┐
-│   × invalid broken  (skills/broken)                                          │
-│ ▌ ✓ valid portable  (skills/portable)                                        │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-└──────────────────────────────────────────────────────────────────────────────┘
+▌ Available variants  3 found
+────────────────────────────────────────────────────────────────────────────────
+experimental/claude-code/skills · Agent-specific · Claude Code
+  ✓ valid experimental
+skills · Common · all agents
+▌ × invalid broken
+  ✓ valid portable
+
+
+
+
+
+
+
+
+
+
+
+
+
+
  Tab/Shift-Tab Region   j/k Move   Enter Open   a Add source   Esc Back …

@@ -25,9 +25,11 @@ pub(crate) const DETAIL_REGION_WIDTH: u16 = 40;
 /// should do.
 ///
 /// The split is one geometry for every screen, so the aside does not jump
-/// when the user switches tabs. The Sources panes, whose columns are not
-/// capped, therefore do yield width at the crossing; that recorded cost
-/// stands until the Sources region rework bounds them (skilled-2k3.15.5).
+/// when the user switches tabs. The Sources panes are bounded for the same
+/// reason the table's columns are — the Repositories pane at its own cap, the
+/// variants pane at the content width it keeps beyond the crossing — so the
+/// columns the aside takes there come out of slack rather than out of a path
+/// or a name that was readable a column earlier.
 pub(crate) const DETAIL_REGION_WIDE_THRESHOLD: u16 = 151;
 
 /// The detail region's share of a workspace wide enough to spare it, matching
