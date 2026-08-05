@@ -9,6 +9,7 @@ use ratatui::{
 
 use crate::{
     AgentKind, InventoryPane, SetupStep, SkilledApp, SourcesPane, View,
+    app::{MAX_INVENTORY_FILTER, UNREGISTERED_SOURCE},
     components::{self, KeyHint},
     inventory::{
         Finding, FindingSeverity, InstallationHealth, InstallationObject,
@@ -101,8 +102,8 @@ fn render_title_bar(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
 
 /// What the application can honestly say about the current session.
 ///
-/// Skilled performs no installation scan and no network access in this release,
-/// so the status may only describe setup progress and registered-source counts.
+/// Skilled performs no network access in this release, so the status may only
+/// describe setup progress and what the local scan observed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SessionStatus {
     SetupInProgress,
@@ -436,11 +437,17 @@ fn setup_lines(app: &SkilledApp, step: SetupStep, width: u16) -> Vec<Line<'stati
                 "Skilled read the global skill root of each selected agent.",
             ));
             lines.push(Line::default());
+            // The status badges vary in width, so they are padded to a column
+            // and the agent names line up beneath one another.
+            const STATUS_COLUMN: usize = 19;
             for root in app.inventory().roots() {
+                let badge = components::badge(root_tone(root), &root.status().summary());
+                let padding = STATUS_COLUMN.saturating_sub(badge.width());
                 lines.push(Line::from(vec![
-                    components::badge(root_tone(root), &root.status().summary()),
+                    badge,
                     Span::raw(format!(
-                        "   {:<11}  {}",
+                        "{}{:<11}  {}",
+                        " ".repeat(padding),
                         root.agent().display_name(),
                         terminal_safe(&home_relative(root.path(), app.home()))
                     )),
@@ -470,10 +477,10 @@ fn setup_lines(app: &SkilledApp, step: SetupStep, width: u16) -> Vec<Line<'stati
                         .sum::<usize>()
                 )),
                 Line::from(format!(
-                    "Installed: {}   Unmanaged: {}   Findings: {}",
+                    "Installed: {}   Unmanaged: {}   Broken: {}",
                     inventory.installation_count(),
                     inventory.unmanaged_count(),
-                    inventory.finding_count()
+                    inventory.broken_count()
                 )),
                 Line::default(),
                 Line::from("Unresolved findings never force a repair."),
@@ -504,8 +511,7 @@ fn render_inventory(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
 /// Column widths for the installation table.
 ///
 /// The three agent columns and the health column are sized by their headings,
-/// which never change; the identity columns divide whatever is left, so the
-/// table keeps its shape from a sixty-column detail split up to any width.
+/// which never change; the identity columns divide whatever is left.
 #[derive(Clone, Copy)]
 struct InventoryColumns {
     skill: usize,
@@ -513,41 +519,73 @@ struct InventoryColumns {
 }
 
 const AGENT_COLUMN_WIDTHS: [usize; 3] = [8, 7, 10];
-const HEALTH_COLUMN_WIDTH: usize = 11;
+/// Wide enough for the longest health badge — `- not a skill`, thirteen cells
+/// — plus a column of clearance, so the row is never clipped and never abuts
+/// the detail region's separator.
+const HEALTH_COLUMN_WIDTH: usize = 14;
 /// The marker and its trailing space, contributed by `components::list_row`.
 const ROW_MARKER_WIDTH: usize = 2;
+/// Below this, a Source column would only ever show an ellipsis.
+const MINIMUM_SOURCE_WIDTH: usize = 12;
+const MINIMUM_SKILL_WIDTH: usize = 8;
 
 fn inventory_columns(width: u16) -> InventoryColumns {
     let fixed = ROW_MARKER_WIDTH + AGENT_COLUMN_WIDTHS.iter().sum::<usize>() + HEALTH_COLUMN_WIDTH;
     let remaining = usize::from(width).saturating_sub(fixed);
-    let skill = (remaining * 6 / 10).max(6);
-    InventoryColumns {
-        skill,
-        source: remaining.saturating_sub(skill).max(4),
+    let skill = (remaining * 6 / 10).max(MINIMUM_SKILL_WIDTH);
+    let source = remaining.saturating_sub(skill);
+    // A Source column too narrow to hold a label truncates every source to the
+    // same ellipsis, which distinguishes nothing. The whole column is dropped
+    // instead, and the detail region still names the source.
+    if source < MINIMUM_SOURCE_WIDTH {
+        return InventoryColumns {
+            skill: remaining.max(MINIMUM_SKILL_WIDTH),
+            source: 0,
+        };
     }
+    InventoryColumns { skill, source }
 }
 
 fn render_inventory_skills(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
     let rows = app.filtered_rows();
-    let roots = inventory_roots_line(app);
-    let roots_height = wrapped_line_count(&roots, area.width).min(2);
-    let filter_height =
-        u16::from(app.inventory_filter_active() || !app.inventory_filter().is_empty());
-    let [header, body] = Layout::vertical([
-        Constraint::Length(2 + u16::try_from(roots_height).unwrap_or(1) + filter_height),
-        Constraint::Min(1),
-    ])
-    .areas(area);
-
     let mut header_lines = vec![components::focused_pane_header(
         "Global inventory",
         &inventory_subtitle(app, rows.len()),
         app.inventory_pane() == InventoryPane::Skills,
     )];
-    if filter_height == 1 {
+    if app.inventory_filter_active() || !app.inventory_filter().is_empty() {
         header_lines.push(inventory_filter_line(app));
     }
-    header_lines.push(roots);
+    header_lines.push(inventory_roots_line(app));
+    // A root that could not be read contributes nothing, so its reason is the
+    // only account the user gets of what is inside it. Every root that failed
+    // gets its own line: dropping the second would hide a second obstruction.
+    header_lines.extend(app.inventory().unreadable_roots().map(|(root, message)| {
+        let badge = components::badge(Tone::Critical, root.agent().display_name());
+        // The reason carries an operating-system message; two rows of it must
+        // not squeeze out the table it sits above.
+        let budget = usize::from(area.width)
+            .saturating_mul(2)
+            .saturating_sub(badge.width() + 2);
+        Line::from(vec![
+            badge,
+            Span::raw(format!(
+                ": {}",
+                terminal_safe_bounded_start(message, budget)
+            )),
+        ])
+    }));
+
+    // Measured after the lines exist, so a wrapped root status or a second
+    // failure reason cannot displace the rule that closes the header.
+    let header_height = detail_lines_height(&header_lines, area.width)
+        .saturating_add(1)
+        .min(usize::from(area.height.saturating_sub(1)));
+    let [header, body] = Layout::vertical([
+        Constraint::Length(u16::try_from(header_height).unwrap_or(u16::MAX)),
+        Constraint::Min(1),
+    ])
+    .areas(area);
     header_lines.push(components::rule(header.width));
     frame.render_widget(
         Paragraph::new(header_lines).wrap(Wrap { trim: false }),
@@ -589,11 +627,33 @@ fn render_inventory_skills(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) 
 }
 
 fn inventory_subtitle(app: &SkilledApp, shown: usize) -> String {
-    let total = app.inventory().rows().len();
+    let inventory = app.inventory();
+    let total = inventory.rows().len();
     if !app.inventory_filter().trim().is_empty() {
-        return format!("{shown} of {total} skills");
+        return format!("{shown} of {total} listed");
+    }
+    // Skills and stray content are counted apart: a root holding only a
+    // README must not be described as holding a skill.
+    let skills = inventory.skill_row_count();
+    let other = total - skills;
+    if other > 0 {
+        return format!(
+            "{skills} skill{} · {other} other entr{}",
+            if skills == 1 { "" } else { "s" },
+            if other == 1 { "y" } else { "ies" }
+        );
     }
     match total {
+        // A count of zero is a scan result. It may only be stated when every
+        // selected root was actually read.
+        0 if inventory.unreadable_roots().next().is_some() => "not fully read".to_owned(),
+        0 if !inventory
+            .roots()
+            .iter()
+            .any(|root| matches!(root.status(), RootStatus::Scanned { .. })) =>
+        {
+            "no root read".to_owned()
+        }
         0 => "nothing installed".to_owned(),
         1 => "1 skill".to_owned(),
         total => format!("{total} skills"),
@@ -601,8 +661,11 @@ fn inventory_subtitle(app: &SkilledApp, shown: usize) -> String {
 }
 
 /// The query box, or the query that is still narrowing the list.
+///
+/// The query is bounded on entry, and bounded again here: the header must
+/// never grow at the expense of the table the query exists to narrow.
 fn inventory_filter_line(app: &SkilledApp) -> Line<'static> {
-    let query = terminal_safe(app.inventory_filter());
+    let query = terminal_safe_bounded_start(app.inventory_filter(), MAX_INVENTORY_FILTER);
     if app.inventory_filter_active() {
         return Line::from(vec![
             Span::styled("/", theme::section_title()),
@@ -616,7 +679,12 @@ fn inventory_filter_line(app: &SkilledApp) -> Line<'static> {
     ])
 }
 
-/// What each agent's root contributed, so a `-` cell can be read correctly.
+/// What each agent's root contributed.
+///
+/// A `-` cell means no skill is installed under that name in that root, which
+/// covers both "nothing is there" and "something is there that is not a skill";
+/// the Health column names which. This line supplies the other half a `-` needs
+/// to be read: whether the root was scanned at all.
 fn inventory_roots_line(app: &SkilledApp) -> Line<'static> {
     let mut spans = vec![Span::styled("Roots: ", theme::pane_subtitle())];
     for (position, root) in app.inventory().roots().iter().enumerate() {
@@ -663,7 +731,7 @@ fn inventory_row_line(
     let mut spans = vec![
         Span::raw(padded(&terminal_safe(row.name()), columns.skill)),
         Span::raw(padded(
-            &terminal_safe(row.source_label().unwrap_or("unmanaged")),
+            &terminal_safe(row.source_label().unwrap_or(UNREGISTERED_SOURCE)),
             columns.source,
         )),
     ];
@@ -685,6 +753,9 @@ fn inventory_row_line(
 
 fn installation_tone(health: InstallationHealth) -> Tone {
     match health {
+        // Stray content is not a state of a skill, so it takes the inactive
+        // tone; the words "not a skill" beside it carry the meaning.
+        InstallationHealth::NotASkill => Tone::Inactive,
         InstallationHealth::Healthy => Tone::Healthy,
         InstallationHealth::Unmanaged => Tone::Unmanaged,
         InstallationHealth::Broken => Tone::Critical,
@@ -707,8 +778,8 @@ fn inventory_empty_state(app: &SkilledApp) -> (String, String) {
         return (
             "An agent skill root could not be read".to_owned(),
             "Skilled reports nothing from a root it could not read in full \
-             rather than reporting part of it. The Roots line above names the \
-             root and what happened."
+             rather than reporting part of it. Each root that failed names its \
+             reason above."
                 .to_owned(),
         );
     }
@@ -720,6 +791,19 @@ fn inventory_empty_state(app: &SkilledApp) -> (String, String) {
             "No skills are installed".to_owned(),
             "The agent skill roots Skilled read hold no skill directories. \
              Nothing was created or changed."
+                .to_owned(),
+        );
+    }
+    // Nothing was looked at, so nothing may be said about what exists.
+    if roots
+        .iter()
+        .all(|root| root.status() == &RootStatus::NotSelected)
+    {
+        return (
+            "No agent is configured".to_owned(),
+            "Skilled reads the skill root of the agents chosen during setup, \
+             and none are chosen, so it read nothing. Rerun setup from \
+             Settings to choose an agent."
                 .to_owned(),
         );
     }
@@ -790,11 +874,59 @@ fn render_inventory_detail(
         );
         return;
     };
+    // The detail region is the only place per-agent observations and findings
+    // exist, so content that does not fit is reported as missing rather than
+    // dropped off the bottom without a trace.
+    let lines = inventory_detail_lines(row, app.home(), body.width);
     frame.render_widget(
-        Paragraph::new(inventory_detail_lines(row, app.home(), body.width))
+        Paragraph::new(bounded_detail_lines(lines, body.width, body.height))
             .wrap(Wrap { trim: false }),
         body,
     );
+}
+
+/// Fit detail lines to a region, saying so when some do not fit.
+///
+/// The last rows are spent on a count of what was left out, because a region
+/// that silently ends mid-section reads as though there were nothing more. The
+/// notice is measured like any other line and shortened rather than wrapped
+/// off the bottom: the one string whose whole job is to report that content
+/// was cut must not itself be cut.
+fn bounded_detail_lines(lines: Vec<Line<'static>>, width: u16, height: u16) -> Vec<Line<'static>> {
+    let available = usize::from(height);
+    if width == 0 || available == 0 || detail_lines_height(&lines, width) <= available {
+        return lines;
+    }
+
+    // Rows hidden, not lines hidden: a dropped line that would have wrapped
+    // costs the reader more than one row of content.
+    let total_rows = detail_lines_height(&lines, width);
+    let notice = |hidden: usize| {
+        let plural = if hidden == 1 { "" } else { "s" };
+        [
+            format!("{hidden} more line{plural} — widen or lengthen the terminal"),
+            format!("{hidden} more line{plural}"),
+            format!("+{hidden}"),
+        ]
+        .into_iter()
+        .map(|label| Line::from(components::badge(Tone::Warning, &label)))
+        .find(|line| wrapped_line_count(line, width) == 1)
+        .unwrap_or_else(|| Line::from(components::badge(Tone::Warning, "…")))
+    };
+
+    let reserved = wrapped_line_count(&notice(total_rows), width);
+    let mut kept = Vec::new();
+    let mut used = 0;
+    for line in &lines {
+        let rows = wrapped_line_count(line, width);
+        if used + rows > available.saturating_sub(reserved) {
+            break;
+        }
+        kept.push(line.clone());
+        used += rows;
+    }
+    kept.push(notice(total_rows - used));
+    kept
 }
 
 fn inventory_detail_lines(row: &InventoryRow, home: &Path, width: u16) -> Vec<Line<'static>> {
@@ -838,15 +970,28 @@ fn inventory_detail_lines(row: &InventoryRow, home: &Path, width: u16) -> Vec<Li
         )),
     }
 
-    for agent in AgentKind::ALL {
-        push_detail_section(&mut lines, &agent.display_name().to_uppercase(), width);
-        match row.observation(agent) {
-            Some(observation) => lines.extend(observation_lines(observation, home, width)),
-            None => lines.push(Line::from(components::badge(
-                Tone::Inactive,
-                "not installed in this root",
-            ))),
-        }
+    for observation in row.observations() {
+        push_detail_section(
+            &mut lines,
+            &observation.agent().display_name().to_uppercase(),
+            width,
+        );
+        lines.extend(observation_lines(observation, home, width));
+    }
+
+    // The agents that carry nothing share one line rather than three empty
+    // sections, so the observations that exist keep the room.
+    let absent: Vec<&str> = AgentKind::ALL
+        .into_iter()
+        .filter(|agent| row.observation(*agent).is_none())
+        .map(AgentKind::display_name)
+        .collect();
+    if !absent.is_empty() {
+        push_detail_section(&mut lines, "NOT INSTALLED", width);
+        lines.push(Line::from(components::badge(
+            Tone::Inactive,
+            &absent.join(", "),
+        )));
     }
     lines
 }
@@ -856,17 +1001,31 @@ fn observation_lines(
     home: &Path,
     width: u16,
 ) -> Vec<Line<'static>> {
-    let mut lines = vec![
-        detail_field_bounded("Path", &home_relative(observation.path(), home), width, 2),
-        detail_field("Object", observation.object().description()),
-    ];
+    // Findings come first. A region too short to hold the section truncates
+    // from the bottom, and the reason an installation is broken is the thing
+    // this view exists to report — losing it to a `Path` the table's own name
+    // column already implies would be the wrong trade.
+    let mut lines: Vec<Line<'static>> = observation
+        .findings()
+        .iter()
+        .flat_map(|finding| finding_lines(finding, width))
+        .collect();
+    lines.push(detail_field_bounded(
+        "Path",
+        &home_relative(observation.path(), home),
+        width,
+        2,
+    ));
+    lines.push(detail_field("Object", observation.object().description()));
     if let InstallationObject::Symlink { target } = observation.object() {
-        lines.push(detail_field_bounded(
-            "Target",
-            &home_relative(target, home),
-            width,
-            2,
-        ));
+        // An unreadable link renders as an empty target; an empty value beside
+        // a label reads as "nothing there" rather than "not known".
+        let target = if target.as_os_str().is_empty() {
+            "could not be read".to_owned()
+        } else {
+            home_relative(target, home)
+        };
+        lines.push(detail_field_bounded("Target", &target, width, 2));
     }
     lines.push(match observation.validation() {
         Some(SkillValidation::Valid { name, .. }) => Line::from(vec![
@@ -883,12 +1042,6 @@ fn observation_lines(
             components::badge(Tone::Inactive, "not attempted"),
         ]),
     });
-    lines.extend(
-        observation
-            .findings()
-            .iter()
-            .flat_map(|finding| finding_lines(finding, width)),
-    );
     lines
 }
 
@@ -2148,7 +2301,7 @@ fn help_commands(context: View, app: &SkilledApp) -> Vec<HelpCommand> {
                 label: "Region",
                 description: "move region focus forward or backward",
             }];
-            if app.filtered_rows().len() > 1 {
+            if inventory_can_move_selection(app) {
                 commands.push(HelpCommand {
                     key: "Up/Down or j/k",
                     label: "Move",
@@ -2290,8 +2443,8 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
 ///
 /// This mirrors [`crate::input`]. A hint that is not backed by a key mapping is
 /// a promise the application cannot keep, so unimplemented commands —
-/// installation, updates, repair, uninstall, forget, and filtering — are absent
-/// by construction.
+/// installation, updates, repair, uninstall, and forget — are absent by
+/// construction.
 fn key_hints(app: &SkilledApp) -> Vec<KeyHint> {
     if app.help_context().is_some() {
         return vec![
@@ -2351,7 +2504,7 @@ fn key_hints(app: &SkilledApp) -> Vec<KeyHint> {
         }
         View::Inventory => {
             let mut hints = vec![KeyHint::new("Tab/Shift-Tab", "Region")];
-            if app.filtered_rows().len() > 1 {
+            if inventory_can_move_selection(app) {
                 hints.push(KeyHint::new("j/k", "Move"));
             }
             if inventory_can_advance(app) {
@@ -2364,7 +2517,10 @@ fn key_hints(app: &SkilledApp) -> Vec<KeyHint> {
                 KeyHint::new("2", "Sources"),
                 KeyHint::new("s", "Settings"),
                 KeyHint::new("?", "Help"),
-                KeyHint::new("q", "Quit"),
+                // The Inventory is where the application opens, so it is the
+                // one view a user can reach without having passed a quit hint
+                // on the way. It survives a narrow row.
+                KeyHint::essential("q", "Quit"),
             ]);
             if inventory_can_go_back(app) {
                 hints.push(KeyHint::essential("Esc", "Back"));
@@ -2399,6 +2555,12 @@ fn key_hints(app: &SkilledApp) -> Vec<KeyHint> {
 /// Enter only drills in, so it advertises itself only where it can.
 fn inventory_can_advance(app: &SkilledApp) -> bool {
     app.inventory_pane() == InventoryPane::Skills && app.selected_installation().is_some()
+}
+
+/// Selection only moves in the list region, and only when there is somewhere
+/// to move it to.
+fn inventory_can_move_selection(app: &SkilledApp) -> bool {
+    app.inventory_pane() == InventoryPane::Skills && app.filtered_installation_count() > 1
 }
 
 /// Back unwinds an applied filter, then a drilled-in detail region.

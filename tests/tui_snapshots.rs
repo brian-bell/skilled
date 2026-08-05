@@ -706,6 +706,64 @@ mod installed {
         insta::assert_snapshot!(normalize_inventory(&temporary, render(&app, 120, 40)));
     }
 
+    /// The narrowest wide viewport, where the primary region is only sixty
+    /// columns and the Source column is dropped rather than truncated into an
+    /// ellipsis that distinguishes nothing.
+    #[test]
+    fn inventory_at_the_wide_breakpoint() {
+        let temporary = tempfile::tempdir().expect("temporary application directory");
+        let app = inventory_app(&temporary);
+
+        let screen = normalize_inventory(&temporary, render(&app, 100, 26));
+
+        assert!(!screen.contains("Source "), "{screen}");
+        assert!(screen.contains("unman"), "{screen}");
+        insta::assert_snapshot!(screen);
+    }
+
+    /// A root Skilled could not read reports the reason, because it
+    /// contributes nothing else.
+    #[test]
+    fn inventory_with_an_unreadable_root_at_minimum_supported_size() {
+        let temporary = tempfile::tempdir().expect("temporary application directory");
+        let home = temporary.path().join("home");
+        fs::create_dir_all(home.join(".claude")).expect("create Claude Code parent");
+        fs::write(home.join(".claude/skills"), "not a directory")
+            .expect("write a file where the root belongs");
+        let mut app = SkilledApp::open(AppEnvironment::new(
+            &home,
+            temporary.path().join("data"),
+            "",
+        ))
+        .expect("open application");
+        for _ in 0..7 {
+            dispatch(&mut app, Action::Continue);
+        }
+
+        insta::assert_snapshot!(normalize_inventory(&temporary, render(&app, 80, 24)));
+    }
+
+    /// Setup step six with something to report, and the summary that counts it.
+    #[test]
+    fn populated_scan_installations_and_summary_at_minimum_supported_size() {
+        let temporary = tempfile::tempdir().expect("temporary application directory");
+        let mut app = inventory_app(&temporary);
+        app.update(Action::OpenSettings);
+        dispatch(&mut app, Action::RerunSetup);
+        for _ in 0..5 {
+            dispatch(&mut app, Action::Continue);
+        }
+
+        let step_six = normalize_inventory(&temporary, render(&app, 80, 24));
+        assert!(step_six.contains("STEP 6 / 7"), "{step_six}");
+        insta::assert_snapshot!("populated_scan_installations", step_six);
+
+        dispatch(&mut app, Action::Continue);
+        let summary = normalize_inventory(&temporary, render(&app, 80, 24));
+        assert!(summary.contains("STEP 7 / 7"), "{summary}");
+        insta::assert_snapshot!("populated_summary", summary);
+    }
+
     #[test]
     fn inventory_broken_installation_detail_at_wide_size() {
         let temporary = tempfile::tempdir().expect("temporary application directory");
@@ -728,6 +786,29 @@ mod installed {
 
         assert_eq!(app.inventory_pane(), InventoryPane::Details);
         insta::assert_snapshot!(normalize_inventory(&temporary, render(&app, 80, 24)));
+    }
+
+    /// Detail that outgrows the region says how much it left out, because a
+    /// pane that simply ends mid-section reads as though there were no more.
+    #[test]
+    fn inventory_detail_too_tall_for_the_region_reports_what_it_dropped() {
+        let temporary = tempfile::tempdir().expect("temporary application directory");
+        let mut app = inventory_app(&temporary);
+        app.update(Action::AdvanceInventoryPane);
+
+        let screen = normalize_inventory(&temporary, render(&app, 80, 24));
+        assert!(
+            screen.contains("! 7 more lines — widen or lengthen the terminal"),
+            "{screen}"
+        );
+        insta::assert_snapshot!(screen);
+
+        // The detail region is only thirty-seven cells wide at the breakpoint,
+        // so the notice takes its short form rather than wrapping off the
+        // bottom — the one line whose job is to report a cut must not be cut.
+        let narrow = normalize_inventory(&temporary, render(&app, 100, 26));
+        assert!(narrow.contains("! 5 more lines"), "{narrow}");
+        assert!(!narrow.contains("widen or lengthen"), "{narrow}");
     }
 
     #[test]

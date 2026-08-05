@@ -4,7 +4,7 @@ expression: "render(&app, 120, 40)"
 ---
  ◆ skilled   global                                                                      ● ready · 0 sources registered
 ▌Inventory  2 Sources  Updates (soon)  Doctor (soon)
-▌ Global inventory  nothing installed                                           │ Details  no selection
+▌ Global inventory  no root read                                                │ Details  no selection
 Roots: Claude Code no root · Codex no root · OpenCode no root                   │ ─────────────────────────────────────
 ────────────────────────────────────────────────────────────────────────────────│
                                                                                 │

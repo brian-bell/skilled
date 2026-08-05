@@ -1,13 +1,13 @@
 ---
 source: tests/tui_snapshots.rs
-expression: "render(&app, 80, 24)"
+expression: "normalize_inventory(&temporary, render(&app, 80, 24))"
 ---
  ◆ skilled   global                              ● ready · 0 sources registered
 ▌Inventory  2 Sources  Updates (soon)  Doctor (soon)
-▌ Global inventory  no root read
-Roots: Claude Code no root · Codex no root · OpenCode no root
+▌ Global inventory  not fully read
+Roots: Claude Code unreadable · Codex no root · OpenCode no root
+× Claude Code: the skill root is not a directory
 ────────────────────────────────────────────────────────────────────────────────
-
 
 
 
@@ -15,10 +15,10 @@ Roots: Claude Code no root · Codex no root · OpenCode no root
 
                                         ⌕
 
-                         No agent skill root exists yet
+                      An agent skill root could not be read
 
-   Skilled looked for the documented global skill root of each selected agent
-                 and found none of them. It did not create one.
+    Skilled reports nothing from a root it could not read in full rather than
+       reporting part of it. Each root that failed names its reason above.
 
 
 

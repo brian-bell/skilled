@@ -9,7 +9,7 @@
 
 use std::{
     collections::HashMap,
-    fs,
+    fs, io,
     path::{Path, PathBuf},
 };
 
@@ -32,8 +32,10 @@ pub enum InstallationObject {
     Symlink { target: PathBuf },
     /// A physical directory.
     Directory,
-    /// Anything else: a regular file, a socket, a device node.
-    File,
+    /// A regular file, a socket, a device node — anything a skill cannot be.
+    NotADirectory,
+    /// The entry exists but its type could not be read.
+    Unknown,
 }
 
 impl InstallationObject {
@@ -41,8 +43,20 @@ impl InstallationObject {
         match self {
             Self::Symlink { .. } => "symbolic link",
             Self::Directory => "directory",
-            Self::File => "file",
+            Self::NotADirectory => "not a directory",
+            // Saying "file" here would assert a type the scan never read.
+            Self::Unknown => "could not be read",
         }
+    }
+
+    /// Whether this object occupies an installation slot at all.
+    ///
+    /// A stray file plainly does not, and counting it would inflate both the
+    /// per-root count and the setup summary. An entry Skilled could not read
+    /// might, and is counted, because understating what is installed is the
+    /// worse error.
+    pub fn is_installation(&self) -> bool {
+        !matches!(self, Self::NotADirectory)
     }
 }
 
@@ -95,17 +109,12 @@ impl Finding {
 /// The registered source variant an installation was resolved to.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VariantResolution {
-    source_id: i64,
     source_label: String,
     catalog_relative_path: PathBuf,
     variant_relative_path: PathBuf,
 }
 
 impl VariantResolution {
-    pub fn source_id(&self) -> i64 {
-        self.source_id
-    }
-
     pub fn source_label(&self) -> &str {
         &self.source_label
     }
@@ -119,12 +128,17 @@ impl VariantResolution {
     }
 }
 
-/// The state of an installation, worst-first.
+/// The state of an installation.
 ///
-/// The ordering is the roll-up rule: a row takes the worst state of the agents
-/// that carry it.
+/// The declared order is the roll-up rule: a row takes the greatest state of
+/// the agents that carry it, so any broken installation makes the row broken
+/// and any unmanaged one outranks a healthy one. Content that is not a skill
+/// ranks lowest, because a name that is a real skill somewhere and a stray
+/// file elsewhere is best described by the skill.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum InstallationHealth {
+    /// Not a skill at all: a file, a socket, a device node.
+    NotASkill,
     /// A registered variant, installed as a link, that validates.
     Healthy,
     /// Structurally sound content Skilled does not own.
@@ -136,6 +150,7 @@ pub enum InstallationHealth {
 impl InstallationHealth {
     pub fn label(self) -> &'static str {
         match self {
+            Self::NotASkill => "not a skill",
             Self::Healthy => "healthy",
             Self::Unmanaged => "unmanaged",
             Self::Broken => "broken",
@@ -231,6 +246,20 @@ impl InventoryRow {
         self.observations()
             .flat_map(|observation| observation.findings())
     }
+
+    /// Whether this row is a skill, rather than other content a root happens to
+    /// hold beside its skills.
+    ///
+    /// Only a directory or a link to one is a skill. An entry Skilled could not
+    /// read is not claimed as one.
+    pub fn is_skill(&self) -> bool {
+        self.observations().any(|observation| {
+            matches!(
+                observation.object(),
+                InstallationObject::Symlink { .. } | InstallationObject::Directory
+            )
+        })
+    }
 }
 
 /// What Skilled was able to observe about one agent's native root.
@@ -319,42 +348,56 @@ impl InventorySnapshot {
 
     /// Installation slots observed, counting each agent separately.
     pub fn installation_count(&self) -> usize {
-        self.rows
-            .iter()
-            .flat_map(InventoryRow::observations)
-            .count()
+        self.installations().count()
     }
 
     pub fn unmanaged_count(&self) -> usize {
-        self.rows
-            .iter()
-            .flat_map(InventoryRow::observations)
+        self.installations()
             .filter(|observation| observation.health() == InstallationHealth::Unmanaged)
             .count()
     }
 
-    pub fn finding_count(&self) -> usize {
-        self.rows.iter().flat_map(InventoryRow::findings).count()
-    }
-
-    pub fn critical_finding_count(&self) -> usize {
-        self.rows
-            .iter()
-            .flat_map(InventoryRow::findings)
-            .filter(|finding| finding.severity() == FindingSeverity::Critical)
+    /// Installation slots an agent cannot load.
+    ///
+    /// The setup summary reports this rather than a total finding count, which
+    /// would double-report every unmanaged install through the informational
+    /// finding that marks it.
+    pub fn broken_count(&self) -> usize {
+        self.installations()
+            .filter(|observation| observation.health() == InstallationHealth::Broken)
             .count()
     }
 
-    /// The snapshot of a session that has not looked at any root yet.
-    pub(crate) fn unscanned(agents: &[AgentDetection; 3]) -> Self {
-        Self {
-            rows: Vec::new(),
-            roots: agents.each_ref().map(|agent| RootScan {
-                agent: agent.kind(),
-                path: agent.root().to_path_buf(),
-                status: RootStatus::NotSelected,
-            }),
-        }
+    /// Every observation that is actually shaped like an installation.
+    ///
+    /// A stray file beside the skill directories is listed so the user can see
+    /// it, but it is not an installation and may not be counted as one: a
+    /// `.DS_Store` must not inflate what the Roots line and the setup summary
+    /// report.
+    fn installations(&self) -> impl Iterator<Item = &InstalledSkillObservation> {
+        self.rows
+            .iter()
+            .flat_map(InventoryRow::observations)
+            .filter(|observation| observation.object().is_installation())
+    }
+
+    /// Rows that are skills, as opposed to other content the roots also hold.
+    ///
+    /// An entry whose type could not be read is not counted: it might be a
+    /// skill, and the subtitle beside this count says "skills" outright.
+    pub fn skill_row_count(&self) -> usize {
+        self.rows.iter().filter(|row| row.is_skill()).count()
+    }
+
+    /// The message behind an unreadable root, if any root could not be read.
+    ///
+    /// A root Skilled could not read in full contributes nothing, so the reason
+    /// is the only account the user gets of what is in it.
+    pub fn unreadable_roots(&self) -> impl Iterator<Item = (&RootScan, &str)> {
+        self.roots.iter().filter_map(|root| match root.status() {
+            RootStatus::Unreadable { message } => Some((root, message.as_str())),
+            _ => None,
+        })
     }
 }
 
@@ -363,14 +406,17 @@ pub(crate) fn scan_installations(
     agents: &[AgentDetection; 3],
     sources: &[RegisteredSource],
 ) -> InventorySnapshot {
-    let index = ResolutionIndex::of(sources);
     let mut budget = InspectionBudget::installation_scan();
+    let index = ResolutionIndex::of(sources, &mut budget);
     let mut observations = Vec::new();
     let roots = agents.each_ref().map(|agent| {
         let status = if agent.selected() {
             match scan_root(agent, &index, &mut budget) {
                 Ok(found) => {
-                    let installed = found.len();
+                    let installed = found
+                        .iter()
+                        .filter(|observation| observation.object().is_installation())
+                        .count();
                     observations.extend(found);
                     RootStatus::Scanned { installed }
                 }
@@ -393,9 +439,14 @@ pub(crate) fn scan_installations(
 }
 
 /// A root that does not exist is missing, not unreadable: absence is expected.
+///
+/// The check is on the link itself. A root that is a dangling symbolic link is
+/// something the user put there, so it is unreadable rather than absent.
 fn root_status_for(agent: &AgentDetection, status: RootStatus) -> RootStatus {
     match status {
-        RootStatus::Unreadable { .. } if !agent.root().exists() => RootStatus::Missing,
+        RootStatus::Unreadable { .. } if fs::symlink_metadata(agent.root()).is_err() => {
+            RootStatus::Missing
+        }
         other => other,
     }
 }
@@ -441,28 +492,69 @@ fn observe(
 ) -> Result<InstalledSkillObservation, String> {
     let path = root.join(name);
     let name = name.to_string_lossy().into_owned();
-    let file_type = fs::symlink_metadata(&path)
-        .map_err(|error| error.to_string())?
-        .file_type();
-
-    if file_type.is_symlink() {
-        let target = fs::read_link(&path).unwrap_or_default();
-        let Ok(canonical) = path.canonicalize() else {
-            // The target is carried on the observation, so the evidence states
-            // the fact rather than repeating a path the detail pane already
-            // shows in the reader's own notation.
+    let file_type = match fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata.file_type(),
+        // One entry that cannot be read is one entry, not a failed root. An
+        // agent writing into its own skill directory mid-scan would otherwise
+        // erase everything Skilled had already observed there.
+        Err(error) => {
             return Ok(broken_object(
                 agent,
                 name,
                 path,
-                InstallationObject::Symlink { target },
+                InstallationObject::Unknown,
                 Finding {
-                    code: "install.dangling_symlink",
+                    code: "install.unreadable_entry",
                     severity: FindingSeverity::Critical,
-                    evidence: "the link target does not exist".to_owned(),
+                    evidence: format!("the entry could not be read: {error}"),
                 },
             ));
+        }
+    };
+
+    if file_type.is_symlink() {
+        let target = fs::read_link(&path).unwrap_or_default();
+        let canonical = match path.canonicalize() {
+            Ok(canonical) => canonical,
+            // A link can fail to resolve for reasons other than a missing
+            // target — a denied directory along the way, a symlink cycle, an
+            // over-long name. Only absence is a dangling link; anything else
+            // says what actually happened rather than asserting a cause
+            // Skilled did not observe. The target itself is carried on the
+            // observation, so neither evidence repeats a path the detail pane
+            // already shows in the reader's own notation.
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Ok(broken_object(
+                    agent,
+                    name,
+                    path,
+                    InstallationObject::Symlink { target },
+                    Finding {
+                        code: "install.dangling_symlink",
+                        severity: FindingSeverity::Critical,
+                        evidence: "the link target does not exist".to_owned(),
+                    },
+                ));
+            }
+            Err(error) => {
+                return Ok(broken_object(
+                    agent,
+                    name,
+                    path,
+                    InstallationObject::Symlink { target },
+                    Finding {
+                        code: "install.unresolvable_symlink",
+                        severity: FindingSeverity::Critical,
+                        evidence: format!("the link target could not be resolved: {error}"),
+                    },
+                ));
+            }
         };
+        // The canonical path resolved here and the one portable validation
+        // resolves for itself are two separate reads, so a target swapped
+        // between them could carry a source label that no longer describes the
+        // content. The scan is read-only and the window requires write access
+        // to the agent root, so it is recorded rather than locked against.
         let resolution = index.resolve(&canonical);
         return classify(
             agent,
@@ -485,17 +577,24 @@ fn observe(
         );
     }
 
-    Ok(broken_object(
+    // A regular file, a socket, or a device node beside the skill directories
+    // is not a broken installation — an agent simply ignores it. Reporting it
+    // as critical would manufacture alarm out of a stray README or .DS_Store,
+    // so it is observed as content that is not a skill and left alone.
+    Ok(InstalledSkillObservation {
         agent,
-        name.clone(),
+        name,
         path,
-        InstallationObject::File,
-        Finding {
-            code: "skill.missing_skill_md",
-            severity: FindingSeverity::Critical,
-            evidence: format!("{name} is a file, so it holds no SKILL.md"),
-        },
-    ))
+        object: InstallationObject::NotADirectory,
+        resolution: None,
+        validation: None,
+        findings: vec![Finding {
+            code: "install.not_a_skill",
+            severity: FindingSeverity::Info,
+            evidence: "this is not a directory, so it cannot hold a SKILL.md".to_owned(),
+        }],
+        health: InstallationHealth::NotASkill,
+    })
 }
 
 /// Validate the installed content and settle its state.
@@ -605,15 +704,26 @@ fn validation_finding_code(error: &PortableValidationError) -> &'static str {
 
 fn assemble_rows(observations: Vec<InstalledSkillObservation>) -> Vec<InventoryRow> {
     let mut rows: Vec<InventoryRow> = Vec::new();
+    // Keyed rather than searched: three full roots can carry thousands of names
+    // apiece, and a linear probe per observation would square that.
+    let mut positions: HashMap<String, usize> = HashMap::new();
     for observation in observations {
-        let position = match rows.iter().position(|row| row.name == observation.name) {
-            Some(position) => position,
-            None => {
+        let position = match positions.get(&observation.name) {
+            // Names are compared as displayed, so two entries holding
+            // different invalid byte sequences can collide. Occupying the slot
+            // a second time starts a new row rather than overwriting one:
+            // understating what is installed is the error this module exists
+            // to avoid.
+            Some(position) if rows[*position].observations[observation.agent.index()].is_none() => {
+                *position
+            }
+            _ => {
                 rows.push(InventoryRow {
                     name: observation.name.clone(),
                     observations: [const { None }; 3],
                     health: observation.health(),
                 });
+                positions.insert(observation.name.clone(), rows.len() - 1);
                 rows.len() - 1
             }
         };
@@ -636,7 +746,12 @@ struct ResolutionIndex {
 }
 
 impl ResolutionIndex {
-    fn of(sources: &[RegisteredSource]) -> Self {
+    /// Build the index, charging each resolution to the scan's budget.
+    ///
+    /// The candidate count comes from what the user registered, so this walk
+    /// is bounded like every other filesystem walk in the module rather than
+    /// trusted to be small.
+    fn of(sources: &[RegisteredSource], budget: &mut InspectionBudget) -> Self {
         let mut by_canonical_path = HashMap::new();
         for source in sources {
             for catalog in source
@@ -645,6 +760,9 @@ impl ResolutionIndex {
                 .filter(|catalog| catalog.included())
             {
                 for candidate in catalog.candidates() {
+                    if !budget.consume_entry() {
+                        return Self { by_canonical_path };
+                    }
                     let Ok(canonical) = source
                         .git_top_level()
                         .join(candidate.relative_path())
@@ -655,7 +773,6 @@ impl ResolutionIndex {
                     by_canonical_path
                         .entry(canonical)
                         .or_insert_with(|| VariantResolution {
-                            source_id: source.id(),
                             source_label: source.label().to_owned(),
                             catalog_relative_path: catalog.relative_path().to_path_buf(),
                             variant_relative_path: candidate.relative_path().to_path_buf(),

@@ -14,7 +14,7 @@ use std::{
 
 use skilled::{
     AgentKind, AppEnvironment, SkilledApp,
-    inventory::{FindingSeverity, InstallationHealth, InstallationObject, RootStatus},
+    inventory::{Finding, FindingSeverity, InstallationHealth, InstallationObject, RootStatus},
 };
 
 /// The exact global roots documented by each agent adapter.
@@ -290,22 +290,68 @@ fn validation_compares_the_declared_name_against_the_installed_directory_name() 
 }
 
 #[test]
-fn a_plain_file_child_is_broken_without_being_read_as_a_skill() {
+fn a_plain_file_child_is_listed_without_being_read_as_a_broken_skill() {
     let fixture = Fixture::new();
     let repository = fixture.source("library", &["portable"]);
     drop(fixture.registered(&repository));
     let root = fixture.create_root(AgentKind::OpenCode);
     fs::write(root.join("notes.md"), "not a skill").expect("write plain file");
+    fs::write(root.join(".DS_Store"), "platform litter").expect("write hidden file");
 
     let app = fixture.app();
-    let row = app.inventory().row("notes.md").expect("plain file row");
+    let inventory = app.inventory();
+    let row = inventory.row("notes.md").expect("plain file row");
 
-    assert_eq!(row.health(), InstallationHealth::Broken);
+    // An agent ignores a stray file, so calling it broken would manufacture an
+    // alarm out of a README or a platform artefact.
+    assert_eq!(row.health(), InstallationHealth::NotASkill);
     let observation = row
         .observation(AgentKind::OpenCode)
         .expect("plain file observation");
-    assert_eq!(observation.object(), &InstallationObject::File);
-    assert_eq!(observation.findings()[0].code(), "skill.missing_skill_md");
+    assert_eq!(observation.object(), &InstallationObject::NotADirectory);
+    assert_eq!(observation.findings()[0].code(), "install.not_a_skill");
+    assert_eq!(observation.findings()[0].severity(), FindingSeverity::Info);
+
+    // Neither file is an installation, so neither inflates a count — and
+    // neither is described as a skill.
+    assert_eq!(inventory.installation_count(), 0);
+    assert_eq!(inventory.broken_count(), 0);
+    assert_eq!(inventory.unmanaged_count(), 0);
+    assert_eq!(inventory.skill_row_count(), 0);
+    assert_eq!(inventory.rows().len(), 2);
+    assert_eq!(
+        inventory.root(AgentKind::OpenCode).status(),
+        &RootStatus::Scanned { installed: 0 }
+    );
+}
+
+#[test]
+fn a_row_takes_the_worst_state_of_the_agents_that_carry_it() {
+    let fixture = Fixture::new();
+    let repository = fixture.source("library", &["shared"]);
+    drop(fixture.registered(&repository));
+    // Healthy in one root, dangling in another, under the same name.
+    fixture.install_symlink(
+        AgentKind::ClaudeCode,
+        "shared",
+        &repository.join("skills/shared"),
+    );
+    fixture.install_symlink(AgentKind::Codex, "shared", &fixture.path().join("nowhere"));
+
+    let app = fixture.app();
+    let row = app.inventory().row("shared").expect("shared row");
+
+    assert_eq!(
+        row.observation(AgentKind::ClaudeCode).map(|o| o.health()),
+        Some(InstallationHealth::Healthy)
+    );
+    assert_eq!(
+        row.observation(AgentKind::Codex).map(|o| o.health()),
+        Some(InstallationHealth::Broken)
+    );
+    assert_eq!(row.health(), InstallationHealth::Broken);
+    // The healthy installation still names its source.
+    assert_eq!(row.source_label(), Some("library"));
 }
 
 #[test]
@@ -318,7 +364,7 @@ fn a_missing_root_reports_absence_without_raising_a_finding() {
     let inventory = app.inventory();
 
     assert!(inventory.rows().is_empty());
-    assert_eq!(inventory.finding_count(), 0);
+    assert_eq!(findings(inventory).count(), 0);
     for agent in AgentKind::ALL {
         assert_eq!(inventory.root(agent).status(), &RootStatus::Missing);
         assert_eq!(
@@ -369,11 +415,12 @@ fn counts_separate_installations_unmanaged_content_and_findings() {
     let app = fixture.app();
     let inventory = app.inventory();
 
-    assert_eq!(inventory.installation_count(), 3);
+    // Two links and a physical copy are installations; the stray file is not.
+    assert_eq!(inventory.installation_count(), 2);
     assert_eq!(inventory.unmanaged_count(), 1);
-    // One informational unmanaged finding and one critical missing-SKILL.md.
-    assert_eq!(inventory.finding_count(), 2);
-    assert_eq!(inventory.critical_finding_count(), 1);
+    assert_eq!(inventory.broken_count(), 0);
+    assert_eq!(inventory.skill_row_count(), 2);
+    assert_eq!(inventory.rows().len(), 3);
 }
 
 #[test]
@@ -412,14 +459,195 @@ fn scanning_never_launches_a_coding_agent_executable() {
 }
 
 #[test]
+fn a_deselected_agent_root_is_left_alone_rather_than_reported_absent() {
+    let fixture = Fixture::new();
+    let repository = fixture.source("library", &["portable"]);
+    let root = fixture.create_root(AgentKind::ClaudeCode);
+    write_skill(&root.join("copied"), "copied");
+    let mut app = fixture.registered(&repository);
+    assert_eq!(app.inventory().rows().len(), 1);
+
+    // Deselect Claude Code and rerun setup so the scan sees the new selection.
+    app.update(skilled::Action::OpenSettings);
+    let update = app.update(skilled::Action::RerunSetup);
+    app.perform_effects(update.effects()).expect("reset setup");
+    app.update(skilled::Action::Continue);
+    app.update(skilled::Action::ToggleSelection);
+    for _ in 0..6 {
+        let update = app.update(skilled::Action::Continue);
+        app.perform_effects(update.effects())
+            .expect("setup effects");
+    }
+
+    let inventory = app.inventory();
+    assert_eq!(
+        inventory.root(AgentKind::ClaudeCode).status(),
+        &RootStatus::NotSelected
+    );
+    // The directory is still there; Skilled simply did not look in it, and so
+    // reports nothing about it either way.
+    assert!(root.join("copied").is_dir());
+    assert!(inventory.rows().is_empty());
+    assert_eq!(findings(inventory).count(), 0);
+}
+
+#[test]
+fn one_unreadable_entry_does_not_discard_the_rest_of_its_root() {
+    let fixture = Fixture::new();
+    let repository = fixture.source("library", &["portable"]);
+    drop(fixture.registered(&repository));
+    let root = fixture.create_root(AgentKind::ClaudeCode);
+    write_skill(&root.join("readable"), "readable");
+    fs::create_dir(root.join("opaque")).expect("create an entry to make unreadable");
+    if running_as_root() {
+        // Permission bits do not bind the superuser, so the condition this
+        // test needs cannot be created.
+        return;
+    }
+    // Readable but not searchable: the listing succeeds while stat on each
+    // child fails, which is what an agent writing into its own root looks like.
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o444))
+        .expect("drop search permission on the root");
+
+    let inventory_owner = fixture.app();
+    let inventory = inventory_owner.inventory();
+    // Restore before any assertion can leave the fixture undeletable.
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).expect("restore permissions");
+
+    let RootStatus::Scanned { installed } = inventory.root(AgentKind::ClaudeCode).status() else {
+        panic!(
+            "one unreadable entry must not fail the root: {:?}",
+            inventory.root(AgentKind::ClaudeCode).status()
+        );
+    };
+    assert_eq!(*installed, 2);
+    for name in ["opaque", "readable"] {
+        let row = inventory.row(name).expect("row for every entry");
+        let observation = row
+            .observation(AgentKind::ClaudeCode)
+            .expect("observation for every entry");
+        assert_eq!(row.health(), InstallationHealth::Broken);
+        assert_eq!(observation.findings()[0].code(), "install.unreadable_entry");
+        assert_eq!(
+            observation.findings()[0].severity(),
+            FindingSeverity::Critical
+        );
+        // The type was never read, so nothing may claim to know it.
+        assert_eq!(observation.object(), &InstallationObject::Unknown);
+        assert_eq!(observation.object().description(), "could not be read");
+        assert!(observation.validation().is_none());
+    }
+    // An entry whose type is unknown might be an installation, so it is
+    // counted: understating what is installed is the worse error.
+    assert_eq!(inventory.broken_count(), 2);
+}
+
+#[test]
+fn a_link_to_a_file_is_a_broken_installation_while_a_bare_file_is_not_one() {
+    let fixture = Fixture::new();
+    let repository = fixture.source("library", &["portable"]);
+    drop(fixture.registered(&repository));
+    let elsewhere = fixture.path().join("elsewhere");
+    fs::create_dir_all(&elsewhere).expect("create elsewhere");
+    fs::write(elsewhere.join("notes.md"), "prose").expect("write a file to link at");
+    fixture.install_symlink(AgentKind::ClaudeCode, "linked", &elsewhere.join("notes.md"));
+    let root = fixture.create_root(AgentKind::ClaudeCode);
+    fs::write(root.join("bare.md"), "prose").expect("write a bare file");
+
+    let app = fixture.app();
+    let inventory = app.inventory();
+
+    // A link is an installation someone meant to make, so a link to something
+    // that cannot be a skill is broken. A file that was simply left in the
+    // root was never an installation, so it is not broken — it is not a skill.
+    let linked = inventory.row("linked").expect("linked row");
+    assert_eq!(linked.health(), InstallationHealth::Broken);
+    let bare = inventory.row("bare.md").expect("bare file row");
+    assert_eq!(bare.health(), InstallationHealth::NotASkill);
+    assert_eq!(inventory.broken_count(), 1);
+    assert_eq!(inventory.skill_row_count(), 1);
+}
+
+#[test]
+fn a_root_that_is_not_a_directory_is_unreadable_and_names_the_reason() {
+    let fixture = Fixture::new();
+    let repository = fixture.source("library", &["portable"]);
+    drop(fixture.registered(&repository));
+    let root = fixture.root(AgentKind::Codex);
+    fs::create_dir_all(root.parent().expect("root parent")).expect("create root parent");
+    fs::write(&root, "not a directory").expect("write a file where the root belongs");
+
+    let app = fixture.app();
+    let inventory = app.inventory();
+
+    let RootStatus::Unreadable { message } = inventory.root(AgentKind::Codex).status() else {
+        panic!(
+            "expected an unreadable root, got {:?}",
+            inventory.root(AgentKind::Codex).status()
+        );
+    };
+    assert!(message.contains("not a directory"), "{message}");
+    // The reason is reachable for display; a root reported as merely missing
+    // would hide a real obstruction.
+    assert_eq!(
+        inventory
+            .unreadable_roots()
+            .map(|(root, _)| root.agent())
+            .collect::<Vec<_>>(),
+        [AgentKind::Codex]
+    );
+    assert!(inventory.rows().is_empty());
+}
+
+#[test]
+fn a_symlink_that_cannot_be_resolved_is_not_reported_as_a_dangling_one() {
+    let fixture = Fixture::new();
+    let repository = fixture.source("library", &["portable"]);
+    drop(fixture.registered(&repository));
+    // A link to itself resolves to neither a target nor a missing file.
+    let root = fixture.create_root(AgentKind::ClaudeCode);
+    symlink(root.join("looping"), root.join("looping")).expect("install a looping link");
+
+    let app = fixture.app();
+    let row = app.inventory().row("looping").expect("looping row");
+
+    assert_eq!(row.health(), InstallationHealth::Broken);
+    let finding = &row
+        .observation(AgentKind::ClaudeCode)
+        .expect("looping observation")
+        .findings()[0];
+    assert_eq!(finding.code(), "install.unresolvable_symlink");
+    assert_eq!(finding.severity(), FindingSeverity::Critical);
+    // The cause is reported, not guessed at.
+    assert!(
+        !finding.evidence().contains("does not exist"),
+        "{finding:?}"
+    );
+}
+
+#[test]
 fn a_root_beyond_the_child_limit_is_reported_unreadable_rather_than_partially_scanned() {
     let fixture = Fixture::new();
     let repository = fixture.source("library", &["portable"]);
     drop(fixture.registered(&repository));
     let root = fixture.create_root(AgentKind::ClaudeCode);
-    for index in 0..=skilled::inventory::MAX_ROOT_CHILDREN {
+    for index in 0..skilled::inventory::MAX_ROOT_CHILDREN {
         fs::create_dir(root.join(format!("skill-{index:05}"))).expect("create bounded fixture");
     }
+
+    // Exactly at the limit is still readable; the cap is a ceiling, not a wall
+    // one short of it.
+    assert_eq!(
+        fixture
+            .app()
+            .inventory()
+            .root(AgentKind::ClaudeCode)
+            .status(),
+        &RootStatus::Scanned {
+            installed: skilled::inventory::MAX_ROOT_CHILDREN
+        }
+    );
+    fs::create_dir(root.join("one-too-many")).expect("exceed the bounded fixture");
 
     let app = fixture.app();
     let inventory = app.inventory();
@@ -532,6 +760,27 @@ impl Fixture {
         }
         (directory, witness)
     }
+}
+
+/// Whether permission bits will be enforced against this process.
+fn running_as_root() -> bool {
+    // Reading a mode-0 directory succeeds only for the superuser.
+    let probe = std::env::temp_dir().join(format!("skilled-root-probe-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&probe);
+    fs::create_dir(&probe).expect("create permission probe");
+    fs::set_permissions(&probe, fs::Permissions::from_mode(0o000)).expect("seal probe");
+    let readable = fs::read_dir(&probe).is_ok();
+    fs::set_permissions(&probe, fs::Permissions::from_mode(0o755)).expect("unseal probe");
+    fs::remove_dir_all(&probe).expect("remove probe");
+    readable
+}
+
+/// Every finding the snapshot holds, across every row and agent.
+fn findings(inventory: &skilled::inventory::InventorySnapshot) -> impl Iterator<Item = &Finding> {
+    inventory
+        .rows()
+        .iter()
+        .flat_map(skilled::inventory::InventoryRow::findings)
 }
 
 fn write_skill(directory: &Path, name: &str) {

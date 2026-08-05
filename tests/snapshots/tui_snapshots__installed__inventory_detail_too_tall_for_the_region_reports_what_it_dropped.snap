@@ -1,28 +1,28 @@
 ---
 source: tests/tui_snapshots.rs
-expression: "normalize_inventory(&temporary, render(&app, 80, 24))"
+expression: screen
 ---
  ◆ skilled   global                               ● ready · 1 source registered
 ▌Inventory  2 Sources  Updates (soon)  Doctor (soon)
- ▌ Details  copied
+ ▌ Details  alpha
  ──────────────────────────────────────────────────────────────────────────────
  SKILL
  ──────────────────────────────────────────────────────────────────────────────
- Name: copied
- Health: U unmanaged
- Description: copied fixture
+ Name: alpha
+ Health: ✓ healthy
+ Description: alpha fixture
  SOURCE
  ──────────────────────────────────────────────────────────────────────────────
- Not resolved to any registered source; Skilled does not manage it.
+ Source: library
+ Catalog: skills
+ Variant: skills/alpha
+ CLAUDE CODE
+ ──────────────────────────────────────────────────────────────────────────────
+ Path: ~/.claude/skills/alpha
+ Object: symbolic link
+ Target: ~/library/skills/alpha
+ Validation: ✓ valid as alpha
  CODEX
  ──────────────────────────────────────────────────────────────────────────────
- Finding: install.unmanaged · info
-   this installation does not come from a registered source
- Path: ~/.agents/skills/copied
- Object: directory
- Validation: ✓ valid as copied
- NOT INSTALLED
- ──────────────────────────────────────────────────────────────────────────────
- - Claude Code, OpenCode
-
+ ! 7 more lines — widen or lengthen the terminal
  Tab/Shift-Tab Region   / Filter   2 Sources   s Settings   q Quit   Esc Back …

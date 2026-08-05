@@ -472,58 +472,6 @@ fn the_scan_installations_step_and_the_end_of_setup_both_request_a_scan() {
 }
 
 #[test]
-fn registering_a_source_restates_the_inventory_without_a_separate_scan() {
-    let temporary = tempfile::tempdir().expect("temporary application directory");
-    let repository = temporary.path().join("library");
-    let mut app = app_in(&temporary);
-    finish_setup(&mut app);
-    write_skill_fixture(&repository.join("skills/variant-0"), "variant-0");
-    install_link(
-        &temporary,
-        AgentKind::ClaudeCode,
-        "variant-0",
-        &repository.join("skills/variant-0"),
-    );
-
-    // Before the source is registered the link is a foreign one; registering
-    // the checkout it points into is what makes it managed.
-    app.update(Action::OpenSources);
-    let update = app.update(Action::OpenInventory);
-    app.perform_effects(update.effects()).expect("scan");
-    assert_eq!(
-        app.inventory().row("variant-0").map(|row| row.health()),
-        Some(InstallationHealth::Unmanaged)
-    );
-
-    register_source(&mut app, &repository, 1);
-
-    assert_eq!(
-        app.inventory().row("variant-0").map(|row| row.health()),
-        Some(InstallationHealth::Healthy)
-    );
-    assert_eq!(
-        app.inventory()
-            .row("variant-0")
-            .and_then(|row| row.source_label()),
-        Some("library")
-    );
-}
-
-#[test]
-fn inventory_selection_wraps_within_the_rows_the_filter_admits() {
-    let temporary = tempfile::tempdir().expect("temporary application directory");
-    let mut app = inventory_app(&temporary);
-
-    for expected in [1, 2, 0] {
-        let update = app.update(Action::MoveInventorySelection(1));
-        assert_eq!(app.focused_installation(), expected);
-        assert!(update.effects().is_empty());
-    }
-    app.update(Action::MoveInventorySelection(-1));
-    assert_eq!(app.focused_installation(), 2);
-}
-
-#[test]
 fn inventory_region_focus_cycles_and_enter_requires_a_selected_row() {
     let temporary = tempfile::tempdir().expect("temporary application directory");
     let mut app = app_in(&temporary);
@@ -544,92 +492,6 @@ fn inventory_region_focus_cycles_and_enter_requires_a_selected_row() {
 }
 
 #[test]
-fn enter_drills_into_details_when_a_row_is_selected() {
-    let temporary = tempfile::tempdir().expect("temporary application directory");
-    let mut app = inventory_app(&temporary);
-
-    app.update(Action::AdvanceInventoryPane);
-
-    assert_eq!(app.inventory_pane(), InventoryPane::Details);
-    // Selection only moves in the list region.
-    app.update(Action::MoveInventorySelection(1));
-    assert_eq!(app.focused_installation(), 0);
-}
-
-#[test]
-fn the_filter_narrows_by_name_source_and_health() {
-    let temporary = tempfile::tempdir().expect("temporary application directory");
-    let mut app = inventory_app(&temporary);
-    assert_eq!(app.filtered_rows().len(), 3);
-
-    type_filter(&mut app, "variant-1");
-    assert_eq!(names(&app), ["variant-1"]);
-
-    clear_filter(&mut app);
-    type_filter(&mut app, "library");
-    assert_eq!(names(&app), ["variant-0", "variant-1"]);
-
-    clear_filter(&mut app);
-    type_filter(&mut app, "unmanaged");
-    assert_eq!(names(&app), ["foreign"]);
-}
-
-#[test]
-fn the_filter_bar_owns_the_keyboard_while_it_is_open() {
-    let temporary = tempfile::tempdir().expect("temporary application directory");
-    let mut app = inventory_app(&temporary);
-    app.update(Action::BeginInventoryFilter);
-    assert!(app.inventory_filter_active());
-
-    // Navigation cannot fire out from under a half-typed query.
-    app.update(Action::OpenSources);
-    app.update(Action::OpenSettings);
-    assert_eq!(app.view(), View::Inventory);
-
-    // Quitting is the one command no context may swallow.
-    assert_eq!(app.update(Action::Quit).outcome(), UpdateOutcome::Quit);
-}
-
-#[test]
-fn submitting_keeps_the_query_and_cancelling_clears_it() {
-    let temporary = tempfile::tempdir().expect("temporary application directory");
-    let mut app = inventory_app(&temporary);
-
-    type_filter(&mut app, "variant");
-    assert!(!app.inventory_filter_active());
-    assert_eq!(app.inventory_filter(), "variant");
-    assert_eq!(names(&app), ["variant-0", "variant-1"]);
-
-    // Back unwinds the applied query before anything else.
-    app.update(Action::Back);
-    assert_eq!(app.inventory_filter(), "");
-    assert_eq!(app.filtered_rows().len(), 3);
-
-    app.update(Action::BeginInventoryFilter);
-    app.update(Action::AppendInventoryFilter('f'));
-    app.update(Action::DeleteInventoryFilterCharacter);
-    app.update(Action::Back);
-    assert_eq!(app.inventory_filter(), "");
-    assert!(!app.inventory_filter_active());
-}
-
-#[test]
-fn a_narrowing_filter_pulls_the_selection_back_into_range() {
-    let temporary = tempfile::tempdir().expect("temporary application directory");
-    let mut app = inventory_app(&temporary);
-    app.update(Action::MoveInventorySelection(-1));
-    assert_eq!(app.focused_installation(), 2);
-
-    type_filter(&mut app, "variant-0");
-
-    assert_eq!(app.focused_installation(), 0);
-    assert_eq!(
-        app.selected_installation().map(|row| row.name().to_owned()),
-        Some("variant-0".to_owned())
-    );
-}
-
-#[test]
 fn an_empty_inventory_cannot_open_the_filter_bar() {
     let temporary = tempfile::tempdir().expect("temporary application directory");
     let mut app = app_in(&temporary);
@@ -638,71 +500,6 @@ fn an_empty_inventory_cannot_open_the_filter_bar() {
     app.update(Action::BeginInventoryFilter);
 
     assert!(!app.inventory_filter_active());
-}
-
-/// An application whose Inventory holds two managed variants and one foreign
-/// installation, focused on the first row.
-fn inventory_app(temporary: &tempfile::TempDir) -> SkilledApp {
-    let repository = temporary.path().join("library");
-    let mut app = app_in(temporary);
-    finish_setup(&mut app);
-    register_source(&mut app, &repository, 2);
-    for index in 0..2 {
-        install_link(
-            temporary,
-            AgentKind::ClaudeCode,
-            &format!("variant-{index}"),
-            &repository.join("skills").join(format!("variant-{index}")),
-        );
-    }
-    let foreign = temporary.path().join("elsewhere/foreign");
-    write_skill_fixture(&foreign, "foreign");
-    install_link(temporary, AgentKind::ClaudeCode, "foreign", &foreign);
-
-    let update = app.update(Action::OpenSources);
-    app.perform_effects(update.effects()).expect("effects");
-    let update = app.update(Action::OpenInventory);
-    app.perform_effects(update.effects())
-        .expect("installation scan");
-    app
-}
-
-fn write_skill_fixture(directory: &Path, name: &str) {
-    fs::create_dir_all(directory).expect("create skill fixture directory");
-    fs::write(
-        directory.join("SKILL.md"),
-        format!("---\nname: {name}\ndescription: {name} fixture\n---\n# {name}\n"),
-    )
-    .expect("write skill fixture");
-}
-
-fn install_link(temporary: &tempfile::TempDir, agent: AgentKind, name: &str, target: &Path) {
-    let root = temporary.path().join("home").join(match agent {
-        AgentKind::ClaudeCode => ".claude/skills",
-        AgentKind::Codex => ".agents/skills",
-        AgentKind::OpenCode => ".config/opencode/skills",
-    });
-    fs::create_dir_all(&root).expect("create agent skill root");
-    std::os::unix::fs::symlink(target, root.join(name)).expect("install symbolic link");
-}
-
-fn type_filter(app: &mut SkilledApp, query: &str) {
-    app.update(Action::BeginInventoryFilter);
-    for character in query.chars() {
-        app.update(Action::AppendInventoryFilter(character));
-    }
-    app.update(Action::SubmitInventoryFilter);
-}
-
-fn clear_filter(app: &mut SkilledApp) {
-    app.update(Action::Back);
-}
-
-fn names(app: &SkilledApp) -> Vec<String> {
-    app.filtered_rows()
-        .iter()
-        .map(|row| row.name().to_owned())
-        .collect()
 }
 
 fn app_in(directory: &tempfile::TempDir) -> SkilledApp {
@@ -781,4 +578,204 @@ fn git(repository: &Path, arguments: &[&str]) {
         .output()
         .expect("run Git fixture command");
     assert!(output.status.success(), "Git command failed: {output:?}");
+}
+
+/// Reducer behaviour that needs a real installed skill.
+///
+/// Managed installations are symbolic links, so these fixtures are
+/// Unix-only.
+#[cfg(unix)]
+mod installed {
+    use super::*;
+
+    #[test]
+    fn registering_a_source_restates_the_inventory_without_a_separate_scan() {
+        let temporary = tempfile::tempdir().expect("temporary application directory");
+        let repository = temporary.path().join("library");
+        let mut app = app_in(&temporary);
+        finish_setup(&mut app);
+        write_skill_fixture(&repository.join("skills/variant-0"), "variant-0");
+        install_link(
+            &temporary,
+            AgentKind::ClaudeCode,
+            "variant-0",
+            &repository.join("skills/variant-0"),
+        );
+
+        // Before the source is registered the link is a foreign one; registering
+        // the checkout it points into is what makes it managed.
+        app.update(Action::OpenSources);
+        let update = app.update(Action::OpenInventory);
+        app.perform_effects(update.effects()).expect("scan");
+        assert_eq!(
+            app.inventory().row("variant-0").map(|row| row.health()),
+            Some(InstallationHealth::Unmanaged)
+        );
+
+        register_source(&mut app, &repository, 1);
+
+        assert_eq!(
+            app.inventory().row("variant-0").map(|row| row.health()),
+            Some(InstallationHealth::Healthy)
+        );
+        assert_eq!(
+            app.inventory()
+                .row("variant-0")
+                .and_then(|row| row.source_label()),
+            Some("library")
+        );
+    }
+    #[test]
+    fn inventory_selection_wraps_within_the_rows_the_filter_admits() {
+        let temporary = tempfile::tempdir().expect("temporary application directory");
+        let mut app = inventory_app(&temporary);
+
+        for expected in [1, 2, 0] {
+            let update = app.update(Action::MoveInventorySelection(1));
+            assert_eq!(app.focused_installation(), expected);
+            assert!(update.effects().is_empty());
+        }
+        app.update(Action::MoveInventorySelection(-1));
+        assert_eq!(app.focused_installation(), 2);
+    }
+    #[test]
+    fn enter_drills_into_details_when_a_row_is_selected() {
+        let temporary = tempfile::tempdir().expect("temporary application directory");
+        let mut app = inventory_app(&temporary);
+
+        app.update(Action::AdvanceInventoryPane);
+
+        assert_eq!(app.inventory_pane(), InventoryPane::Details);
+        // Selection only moves in the list region.
+        app.update(Action::MoveInventorySelection(1));
+        assert_eq!(app.focused_installation(), 0);
+    }
+    #[test]
+    fn the_filter_narrows_by_name_source_and_health() {
+        let temporary = tempfile::tempdir().expect("temporary application directory");
+        let mut app = inventory_app(&temporary);
+        assert_eq!(app.filtered_rows().len(), 3);
+
+        type_filter(&mut app, "variant-1");
+        assert_eq!(names(&app), ["variant-1"]);
+
+        clear_filter(&mut app);
+        type_filter(&mut app, "library");
+        assert_eq!(names(&app), ["variant-0", "variant-1"]);
+
+        clear_filter(&mut app);
+        type_filter(&mut app, "unmanaged");
+        assert_eq!(names(&app), ["foreign"]);
+    }
+    #[test]
+    fn the_filter_bar_owns_the_keyboard_while_it_is_open() {
+        let temporary = tempfile::tempdir().expect("temporary application directory");
+        let mut app = inventory_app(&temporary);
+        app.update(Action::BeginInventoryFilter);
+        assert!(app.inventory_filter_active());
+
+        // Navigation cannot fire out from under a half-typed query.
+        app.update(Action::OpenSources);
+        app.update(Action::OpenSettings);
+        assert_eq!(app.view(), View::Inventory);
+
+        // Quitting is the one command no context may swallow.
+        assert_eq!(app.update(Action::Quit).outcome(), UpdateOutcome::Quit);
+    }
+    #[test]
+    fn submitting_keeps_the_query_and_cancelling_clears_it() {
+        let temporary = tempfile::tempdir().expect("temporary application directory");
+        let mut app = inventory_app(&temporary);
+
+        type_filter(&mut app, "variant");
+        assert!(!app.inventory_filter_active());
+        assert_eq!(app.inventory_filter(), "variant");
+        assert_eq!(names(&app), ["variant-0", "variant-1"]);
+
+        // Back unwinds the applied query before anything else.
+        app.update(Action::Back);
+        assert_eq!(app.inventory_filter(), "");
+        assert_eq!(app.filtered_rows().len(), 3);
+
+        app.update(Action::BeginInventoryFilter);
+        app.update(Action::AppendInventoryFilter('f'));
+        app.update(Action::DeleteInventoryFilterCharacter);
+        app.update(Action::Back);
+        assert_eq!(app.inventory_filter(), "");
+        assert!(!app.inventory_filter_active());
+    }
+    #[test]
+    fn a_narrowing_filter_pulls_the_selection_back_into_range() {
+        let temporary = tempfile::tempdir().expect("temporary application directory");
+        let mut app = inventory_app(&temporary);
+        app.update(Action::MoveInventorySelection(-1));
+        assert_eq!(app.focused_installation(), 2);
+
+        type_filter(&mut app, "variant-0");
+
+        assert_eq!(app.focused_installation(), 0);
+        assert_eq!(
+            app.selected_installation().map(|row| row.name().to_owned()),
+            Some("variant-0".to_owned())
+        );
+    }
+    /// An application whose Inventory holds two managed variants and one foreign
+    /// installation, focused on the first row.
+    fn inventory_app(temporary: &tempfile::TempDir) -> SkilledApp {
+        let repository = temporary.path().join("library");
+        let mut app = app_in(temporary);
+        finish_setup(&mut app);
+        register_source(&mut app, &repository, 2);
+        for index in 0..2 {
+            install_link(
+                temporary,
+                AgentKind::ClaudeCode,
+                &format!("variant-{index}"),
+                &repository.join("skills").join(format!("variant-{index}")),
+            );
+        }
+        let foreign = temporary.path().join("elsewhere/foreign");
+        write_skill_fixture(&foreign, "foreign");
+        install_link(temporary, AgentKind::ClaudeCode, "foreign", &foreign);
+
+        let update = app.update(Action::OpenSources);
+        app.perform_effects(update.effects()).expect("effects");
+        let update = app.update(Action::OpenInventory);
+        app.perform_effects(update.effects())
+            .expect("installation scan");
+        app
+    }
+    fn write_skill_fixture(directory: &Path, name: &str) {
+        fs::create_dir_all(directory).expect("create skill fixture directory");
+        fs::write(
+            directory.join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: {name} fixture\n---\n# {name}\n"),
+        )
+        .expect("write skill fixture");
+    }
+    fn install_link(temporary: &tempfile::TempDir, agent: AgentKind, name: &str, target: &Path) {
+        let root = temporary.path().join("home").join(match agent {
+            AgentKind::ClaudeCode => ".claude/skills",
+            AgentKind::Codex => ".agents/skills",
+            AgentKind::OpenCode => ".config/opencode/skills",
+        });
+        fs::create_dir_all(&root).expect("create agent skill root");
+        std::os::unix::fs::symlink(target, root.join(name)).expect("install symbolic link");
+    }
+    fn type_filter(app: &mut SkilledApp, query: &str) {
+        app.update(Action::BeginInventoryFilter);
+        for character in query.chars() {
+            app.update(Action::AppendInventoryFilter(character));
+        }
+        app.update(Action::SubmitInventoryFilter);
+    }
+    fn clear_filter(app: &mut SkilledApp) {
+        app.update(Action::Back);
+    }
+    fn names(app: &SkilledApp) -> Vec<String> {
+        app.filtered_rows()
+            .iter()
+            .map(|row| row.name().to_owned())
+            .collect()
+    }
 }

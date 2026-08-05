@@ -1,6 +1,6 @@
 ---
 source: tests/tui_snapshots.rs
-expression: "render(&app, 80, 24)"
+expression: summary
 ---
  ◆ skilled   global                                         ● setup in progress
  Setup · Summary   navigation is locked during setup
@@ -13,8 +13,8 @@ expression: "render(&app, 80, 24)"
   │  Setup is ready to finish.                                               │
   │                                                                          │
   │  Configured agents: 3                                                    │
-  │  Sources: 0   Skills: 0                                                  │
-  │  Installed: 0   Unmanaged: 0   Broken: 0                                 │
+  │  Sources: 1   Skills: 2                                                  │
+  │  Installed: 4   Unmanaged: 1   Broken: 1                                 │
   │                                                                          │
   │  Unresolved findings never force a repair.                               │
   │                                                                          │

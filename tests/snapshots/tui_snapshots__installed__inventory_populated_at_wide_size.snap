@@ -7,10 +7,10 @@ expression: "normalize_inventory(&temporary, render(&app, 120, 40))"
 ▌ Global inventory  3 skills                                                    │ Details  alpha
 Roots: Claude Code 2 installed · Codex 2 installed · OpenCode no root           │ ─────────────────────────────────────
 ────────────────────────────────────────────────────────────────────────────────│ SKILL
-  Skill                    Source           Claude  Codex  OpenCode  Health     │ ─────────────────────────────────────
-▌ alpha                    library          ✓       ✓      -         ✓ healthy  │ Name: alpha
-  broken                   unmanaged        ×       -      -         × broken   │ Health: ✓ healthy
-  copied                   unmanaged        -       U      -         U unmanaged│ Description: alpha fixture
+  Skill                  Source          Claude  Codex  OpenCode  Health        │ ─────────────────────────────────────
+▌ alpha                  library         ✓       ✓      -         ✓ healthy     │ Name: alpha
+  broken                 not registered  ×       -      -         × broken      │ Health: ✓ healthy
+  copied                 not registered  -       U      -         U unmanaged   │ Description: alpha fixture
                                                                                 │ SOURCE
                                                                                 │ ─────────────────────────────────────
                                                                                 │ Source: library
@@ -28,9 +28,9 @@ Roots: Claude Code 2 installed · Codex 2 installed · OpenCode no root         
                                                                                 │ Object: symbolic link
                                                                                 │ Target: ~/library/skills/alpha
                                                                                 │ Validation: ✓ valid as alpha
-                                                                                │ OPENCODE
+                                                                                │ NOT INSTALLED
                                                                                 │ ─────────────────────────────────────
-                                                                                │ - not installed in this root
+                                                                                │ - OpenCode
                                                                                 │
                                                                                 │
                                                                                 │
