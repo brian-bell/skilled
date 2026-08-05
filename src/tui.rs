@@ -73,6 +73,11 @@ fn render_title_bar(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
     // The two halves get their own rectangles because a Paragraph repaints its
     // whole area before drawing: rendering the status across the full row would
     // silently flatten the product mark and wordmark to the status colour.
+    //
+    // The band goes down first and the paragraphs only carry foreground
+    // colours, so it survives underneath them.
+    frame.render_widget(Block::new().style(theme::chrome_band()), area);
+
     let status = SessionStatus::of(app);
     let label = status.label();
     let status_width = u16::try_from(Span::raw(&label).width() + 3)
@@ -185,6 +190,14 @@ fn render_navigation(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
             ),
             style,
         ));
+        // The accent is patched over the entry's own style, so the count keeps
+        // the surface of the tab it belongs to.
+        if let Some(count) = destination.count(app) {
+            spans.push(Span::styled(
+                format!("{count} "),
+                style.patch(theme::nav_count()),
+            ));
+        }
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
@@ -272,6 +285,27 @@ impl Destination {
 
     fn is_available(self) -> bool {
         matches!(self, Self::Inventory | Self::Sources)
+    }
+
+    /// What this destination can honestly say it holds, if anything.
+    ///
+    /// The registry is always fully known, so Sources always has a count, zero
+    /// included. The inventory is an observation of the filesystem: its count
+    /// is stated only when every root Skilled was asked to look at was read or
+    /// found absent, the same gate [`inventory_subtitle`] enforces. A
+    /// destination this release cannot open has nothing to count and renders
+    /// nothing — an em dash would read as a measurement that came back empty.
+    fn count(self, app: &SkilledApp) -> Option<usize> {
+        match self {
+            Self::Inventory => {
+                let inventory = app.inventory();
+                inventory
+                    .counts_are_complete()
+                    .then(|| inventory.skill_row_count())
+            }
+            Self::Sources => Some(app.sources().len()),
+            Self::Updates | Self::Doctor => None,
+        }
     }
 
     fn is_active(self, view: View) -> bool {
@@ -2525,6 +2559,10 @@ fn help_scope(context: View) -> String {
 }
 
 fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
+    // The band reaches the full width, so the row reads as chrome rather than
+    // as a smear the length of the hints. The hint line itself only sets
+    // foreground colours, apart from the key caps' own emphasis.
+    frame.render_widget(Block::new().style(theme::chrome_band()), area);
     frame.render_widget(
         Paragraph::new(components::key_hint_line(&key_hints(app), area.width))
             .style(theme::chrome()),

@@ -85,13 +85,6 @@ pub(crate) fn chrome() -> Style {
 /// Background only, mirroring `nav_surface()`: the text on it keeps its own
 /// role — `chrome()` and `key_label()` inherit the band, `key_cap()` carries
 /// its own local emphasis.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "consumed by the persistent-chrome slice (skilled-2k3.15.2)"
-    )
-)]
 pub(crate) fn chrome_band() -> Style {
     Style::default().bg(BAND)
 }
@@ -133,13 +126,6 @@ pub(crate) fn nav_inactive() -> Style {
 /// inactive (`SURFACE`) tab. A count may only be rendered when the underlying
 /// condition it summarises actually holds; this token styles it, it does not
 /// license it.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "consumed by the persistent-chrome slice (skilled-2k3.15.2)"
-    )
-)]
 pub(crate) fn nav_count() -> Style {
     Style::default().fg(AMBER)
 }

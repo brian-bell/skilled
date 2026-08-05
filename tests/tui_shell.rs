@@ -474,12 +474,14 @@ fn surfaces_are_painted_where_the_design_calls_for_them() {
     let screen = buffer(&app, 120, 40);
 
     const TERMINAL: Color = Color::Rgb(0x0b, 0x0f, 0x14);
+    const BAND: Color = Color::Rgb(0x0d, 0x12, 0x18);
     const SURFACE: Color = Color::Rgb(0x0f, 0x15, 0x1d);
     const SURFACE_2: Color = Color::Rgb(0x12, 0x1a, 0x24);
     const SURFACE_3: Color = Color::Rgb(0x17, 0x21, 0x2c);
 
-    // One canvas under everything, chrome and workspace alike.
-    assert_eq!(style_in_row(&screen, 0, "skilled").bg, Some(TERMINAL));
+    // The canvas shows through the workspace, while the two chrome rows sit on
+    // their own band.
+    assert_eq!(style_in_row(&screen, 0, "skilled").bg, Some(BAND));
     assert_eq!(
         style_in_row(&screen, row_containing(&screen, "Repositories"), "┌").bg,
         Some(TERMINAL)
@@ -489,6 +491,18 @@ fn surfaces_are_painted_where_the_design_calls_for_them() {
     // Sources is the active tab here, so Inventory is the inactive probe.
     assert_eq!(style_in_row(&screen, 1, "1 Inventory").bg, Some(SURFACE));
     assert_eq!(style_in_row(&screen, 1, "▌Sources").bg, Some(SURFACE_2));
+
+    // The key-hint row shares the title bar's band, and it reaches the edge of
+    // the terminal rather than stopping where the last hint does.
+    let key_hints = screen.area.height - 1;
+    assert_eq!(style_in_row(&screen, key_hints, "Quit").bg, Some(BAND));
+    assert_eq!(
+        screen[(screen.area.width - 1, key_hints)].style().bg,
+        Some(BAND),
+        "the band should reach the end of the row, not stop at the last hint"
+    );
+    // A key cap keeps its own emphasis on top of that band.
+    assert_eq!(style_in_row(&screen, key_hints, "q ").bg, Some(SURFACE_2));
 
     // The focused row is tinted across the pane, not just behind its label.
     let focused = row_containing(&screen, "▌ source");
@@ -1145,6 +1159,62 @@ fn a_partially_read_inventory_lists_rows_without_claiming_a_total() {
         rendered.contains("the skill root is not a directory"),
         "{rendered}"
     );
+}
+
+/// A tab count is a claim about a scan, so it is withheld whenever the scan
+/// did not cover everything it was asked to.
+#[test]
+fn navigation_withholds_a_count_it_could_not_observe() {
+    // What follows a tab's title, past the space that separates them, which is
+    // where a count would appear. Nothing follows the last title at all.
+    fn after(row: &str, title: &str) -> char {
+        let index = row
+            .find(title)
+            .unwrap_or_else(|| panic!("{title:?} not found in {row:?}"));
+        let rest = &row[index + title.len()..];
+        rest.strip_prefix(' ')
+            .unwrap_or(rest)
+            .chars()
+            .next()
+            .unwrap_or(' ')
+    }
+
+    for unreadable_only in [true, false] {
+        let harness = Harness::new();
+        let home = harness.directory.path().join("home");
+        if !unreadable_only {
+            // One root reads cleanly and holds a skill; the other does not.
+            write_skill_fixture(&home.join(".claude/skills/alpha"), "alpha");
+        }
+        let root = if unreadable_only {
+            home.join(".claude/skills")
+        } else {
+            home.join(".agents/skills")
+        };
+        fs::create_dir_all(root.parent().expect("root parent")).expect("create root parent");
+        fs::write(&root, "not a directory").expect("write a file where the root belongs");
+        let app = harness.completed_setup();
+
+        let navigation = row_text(&buffer(&app, 80, 24), 1);
+
+        assert!(navigation.contains("▌Inventory"), "{navigation}");
+        assert!(
+            !after(&navigation, "▌Inventory").is_ascii_digit(),
+            "a partly read scan may not state a total: {navigation}"
+        );
+        // The registry is not the filesystem: it is still fully known.
+        assert!(navigation.contains(" 2 Sources 0 "), "{navigation}");
+
+        // A destination this release cannot open counts nothing, and says so
+        // by rendering nothing rather than by a placeholder that reads as an
+        // empty measurement.
+        for unavailable in ["Updates (soon)", "Doctor (soon)"] {
+            let next = after(&navigation, unavailable);
+            assert!(!next.is_ascii_digit(), "{unavailable}: {navigation}");
+            assert_ne!(next, '—', "{unavailable}: {navigation}");
+        }
+        assert!(!navigation.contains('—'), "{navigation}");
+    }
 }
 
 #[test]
@@ -2066,6 +2136,19 @@ fn style_in_row(buffer: &Buffer, y: u16, needle: &str) -> Style {
     buffer[(buffer.area.x + column, y)].style()
 }
 
+/// The style of the cell immediately after `needle` in row `y`.
+///
+/// A count is only ever a digit, so it has to be located by what precedes it
+/// rather than by its own text.
+fn style_following(buffer: &Buffer, y: u16, needle: &str) -> Style {
+    let row = row_text(buffer, y);
+    let byte_index = row
+        .find(needle)
+        .unwrap_or_else(|| panic!("{needle:?} not found in row {y}: {row:?}"));
+    let column = row[..byte_index].chars().count() + needle.chars().count();
+    buffer[(buffer.area.x + u16::try_from(column).expect("column"), y)].style()
+}
+
 fn style_at(buffer: &Buffer, needle: &str) -> Style {
     let area = buffer.area;
     for y in area.y..area.y + area.height {
@@ -2154,6 +2237,54 @@ mod installed {
             assert!(rendered.contains(heading), "{heading} in\n{rendered}");
         }
     }
+    #[test]
+    fn navigation_counts_what_the_scan_and_the_registry_know() {
+        const SURFACE: Color = Color::Rgb(0x0f, 0x15, 0x1d);
+        const SURFACE_2: Color = Color::Rgb(0x12, 0x1a, 0x24);
+        const AMBER: Color = Color::Rgb(0xe6, 0xbd, 0x6a);
+
+        let harness = Harness::new();
+        let mut app = harness.installed_inventory();
+        // Every selected root was read here, so a count is an observation the
+        // navigation is entitled to state.
+        assert!(app.inventory().counts_are_complete());
+        let skills = app.inventory().skill_row_count();
+        let sources = app.sources().len();
+
+        let screen = buffer(&app, 120, 40);
+        let navigation = row_text(&screen, 1);
+
+        // The count says the same thing the Inventory subtitle does: skills,
+        // not every listed entry.
+        assert!(
+            navigation.contains(&format!("▌Inventory {skills} ")),
+            "{navigation}"
+        );
+        assert!(
+            navigation.contains(&format!(" 2 Sources {sources} ")),
+            "{navigation}"
+        );
+
+        // A count carries no surface of its own: it sits inside its entry and
+        // inherits it, so only the accent distinguishes it from the title.
+        let inventory_count = style_following(&screen, 1, "▌Inventory ");
+        assert_eq!(inventory_count.fg, Some(AMBER));
+        assert_eq!(inventory_count.bg, Some(SURFACE_2));
+        let sources_count = style_following(&screen, 1, "2 Sources ");
+        assert_eq!(sources_count.fg, Some(AMBER));
+        assert_eq!(sources_count.bg, Some(SURFACE));
+
+        // Which is what makes the surfaces swap when the other tab is active.
+        app.update(Action::OpenSources);
+        let screen = buffer(&app, 120, 40);
+        let inventory_count = style_following(&screen, 1, "1 Inventory ");
+        assert_eq!(inventory_count.fg, Some(AMBER));
+        assert_eq!(inventory_count.bg, Some(SURFACE));
+        let sources_count = style_following(&screen, 1, "▌Sources ");
+        assert_eq!(sources_count.fg, Some(AMBER));
+        assert_eq!(sources_count.bg, Some(SURFACE_2));
+    }
+
     /// Stray content is listed, but never described as a skill.
     #[test]
     fn a_root_holding_only_stray_files_is_not_described_as_holding_skills() {
