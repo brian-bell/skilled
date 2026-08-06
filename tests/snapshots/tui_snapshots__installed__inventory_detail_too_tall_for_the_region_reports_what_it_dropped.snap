@@ -1,6 +1,5 @@
 ---
 source: tests/tui_snapshots.rs
-assertion_line: 958
 expression: screen
 ---
  ◆ skilled   global                               ● ready · 1 source registered

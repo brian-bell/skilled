@@ -124,7 +124,7 @@ pub enum Action {
     MoveInventoryPane(i8),
     AdvanceInventoryPane,
     MoveInventorySelection(i8),
-    /// Move the Inventory detail region's window by rows.
+    /// Move the Inventory detail region's window by lines.
     ///
     /// Named apart from `MoveInventorySelection` because it moves a viewport
     /// rather than a selection: the same keys do both, in different regions,
@@ -324,7 +324,12 @@ pub struct SkilledApp {
     focused_installation: usize,
     inventory_filter: String,
     inventory_filter_active: bool,
-    /// Rows of the detail region's content scrolled past the top of its body.
+    /// Lines of the detail region's content scrolled past the top of its body.
+    ///
+    /// Lines, not rows: the region states observed fields, and a window that
+    /// opened or closed inside a wrapped one would show a path without its
+    /// label or a label without its path. What the region *reports* is still
+    /// counted in rows, which is what a reader loses.
     inventory_detail_scroll: usize,
     /// The furthest offset the last drawn frame found useful, and the only
     /// bound the reducer has: `update` never learns the terminal's size, so
@@ -485,7 +490,7 @@ impl SkilledApp {
         &self.inventory_filter
     }
 
-    /// How far the detail region's window has been scrolled, in rows.
+    /// How far the detail region's window has been scrolled, in lines.
     pub fn inventory_detail_scroll(&self) -> usize {
         self.inventory_detail_scroll
     }

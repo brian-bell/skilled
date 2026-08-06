@@ -860,6 +860,27 @@ mod installed {
             assert_eq!(app.inventory_detail_scroll(), expected);
         }
     }
+    /// A terminal that grew has less left to scroll, so the offset the last
+    /// frame allowed is past the end of what the next one holds. Noting the
+    /// new extent pulls it back, rather than leaving the state describing a
+    /// window no frame would draw.
+    #[test]
+    fn a_smaller_extent_pulls_the_window_back_with_it() {
+        let temporary = tempfile::tempdir().expect("temporary application directory");
+        let mut app = inventory_app(&temporary);
+        app.update(Action::AdvanceInventoryPane);
+        app.note_inventory_detail_max_scroll(5);
+        for _ in 0..5 {
+            app.update(Action::ScrollInventoryDetail(1));
+        }
+        assert_eq!(app.inventory_detail_scroll(), 5);
+
+        app.note_inventory_detail_max_scroll(2);
+        assert_eq!(app.inventory_detail_scroll(), 2);
+
+        app.note_inventory_detail_max_scroll(0);
+        assert_eq!(app.inventory_detail_scroll(), 0);
+    }
     /// A wide terminal draws the detail region beside a focused table, so the
     /// region being on screen is not the same as the region having the keys.
     #[test]

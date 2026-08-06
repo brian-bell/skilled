@@ -988,7 +988,10 @@ mod installed {
     /// Scroll the detail region the way the runner does: draw, take the
     /// frame's report back to the application, and move by what it measured.
     fn scroll_detail_to_the_end(app: &mut SkilledApp, width: u16, height: u16) {
-        let extent = drawn(app, width, height).1.inventory_detail_max_scroll();
+        let extent = drawn(app, width, height)
+            .1
+            .inventory_detail_max_scroll()
+            .expect("the frame drew the detail region");
         assert!(extent > 0, "the region should have somewhere to scroll");
         app.note_inventory_detail_max_scroll(extent);
         for _ in 0..extent {

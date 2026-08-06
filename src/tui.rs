@@ -35,14 +35,15 @@ pub const MINIMUM_HEIGHT: u16 = 24;
 /// filesystem work.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct RenderFeedback {
-    inventory_detail_max_scroll: usize,
+    inventory_detail_max_scroll: Option<usize>,
 }
 
 impl RenderFeedback {
     /// The furthest the Inventory detail region could be scrolled and still
-    /// show rows that were not already visible; zero when the region is not
-    /// on screen, holds nothing, or holds everything it has.
-    pub fn inventory_detail_max_scroll(self) -> usize {
+    /// show rows that were not already visible: zero where it holds everything
+    /// it has, and `None` where this frame did not draw it at all and so
+    /// measured nothing.
+    pub fn inventory_detail_max_scroll(self) -> Option<usize> {
         self.inventory_detail_max_scroll
     }
 }
@@ -1188,8 +1189,25 @@ fn render_inventory_detail(
         body,
         lines,
         app.inventory_detail_scroll(),
-        app.inventory_pane() == InventoryPane::Details,
+        rows_below_advice(app),
     );
+}
+
+/// What the region can honestly tell a reader about reaching the rows below
+/// its window, from wherever the keyboard currently is.
+///
+/// The filter bar takes every printable key for its query and locks
+/// navigation, so while it is open no keystroke named here would reach
+/// anything — the region is drawn beside the table, but the way back to it is
+/// through `Esc`, not through the keys the notice would otherwise advertise.
+fn rows_below_advice(app: &SkilledApp) -> RowsBelow {
+    if app.inventory_filter_active() {
+        RowsBelow::NotFromHere
+    } else if app.inventory_pane() == InventoryPane::Details {
+        RowsBelow::UnderTheseKeys
+    } else {
+        RowsBelow::BehindTheFocus
+    }
 }
 
 /// Draw a scrollable detail region, accounting for every row it does not show.
@@ -1208,15 +1226,22 @@ fn render_detail_window(
     body: Rect,
     lines: Vec<Line<'static>>,
     offset: usize,
-    focused: bool,
+    advice: RowsBelow,
 ) {
     if body.width == 0 {
         return;
     }
-    let total_rows = detail_lines_height(&lines, body.width);
-    let window = detail_window(total_rows, body.height, offset);
-    let [above, content, below] = Layout::vertical([
+    let rows_per_line: Vec<usize> = lines
+        .iter()
+        .map(|line| wrapped_line_count(line, body.width))
+        .collect();
+    let window = detail_window(&rows_per_line, body.height, offset);
+    // The slack sits between the content and the notice below it: the notice
+    // belongs at the region's edge, where a reader looks for the end, and the
+    // rows a whole line could not fill are the end of what is shown.
+    let [above, content, _slack, below] = Layout::vertical([
         Constraint::Length(u16::from(window.above > 0)),
+        Constraint::Length(u16::try_from(window.shown).unwrap_or(u16::MAX)),
         Constraint::Min(0),
         Constraint::Length(u16::from(window.below > 0)),
     ])
@@ -1235,14 +1260,15 @@ fn render_detail_window(
         content,
     );
     if window.below > 0 {
+        // A region too short to scroll answers to no keystroke, whatever the
+        // caller had in mind for one that can.
+        let advice = if detail_max_scroll(&rows_per_line, body.height) == 0 {
+            RowsBelow::NotFromHere
+        } else {
+            advice
+        };
         frame.render_widget(
-            Paragraph::new(rows_below_notice(
-                window.below,
-                body.width,
-                // Advice only where the keys are live: below a region the user
-                // cannot scroll, the way to see more is a bigger terminal.
-                focused && detail_max_scroll(total_rows, body.height) > 0,
-            )),
+            Paragraph::new(rows_below_notice(window.below, body.width, advice)),
             below,
         );
     }
@@ -1261,16 +1287,32 @@ struct DetailWindow {
 ///
 /// The notices cost a row each, and they are counted before the content rather
 /// than after it: a notice that had to be squeezed in afterwards would either
-/// wrap off the bottom or push away the row it was reporting on.
+/// wrap off the bottom or push away the row it was reporting on. The result
+/// drives the layout as well as the counts, so what the region says it showed
+/// is the height it was given to show it in.
 ///
-/// Everything here is counted in rows rather than lines, because that is what
-/// the reader loses: a hidden line that would have wrapped costs more than one
-/// row of the region. It is also what a window can move by, so a wrapped line
-/// at either edge is shown in part rather than withheld whole.
-fn detail_window(total_rows: usize, height: u16, offset: usize) -> DetailWindow {
+/// The window moves and stops by whole lines, though it counts in rows.
+///
+/// Rows are the honest unit for a count — a hidden line that would have
+/// wrapped costs the reader more than one of them — but they are the wrong
+/// unit to move by here. A window that opened mid-line would show the tail of
+/// a path with its label scrolled off, and one that closed mid-line would show
+/// a `Target:` with nothing after it: this region's whole job is to state what
+/// was observed, and half a field states something that was not. Moving by
+/// lines also keeps every keystroke worth pressing, where snapping only the
+/// bottom edge left steps that consumed a row at the top and revealed none at
+/// the foot.
+///
+/// The price is up to a line's worth of blank rows above the notice, where the
+/// next line does not fit in what is left. A line taller than the whole window
+/// is the exception that has nowhere to stop: it is shown in part, because
+/// withholding it would leave the region blank.
+fn detail_window(rows_per_line: &[usize], height: u16, offset: usize) -> DetailWindow {
     let rows = usize::from(height);
-    let above = offset.min(detail_max_scroll(total_rows, height));
-    let remaining = total_rows - above;
+    let total_rows: usize = rows_per_line.iter().sum();
+    let first = offset.min(detail_max_scroll(rows_per_line, height));
+    let above: usize = rows_per_line.iter().take(first).sum();
+    let remaining = total_rows.saturating_sub(above);
     let reserved = usize::from(above > 0);
     if remaining <= rows.saturating_sub(reserved) {
         return DetailWindow {
@@ -1279,55 +1321,95 @@ fn detail_window(total_rows: usize, height: u16, offset: usize) -> DetailWindow 
             below: 0,
         };
     }
-    let shown = rows.saturating_sub(reserved).saturating_sub(1);
+    let capacity = rows.saturating_sub(reserved).saturating_sub(1);
+    let shown = whole_lines_within(&rows_per_line[first.min(rows_per_line.len())..], capacity)
+        .unwrap_or(capacity);
     DetailWindow {
         above,
         shown,
-        below: remaining - shown,
+        below: remaining.saturating_sub(shown),
     }
 }
 
-/// The furthest offset worth scrolling to: the one that brings the last row
-/// into view, and no further, because a window scrolled past its content shows
-/// emptiness that reads as an absence of content.
+/// The rows of as many whole lines as `capacity` holds, or `None` where the
+/// first of them alone outgrows it.
+fn whole_lines_within(rows_per_line: &[usize], capacity: usize) -> Option<usize> {
+    let mut used = 0;
+    let mut shown = None;
+    for line_rows in rows_per_line {
+        if used + line_rows > capacity {
+            break;
+        }
+        used += line_rows;
+        shown = Some(used);
+    }
+    shown
+}
+
+/// The furthest line the window can open on: the first one from which the rest
+/// of the content fits, and no further, because a window scrolled past its
+/// content shows emptiness that reads as an absence of content.
 ///
 /// A region with fewer than two rows can hold a notice or a row of content but
 /// not both, so it cannot scroll usefully and only reports what it dropped.
-fn detail_max_scroll(total_rows: usize, height: u16) -> usize {
+/// Every subtraction downstream of this one is guarded by that: the returned
+/// offset is never past the last line, whatever the caller asks for.
+fn detail_max_scroll(rows_per_line: &[usize], height: u16) -> usize {
     let rows = usize::from(height);
+    let total_rows: usize = rows_per_line.iter().sum();
     if rows < 2 || total_rows <= rows {
         return 0;
     }
-    // One row goes to the notice for everything scrolled past, so the last
-    // offset shows `rows - 1` rows of content ending on the last of them.
-    total_rows - rows + 1
+    // One row goes to the notice for the lines scrolled past, so the last
+    // window has `rows - 1` in which to finish the content.
+    let capacity = rows - 1;
+    let mut above = 0;
+    for (line, line_rows) in rows_per_line.iter().enumerate() {
+        if total_rows - above <= capacity {
+            return line;
+        }
+        above += line_rows;
+    }
+    // A last line taller than the window itself can be opened on but never
+    // finished; stopping anywhere earlier would hide it as well.
+    rows_per_line.len().saturating_sub(1)
 }
 
-/// How far the Inventory's detail region could be scrolled in this frame.
+/// How far the Inventory's detail region could be scrolled in this frame, or
+/// `None` where this frame did not draw it.
 ///
 /// Measured from the workspace the frame is about to lay out, so a hint or a
-/// help entry gated on it describes the terminal the user is looking at. Zero
-/// wherever the region is not drawn — another view, or a compact viewport
-/// showing the table instead — because a region that is not on screen cannot
-/// be scrolled.
-fn inventory_detail_scroll_extent(app: &SkilledApp, workspace: Rect) -> usize {
+/// help entry gated on it describes the terminal the user is looking at. The
+/// absent case is kept apart from a measured zero for the reason the scanner
+/// keeps "not read" apart from "nothing there": a compact terminal showing the
+/// table has not discovered that the region behind it holds nothing, and
+/// answering zero would throw away an offset the user scrolled to and will
+/// come back to.
+fn inventory_detail_scroll_extent(app: &SkilledApp, workspace: Rect) -> Option<usize> {
     if app.view() != View::Inventory {
-        return 0;
+        return None;
     }
     let (primary, detail) = viewport::workspace_regions(workspace);
     let body = match (detail, app.inventory_pane()) {
         (Some(detail), _) => detail_regions(detail, true).body(),
         (None, InventoryPane::Details) => detail_regions(primary, false).body(),
-        (None, InventoryPane::Skills) => return 0,
-    };
-    let Some(row) = app.selected_installation() else {
-        return 0;
+        (None, InventoryPane::Skills) => return None,
     };
     if body.width == 0 {
-        return 0;
+        return None;
     }
+    // A region with no selection draws an empty state rather than a window,
+    // and an empty state has nothing to scroll — that is a measurement, not an
+    // absence of one.
+    let Some(row) = app.selected_installation() else {
+        return Some(0);
+    };
     let lines = inventory_detail_lines(row, app.home(), body.width);
-    detail_max_scroll(detail_lines_height(&lines, body.width), body.height)
+    let rows_per_line: Vec<usize> = lines
+        .iter()
+        .map(|line| wrapped_line_count(line, body.width))
+        .collect();
+    Some(detail_max_scroll(&rows_per_line, body.height))
 }
 
 /// The line a detail region spends on what it could not show.
@@ -1356,19 +1438,37 @@ fn dropped_rows_notice(hidden: usize, width: u16) -> Line<'static> {
     )
 }
 
+/// How the rows below a detail region's window can be reached.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RowsBelow {
+    /// The region has the keyboard: the movement keys move its window.
+    UnderTheseKeys,
+    /// The region is drawn beside a focused one, so the window is a region
+    /// focus away from moving.
+    BehindTheFocus,
+    /// Nothing the reader could press from here would reach them: the region
+    /// is too short to scroll, or the keyboard belongs to something — the
+    /// filter's query box — that will not give it up for a movement key.
+    NotFromHere,
+}
+
 /// The line a scrollable region spends on the rows below its window.
 ///
-/// Where the region has the keyboard it names the keys that reach them; where
-/// it does not, it keeps the advice that does apply, because a hint the
-/// focused region would answer to is a promise this one cannot keep.
-fn rows_below_notice(hidden: usize, width: u16, scrollable: bool) -> Line<'static> {
-    if !scrollable {
-        return dropped_rows_notice(hidden, width);
-    }
+/// The advice names what actually reaches them from where the user is
+/// standing, which is not the same sentence in each place: a hint the focused
+/// region would answer to is a promise an unfocused one cannot keep, and
+/// advising a bigger terminal where a keystroke would do sends the user to
+/// resize a window they did not need to touch.
+fn rows_below_notice(hidden: usize, width: u16, reach: RowsBelow) -> Line<'static> {
     let plural = plural(hidden);
+    let advice = match reach {
+        RowsBelow::UnderTheseKeys => "j/k to scroll",
+        RowsBelow::BehindTheFocus => "Tab, then j/k",
+        RowsBelow::NotFromHere => return dropped_rows_notice(hidden, width),
+    };
     hidden_rows_notice(
         [
-            format!("{hidden} more line{plural} below — j/k to scroll"),
+            format!("{hidden} more line{plural} below — {advice}"),
             format!("{hidden} more line{plural} below"),
             format!("+{hidden}"),
         ],
@@ -1394,7 +1494,7 @@ fn plural(count: usize) -> &'static str {
 }
 
 /// Set a hidden-row count on one line, in the longest form that fits.
-fn hidden_rows_notice<const FORMS: usize>(forms: [String; FORMS], width: u16) -> Line<'static> {
+fn hidden_rows_notice(forms: impl IntoIterator<Item = String>, width: u16) -> Line<'static> {
     forms
         .into_iter()
         .map(|label| Line::from(components::badge(Tone::Warning, &label)))
@@ -3306,7 +3406,7 @@ fn render_help(
     area: Rect,
     context: View,
     app: &SkilledApp,
-    inventory_detail_extent: usize,
+    inventory_detail_extent: Option<usize>,
 ) {
     let viewport = viewport::classify(area);
     let (width, height) = match viewport {
@@ -3408,7 +3508,7 @@ struct HelpCommand {
 fn help_commands(
     context: View,
     app: &SkilledApp,
-    inventory_detail_extent: usize,
+    inventory_detail_extent: Option<usize>,
 ) -> Vec<HelpCommand> {
     match context {
         View::Setup(step) => {
@@ -3615,7 +3715,7 @@ fn render_footer(
     frame: &mut Frame<'_>,
     area: Rect,
     app: &SkilledApp,
-    inventory_detail_extent: usize,
+    inventory_detail_extent: Option<usize>,
 ) {
     // The band reaches the full width, so the row reads as chrome rather than
     // as a smear the length of the hints. The hint line itself only sets
@@ -3637,7 +3737,7 @@ fn render_footer(
 /// a promise the application cannot keep, so unimplemented commands —
 /// installation, updates, repair, uninstall, and forget — are absent by
 /// construction.
-fn key_hints(app: &SkilledApp, inventory_detail_extent: usize) -> Vec<KeyHint> {
+fn key_hints(app: &SkilledApp, inventory_detail_extent: Option<usize>) -> Vec<KeyHint> {
     if app.help_context().is_some() {
         return vec![
             KeyHint::essential("Esc", "Close"),
@@ -3764,8 +3864,9 @@ fn inventory_can_move_selection(app: &SkilledApp) -> bool {
 /// The extent is the frame's own measurement rather than the last one noted on
 /// the application, so the hint cannot survive a resize that removed the thing
 /// it advertises.
-fn inventory_can_scroll_detail(app: &SkilledApp, inventory_detail_extent: usize) -> bool {
-    app.inventory_pane() == InventoryPane::Details && inventory_detail_extent > 0
+fn inventory_can_scroll_detail(app: &SkilledApp, inventory_detail_extent: Option<usize>) -> bool {
+    app.inventory_pane() == InventoryPane::Details
+        && inventory_detail_extent.is_some_and(|extent| extent > 0)
 }
 
 /// Back unwinds an applied filter, then a drilled-in detail region.
@@ -4174,6 +4275,130 @@ mod tests {
                         "the claim should be stated whole"
                     );
                 }
+            }
+        }
+    }
+
+    /// The window's three numbers are one measurement of one region, so they
+    /// are checked against every shape a handful of lines can take rather than
+    /// against the fixture a screen happens to hold: whatever the geometry,
+    /// the rows scrolled past plus the rows shown plus the rows still below
+    /// are the rows the region holds, and the offset never runs past them.
+    ///
+    /// The degenerate heights are the point of the sweep. They are unreachable
+    /// through the application — the shell refuses to draw below eighty by
+    /// twenty-four — so nothing else in the suite stands between a subtraction
+    /// here and a panic in a user's terminal.
+    #[test]
+    fn every_detail_window_accounts_for_the_rows_it_was_given() {
+        for lines in [
+            vec![],
+            vec![1],
+            vec![1, 1, 1],
+            vec![3],
+            vec![1, 3, 1],
+            vec![2, 2, 2, 2],
+            vec![5, 1],
+            vec![1, 1, 5],
+            vec![1, 1, 1, 1, 1, 1, 1, 1],
+        ] {
+            let total: usize = lines.iter().sum();
+            for height in 0..10u16 {
+                let extent = detail_max_scroll(&lines, height);
+                assert!(
+                    extent < lines.len().max(1),
+                    "a window cannot open past the last line"
+                );
+                let mut end = 0;
+                // Offsets past the extent are asked for on purpose: the reducer
+                // clamps against the previous frame, so a terminal that grew
+                // hands this one an offset it has never measured.
+                for offset in 0..lines.len() + 3 {
+                    let window = detail_window(&lines, height, offset);
+                    assert_eq!(
+                        window.above + window.shown + window.below,
+                        total,
+                        "lines {lines:?} at height {height} and offset {offset} \
+                         lost or invented rows: {window:?}"
+                    );
+                    assert_eq!(
+                        window.above,
+                        lines.iter().take(offset.min(extent)).sum::<usize>(),
+                        "lines {lines:?} at height {height} and offset {offset} \
+                         opened somewhere other than on a line"
+                    );
+                    // A region with no rows at all draws neither content nor
+                    // notice; every other one has room for what it claims.
+                    assert!(
+                        height == 0
+                            || window.shown
+                                + usize::from(window.above > 0)
+                                + usize::from(window.below > 0)
+                                <= usize::from(height),
+                        "lines {lines:?} at height {height} and offset {offset} \
+                         needed more rows than the region has: {window:?}"
+                    );
+                    // Scrolling never takes content back: the foot of the
+                    // window only ever moves down the content.
+                    assert!(
+                        window.above + window.shown >= end,
+                        "lines {lines:?} at height {height} and offset {offset} \
+                         gave back rows it had already shown: {window:?}"
+                    );
+                    end = window.above + window.shown;
+                }
+            }
+            // Scrolled to the extent, the last row is on screen: an extent
+            // that stops short of the end is not an extent. The exception is
+            // a final line taller than the window, which can be opened on but
+            // never finished.
+            for height in 2..10u16 {
+                let window = detail_window(&lines, height, detail_max_scroll(&lines, height));
+                assert!(
+                    window.below == 0
+                        || lines
+                            .last()
+                            .is_some_and(|last| *last > usize::from(height) - 1),
+                    "lines {lines:?} at height {height} could not reach the end: {window:?}"
+                );
+            }
+        }
+    }
+
+    /// A field wrapped onto a second row is withheld rather than shown headless
+    /// or headed by nothing — except where the line is taller than the window
+    /// itself, which has no boundary to stop on and would otherwise leave the
+    /// region blank.
+    #[test]
+    fn the_window_stops_on_a_line_boundary_unless_one_line_outgrows_it() {
+        // Five rows: one for the notice below, four for content, and the
+        // three-row line fits inside them.
+        assert_eq!(detail_window(&[1, 3, 1, 1], 5, 0).shown, 4);
+        // One row short, so the three-row line is withheld whole rather than
+        // shown as its first two rows.
+        assert_eq!(detail_window(&[1, 3, 1, 1], 4, 0).shown, 1);
+        // Nothing fits whole, so the region shows what it can rather than
+        // nothing at all.
+        assert_eq!(detail_window(&[5, 1], 4, 0).shown, 3);
+    }
+
+    /// The window opens on a line, so every keystroke moves it: the reader is
+    /// never asked to press a key twice for one step. The rows it gives up at
+    /// the top are the whole of the line it left behind.
+    #[test]
+    fn every_step_of_the_window_leaves_a_whole_line_behind() {
+        let lines = [1, 3, 1, 1, 2, 1, 3, 1];
+        for height in 2..10u16 {
+            let extent = detail_max_scroll(&lines, height);
+            let mut above = 0;
+            for offset in 1..=extent {
+                let window = detail_window(&lines, height, offset);
+                assert!(
+                    window.above > above,
+                    "at height {height} the window did not move for offset {offset}"
+                );
+                assert_eq!(window.above, above + lines[offset - 1]);
+                above = window.above;
             }
         }
     }
