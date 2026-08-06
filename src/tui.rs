@@ -1404,9 +1404,11 @@ const MAX_VARIANT_WIDTH: usize = MAX_SKILL_WIDTH;
 /// widening the terminal past the threshold takes the columns out of slack —
 /// which the group label's band and a selected row's band still cross — and
 /// never out of a catalog path or a variant name that was readable a column
-/// earlier. That slack is not empty: [`group_label`] sets its qualifiers
-/// against the pane's right edge, so the columns past the cap are what a wide
-/// single-pane terminal spends on saying more about the catalog.
+/// earlier. Beside the detail region that slack stays empty, for the same
+/// reason: [`group_label`] sets its qualifiers against the pane's right edge
+/// only in the compact viewport, where widening always widens the pane —
+/// up to the relayout at [`viewport::WIDE_MINIMUM_WIDTH`], which no pane
+/// content survives whole in any case.
 const VARIANTS_CONTENT_MAX_WIDTH: usize = 65;
 
 fn render_sources(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
@@ -1745,7 +1747,7 @@ fn variant_row(candidate: &SkillCandidate, selected: bool, width: u16) -> Line<'
 
 /// The line naming the catalog a run of variants belongs to (prototype
 /// `.catalog-title`): where it is, and as much of how it is classified and
-/// which agents it is registered for as the pane has room for.
+/// which agents it is registered for as the label has room for.
 fn catalog_group_label(
     catalog: &CatalogProposal,
     width: u16,
@@ -1765,7 +1767,9 @@ fn catalog_group_label(
 /// Set against the right edge, the qualifiers need enough space that they read
 /// as a separate statement about the catalog and not as the tail of its path —
 /// which is exactly what a single space, the gap inside `Common · all agents`,
-/// would make them.
+/// would make them. Two is also where the prototype's `.catalog-title` lands:
+/// its `gap: 12px` is a cell and a half at the eight pixels a cell the other
+/// bounds here are read at, and half a column is not spendable.
 const GROUP_LABEL_QUALIFIER_GAP: usize = 2;
 
 /// A group label: the path at the left, and whichever qualifiers the pane can
@@ -1780,18 +1784,22 @@ const GROUP_LABEL_QUALIFIER_GAP: usize = 2;
 /// claim of every agent or of one named agent is the more specific fact and
 /// the one a reader scanning for their own agent is looking for.
 ///
-/// Chosen this way, widening the terminal can only ever add: the path shown is
-/// `min(path, cap, width)`, which never shrinks, and each column past it is a
-/// column the qualifiers may spend. That is the same promise
+/// Chosen this way, widening the pane can only ever add: the path shown is
+/// `min(path, cap, width)`, which never shrinks, and every column past it is a
+/// column the label may spend — on the qualifiers where they may have it, and
+/// otherwise on the blank its band crosses. That is the same promise
 /// [`viewport::DETAIL_REGION_WIDE_THRESHOLD`] makes for the inventory table's
 /// columns — a name readable at one width must not be ellipsized at the next
-/// one up.
+/// one up. The promise is the pane's, not the terminal's: widening the
+/// terminal from 99 columns to 100 relays the whole workspace, taking the
+/// variants pane from the full width to a third of it, and no piece of pane
+/// content survives that crossing whole.
 ///
 /// A shed qualifier leaves no mark, where a shortened path leaves an ellipsis.
 /// That is deliberate: the qualifiers are a description of the catalog, and
-/// the same two facts are given in full in the detail region under CATALOG, so
-/// a narrow pane is not the reader's only account of them. Nothing on the line
-/// claims they were stated.
+/// both facts are given in full in the detail region under CATALOG for the
+/// catalog the selection rests in, so a narrow pane is not the reader's only
+/// account of them. Nothing on the line claims they were stated.
 ///
 /// This follows the prototype's `.catalog-title`, which sets path and
 /// qualifiers `space-between`. The objection recorded when they were first set
@@ -1802,12 +1810,12 @@ const GROUP_LABEL_QUALIFIER_GAP: usize = 2;
 ///
 /// What splitting them buys is the shedding the cap would otherwise force on a
 /// pane far wider than the cap. That is only the compact viewport, where the
-/// variants pane is the whole workspace and no detail region is on screen to
-/// restate what was shed, so `beside_details` is where the qualifiers stop:
-/// beside the detail region they end at the content cap like everything else
-/// in the pane. Spending that slack there would cost more than it gave — the
-/// pane is 75 columns at 150 and 65 at 151, so a qualifier held only by the
-/// slack would vanish as the terminal widened past the crossing
+/// variants pane is the whole workspace and no detail region is on screen at
+/// all, so `beside_details` is where the qualifiers stop: beside the detail
+/// region they end at the content cap like everything else in the pane.
+/// Spending that slack there would cost more than it gave — the variants pane
+/// is 74 columns at a terminal of 150 and 65 at 151, so a qualifier held only
+/// by the slack would vanish as the terminal widened past the very crossing
 /// [`viewport::DETAIL_REGION_WIDE_THRESHOLD`] and the cap exist to survive.
 fn group_label(
     path: &str,
@@ -1820,7 +1828,7 @@ fn group_label(
     // The path is bounded to the pane's content cap; the qualifiers are what
     // the slack past it is spent on, and only where that slack is stable.
     let content = width.min(VARIANTS_CONTENT_MAX_WIDTH);
-    let path = terminal_safe_bounded_middle(&terminal_safe(path), content);
+    let path = terminal_safe_bounded_middle(path, content);
     let path_width = Span::raw(&path).width();
     let qualifiers_end = if beside_details { content } else { width };
     let qualifiers = [format!("{classification} · {claim}"), claim.to_owned()]
@@ -3633,6 +3641,9 @@ mod tests {
     fn a_group_labels_qualifiers_are_set_flush_against_the_end_of_the_label() {
         const GAP: usize = 2;
 
+        assert_eq!(GROUP_LABEL_QUALIFIER_GAP, GAP);
+        let mut tightest = usize::MAX;
+
         for width in 0..=120_u16 {
             for beside_details in [false, true] {
                 for (path, classification, claim) in [
@@ -3670,9 +3681,13 @@ mod tests {
                     );
                     let gap = end - Span::raw(named).width() - Span::raw(qualifiers).width();
                     assert!(gap >= GAP, "{width} columns: gap of {gap}: {text:?}");
+                    // The tightest fit is exactly the gap the label promises,
+                    // so the promised gap is pinned and not merely a bound.
+                    tightest = tightest.min(gap);
                 }
             }
         }
+        assert_eq!(tightest, GAP, "no width fitted the qualifiers exactly");
     }
 
     /// A grouped list of the given shape. `wrapping` gives every row more text

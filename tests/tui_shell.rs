@@ -1984,7 +1984,6 @@ fn variants_are_grouped_under_a_label_naming_their_catalog() {
             gap.len() >= 2 && gap.bytes().all(|byte| byte == b' '),
             "{label:?}"
         );
-        row
     };
     labelled("skills", "Common · all agents");
     labelled(
@@ -2008,9 +2007,11 @@ fn variants_are_grouped_under_a_label_naming_their_catalog() {
     // qualifiers, classification first: the path is which catalog, and the
     // rows beneath the label no longer carry that themselves. Which of the
     // qualifiers survives at a given width is the unit tests' subject; that
-    // widening only ever adds is the promise being kept here.
+    // widening the pane only ever adds is the promise being kept here.
+    //
     // Read only as far as the rule after the variants pane: the detail region
-    // beside it states the same two facts in full.
+    // beside it states both facts for the catalog the selection rests in, and
+    // would otherwise answer for the label.
     let label = |width: u16| {
         let screen = buffer(&app, width, 40);
         let row = row_text(
@@ -2026,6 +2027,22 @@ fn variants_are_grouped_under_a_label_naming_their_catalog() {
     assert!(!wider.contains("Agent-specific"), "{wider:?}");
     // Set away from the path, not appended to it.
     assert!(wider.contains("skills  "), "{wider:?}");
+
+    // The promise is the pane's, not the terminal's. Widening from 99 to 100
+    // relays the workspace — the variants pane goes from the whole terminal to
+    // a third of it, and gives up the detail region's columns rather than the
+    // label's — so the label says more at 99 than at 100. Recorded so that
+    // crossing stays a deliberate one.
+    app.update(Action::AdvanceSourcesPane);
+    let compact = buffer(&app, 99, 40);
+    let compact = row_text(
+        &compact,
+        row_containing(&compact, "experimental/claude-code/skills"),
+    );
+    assert!(
+        compact.trim_end().ends_with("Agent-specific · Claude Code"),
+        "{compact:?}"
+    );
 }
 
 /// A variant row is bounded to its pane as well as to the name cap. At the
@@ -2285,10 +2302,11 @@ fn every_catalog_of_an_all_empty_source_is_reachable_by_moving_the_selection() {
         .iter()
         .map(|name| format!("{name}/claude-code/skills"))
         .collect();
-    // The common catalog's qualifiers rather than its path, because `skills`
-    // on its own is a substring of every `cNN/claude-code/skills` label and
-    // would be seen on the first frame.
-    labels.push("Common · all agents".to_owned());
+    // Anchored to the start of a row, because `skills` on its own is a
+    // substring of every `cNN/claude-code/skills` label and would be seen on
+    // the first frame. Anchoring on the qualifiers instead would make this
+    // test report an unreachable catalog if they were ever shed here.
+    labels.push("\nskills".to_owned());
     let catalog_count = labels.len();
 
     // Twelve catalogs need twenty-four rows, so the first render cannot hold
