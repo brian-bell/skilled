@@ -222,7 +222,13 @@ less the pane, the rule, and the gutter — and bounds its content to that rathe
 than to its own width, so widening past the threshold takes columns out of
 slack and never out of a catalog path or a variant name that was readable a
 column earlier. A variant name stops earning width at the same cap a skill name
-does in the inventory table, and the detail region still gives it in full.
+does in the inventory table, and the detail region states it on a line of its
+own — which is not the same as stating it in full. That line is bounded to one
+as well, and in the narrow aside tier it has fewer cells for the directory and
+the declared name together than the cap alone allows a pane row, so a long name
+is elided there too. What the region adds is not width but the second fact: the
+name the skill declares beside the directory it lives in, which a pane row has
+no room to name at all.
 
 A repository entry is the prototype's three-line `.source-row`: what the source
 is called, the checkout it names, and the state it was last seen in beside
@@ -241,26 +247,73 @@ Every rendered row is a focus position — each candidate, and each catalog's
 state row — so the selection can rest on an error or an empty catalog as well
 as on a variant, the window follows it, and a source with more rows than the
 pane holds keeps every one reachable whatever mixture it is; the Details
-CATALOG section follows whichever row the band is on. The
-label gives the catalog's path first and then whichever qualifiers — its
-classification, and which agents it is registered for — the pane can hold
-whole, shedding the classification first because a claim of every agent or of
-one named agent is the more specific fact. Chosen that way the label can only
-ever say more as the pane widens, which is the promise
-`DETAIL_REGION_WIDE_THRESHOLD` makes for the table's columns. A shed qualifier
+CATALOG section follows whichever row the band is on. The label gives the
+catalog's path first and then whichever qualifiers — its classification, and
+which agents it is registered for — the pane can hold whole, shedding the
+classification first because a claim of every agent or of one named agent is
+the more specific fact. Chosen that way the label can only ever say more as the
+pane widens, which is the promise `DETAIL_REGION_WIDE_THRESHOLD` makes for the
+table's columns. A shed qualifier
 leaves no mark where a shortened path leaves an ellipsis, and nothing on the
-line claims the qualifiers were stated; the detail region gives both facts in
-full under CATALOG. Two departures from the prototype's `.catalog-title`: its
-path and qualifiers are set `space-between`, hard to either edge, and here they
-are adjacent, because the pane's slack is what a selected row's band crosses
-and a label split across it would read as two columns the rows beneath do not
-have. And its band is a surface rather than a cue — barely above the terminal
+line claims the qualifiers were stated; the detail region states both under
+CATALOG, where the classification and the claim stand whole and only the path
+can be elided. Two departures from the prototype's `.catalog-title`: its path
+and qualifiers are set `space-between`, hard to either edge, and here they are
+adjacent, because the pane's slack is what a selected row's band crosses and a
+label split across it would read as two columns the rows beneath do not have.
+And its band is a surface rather than a cue — barely above the terminal
 background, as `#0b1016` is against `#0b0f14` in the prototype — so what
 separates a label from its rows is that the label is muted and starts flush
 where the rows are indented past their marker column. A window scrolled deep
 into a long group pins that group's label to its own first row, because rows
 read without it name a variant without naming the catalog it came from, which
 is the question the per-row path used to answer.
+
+The Sources detail region records departures of its own on top of the anatomy
+it shares with Inventory's. Under REPOSITORY, HEAD is the seven-character
+abbreviation `RegisteredSource::short_head()` at every width — the form the
+prototype prints — because forty characters outrun the narrow aside tier's
+line, and a value wrapped below its label can be cut away from it by the row
+budget, which is what left `HEAD:` standing alone with nothing after it between
+100 and 150 columns. The scan time is a civil date, `YYYY-MM-DD HH:MM UTC` from
+`format_scan_timestamp`; the stored value is seconds since the epoch, which
+says nothing to a reader. The civil arithmetic is Hinnant's `civil_from_days`
+written out here rather than taken from a date crate, because one field is not
+worth a production dependency, and UTC is named in the text because nothing
+converts the value to the reader's zone. That the field is stated at all is the
+departure: the prototype's `Last fetched: never in this session` stands for a
+fetch this release does not perform, while the last scan is something Skilled
+actually knows. Status and that time share a row only while both stand on it
+whole and take a line each otherwise, which in this release means the compact
+drill-in shares the row and neither aside tier does; wrapping instead put the
+whole timestamp on the row below at the narrow tier and `UTC` alone at the wide
+one, a time naming no zone under a label naming no value.
+
+Repository Path, Remote, and the catalog path under CATALOG — values with
+nowhere to wrap — are one line middle-truncated through
+`detail_field_middle`: wrapped, such a value breaks mid-word, reads as two
+values, and can lose its continuation to the row budget, where an elision in
+the middle keeps the root the path starts from and the directory it ends at.
+That is the elision a repository entry's path line already takes in the
+Repositories pane, rather than the trailing one the inventory table's cells
+take. The VARIANT path keeps the trailing elision of its one-line bound: what
+a trailing cut loses there is the directory name the Directory field one row
+above has just stated, where the middle of the path is restated by no
+neighbouring field. The classification shares the catalog path's line while both stand whole
+and otherwise falls, whole, to a `Classification:` row of its own — a field the
+prototype does not have. That is where the region parts company with the
+variants group label: a pane row has one line and sheds the qualifier it cannot
+fit, while the region has another line to spend, so the fact moves rather than
+being dropped and the path is never crowded down to an elision short enough to
+pass for a path of its own. Compatibility is the claims phrase the group label
+uses — `all agents`, `Claude Code`, `Claude Code + Codex`, `no agents` — and
+not the per-agent yes/no list it replaced, so the pane and the region beside it
+name a catalog's claim in one vocabulary; a unit test holds every combination
+of the three agents inside the narrowest region's line, because a claim cut
+short names a different claim. The setup catalog-confirmation dialog keeps the
+exhaustive yes/no form deliberately: that surface is where per-agent
+registration is confirmed and edited, so an unclaimed agent has to be visible
+there to be toggled.
 
 ## Quick Reference
 

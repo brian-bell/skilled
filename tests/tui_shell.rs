@@ -2671,17 +2671,30 @@ fn sources_details_keep_every_path_on_its_own_line() {
     // the narrower of the two and the one a long path crowds first.
     for (width, height) in [(80, 24), (120, 40), (160, 48)] {
         let region = detail_region_lines(&text(&buffer(&app, width, height)));
-        let field = |label: &str| {
-            let index = region
+        // Anchored on the section a field belongs to: REPOSITORY, CATALOG and
+        // VARIANT each state a `Path`, and which one is meant should not rest
+        // on the order the sections happen to be rendered in.
+        let field = |section: &str, label: &str| {
+            let start = region
+                .iter()
+                .position(|line| line == section)
+                .unwrap_or_else(|| panic!("{section:?} missing at {width} columns\n{region:#?}"));
+            let index = region[start..]
                 .iter()
                 .position(|line| line.starts_with(label))
-                .unwrap_or_else(|| panic!("{label:?} missing at {width} columns\n{region:#?}"));
-            (region[index].clone(), region[index + 1].clone())
+                .map(|offset| start + offset)
+                .unwrap_or_else(|| {
+                    panic!("{label:?} missing under {section} at {width} columns\n{region:#?}")
+                });
+            let next = region.get(index + 1).cloned().unwrap_or_else(|| {
+                panic!("{label:?} ends the region at {width} columns\n{region:#?}")
+            });
+            (region[index].clone(), next)
         };
 
         // Each path field is followed by the next field, so none of them spill
         // a second line of path into the region.
-        let (path, next) = field("Path: ");
+        let (path, next) = field("REPOSITORY", "Path: ");
         assert!(path.contains("..."), "{path:?} at {width} columns");
         assert!(
             path.ends_with("directory"),
@@ -2689,7 +2702,7 @@ fn sources_details_keep_every_path_on_its_own_line() {
         );
         assert!(next.starts_with("HEAD: "), "{next:?} at {width} columns");
 
-        let (remote, next) = field("Remote: ");
+        let (remote, next) = field("REPOSITORY", "Remote: ");
         assert!(remote.contains("..."), "{remote:?} at {width} columns");
         assert!(
             remote.ends_with("source.git"),
@@ -2700,7 +2713,7 @@ fn sources_details_keep_every_path_on_its_own_line() {
         // The catalog path is one line the same way, and the classification it
         // is stated with stays whole whether it shares that line or takes its
         // own — it is never cut, and never crowds the path into an elision.
-        let (catalog_path, next) = field("Path: deeply");
+        let (catalog_path, next) = field("CATALOG", "Path: ");
         let shown = catalog_path
             .strip_prefix("Path: ")
             .and_then(|value| value.split(" · ").next())
@@ -2772,13 +2785,24 @@ fn sources_details_name_the_agents_a_catalog_claims_in_the_group_label_words() {
     // The agent-specific catalog claims the one agent its path names.
     assert_eq!(claim(&app), "Compatibility: Claude Code");
 
-    // Moving into the common catalog changes the claim with the selection.
+    // Moving into the common catalog changes the claim with the selection. The
+    // walk is asserted to have arrived: a claim read off a selection that never
+    // moved would be the first catalog's answer to a question about the second.
+    let common_catalog_selected =
+        |app: &SkilledApp| text(&buffer(app, 120, 40)).contains("Classification: Common");
+    let mut selected = common_catalog_selected(&app);
     for _ in 0..4 {
-        if text(&buffer(&app, 120, 40)).contains("Path: skills · Classification: Common") {
+        if selected {
             break;
         }
         app.update(Action::MoveSourcesSelection(1));
+        selected = common_catalog_selected(&app);
     }
+    assert!(
+        selected,
+        "the selection should reach the common catalog\n{}",
+        text(&buffer(&app, 120, 40))
+    );
     assert_eq!(claim(&app), "Compatibility: all agents");
 }
 
@@ -2817,6 +2841,14 @@ fn sources_details_state_the_revision_in_the_abbreviated_form_at_every_width() {
 /// The stored scan time is seconds since the epoch. Rendered as those digits
 /// it tells the reader nothing, so the pane states the civil date it stands
 /// for and names the zone it is in.
+///
+/// The zone has to reach the reader on the label's own line at every width.
+/// A timestamp wrapped away from `Last scan:` leaves the label saying nothing,
+/// which is the bug the abbreviated revision fixed; one wrapped after its last
+/// space is worse than that, because `2026-08-05 04:14` reads as a complete
+/// time and the row that would have said which zone it is in is somewhere
+/// else. Both detail-region width tiers are swept, either side of
+/// `DETAIL_REGION_WIDE_THRESHOLD`.
 #[test]
 fn sources_details_state_the_last_scan_as_a_date_rather_than_an_epoch() {
     let harness = Harness::new();
@@ -2830,20 +2862,42 @@ fn sources_details_state_the_last_scan_as_a_date_rather_than_an_epoch() {
     app.update(Action::AdvanceSourcesPane);
     app.update(Action::AdvanceSourcesPane);
 
-    let rendered = text(&buffer(&app, 80, 24));
+    let mut scanned = String::new();
+    for width in [80, 100, 120, 150, 151, 160, 200] {
+        let rendered = text(&buffer(&app, width, 40));
+        assert!(
+            !rendered.contains(&stored.to_string()),
+            "the raw epoch should not be shown at {width} columns\n{rendered}"
+        );
+        // Read from the label's own row and no further, so a timestamp that
+        // wrapped onto the row below is a missing one.
+        scanned = rendered
+            .lines()
+            .find_map(|line| line.split_once("Last scan: "))
+            .map(|(_, rest)| rest.trim_end().to_owned())
+            .unwrap_or_else(|| String::from("<no last scan line>"));
+        assert!(
+            is_utc_minute_timestamp(&scanned),
+            "{scanned:?} should read as a whole UTC timestamp at {width} columns\n{rendered}"
+        );
+        // The drill-in states the scan time beside the status, since the row it
+        // would otherwise spend is one the sections below it need; the aside is
+        // too narrow for both, so there the scan time takes its own row. The
+        // shared line is 49 cells at its shortest — `Status: `, the briefest
+        // badge, ` · `, `Last scan: `, and the twenty of the timestamp — which
+        // the drill-in has and neither aside tier does at 37 or 47. So 100 here
+        // is the width the aside first appears at and not a width of its own:
+        // the region asks whether the line fits, never how wide the terminal is.
+        let shared = rendered
+            .lines()
+            .any(|line| line.contains("Status: ") && line.contains("Last scan: "));
+        assert_eq!(
+            shared,
+            width < 100,
+            "the scan time shares the status row only where both fit at {width} columns\n{rendered}"
+        );
+    }
 
-    assert!(
-        !rendered.contains(&stored.to_string()),
-        "the raw epoch should not be shown\n{rendered}"
-    );
-    let scanned = rendered
-        .split_once("Last scan: ")
-        .map(|(_, rest)| rest.chars().take("2026-08-05 04:14 UTC".len()).collect())
-        .unwrap_or_else(|| String::from("<no last scan line>"));
-    assert!(
-        is_utc_minute_timestamp(&scanned),
-        "{scanned:?} should read as a UTC timestamp\n{rendered}"
-    );
     // The formatter's own cases are unit-tested; here the point is that the
     // moment shown is the one that was stored. Read back independently of the
     // rendering, the date and time must land on the stored second, give or
@@ -2851,7 +2905,7 @@ fn sources_details_state_the_last_scan_as_a_date_rather_than_an_epoch() {
     let elapsed = stored - epoch_seconds_of(&scanned);
     assert!(
         (0..60).contains(&elapsed),
-        "{scanned:?} should stand for the stored scan time\n{rendered}"
+        "{scanned:?} should stand for the stored scan time"
     );
 }
 
@@ -2864,6 +2918,9 @@ fn epoch_seconds_of(timestamp: &str) -> i64 {
             .unwrap_or_else(|_| panic!("{timestamp:?} should be a timestamp"))
     };
     let (year, month, day) = (number(0..4), number(5..7), number(8..10));
+    // Counting forward from 1970 only answers for years at or after it; a
+    // caller handed an earlier one would otherwise be given a confident zero.
+    assert!(year >= 1970, "{timestamp:?} is before the epoch");
     let leap = |year: i64| year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
     let mut days = (1970..year)
         .map(|year| if leap(year) { 366 } else { 365 })
@@ -2901,6 +2958,61 @@ fn is_utc_minute_timestamp(value: &str) -> bool {
                 actual == expected
             }
         })
+}
+
+/// The region says nothing when it runs out of rows: a section cut short reads
+/// as a section that had no more to say. So the densest thing it can be asked
+/// to state — a catalog path long enough to take its classification onto a
+/// second line, and an invalid variant whose validation error wraps onto a
+/// second line of its own — has to reach its last line at the supported
+/// minimum, where the drill-in has the whole screen and no aside to spill into.
+/// Every row spent in the drill-in is measured against that.
+///
+/// The claim is that size and no other. A terminal 24 rows tall but wide enough
+/// for the aside gives this same fixture fewer rows than it needs, and the
+/// region ends mid-sentence without saying so, where the Inventory region would
+/// state what it dropped. That is older than this test and outside the issue it
+/// was written for; it is recorded here so the coverage is not read as wider
+/// than it is.
+#[test]
+fn sources_details_state_their_last_line_at_the_minimum_supported_size() {
+    let harness = Harness::new();
+    let repository = harness.directory.path().join("source");
+    let catalog = repository.join("deeply/nested/experimental/claude-code/skills");
+    fs::create_dir_all(catalog.join("experimental")).expect("create catalog fixture");
+    fs::write(
+        catalog.join("experimental").join("SKILL.md"),
+        "---\nname: experimental\ndescription: Experimental fixture\n---\n# Fixture\n",
+    )
+    .expect("write catalog fixture");
+    fs::create_dir_all(catalog.join("broken")).expect("create invalid variant");
+    fs::write(catalog.join("broken").join("skill.md"), "wrong name\n")
+        .expect("write invalid variant");
+    create_repository(&repository);
+    let mut app = harness.completed_setup();
+    let preview = app.preview_source(&repository).expect("preview source");
+    app.confirm_source(preview).expect("register source");
+    app.update(Action::OpenSources);
+    app.update(Action::AdvanceSourcesPane);
+    app.update(Action::AdvanceSourcesPane);
+
+    let rendered = text(&buffer(&app, 80, 24));
+
+    for expected in [
+        "Classification: Agent-specific",
+        "Compatibility: Claude Code",
+        "Directory: broken · Name: broken",
+        "Status: × invalid",
+        // The last line of the last section: the tail of the wrapped
+        // validation error, and the first thing a region one row short of its
+        // content drops.
+        "SKILL.md",
+    ] {
+        assert!(
+            rendered.contains(expected),
+            "missing {expected:?} in\n{rendered}"
+        );
+    }
 }
 
 #[test]
