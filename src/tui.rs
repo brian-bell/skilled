@@ -1137,18 +1137,7 @@ fn bounded_detail_lines(lines: Vec<Line<'static>>, width: u16, height: u16) -> V
     // Rows hidden, not lines hidden: a dropped line that would have wrapped
     // costs the reader more than one row of content.
     let total_rows = detail_lines_height(&lines, width);
-    let notice = |hidden: usize| {
-        let plural = if hidden == 1 { "" } else { "s" };
-        [
-            format!("{hidden} more line{plural} — widen or lengthen the terminal"),
-            format!("{hidden} more line{plural}"),
-            format!("+{hidden}"),
-        ]
-        .into_iter()
-        .map(|label| Line::from(components::badge(Tone::Warning, &label)))
-        .find(|line| wrapped_line_count(line, width) == 1)
-        .unwrap_or_else(|| Line::from(components::badge(Tone::Warning, "…")))
-    };
+    let notice = |hidden: usize| dropped_rows_notice(hidden, width);
 
     let reserved = wrapped_line_count(&notice(total_rows), width);
     let mut kept = Vec::new();
@@ -1163,6 +1152,26 @@ fn bounded_detail_lines(lines: Vec<Line<'static>>, width: u16, height: u16) -> V
     }
     kept.push(notice(total_rows - used));
     kept
+}
+
+/// The line a detail region spends on what it could not show.
+///
+/// Stated in rows, and always on one of them: the phrase gives up its advice,
+/// then its words, before it would wrap, because the one string whose whole
+/// job is to report that content was cut must not itself be cut. Shared by
+/// both detail regions so a reader who has learnt to look for it on one screen
+/// finds the same sentence on the other.
+fn dropped_rows_notice(hidden: usize, width: u16) -> Line<'static> {
+    let plural = if hidden == 1 { "" } else { "s" };
+    [
+        format!("{hidden} more line{plural} — widen or lengthen the terminal"),
+        format!("{hidden} more line{plural}"),
+        format!("+{hidden}"),
+    ]
+    .into_iter()
+    .map(|label| Line::from(components::badge(Tone::Warning, &label)))
+    .find(|line| wrapped_line_count(line, width) == 1)
+    .unwrap_or_else(|| Line::from(components::badge(Tone::Warning, "…")))
 }
 
 fn inventory_detail_lines(row: &InventoryRow, home: &Path, width: u16) -> Vec<Line<'static>> {
@@ -2169,6 +2178,20 @@ fn render_source_details(
     }
 }
 
+/// Lay the three sections into the region, saying so when they do not fit.
+///
+/// The sections are budgeted against each other — the variant and catalog
+/// essentials are reserved first, and the repository section gives up its
+/// lines before either — but whichever section ends up short, what it drops
+/// falls off the bottom of the region unremarked. So the region reports it,
+/// the way the inventory's does: the last row is spent on a count of the rows
+/// none of the three could show, because a region that ends mid-sentence reads
+/// as though the sentence had ended.
+///
+/// One notice for the region rather than one per section: three apologies
+/// would cost three rows of the content they are apologising for, and the
+/// reader's question is what this screen is not telling them, not which of its
+/// headings the answer sat under.
 fn render_detail_regions(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -2178,6 +2201,24 @@ fn render_detail_regions(
     variant_lines: Vec<Line<'static>>,
     variant_essential_height: usize,
 ) {
+    let section_rows = [&repository_lines, &catalog_lines, &variant_lines]
+        .map(|lines| detail_lines_height(lines, area.width));
+    let total_rows: usize = section_rows.iter().sum();
+    // Measured before the sections are budgeted, because the row the notice
+    // takes is a row they cannot have. Its final wording counts what was
+    // dropped once they have been laid out; this only asks how tall it is.
+    let notice_rows = if total_rows > usize::from(area.height) {
+        wrapped_line_count(&dropped_rows_notice(total_rows, area.width), area.width)
+    } else {
+        0
+    };
+    let [content, notice_area] = Layout::vertical([
+        Constraint::Min(0),
+        Constraint::Length(u16::try_from(notice_rows).unwrap_or(u16::MAX)),
+    ])
+    .areas(area);
+    let area = content;
+
     let available = usize::from(area.height);
     let reserved_variant = variant_essential_height.min(available);
     let reserved_catalog = catalog_essential_height.min(available.saturating_sub(reserved_variant));
@@ -2208,6 +2249,21 @@ fn render_detail_regions(
         Paragraph::new(variant_lines).wrap(Wrap { trim: false }),
         variant_area,
     );
+    if notice_rows > 0 {
+        // What each section actually showed, not what it was allotted: the
+        // last section is handed every row left over, which is more than its
+        // content where an earlier one was the section that overflowed.
+        let shown: usize = section_rows
+            .iter()
+            .zip([repository_height, catalog_height, variant_height])
+            .map(|(rows, height)| (*rows).min(height))
+            .sum();
+        frame.render_widget(
+            Paragraph::new(dropped_rows_notice(total_rows - shown, area.width))
+                .wrap(Wrap { trim: false }),
+            notice_area,
+        );
+    }
 }
 
 fn detail_lines_height(lines: &[Line<'_>], width: u16) -> usize {

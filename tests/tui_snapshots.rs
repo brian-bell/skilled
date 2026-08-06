@@ -470,6 +470,48 @@ fn sources_details_with_a_long_catalog_path_at_wide_and_compact_sizes() {
     );
 }
 
+/// Detail that outgrows the Sources region says how much it left out, the way
+/// the Inventory region does. A region that simply ends mid-sentence reads as
+/// though the description it was stating had ended there.
+#[test]
+fn sources_detail_too_tall_for_the_region_reports_what_it_dropped() {
+    let temporary = tempfile::tempdir_in("/tmp").expect("temporary application directory");
+    let repository = temporary.path().join("source");
+    let variant = repository.join("skills/verbose");
+    fs::create_dir_all(&variant).expect("create catalog fixture");
+    fs::write(
+        variant.join("SKILL.md"),
+        "---\nname: verbose\ndescription: A description long enough to outgrow the detail \
+         region at twenty-four rows, so the region has to say what it could not \
+         show rather than ending in the middle of this sentence.\n---\n# Verbose\n",
+    )
+    .expect("write catalog fixture");
+    git(&repository, &["init", "-b", "main"]);
+    git(&repository, &["config", "user.name", "Skilled Test"]);
+    git(
+        &repository,
+        &["config", "user.email", "skilled@example.test"],
+    );
+    git(&repository, &["add", "."]);
+    git(&repository, &["commit", "-m", "fixture"]);
+    let mut app = SkilledApp::open(AppEnvironment::new(
+        temporary.path().join("home"),
+        temporary.path().join("data"),
+        "",
+    ))
+    .expect("open application");
+    let preview = app.preview_source(&repository).expect("preview source");
+    app.confirm_source(preview).expect("confirm source");
+    for _ in 0..7 {
+        dispatch(&mut app, Action::Continue);
+    }
+    app.update(Action::OpenSources);
+
+    let screen = normalize_sources_screen(&app, &temporary, render(&app, 120, 24));
+    assert!(screen.contains("more line"), "{screen}");
+    insta::assert_snapshot!("sources_detail_too_tall_at_wide_size", screen);
+}
+
 #[test]
 fn sources_escape_control_characters_from_skill_metadata() {
     let temporary = tempfile::tempdir().expect("temporary application directory");

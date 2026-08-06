@@ -2959,6 +2959,45 @@ fn sources_details_name_the_agents_a_catalog_claims_in_the_group_label_words() {
     assert_eq!(claim(&app), "Registered for: all agents");
 }
 
+/// The Sources detail region reports a cut in words and in a tone, the way the
+/// Inventory region does — colour alone is not a signal a terminal can be
+/// relied on to carry, and a description that simply stops reads as a
+/// description that ended.
+#[test]
+fn a_truncated_sources_detail_region_reports_the_cut() {
+    let harness = Harness::new();
+    let repository = harness.directory.path().join("source");
+    let variant = repository.join("skills/verbose");
+    fs::create_dir_all(&variant).expect("create catalog fixture");
+    fs::write(
+        variant.join("SKILL.md"),
+        "---\nname: verbose\ndescription: A description long enough to outgrow the detail \
+         region at twenty-four rows, so the region has to say what it could not show \
+         rather than ending in the middle of this sentence.\n---\n# Verbose\n",
+    )
+    .expect("write catalog fixture");
+    create_repository(&repository);
+    let mut app = harness.completed_setup();
+    let preview = app.preview_source(&repository).expect("preview source");
+    app.confirm_source(preview).expect("register source");
+    app.update(Action::OpenSources);
+
+    let screen = buffer(&app, 120, 24);
+    let notice = row_containing(&screen, "more line");
+    let line = row_text(&screen, notice);
+    assert!(line.contains("! "), "{line}");
+    assert_eq!(
+        style_in_row(&screen, notice, "!").fg,
+        Some(Color::Rgb(0xe6, 0xbd, 0x6a))
+    );
+
+    // A region tall enough for every section says nothing: the notice is a
+    // report of a cut, not a permanent fixture of the screen.
+    let whole = text(&buffer(&app, 120, 40));
+    assert!(!whole.contains("more line"), "{whole}");
+    assert!(whole.contains("this sentence."), "{whole}");
+}
+
 /// The longest claim two agents can make outruns the narrowest detail region's
 /// line by a column, so it wraps onto a second one. This pins that the wrap is
 /// all that happens to it: both agents are still named, in order, and the
