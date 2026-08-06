@@ -9,10 +9,10 @@ expression: "normalize_sources_screen(&app, &temporary, render(&app, 80, 24))"
  REPOSITORY
  ──────────────────────────────────────────────────────────────────────────────
  Label: source · Branch: main
- Path: [TEMP]/source                 
+ Path: [TEMP]/source
  HEAD: [SHORT]
  Remote: https://example.test/source.git
- Status: ✓ clean · Last scan: [SCAN]              
+ Status: ✓ clean · Last scan: [SCAN]
  CATALOG
  ──────────────────────────────────────────────────────────────────────────────
  Path: skills · Classification: Common
