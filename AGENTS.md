@@ -223,7 +223,12 @@ or banded. The path line is muted where the prototype's `.source-path` is
 faint, for the reason the table headings are: it names the checkout the entry
 stands for. Variants are grouped under their catalog, with each catalog's own
 scan failure beneath its own label rather than stacked above the whole list,
-and an empty catalog saying `no variants` rather than showing a bare label. The
+and an empty catalog saying `no variants` rather than showing a bare label.
+Every rendered row is a focus position — each candidate, and each catalog's
+state row — so the selection can rest on an error or an empty catalog as well
+as on a variant, the window follows it, and a source with more rows than the
+pane holds keeps every one reachable whatever mixture it is; the Details
+CATALOG section follows whichever row the band is on. The
 label gives the catalog's path first and then whichever qualifiers — its
 classification, and which agents it is registered for — the pane can hold
 whole, shedding the classification first because a claim of every agent or of

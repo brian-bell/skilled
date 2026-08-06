@@ -1786,6 +1786,282 @@ fn sources_distinguish_clean_and_unavailable_repositories_semantically() {
     );
 }
 
+/// A source with more empty catalogs than the pane has rows keeps every one
+/// of them reachable: the catalog-state rows are the pane's rows when no
+/// candidates exist, so focus moves over them and the window follows, instead
+/// of an unwindowed list clipping the tail with nothing to scroll it by.
+#[test]
+fn every_catalog_of_an_all_empty_source_is_reachable_by_moving_the_selection() {
+    let harness = Harness::new();
+    let repository = harness.directory.path().join("source");
+    fs::create_dir_all(repository.join("skills")).expect("create common catalog");
+    fs::write(repository.join("skills/.keep"), "empty catalog fixture").expect("write keep file");
+    let names: Vec<String> = (1..=11).map(|index| format!("c{index:02}")).collect();
+    for name in &names {
+        let catalog = repository.join(name).join("claude-code/skills");
+        fs::create_dir_all(&catalog).expect("create agent catalog");
+        fs::write(catalog.join(".keep"), "empty catalog fixture").expect("write keep file");
+    }
+    create_repository(&repository);
+    let mut app = harness.completed_setup();
+    let preview = app.preview_source(&repository).expect("preview source");
+    app.confirm_source(preview).expect("register source");
+    app.update(Action::OpenSources);
+    app.update(Action::AdvanceSourcesPane);
+
+    let mut labels: Vec<String> = names
+        .iter()
+        .map(|name| format!("{name}/claude-code/skills"))
+        .collect();
+    // The full label, because `skills · ` on its own is a substring of every
+    // `cNN/claude-code/skills · …` label and would be seen on the first frame.
+    labels.push("skills · Common · all agents".to_owned());
+    let catalog_count = labels.len();
+
+    // Twelve catalogs need twenty-four rows, so the first render cannot hold
+    // them all — otherwise this test would pass without any windowing.
+    let rendered = text(&buffer(&app, 80, 24));
+    assert!(
+        labels
+            .iter()
+            .any(|label| !rendered.contains(label.as_str())),
+        "every catalog label fit on one screen, so nothing is clipped:\n{rendered}"
+    );
+    assert!(rendered.contains("▌ no variants"), "{rendered}");
+    // The rows are movable, so the key-hint bar must say so: reaching the
+    // clipped catalogs is only real if the way there is advertised.
+    assert!(rendered.contains("j/k Move"), "{rendered}");
+
+    // Walking the selection across every catalog brings each label into view.
+    let mut seen: Vec<bool> = vec![false; catalog_count];
+    for _ in 0..catalog_count {
+        let rendered = text(&buffer(&app, 80, 24));
+        assert!(rendered.contains("▌ no variants"), "{rendered}");
+        for (index, label) in labels.iter().enumerate() {
+            seen[index] |= rendered.contains(label.as_str());
+        }
+        app.update(Action::MoveSourcesSelection(1));
+    }
+    for (index, label) in labels.iter().enumerate() {
+        assert!(
+            seen[index],
+            "catalog {label:?} was never scrolled into view"
+        );
+    }
+}
+
+/// One candidate somewhere must not strand the other catalogs: every rendered
+/// row is a focus position — each candidate, and each catalog's state row —
+/// so a source mixing one skill with many empty catalogs can still be walked
+/// to its end.
+#[test]
+fn a_source_with_one_candidate_and_many_empty_catalogs_is_still_walkable() {
+    let harness = Harness::new();
+    let repository = harness.directory.path().join("source");
+    fs::create_dir_all(repository.join("skills/portable")).expect("create candidate");
+    fs::write(
+        repository.join("skills/portable/SKILL.md"),
+        "---\nname: portable\ndescription: Portable fixture\n---\n# Portable\n",
+    )
+    .expect("write candidate");
+    let names: Vec<String> = (1..=11).map(|index| format!("c{index:02}")).collect();
+    for name in &names {
+        let catalog = repository.join(name).join("claude-code/skills");
+        fs::create_dir_all(&catalog).expect("create agent catalog");
+        fs::write(catalog.join(".keep"), "empty catalog fixture").expect("write keep file");
+    }
+    create_repository(&repository);
+    let mut app = harness.completed_setup();
+    let preview = app.preview_source(&repository).expect("preview source");
+    app.confirm_source(preview).expect("register source");
+    app.update(Action::OpenSources);
+    app.update(Action::AdvanceSourcesPane);
+
+    let labels: Vec<String> = names
+        .iter()
+        .map(|name| format!("{name}/claude-code/skills"))
+        .collect();
+    let row_count = labels.len() + 1;
+
+    let rendered = text(&buffer(&app, 80, 24));
+    assert!(
+        labels
+            .iter()
+            .any(|label| !rendered.contains(label.as_str())),
+        "every catalog label fit on one screen, so nothing is clipped:\n{rendered}"
+    );
+
+    let mut seen: Vec<bool> = vec![false; labels.len()];
+    for _ in 0..row_count {
+        let rendered = text(&buffer(&app, 80, 24));
+        for (index, label) in labels.iter().enumerate() {
+            seen[index] |= rendered.contains(label.as_str());
+        }
+        app.update(Action::MoveSourcesSelection(1));
+    }
+    for (index, label) in labels.iter().enumerate() {
+        assert!(
+            seen[index],
+            "catalog {label:?} was never scrolled into view"
+        );
+    }
+}
+
+/// A source that could not be read at all renders no rows, so it counts
+/// none: the `j/k Move` hint must not appear for an unavailable source even
+/// when several catalog roots are registered, because pressing the key would
+/// walk a selection nothing on screen shows.
+#[test]
+fn an_unavailable_source_offers_no_selection_to_move() {
+    let harness = Harness::new();
+    let repository = harness.directory.path().join("source");
+    let moved = harness.directory.path().join("source-moved");
+    create_two_catalog_source_fixture(&repository);
+    let environment = harness.environment();
+    let mut app = harness.completed_setup();
+    let preview = app.preview_source(&repository).expect("preview source");
+    app.confirm_source(preview).expect("register source");
+    drop(app);
+    fs::rename(&repository, &moved).expect("move registered checkout");
+    let mut reopened = SkilledApp::open(environment).expect("reopen application");
+    reopened.update(Action::OpenSources);
+    reopened.update(Action::AdvanceSourcesPane);
+
+    let before = buffer(&reopened, 80, 24);
+    assert!(text(&before).contains("× unavailable"), "{}", text(&before));
+    assert!(
+        !text(&before).contains("j/k Move"),
+        "the hint offers a move the pane cannot show:\n{}",
+        text(&before)
+    );
+
+    reopened.update(Action::MoveSourcesSelection(1));
+    let after = buffer(&reopened, 80, 24);
+    assert_eq!(
+        text(&before),
+        text(&after),
+        "moving the selection changed a pane that renders no rows"
+    );
+}
+
+/// A catalog's error row is a focus position like any other row, so its text
+/// is bounded to the pane the way a variant name is: a wrapped error would
+/// put the marker and the band on one line and the words on the next.
+#[test]
+fn a_selected_catalog_error_row_is_bounded_and_banded_like_any_row() {
+    const SURFACE_3: Color = Color::Rgb(0x17, 0x21, 0x2c);
+
+    let harness = Harness::new();
+    let repository = harness.directory.path().join("source");
+    for (catalog, skill) in [("catalog-a", "portable"), ("catalog-b", "second")] {
+        let directory = repository.join(catalog).join("codex/skills").join(skill);
+        fs::create_dir_all(&directory).expect("create catalog fixture");
+        fs::write(
+            directory.join("SKILL.md"),
+            format!("---\nname: {skill}\ndescription: {skill} fixture\n---\n# Fixture\n"),
+        )
+        .expect("write catalog fixture");
+    }
+    create_repository(&repository);
+    let environment = harness.environment();
+    let mut app = harness.completed_setup();
+    let preview = app.preview_source(&repository).expect("preview source");
+    app.confirm_source(preview).expect("register source");
+    drop(app);
+    let connection =
+        rusqlite::Connection::open(harness.directory.path().join("data/skilled.sqlite3"))
+            .expect("open application database");
+    connection
+        .execute(
+            "UPDATE catalog_roots SET relative_path = '../outside' \
+             WHERE relative_path LIKE 'catalog-b/%'",
+            [],
+        )
+        .expect("corrupt one stored catalog path");
+    drop(connection);
+    let mut reopened = SkilledApp::open(environment).expect("reopen application");
+    reopened.update(Action::OpenSources);
+    reopened.update(Action::AdvanceSourcesPane);
+
+    // The corrupted catalog sorts first, so its error row is the selection.
+    let screen = buffer(&reopened, 100, 40);
+    let selected = row_containing(&screen, "▌ × unavailable");
+    let region = |y: u16| {
+        let line = row_text(&screen, y);
+        let dividers = line
+            .char_indices()
+            .filter(|(_, character)| *character == '│')
+            .map(|(byte_index, _)| byte_index)
+            .collect::<Vec<_>>();
+        line[dividers[0] + '│'.len_utf8()..dividers[1]].to_owned()
+    };
+    // Bounded, with the ellipsis saying there was more; the rest of the
+    // message is given in the detail region.
+    assert!(
+        region(selected).trim_end().ends_with("..."),
+        "{:?}",
+        region(selected)
+    );
+    // The next region row is the healthy catalog's label, not a wrapped
+    // continuation of the error.
+    assert!(
+        region(selected + 1).trim_start().starts_with("catalog-a"),
+        "{:?}",
+        region(selected + 1)
+    );
+    assert_eq!(
+        style_in_row(&screen, selected, "× unavailable").bg,
+        Some(SURFACE_3)
+    );
+}
+
+/// The selection the pane shows carries across the region boundary: a focused
+/// catalog-state row selects its catalog, so the Details CATALOG section
+/// names the catalog the band is on rather than rendering identically for
+/// every position.
+#[test]
+fn focusing_an_empty_catalog_row_selects_that_catalog_in_details() {
+    let harness = Harness::new();
+    let repository = harness.directory.path().join("source");
+    fs::create_dir_all(repository.join("skills/portable")).expect("create candidate");
+    fs::write(
+        repository.join("skills/portable/SKILL.md"),
+        "---\nname: portable\ndescription: Portable fixture\n---\n# Portable\n",
+    )
+    .expect("write candidate");
+    let empty = repository.join("experimental/claude-code/skills");
+    fs::create_dir_all(&empty).expect("create empty catalog");
+    fs::write(empty.join(".keep"), "empty catalog fixture").expect("write keep file");
+    create_repository(&repository);
+    let mut app = harness.completed_setup();
+    let preview = app.preview_source(&repository).expect("preview source");
+    app.confirm_source(preview).expect("register source");
+    app.update(Action::OpenSources);
+    app.update(Action::AdvanceSourcesPane);
+
+    // Walk the selection until the band rests on the empty catalog's state
+    // row — bounded, so a selection that cannot reach it fails rather than
+    // spins — then open Details.
+    for _ in 0..4 {
+        if text(&buffer(&app, 80, 24)).contains("▌ no variants") {
+            break;
+        }
+        app.update(Action::MoveSourcesSelection(1));
+    }
+    assert!(
+        text(&buffer(&app, 80, 24)).contains("▌ no variants"),
+        "the selection never reached the empty catalog's state row"
+    );
+    app.update(Action::AdvanceSourcesPane);
+
+    let details = text(&buffer(&app, 80, 24));
+    assert!(
+        details.contains("Path: experimental/claude-code/skills"),
+        "{details}"
+    );
+    assert!(!details.contains("Directory: portable"), "{details}");
+}
+
 /// The generic empty state is reserved for a source with no catalogs at all.
 /// A catalog that scanned clean but holds nothing is still named, with the
 /// `no variants` line beneath its label: flattening it into the empty state
@@ -1887,6 +2163,9 @@ fn details_keep_failed_catalog_errors_beside_a_healthy_selected_variant() {
     let mut reopened = SkilledApp::open(environment).expect("reopen application");
     reopened.update(Action::OpenSources);
     reopened.update(Action::AdvanceSourcesPane);
+    // The failed catalog sorts first and its error row is a focus position,
+    // so the healthy variant is one move down.
+    reopened.update(Action::MoveSourcesSelection(1));
     reopened.update(Action::AdvanceSourcesPane);
 
     let details = text(&buffer(&reopened, 80, 24));

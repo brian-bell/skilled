@@ -1595,6 +1595,12 @@ fn render_source_variants(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
     // the lines are built rather than computed from the selection, because
     // group labels and error lines sit between the rows and only this loop
     // knows where they fell.
+    // Every rendered row is a focus position — each candidate, and each
+    // catalog's state row (its error, or `no variants`) — so
+    // `move_sources_selection` counts exactly these rows, the window follows
+    // the selection, and a list taller than the pane can be walked whatever
+    // mixture of skills, errors, and empty catalogs it holds. `selected_row`
+    // walks the same order to answer what the selection rests on.
     let mut lines = Vec::new();
     let mut group_labels = Vec::new();
     let mut focused_line = 0;
@@ -1604,11 +1610,27 @@ fn render_source_variants(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
         lines.push(catalog_group_label(catalog, inner.width));
         group_labels.push(label);
         if let Some(error) = catalog.scan_error() {
-            lines.push(Line::from(vec![
-                components::badge(Tone::Critical, "unavailable"),
-                Span::raw(format!(" {}", terminal_safe(error))),
-            ]));
+            let selected = position == app.focused_variant();
+            if selected {
+                focused_line = lines.len();
+            }
+            let badge = components::badge(Tone::Critical, "unavailable");
+            // Bounded to the pane like every other row: a wrapped error would
+            // put the marker and the band on one line and the words on the
+            // next. The detail region gives the message in full.
+            let budget = usize::from(inner.width)
+                .min(VARIANTS_CONTENT_MAX_WIDTH)
+                .saturating_sub(ROW_MARKER_WIDTH + badge.width() + 1);
+            lines.push(components::list_row(
+                vec![
+                    badge,
+                    Span::raw(format!(" {}", terminal_safe_bounded_start(error, budget))),
+                ],
+                selected,
+                inner.width,
+            ));
             group_labels.push(label);
+            position += 1;
         }
         for candidate in catalog.candidates() {
             let selected = position == app.focused_variant();
@@ -1624,28 +1646,39 @@ fn render_source_variants(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
             // though the rows under the first belonged to both, and a label
             // with nothing under it would not say whether the catalog is empty
             // or the list has scrolled.
-            lines.push(Line::from(Span::styled(
-                format!("{}no variants", " ".repeat(ROW_MARKER_WIDTH)),
-                theme::pane_subtitle(),
-            )));
+            let selected = position == app.focused_variant();
+            if selected {
+                focused_line = lines.len();
+            }
+            lines.push(components::list_row(
+                vec![Span::styled(
+                    "no variants".to_owned(),
+                    theme::pane_subtitle(),
+                )],
+                selected,
+                inner.width,
+            ));
             group_labels.push(label);
+            position += 1;
         }
+    }
+    debug_assert_eq!(
+        position,
+        app.variants_row_count(),
+        "the pane renders exactly the rows the selection counts"
+    );
+    if variants.is_empty() && catalog_error_count > 0 {
+        // The hint belongs to catalog errors: an all-empty source that read
+        // cleanly has nothing further for Details to explain. It travels
+        // with the last group and scrolls as the rows do.
+        lines.push(Line::from("Open Details for the catalog error."));
+        group_labels.push(group_labels.last().copied().unwrap_or(0));
     }
     debug_assert_eq!(
         lines.len(),
         group_labels.len(),
         "every line belongs under a label"
     );
-
-    if variants.is_empty() {
-        // The hint belongs to catalog errors: an all-empty source that read
-        // cleanly has nothing further for Details to explain.
-        if catalog_error_count > 0 {
-            lines.push(Line::from("Open Details for the catalog error."));
-        }
-        frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
-        return;
-    }
 
     let visible = visible_grouped_lines(
         &lines,
@@ -1849,18 +1882,21 @@ fn render_source_details(
 
     let mut catalog_lines = Vec::new();
     push_detail_section(&mut catalog_lines, "CATALOG", inner.width);
-    if let Some(variant) = selected {
+    // The catalog of whichever row the selection rests on — a state row names
+    // its catalog as surely as a variant does, so moving the band in the
+    // variants pane always changes what this section says.
+    if let Some(catalog) = selected_catalog(app) {
         catalog_lines.push(detail_field_bounded(
             "Path",
             &format!(
                 "{} · Classification: {}",
-                terminal_safe(&variant.catalog.relative_path().display().to_string()),
-                catalog_classification(variant.catalog)
+                terminal_safe(&catalog.relative_path().display().to_string()),
+                catalog_classification(catalog)
             ),
             inner.width,
             if inner.width >= 60 { 1 } else { 2 },
         ));
-        let compatibility = variant.catalog.compatibility();
+        let compatibility = catalog.compatibility();
         catalog_lines.push(detail_field_bounded(
             "Compatibility",
             &format!(
@@ -1874,7 +1910,7 @@ fn render_source_details(
         ));
     } else {
         catalog_lines.push(Line::from(
-            "No variant selected; catalog metadata is unavailable.",
+            "No catalog selected; catalog metadata is unavailable.",
         ));
     }
     let catalog_essential_height = detail_lines_height(&catalog_lines, inner.width);
@@ -2028,10 +2064,67 @@ fn flattened_variants(source: &RegisteredSource) -> Vec<SourceVariant<'_>> {
         .collect()
 }
 
+/// What the variants-pane selection rests on: a variant, or a catalog's
+/// state row (its error, or `no variants`).
+enum SelectedSourceRow<'a> {
+    Variant(SourceVariant<'a>),
+    CatalogState(&'a CatalogProposal),
+}
+
+/// The row the selection rests on, walked in the pane's render order: for
+/// each catalog its error row, then its candidates, then its `no variants`
+/// row. `render_source_variants` builds exactly these rows and asserts the
+/// count against `variants_row_count`, which counts them the same way.
+fn selected_row(app: &SkilledApp) -> Option<SelectedSourceRow<'_>> {
+    let source = app.selected_source()?;
+    // An unavailable source renders its source error and no rows, so nothing
+    // is selected — mirroring `variants_row_count`, which counts none.
+    if source.source_error().is_some() {
+        return None;
+    }
+    let mut position = 0;
+    for catalog in source.catalogs() {
+        if catalog.scan_error().is_some() {
+            if position == app.focused_variant() {
+                return Some(SelectedSourceRow::CatalogState(catalog));
+            }
+            position += 1;
+        }
+        for candidate in catalog.candidates() {
+            if position == app.focused_variant() {
+                return Some(SelectedSourceRow::Variant(SourceVariant {
+                    catalog,
+                    candidate,
+                }));
+            }
+            position += 1;
+        }
+        if catalog.candidates().is_empty() && catalog.scan_error().is_none() {
+            if position == app.focused_variant() {
+                return Some(SelectedSourceRow::CatalogState(catalog));
+            }
+            position += 1;
+        }
+    }
+    None
+}
+
 fn selected_variant(app: &SkilledApp) -> Option<SourceVariant<'_>> {
-    app.selected_source()
-        .map(flattened_variants)
-        .and_then(|variants| variants.into_iter().nth(app.focused_variant()))
+    match selected_row(app)? {
+        SelectedSourceRow::Variant(variant) => Some(variant),
+        SelectedSourceRow::CatalogState(_) => None,
+    }
+}
+
+/// The catalog the selection rests in, whichever row kind carries it: a
+/// selected state row names its catalog as surely as a selected variant does,
+/// so the Details CATALOG section follows the band across the region
+/// boundary instead of rendering identically for every position.
+fn selected_catalog(app: &SkilledApp) -> Option<&CatalogProposal> {
+    match selected_row(app)? {
+        SelectedSourceRow::Variant(variant) => Some(variant.catalog),
+        SelectedSourceRow::CatalogState(catalog) => Some(catalog),
+    }
 }
 
 fn catalog_classification(catalog: &CatalogProposal) -> &'static str {
@@ -3170,9 +3263,9 @@ fn inventory_can_go_back(app: &SkilledApp) -> bool {
 fn sources_can_move_selection(app: &SkilledApp) -> bool {
     match app.sources_pane() {
         SourcesPane::Repositories => app.sources().len() > 1,
-        SourcesPane::Variants => app
-            .selected_source()
-            .is_some_and(|source| flattened_variants(source).len() > 1),
+        // Rows, not variants: catalog-state rows are focus positions too, and
+        // a hint must appear exactly when the binding does something.
+        SourcesPane::Variants => app.variants_row_count() > 1,
         SourcesPane::Details => false,
     }
 }
