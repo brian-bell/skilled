@@ -17,7 +17,7 @@ expression: "normalize_sources_screen(&app, &temporary, render(&app, 120, 40))"
                                  │                                              │ CATALOG
                                  │                                              │ ─────────────────────────────────────
                                  │                                              │ Path: skills · Classification: Common
-                                 │                                              │ Compatibility: all agents
+                                 │                                              │ Registered for: all agents
                                  │                                              │ VARIANT
                                  │                                              │ ─────────────────────────────────────
                                  │                                              │ Directory: broken · Name: broken

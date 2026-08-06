@@ -1745,7 +1745,7 @@ fn catalog_group_label(
     group_label(
         &catalog.relative_path().display().to_string(),
         catalog_classification(catalog),
-        &compatibility_claim(catalog.compatibility()),
+        &registration_claim(catalog.compatibility()),
         width,
         beside_details,
     )
@@ -1850,6 +1850,29 @@ fn group_label(
     )
 }
 
+/// What the detail region calls the set of agents a catalog is registered for.
+///
+/// A departure from the prototype, which labels this field `Compatibility`.
+/// Nothing here is a compatibility statement: the value is the registration
+/// Skilled proposed and the user confirmed, and no skill was inspected for
+/// what it can run under and no agent was asked. `Compatibility: Claude Code`
+/// would read as a finding about the catalog; `Registered for: Claude Code`
+/// says who it was filed under, which is the fact that exists. The variants
+/// group label carries the bare phrase with no label word, so it is unaffected
+/// either way.
+const REGISTRATION_LABEL: &str = "Registered for";
+
+/// How many lines the registration claim may occupy in the detail region.
+///
+/// Two, not one. The label is a column longer than the prototype's, and the
+/// longest claim — two agents named in full — then outruns the narrowest
+/// region's line by exactly that column. Given one line it would be elided,
+/// and an elided claim names agents that were never registered, which is the
+/// one thing this field must not do. So it wraps: the claim stands whole and
+/// spends a second row only in the narrowest region and only where a shorter
+/// claim would not have needed it.
+const REGISTRATION_CLAIM_LINES: usize = 2;
+
 /// Which agents a catalog is registered for, for the variants group label and
 /// the detail region's CATALOG section alike.
 ///
@@ -1859,7 +1882,7 @@ fn group_label(
 /// registered for none says so rather than rendering an empty phrase, and one
 /// registered for some names those and stops: the agents left out are the ones
 /// not claimed, which is what the setup dialog's exhaustive yes/no list is for.
-fn compatibility_claim(compatibility: Compatibility) -> String {
+fn registration_claim(compatibility: Compatibility) -> String {
     if compatibility.all_supported() {
         return "all agents".to_owned();
     }
@@ -2043,10 +2066,10 @@ fn render_source_details(
         // The same phrase the variants group label uses, so the region and the
         // pane beside it name a catalog's claim in one vocabulary.
         catalog_lines.push(detail_field_bounded(
-            "Compatibility",
-            &compatibility_claim(catalog.compatibility()),
+            REGISTRATION_LABEL,
+            &registration_claim(catalog.compatibility()),
             inner.width,
-            1,
+            REGISTRATION_CLAIM_LINES,
         ));
     } else {
         catalog_lines.push(Line::from(
@@ -3753,28 +3776,27 @@ mod tests {
 
     /// The claim names agents, so a claim cut short names a different one:
     /// `Claude Code + Open...` is not what was stored, and unlike a path it
-    /// carries no sense of the value it stands for. The longest two agents can
-    /// make of it fills the narrowest region's line to the cell, so every
-    /// combination is checked rather than the one a fixture happens to hold.
+    /// carries no sense of the value it stands for. Every combination is
+    /// checked rather than the one a fixture happens to hold, because the
+    /// longest two agents can make of it outruns the narrowest region's line
+    /// by a single column — which is the whole reason the field is given the
+    /// room to wrap instead of a budget to elide against.
     #[test]
-    fn every_compatibility_claim_stands_whole_in_the_narrowest_detail_region() {
+    fn every_registration_claim_stands_whole_in_the_narrowest_detail_region() {
         for claude_code in [false, true] {
             for codex in [false, true] {
                 for opencode in [false, true] {
-                    let claim = compatibility_claim(Compatibility::from_flags(
-                        claude_code,
-                        codex,
-                        opencode,
-                    ));
+                    let claim =
+                        registration_claim(Compatibility::from_flags(claude_code, codex, opencode));
                     let stated = label_text(&detail_field_bounded(
-                        "Compatibility",
+                        REGISTRATION_LABEL,
                         &claim,
                         NARROWEST_INNER_WIDTH,
-                        1,
+                        REGISTRATION_CLAIM_LINES,
                     ));
                     assert_eq!(
                         stated,
-                        format!("Compatibility: {claim}"),
+                        format!("{REGISTRATION_LABEL}: {claim}"),
                         "the claim should be stated whole"
                     );
                 }

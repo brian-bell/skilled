@@ -345,7 +345,7 @@ fn sources_show_the_persisted_catalog_classification_and_compatibility() {
     // The claim names the agents the catalog is registered for and stops; the
     // agent switched off during setup is one of the ones it does not name.
     assert!(
-        screen.contains("Compatibility: Claude Code + Codex"),
+        screen.contains("Registered for: Claude Code + Codex"),
         "{screen}"
     );
     assert!(!screen.contains("OpenCode"), "{screen}");

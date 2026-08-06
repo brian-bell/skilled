@@ -17,7 +17,7 @@ expression: "normalize_sources_screen(&app, &temporary, render(&app, 80, 24))"
  ──────────────────────────────────────────────────────────────────────────────
  Path: deeply/nested/experimental/claude-code/skills
  Classification: Agent-specific
- Compatibility: Claude Code
+ Registered for: Claude Code
  VARIANT
  ──────────────────────────────────────────────────────────────────────────────
  Directory: experimental · Name: experimental
