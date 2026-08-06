@@ -68,6 +68,10 @@ signal needs both, because colour alone is not an acceptable cue.
 - Keep `update` free of filesystem, process, and database work: external work
   is a typed `Effect` performed by the runner (see `Effect::ScanInstallations`
   and the snapshot reset in `enter_inventory`).
+- The reducer is geometry-blind, and stays that way. What only the renderer can
+  measure crosses back the other way: `tui::render` returns a `RenderFeedback`
+  and the runner notes it before reading the next key. `None` there means the
+  frame did not draw the thing, which is not the same as measuring zero.
 - Truthfulness is a hard requirement of the inventory. Every summarising
   surface asks `InventorySnapshot` — `stated_skill_count`, `scan_pending`,
   `no_agent_configured` — rather than re-deriving what may be claimed, and

@@ -12,7 +12,7 @@ use std::{
     process::Command,
 };
 
-use skilled::{Action, AgentKind, AppEnvironment, SkilledApp};
+use skilled::{Action, AgentKind, AppEnvironment, InventoryPane, SkilledApp, tui::RenderFeedback};
 
 #[test]
 fn setup_uses_the_shared_dialog_and_seven_segment_progress() {
@@ -3833,6 +3833,54 @@ impl Harness {
         app
     }
 
+    /// One `alpha` skill linked into all three agent roots from the
+    /// registered checkout.
+    ///
+    /// Its detail region carries a section for every agent, which is more
+    /// than the minimum supported terminal can hold at once — the arrangement
+    /// the issue behind the scrollable region names.
+    #[cfg(unix)]
+    fn everywhere_installed_inventory(&self) -> SkilledApp {
+        let home = self.directory.path().join("home");
+        // Named long enough that the observed target path cannot share a row
+        // with its label: the field then wraps, and the window has a line
+        // whose first row states a path as empty if it is cut after it.
+        let repository = home.join("library-checked-out-under-a-long-name");
+        let skill = repository.join("skills/alpha");
+        fs::create_dir_all(&skill).expect("create skill fixture");
+        // The description is long enough to wrap in a detail region at any
+        // width, so the region holds a line worth more than one row.
+        fs::write(
+            skill.join("SKILL.md"),
+            "---\nname: alpha\ndescription: A description long enough to wrap onto \
+             several rows of the detail region at every width a supported terminal \
+             gives it, so a window counted in rows is not the same as one counted \
+             in lines.\n---\n# alpha\n",
+        )
+        .expect("write skill fixture");
+        create_repository(&repository);
+
+        let mut app = self.completed_setup();
+        let preview = app.preview_source(&repository).expect("preview source");
+        app.confirm_source(preview).expect("register source");
+
+        for root in [
+            ".claude/skills",
+            ".agents/skills",
+            ".config/opencode/skills",
+        ] {
+            let root = home.join(root);
+            fs::create_dir_all(&root).expect("create agent skill root");
+            symlink(repository.join("skills/alpha"), root.join("alpha"));
+        }
+
+        app.update(Action::OpenSources);
+        let update = app.update(Action::OpenInventory);
+        app.perform_effects(update.effects())
+            .expect("installation scan");
+        app
+    }
+
     /// One `gamma` skill installed two ways: linked from the registered
     /// checkout for Claude Code, and copied outright for Codex.
     ///
@@ -3981,12 +4029,41 @@ fn write_skill_fixture(directory: &Path, name: &str) {
 }
 
 fn buffer(app: &SkilledApp, width: u16, height: u16) -> Buffer {
+    drawn(app, width, height).0
+}
+
+/// What a frame reported about itself, which is how the geometry the reducer
+/// cannot see reaches the application state.
+fn feedback(app: &SkilledApp, width: u16, height: u16) -> RenderFeedback {
+    drawn(app, width, height).1
+}
+
+/// The scroll extent of a frame that drew the detail region.
+fn measured_extent(app: &SkilledApp, width: u16, height: u16) -> usize {
+    feedback(app, width, height)
+        .inventory_detail_max_scroll()
+        .expect("the frame drew the detail region")
+}
+
+/// Draw, take the frame's report back to the application, and move the window
+/// — the loop in `runner::run`, so a test scrolls the way a user does.
+fn scroll_detail(app: &mut SkilledApp, width: u16, height: u16, steps: usize) {
+    for _ in 0..steps {
+        if let Some(extent) = feedback(app, width, height).inventory_detail_max_scroll() {
+            app.note_inventory_detail_max_scroll(extent);
+        }
+        app.update(Action::ScrollInventoryDetail(1));
+    }
+}
+
+fn drawn(app: &SkilledApp, width: u16, height: u16) -> (Buffer, RenderFeedback) {
     let backend = TestBackend::new(width, height);
     let mut terminal = Terminal::new(backend).expect("create test terminal");
+    let mut feedback = RenderFeedback::default();
     terminal
-        .draw(|frame| skilled::tui::render(frame, app))
+        .draw(|frame| feedback = skilled::tui::render(frame, app))
         .expect("render frame");
-    terminal.backend().buffer().clone()
+    (terminal.backend().buffer().clone(), feedback)
 }
 
 fn row_text(buffer: &Buffer, y: u16) -> String {
@@ -4587,11 +4664,356 @@ mod installed {
         let notice = row_containing(&screen, "more line");
         let line = row_text(&screen, notice);
         assert!(line.contains("! "), "{line}");
-        assert!(line.contains("widen or lengthen the terminal"), "{line}");
+        // The region has the keyboard and rows below the window, so the notice
+        // names the keys that reach them rather than advising a bigger
+        // terminal: the binding is live, so the advice is one we can keep.
+        assert!(line.contains("below — j/k to scroll"), "{line}");
         assert_eq!(
             style_in_row(&screen, notice, "!").fg,
             Some(Color::Rgb(0xe6, 0xbd, 0x6a))
         );
+    }
+
+    /// `update` never learns the terminal's size, so the frame measures how far
+    /// its detail region can usefully scroll and reports it back. A region tall
+    /// enough for everything reports nothing to scroll to, which is what keeps
+    /// the offset — and the key hint that depends on it — from claiming a
+    /// movement the screen cannot make.
+    #[test]
+    fn the_detail_region_reports_the_extent_the_frame_could_scroll() {
+        let harness = Harness::new();
+        let mut app = harness.everywhere_installed_inventory();
+        app.update(Action::AdvanceInventoryPane);
+
+        let cramped = measured_extent(&app, 80, 24);
+        assert!(
+            cramped > 0,
+            "three agent sections outgrow the minimum terminal\n{}",
+            text(&buffer(&app, 80, 24))
+        );
+        assert_eq!(measured_extent(&app, 80, 60), 0);
+
+        // A compact terminal showing the table has not measured the region
+        // behind it, which is not the same as measuring nothing to scroll.
+        app.update(Action::Back);
+        assert_eq!(
+            feedback(&app, 80, 24).inventory_detail_max_scroll(),
+            None,
+            "the region is not on screen"
+        );
+        app.update(Action::AdvanceInventoryPane);
+
+        // Scrolling as far as the frame reported reaches the last agent's
+        // section, which is what makes the extent an extent rather than a
+        // number: unreachable rows are the whole complaint behind the region.
+        let cut = text(&buffer(&app, 80, 24));
+        assert!(!cut.contains("OPENCODE"), "{cut}");
+        scroll_detail(&mut app, 80, 24, cramped);
+        let scrolled = text(&buffer(&app, 80, 24));
+        assert!(scrolled.contains("OPENCODE"), "{scrolled}");
+        assert!(
+            scrolled.contains("Path: ~/.config/opencode/skills/alpha"),
+            "{scrolled}"
+        );
+    }
+
+    /// The counts at the two ends of the window are measurements, so they are
+    /// checked against the screen rather than against themselves: at every
+    /// height the region can be cut at and every offset it can be scrolled to,
+    /// what it says is above, plus what it shows, plus what it says is below,
+    /// is the whole of the content. A stated count that drifts from the rows on
+    /// screen is worse than no notice, because it is read as a fact.
+    #[test]
+    fn the_scrolled_detail_region_accounts_for_every_row_it_does_not_show() {
+        fn region_rows(app: &SkilledApp, width: u16, height: u16) -> Vec<String> {
+            let screen = text(&buffer(app, width, height));
+            let screen: Vec<&str> = screen.lines().collect();
+            let mut rows: Vec<String> = if screen.iter().any(|row| row.contains('│')) {
+                // Beside the table, the region is everything past the rule.
+                screen
+                    .iter()
+                    .filter_map(|row| row.rsplit_once('│'))
+                    .map(|(_, region)| region.trim().to_owned())
+                    .collect()
+            } else {
+                // Drilled into on a compact terminal, it is the whole
+                // workspace: below the title bar and navigation, above the
+                // key hints.
+                screen[2..screen.len() - 1]
+                    .iter()
+                    .map(|row| row.trim().to_owned())
+                    .collect()
+            };
+            // The pane's own heading and rule are the scaffold around the
+            // window, not rows of the content it is windowing.
+            rows.drain(..2);
+            // Trailing blanks are room the region did not need, not content
+            // it showed. Blanks between sections are content and stay counted,
+            // because a hidden one costs the reader a row like any other.
+            while rows.last().is_some_and(String::is_empty) {
+                rows.pop();
+            }
+            rows
+        }
+        fn stated(row: &str, phrase: &str) -> Option<usize> {
+            row.strip_prefix("! ")?
+                .split_once(phrase)
+                .and_then(|(count, _)| count.trim().parse().ok())
+        }
+
+        let harness = Harness::new();
+        let mut app = harness.everywhere_installed_inventory();
+        app.update(Action::AdvanceInventoryPane);
+        let mut cut_heights = 0;
+
+        // Three widths: the two sides of the wide breakpoint, where the region
+        // is beside the table and wraps differently, and the minimum supported
+        // terminal, where it is drilled into and fills the workspace.
+        for width in [120, 100, 80] {
+            let whole = region_rows(&app, width, 80);
+            for height in 24..40 {
+                let extent = measured_extent(&app, width, height);
+                app.note_inventory_detail_max_scroll(extent);
+                for _ in 0..=extent {
+                    app.update(Action::ScrollInventoryDetail(-1));
+                }
+                let mut previously_above = 0;
+                for offset in 0..=extent {
+                    if offset > 0 {
+                        app.update(Action::ScrollInventoryDetail(1));
+                    }
+                    assert_eq!(app.inventory_detail_scroll(), offset);
+
+                    let rows = region_rows(&app, width, height);
+                    let above = rows.first().and_then(|row| stated(row, " line"));
+                    let below = rows.last().and_then(|row| stated(row, " more line"));
+                    // No line of this region's content is blank, so a blank
+                    // row above the notice is room a whole line could not
+                    // fill: unused space, like the tail of an uncut region,
+                    // and not a row the window showed.
+                    let mut shown = &rows
+                        [usize::from(above.is_some())..rows.len() - usize::from(below.is_some())];
+                    while shown.last().is_some_and(String::is_empty) {
+                        shown = &shown[..shown.len() - 1];
+                    }
+                    if below.is_some() {
+                        cut_heights += 1;
+                    }
+                    assert_eq!(
+                        above.unwrap_or(0) + shown.len() + below.unwrap_or(0),
+                        whole.len(),
+                        "at {width} columns, height {height} and offset {offset} the \
+                         region showed {} rows and claimed {above:?} above and \
+                         {below:?} below",
+                        shown.len()
+                    );
+                    // The rows themselves, not just their number: a window
+                    // drawn a row away from the count it states would add up
+                    // correctly and still be showing the wrong place.
+                    let above = above.unwrap_or(0);
+                    assert_eq!(
+                        shown,
+                        &whole[above..above + shown.len()],
+                        "at {width} columns, height {height} and offset {offset} the \
+                         window opened somewhere other than where it says"
+                    );
+                    // Every keystroke is worth pressing: one step of the offset
+                    // leaves one more line behind, so the window always moves.
+                    assert!(
+                        offset == 0 || above > previously_above,
+                        "at {width} columns and height {height} the window did not \
+                         move for offset {offset}"
+                    );
+                    previously_above = above;
+                    // A field wrapped onto a second row is withheld rather
+                    // than cut after its label: a path stated as empty is a
+                    // false observation, and this region's only job is to
+                    // state what was observed.
+                    assert!(
+                        !shown.last().is_some_and(|row| row.ends_with(':')),
+                        "at {width} columns, height {height} and offset {offset} the \
+                         window ended on a label with no value: {:?}",
+                        shown.last()
+                    );
+                }
+                // Scrolled to the extent, there is nothing left below: an
+                // extent that never reaches the end is not an extent.
+                if extent > 0 {
+                    let rows = region_rows(&app, width, height);
+                    assert_eq!(
+                        rows.last().and_then(|row| stated(row, " more line")),
+                        None,
+                        "at {width} columns and height {height} the last offset still \
+                         hid rows"
+                    );
+                }
+            }
+        }
+        assert!(
+            cut_heights > 0,
+            "the sweep should reach heights where the region is cut"
+        );
+    }
+
+    /// Colour is not a signal a terminal can be relied on to carry, so both
+    /// ends of the window are words as well as a tone — and the tone is the
+    /// warning role, the same one the uncut region's notice already wears.
+    #[test]
+    fn both_ends_of_the_scrolled_detail_region_are_warning_badges() {
+        const WARNING: Color = Color::Rgb(0xe6, 0xbd, 0x6a);
+
+        let harness = Harness::new();
+        let mut app = harness.everywhere_installed_inventory();
+        app.update(Action::AdvanceInventoryPane);
+        scroll_detail(&mut app, 80, 24, 1);
+
+        let screen = buffer(&app, 80, 24);
+        let above = row_containing(&screen, "line above");
+        assert!(
+            row_text(&screen, above).contains("! 1 line above"),
+            "{}",
+            row_text(&screen, above)
+        );
+        assert_eq!(style_in_row(&screen, above, "!").fg, Some(WARNING));
+
+        let below = row_containing(&screen, "more line");
+        assert!(
+            row_text(&screen, below).contains("below"),
+            "{}",
+            row_text(&screen, below)
+        );
+        assert_eq!(style_in_row(&screen, below, "!").fg, Some(WARNING));
+    }
+
+    /// The reducer can only clamp the offset against the frame before it, so a
+    /// terminal that grew since then hands the renderer an offset past the end
+    /// of what it now has to show. The window comes back to the end rather
+    /// than opening on the blank beyond it, which a reader takes for an
+    /// absence of content.
+    #[test]
+    fn a_frame_handed_a_stale_offset_still_opens_on_content() {
+        let harness = Harness::new();
+        let mut app = harness.everywhere_installed_inventory();
+        app.update(Action::AdvanceInventoryPane);
+        let cramped = measured_extent(&app, 80, 24);
+        scroll_detail(&mut app, 80, 24, cramped);
+
+        // A taller region reaches the same last row from a smaller offset, so
+        // the one the application is holding is now past the end.
+        let stale = app.inventory_detail_scroll();
+        let extent = measured_extent(&app, 80, 30);
+        assert!(extent > 0, "the taller region should still be cut");
+        assert!(stale > extent, "{stale} should outrun {extent}");
+
+        // The frame draws what it would have drawn had the offset been pulled
+        // back first, and the next one — the runner notes before every key —
+        // pulls it back for good.
+        let stale_frame = text(&buffer(&app, 80, 30));
+        app.note_inventory_detail_max_scroll(extent);
+        assert_eq!(app.inventory_detail_scroll(), extent);
+        assert_eq!(stale_frame, text(&buffer(&app, 80, 30)));
+
+        assert!(stale_frame.contains("OPENCODE"), "{stale_frame}");
+        assert!(stale_frame.contains("lines above"), "{stale_frame}");
+        assert!(!stale_frame.contains("more lines below"), "{stale_frame}");
+    }
+
+    /// Moving focus out of the region and back changes nothing behind it, so
+    /// the window is where it was left. A compact terminal takes the region
+    /// off screen entirely while the table has focus, and a frame that
+    /// measured nothing must not be read as one that measured nothing to
+    /// scroll — the offset would be lost on the way past.
+    #[test]
+    fn the_window_survives_leaving_the_region_in_either_viewport() {
+        for (width, height) in [(80, 24), (120, 24)] {
+            let harness = Harness::new();
+            let mut app = harness.everywhere_installed_inventory();
+            app.update(Action::AdvanceInventoryPane);
+            scroll_detail(&mut app, width, height, 2);
+            assert_eq!(app.inventory_detail_scroll(), 2, "at {width}x{height}");
+
+            // Drawn between each step, the way the runner does it.
+            for _ in 0..2 {
+                if let Some(extent) = feedback(&app, width, height).inventory_detail_max_scroll() {
+                    app.note_inventory_detail_max_scroll(extent);
+                }
+                app.update(Action::MoveInventoryPane(1));
+            }
+
+            assert_eq!(app.inventory_pane(), InventoryPane::Details);
+            assert_eq!(app.inventory_detail_scroll(), 2, "at {width}x{height}");
+        }
+    }
+
+    /// A key hint and a help entry are contracts: they appear exactly where the
+    /// binding does something. The detail region's window only moves where the
+    /// region has the keyboard and this frame found rows it does not reach.
+    #[test]
+    fn the_scroll_affordance_appears_only_where_the_window_can_move() {
+        let harness = Harness::new();
+        let mut app = harness.everywhere_installed_inventory();
+
+        // Beside the table, the region is cut but the keys belong to the table.
+        let beside = text(&buffer(&app, 100, 24));
+        assert!(!beside.contains("j/k Scroll"), "{beside}");
+
+        app.update(Action::AdvanceInventoryPane);
+        let cut = text(&buffer(&app, 80, 24));
+        assert!(cut.contains("j/k Scroll"), "{cut}");
+        assert!(!cut.contains("j/k Move"), "{cut}");
+
+        // A region tall enough for everything has nowhere to scroll to.
+        let whole = text(&buffer(&app, 80, 60));
+        assert!(!whole.contains("j/k Scroll"), "{whole}");
+
+        app.update(Action::OpenHelp);
+        let help = text(&buffer(&app, 80, 24));
+        assert!(help.contains("Scroll details"), "{help}");
+        let tall = text(&buffer(&app, 80, 60));
+        assert!(!tall.contains("Scroll details"), "{tall}");
+    }
+
+    /// The notice below the window names the way to the rows beneath it, so it
+    /// answers for the same contract a key hint does. A dialog holds the
+    /// keyboard while it is open and the filter bar takes every printable key,
+    /// so under either the notice names no keystroke at all — both screens
+    /// already say navigation is locked, and a notice pointing at a movement
+    /// key would contradict them about the very rows it is reporting on.
+    #[test]
+    fn the_notice_names_no_keys_a_dialog_or_the_filter_bar_has_taken() {
+        fn notice(app: &SkilledApp) -> String {
+            let screen = buffer(app, 120, 24);
+            row_text(&screen, row_containing(&screen, "more line"))
+        }
+        let harness = Harness::new();
+        let mut app = harness.everywhere_installed_inventory();
+
+        assert!(notice(&app).contains("Tab, then j/k"), "{}", notice(&app));
+
+        app.update(Action::OpenHelp);
+        let with_help = notice(&app);
+        assert!(with_help.contains("more line"), "{with_help}");
+        assert!(!with_help.contains("j/k"), "{with_help}");
+        assert!(!with_help.contains("Tab"), "{with_help}");
+
+        app.update(Action::CloseHelp);
+        app.update(Action::AdvanceInventoryPane);
+        assert!(notice(&app).contains("j/k to scroll"), "{}", notice(&app));
+
+        // Drilled in, where the movement keys really are the region's, a
+        // dialog still answers for them first.
+        app.update(Action::OpenHelp);
+        let drilled_in = notice(&app);
+        assert!(!drilled_in.contains("j/k"), "{drilled_in}");
+        app.update(Action::CloseHelp);
+
+        app.update(Action::MoveInventoryPane(1));
+        app.update(Action::BeginInventoryFilter);
+        assert!(app.inventory_filter_active());
+        let filtering = notice(&app);
+        assert!(filtering.contains("more line"), "{filtering}");
+        assert!(!filtering.contains("j/k"), "{filtering}");
+        assert!(!filtering.contains("Tab"), "{filtering}");
     }
 
     /// An entry whose type could not be read never claims to know what it is.
@@ -4728,10 +5150,13 @@ mod installed {
         assert!(!detail.contains("Global inventory"), "{detail}");
         // Neither selection nor filtering acts in the detail region — the
         // query box is drawn above the table, which is not on screen — so the
-        // bar must not advertise either.
+        // bar must not advertise either. The movement keys are bound here all
+        // the same, to the window of a region taller than this terminal, and
+        // the bar says which of the two they do. Naming it costs the row its
+        // last non-essential hints, which is what the bar's own budget is for.
         assert_eq!(
             row_text(&buffer(&app, 80, 24), 23),
-            " Tab/Shift-Tab Region   2 Sources   s Settings   ? Help   q Quit   Esc Back"
+            " Tab/Shift-Tab Region   j/k Scroll   2 Sources   q Quit   Esc Back …"
         );
 
         app.update(Action::Back);

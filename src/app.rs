@@ -124,6 +124,13 @@ pub enum Action {
     MoveInventoryPane(i8),
     AdvanceInventoryPane,
     MoveInventorySelection(i8),
+    /// Move the Inventory detail region's window by lines.
+    ///
+    /// Named apart from `MoveInventorySelection` because it moves a viewport
+    /// rather than a selection: the same keys do both, in different regions,
+    /// and a reducer test that could not tell them apart would be reading the
+    /// key rather than the behaviour.
+    ScrollInventoryDetail(i8),
     BeginInventoryFilter,
     AppendInventoryFilter(char),
     DeleteInventoryFilterCharacter,
@@ -317,6 +324,17 @@ pub struct SkilledApp {
     focused_installation: usize,
     inventory_filter: String,
     inventory_filter_active: bool,
+    /// Lines of the detail region's content scrolled past the top of its body.
+    ///
+    /// Lines, not rows: the region states observed fields, and a window that
+    /// opened or closed inside a wrapped one would show a path without its
+    /// label or a label without its path. What the region *reports* is still
+    /// counted in rows, which is what a reader loses.
+    inventory_detail_scroll: usize,
+    /// The furthest offset the last drawn frame found useful, and the only
+    /// bound the reducer has: `update` never learns the terminal's size, so
+    /// the renderer measures the region and the runner notes what it found.
+    inventory_detail_max_scroll: usize,
     help_context: Option<View>,
 }
 
@@ -366,6 +384,8 @@ impl SkilledApp {
             focused_installation: 0,
             inventory_filter: String::new(),
             inventory_filter_active: false,
+            inventory_detail_scroll: 0,
+            inventory_detail_max_scroll: 0,
             help_context: None,
         };
         app.refilter_installations();
@@ -468,6 +488,24 @@ impl SkilledApp {
 
     pub fn inventory_filter(&self) -> &str {
         &self.inventory_filter
+    }
+
+    /// How far the detail region's window has been scrolled, in lines.
+    pub fn inventory_detail_scroll(&self) -> usize {
+        self.inventory_detail_scroll
+    }
+
+    /// Record what the frame just drawn measured the detail region's scrollable
+    /// extent to be.
+    ///
+    /// The offset is pulled back with it, so a terminal that shrank between
+    /// frames cannot leave the state pointing past the end of the content.
+    /// This is the one place geometry reaches the application state, and it is
+    /// not a reducer transition: `update` stays free of anything the terminal
+    /// knows and the renderer measures.
+    pub fn note_inventory_detail_max_scroll(&mut self, max_scroll: usize) {
+        self.inventory_detail_max_scroll = max_scroll;
+        self.inventory_detail_scroll = self.inventory_detail_scroll.min(max_scroll);
     }
 
     pub fn inventory_filter_active(&self) -> bool {
@@ -716,6 +754,10 @@ impl SkilledApp {
                 self.move_installation_selection(delta);
                 Vec::new()
             }
+            Action::ScrollInventoryDetail(delta) => {
+                self.scroll_inventory_detail(delta);
+                Vec::new()
+            }
             Action::BeginInventoryFilter => {
                 // The query box is drawn above the table, and a compact
                 // terminal showing the detail region has no table to draw it
@@ -846,6 +888,19 @@ impl SkilledApp {
             .collect();
         let last = self.filtered_installations.len().saturating_sub(1);
         self.focused_installation = self.focused_installation.min(last);
+        self.reset_inventory_detail_scroll();
+    }
+
+    /// Return the detail region's window to the top, and forget the extent
+    /// measured for content that is no longer there.
+    ///
+    /// Both halves matter: an offset kept across a change would point into a
+    /// skill the user never scrolled through, and an extent kept across one
+    /// would let the next keystroke scroll past the end of shorter content
+    /// before a frame has had the chance to measure it.
+    fn reset_inventory_detail_scroll(&mut self) {
+        self.inventory_detail_scroll = 0;
+        self.inventory_detail_max_scroll = 0;
     }
 
     fn enter_inventory(&mut self) -> Vec<Effect> {
@@ -866,6 +921,9 @@ impl SkilledApp {
         // lands refilters and re-clamps it against the fresh rows, so a row
         // that is still there keeps its selection.
         self.filtered_installations.clear();
+        // The rows this window was scrolled through are gone with the
+        // snapshot, and the scan that lands refilters, which resets it again.
+        self.reset_inventory_detail_scroll();
         vec![Effect::ScanInstallations]
     }
 
@@ -903,6 +961,22 @@ impl SkilledApp {
             delta,
             self.filtered_installations.len(),
         );
+        self.reset_inventory_detail_scroll();
+    }
+
+    /// Move the detail region's window, clamped rather than wrapped.
+    ///
+    /// A list wraps because every row is a place to stand; a window does not,
+    /// because the top and the bottom of a document are ends rather than
+    /// neighbours.
+    fn scroll_inventory_detail(&mut self, delta: i8) {
+        if self.view != View::Inventory || self.inventory_pane != InventoryPane::Details {
+            return;
+        }
+        let offset = self
+            .inventory_detail_scroll
+            .saturating_add_signed(isize::from(delta));
+        self.inventory_detail_scroll = offset.min(self.inventory_detail_max_scroll);
     }
 
     pub fn open_settings(&mut self) {

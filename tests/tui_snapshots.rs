@@ -5,7 +5,7 @@ use std::{
 };
 
 use ratatui::{Terminal, backend::TestBackend, buffer::Buffer};
-use skilled::{Action, AgentKind, AppEnvironment, SkilledApp};
+use skilled::{Action, AgentKind, AppEnvironment, SkilledApp, tui::RenderFeedback};
 
 #[test]
 fn first_run_welcome_at_minimum_supported_size() {
@@ -942,7 +942,8 @@ mod installed {
     }
 
     /// Detail that outgrows the region says how much it left out, because a
-    /// pane that simply ends mid-section reads as though there were no more.
+    /// pane that simply ends mid-section reads as though there were no more —
+    /// and, holding the keyboard, says how the rest is reached.
     #[test]
     fn inventory_detail_too_tall_for_the_region_reports_what_it_dropped() {
         let temporary = tempfile::tempdir().expect("temporary application directory");
@@ -951,17 +952,62 @@ mod installed {
 
         let screen = normalize_inventory(&temporary, render(&app, 80, 24));
         assert!(
-            screen.contains("! 7 more lines — widen or lengthen the terminal"),
+            screen.contains("! 7 more lines below — j/k to scroll"),
             "{screen}"
         );
         insta::assert_snapshot!(screen);
 
-        // The detail region is only thirty-seven cells wide at the breakpoint,
-        // so the notice takes its short form rather than wrapping off the
-        // bottom — the one line whose job is to report a cut must not be cut.
+        // Beside the table the region is only thirty-seven cells wide, and the
+        // keys belong to the table: the notice names the focus that reaches
+        // the window before the keys that move it, and that form still fits.
+        app.update(Action::MoveInventoryPane(1));
+        let beside = normalize_inventory(&temporary, render(&app, 100, 26));
+        assert!(
+            beside.contains("! 5 more lines below — Tab, then j/k"),
+            "{beside}"
+        );
+
+        // With the query box holding every printable key, no keystroke reaches
+        // those rows and the notice falls back to advising a bigger terminal —
+        // a phrase too long for this region, so it gives up its words rather
+        // than wrapping off the bottom: the one line whose job is to report a
+        // cut must not itself be cut.
+        app.update(Action::BeginInventoryFilter);
+        assert!(app.inventory_filter_active());
         let narrow = normalize_inventory(&temporary, render(&app, 100, 26));
         assert!(narrow.contains("! 5 more lines"), "{narrow}");
         assert!(!narrow.contains("widen or lengthen"), "{narrow}");
+        assert!(!narrow.contains("more lines below"), "{narrow}");
+    }
+
+    /// The rows a cramped region cannot show are reachable rather than merely
+    /// counted. Scrolled as far as the frame reported, the window ends on the
+    /// last row of the content and says how much of it is now above.
+    #[test]
+    fn inventory_detail_scrolled_to_its_end_at_minimum_supported_size() {
+        let temporary = tempfile::tempdir().expect("temporary application directory");
+        let mut app = inventory_app(&temporary);
+        app.update(Action::AdvanceInventoryPane);
+        scroll_detail_to_the_end(&mut app, 80, 24);
+
+        let screen = normalize_inventory(&temporary, render(&app, 80, 24));
+        assert!(screen.contains("! 7 lines above"), "{screen}");
+        assert!(!screen.contains("more lines below"), "{screen}");
+        insta::assert_snapshot!(screen);
+    }
+
+    /// Scroll the detail region the way the runner does: draw, take the
+    /// frame's report back to the application, and move by what it measured.
+    fn scroll_detail_to_the_end(app: &mut SkilledApp, width: u16, height: u16) {
+        let extent = drawn(app, width, height)
+            .1
+            .inventory_detail_max_scroll()
+            .expect("the frame drew the detail region");
+        assert!(extent > 0, "the region should have somewhere to scroll");
+        app.note_inventory_detail_max_scroll(extent);
+        for _ in 0..extent {
+            app.update(Action::ScrollInventoryDetail(1));
+        }
     }
 
     #[test]
@@ -1069,12 +1115,17 @@ mod installed {
 }
 
 fn render(app: &SkilledApp, width: u16, height: u16) -> String {
+    drawn(app, width, height).0
+}
+
+fn drawn(app: &SkilledApp, width: u16, height: u16) -> (String, RenderFeedback) {
     let backend = TestBackend::new(width, height);
     let mut terminal = Terminal::new(backend).expect("create test terminal");
+    let mut feedback = RenderFeedback::default();
     terminal
-        .draw(|frame| skilled::tui::render(frame, app))
+        .draw(|frame| feedback = skilled::tui::render(frame, app))
         .expect("render frame");
-    buffer_text(terminal.backend().buffer())
+    (buffer_text(terminal.backend().buffer()), feedback)
 }
 
 fn normalize_sources_screen(

@@ -18,7 +18,18 @@ pub fn run(environment: AppEnvironment) -> Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     loop {
-        terminal.draw(|frame| tui::render(frame, &app))?;
+        // The frame measures what the reducer cannot see, so its report is
+        // taken back before the next key is read: `update` stays free of
+        // geometry, and the region the user is looking at is the one the next
+        // keystroke is clamped against.
+        let mut feedback = tui::RenderFeedback::default();
+        terminal.draw(|frame| feedback = tui::render(frame, &app))?;
+        // A frame that did not draw the region measured nothing, and nothing
+        // is not zero: the offset it was last scrolled to survives the frames
+        // where the region is off screen.
+        if let Some(max_scroll) = feedback.inventory_detail_max_scroll() {
+            app.note_inventory_detail_max_scroll(max_scroll);
+        }
         let Event::Key(key) = event::read()? else {
             continue;
         };

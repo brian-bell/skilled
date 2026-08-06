@@ -61,6 +61,14 @@ it does not yet install, repair, update, or uninstall skills.
   of them was actually read; otherwise Skilled says why it is withholding the
   count instead of reporting a zero.
 - Filtering the inventory by skill name, source, or health.
+- A scrollable inventory detail region. A skill installed for several agents
+  outgrows the minimum terminal, so `j` / `k` move the region's window once it
+  has focus, by whole lines, so a wrapped field passes the window's edge whole
+  rather than being cut into a label with no value under it. Both ends of the
+  window state in rows what they hide, and the notice at the foot names what
+  would actually reach those rows from where the reader is standing: the
+  movement keys, a region focus before them, or a larger terminal when no
+  keystroke would do.
 - Direct startup into Inventory after setup is complete.
 - A shared-dialog Settings action for rerunning setup. Rerunning refreshes agent
   root and executable detection while retaining current agent selections and
@@ -127,8 +135,10 @@ In catalog confirmation:
 
 In Inventory, Tab and Shift-Tab move between the skill table and its details;
 Enter opens the details of the selected skill on a compact terminal, and Esc
-returns. `j` / `k` or arrow keys move the selection, and `/` filters by name,
-source, or health — Enter applies the query and Esc clears it.
+returns. `j` / `k` or arrow keys move the selection in the table, and scroll the
+details region once it has focus — a region with more to show than fits says so
+at the foot of its window and names the keys that reach the rest. `/` filters by
+name, source, or health — Enter applies the query and Esc clears it.
 
 From Inventory, press `2` to open Sources. In Sources, Tab and Shift-Tab move
 forward and backward through Repositories, Variants, and Details; Enter advances

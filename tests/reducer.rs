@@ -841,6 +841,104 @@ mod installed {
         app.update(Action::MoveInventorySelection(1));
         assert_eq!(app.focused_installation(), 0);
     }
+    /// The reducer is geometry-blind, so the furthest the detail region can
+    /// scroll is whatever the last frame measured and reported back.
+    #[test]
+    fn detail_scrolling_stays_within_the_extent_the_last_frame_reported() {
+        let temporary = tempfile::tempdir().expect("temporary application directory");
+        let mut app = inventory_app(&temporary);
+        app.update(Action::AdvanceInventoryPane);
+        app.note_inventory_detail_max_scroll(2);
+
+        for expected in [1, 2, 2] {
+            let update = app.update(Action::ScrollInventoryDetail(1));
+            assert_eq!(app.inventory_detail_scroll(), expected);
+            assert!(update.effects().is_empty());
+        }
+        for expected in [1, 0, 0] {
+            app.update(Action::ScrollInventoryDetail(-1));
+            assert_eq!(app.inventory_detail_scroll(), expected);
+        }
+    }
+    /// A terminal that grew has less left to scroll, so the offset the last
+    /// frame allowed is past the end of what the next one holds. Noting the
+    /// new extent pulls it back, rather than leaving the state describing a
+    /// window no frame would draw.
+    #[test]
+    fn a_smaller_extent_pulls_the_window_back_with_it() {
+        let temporary = tempfile::tempdir().expect("temporary application directory");
+        let mut app = inventory_app(&temporary);
+        app.update(Action::AdvanceInventoryPane);
+        app.note_inventory_detail_max_scroll(5);
+        for _ in 0..5 {
+            app.update(Action::ScrollInventoryDetail(1));
+        }
+        assert_eq!(app.inventory_detail_scroll(), 5);
+
+        app.note_inventory_detail_max_scroll(2);
+        assert_eq!(app.inventory_detail_scroll(), 2);
+
+        app.note_inventory_detail_max_scroll(0);
+        assert_eq!(app.inventory_detail_scroll(), 0);
+    }
+    /// A wide terminal draws the detail region beside a focused table, so the
+    /// region being on screen is not the same as the region having the keys.
+    #[test]
+    fn the_detail_window_moves_only_where_the_detail_region_has_focus() {
+        let temporary = tempfile::tempdir().expect("temporary application directory");
+        let mut app = inventory_app(&temporary);
+        app.note_inventory_detail_max_scroll(4);
+
+        assert_eq!(app.inventory_pane(), InventoryPane::Skills);
+        app.update(Action::ScrollInventoryDetail(1));
+        assert_eq!(app.inventory_detail_scroll(), 0);
+
+        app.update(Action::OpenSources);
+        app.update(Action::ScrollInventoryDetail(1));
+        assert_eq!(app.inventory_detail_scroll(), 0);
+    }
+    /// A window scrolled into one skill's observations describes that skill.
+    /// Once the rows behind it are restated, the same offset points into
+    /// something the user never scrolled through, so it returns to the top —
+    /// but moving focus between the regions changes no content and keeps it.
+    #[test]
+    fn the_detail_window_returns_to_the_top_when_the_content_behind_it_changes() {
+        fn scroll_into_details(app: &mut SkilledApp) {
+            app.update(Action::AdvanceInventoryPane);
+            app.note_inventory_detail_max_scroll(3);
+            app.update(Action::ScrollInventoryDetail(1));
+            assert_eq!(app.inventory_detail_scroll(), 1);
+        }
+        let temporary = tempfile::tempdir().expect("temporary application directory");
+        let mut app = inventory_app(&temporary);
+
+        scroll_into_details(&mut app);
+        app.update(Action::MoveInventoryPane(1));
+        app.update(Action::MoveInventoryPane(1));
+        assert_eq!(app.inventory_pane(), InventoryPane::Details);
+        assert_eq!(app.inventory_detail_scroll(), 1);
+
+        app.update(Action::MoveInventoryPane(1));
+        app.update(Action::MoveInventorySelection(1));
+        assert_eq!(app.inventory_detail_scroll(), 0);
+
+        scroll_into_details(&mut app);
+        app.update(Action::MoveInventoryPane(1));
+        type_filter(&mut app, "variant");
+        assert_eq!(app.inventory_detail_scroll(), 0);
+
+        scroll_into_details(&mut app);
+        let update = app.update(Action::OpenSources);
+        app.perform_effects(update.effects()).expect("effects");
+        let update = app.update(Action::OpenInventory);
+        // Before the scan, not only after it: the transition into the view
+        // states that nothing has been scanned for it, and a window scrolled
+        // into the last view's rows would outlive the rows it belonged to.
+        assert_eq!(app.inventory_detail_scroll(), 0);
+        app.perform_effects(update.effects())
+            .expect("installation scan");
+        assert_eq!(app.inventory_detail_scroll(), 0);
+    }
     #[test]
     fn the_filter_narrows_by_name_source_and_health() {
         let temporary = tempfile::tempdir().expect("temporary application directory");

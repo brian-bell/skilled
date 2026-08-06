@@ -1,6 +1,6 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
-use crate::{Action, AgentKind, SetupStep, SkilledApp, View};
+use crate::{Action, AgentKind, InventoryPane, SetupStep, SkilledApp, View};
 
 pub fn action_for_app_key(app: &SkilledApp, key: KeyEvent) -> Option<Action> {
     if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
@@ -64,7 +64,20 @@ pub fn action_for_app_key(app: &SkilledApp, key: KeyEvent) -> Option<Action> {
             _ => action,
         };
     }
-    action_for_key(app.view(), key)
+    // The keys that move the Inventory's selection move the detail region's
+    // window once it has focus. The translation happens here rather than in
+    // `action_for_key` because only this side sees which region is focused —
+    // and it happens after that call so the held-key allowance the movement
+    // keys already have carries over to scrolling, which is where a user is
+    // most likely to hold one down.
+    match action_for_key(app.view(), key) {
+        Some(Action::MoveInventorySelection(delta))
+            if app.view() == View::Inventory && app.inventory_pane() == InventoryPane::Details =>
+        {
+            Some(Action::ScrollInventoryDetail(delta))
+        }
+        action => action,
+    }
 }
 
 pub fn action_for_key(view: View, key: KeyEvent) -> Option<Action> {
