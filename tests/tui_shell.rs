@@ -1583,18 +1583,34 @@ fn navigation_count_digit_cannot_read_as_a_route_key() {
 
     // Grammar sweep: every ASCII digit in the row is either a count
     // (preceded immediately by '·') or a route key (followed by ' ' and an
-    // available title). Anything else would be the old ambiguity.
-    for (index, character) in navigation.char_indices() {
+    // available title). Anything else would be the old ambiguity. The sweep
+    // operates on runs of digits, not digit-by-digit, so a multi-digit
+    // count like '·12' is still classified as one count rather than failing
+    // the trailing '2' on the leading-1 test.
+    let mut chars = navigation.char_indices().peekable();
+    while let Some((start, character)) = chars.next() {
         if !character.is_ascii_digit() {
             continue;
         }
-        let prefix_is_count = navigation[..index].ends_with('·');
-        let suffix_starts_route_key = navigation[index + 1..]
+        // Walk the rest of the digit run.
+        while chars.peek().is_some_and(|(_, next)| next.is_ascii_digit()) {
+            chars.next();
+        }
+        let prefix_is_count = navigation[..start].ends_with('·');
+        let suffix_starts_route_key = navigation[start..]
+            .strip_prefix(|character: char| character.is_ascii_digit())
+            .unwrap_or(&navigation[start..])
             .strip_prefix(' ')
             .is_some_and(|rest| rest.starts_with("Inventory") || rest.starts_with("Sources"));
+        // `start` is the byte index of the run's first digit; after the
+        // walk above the run's first digit is still at `start` and the run
+        // ends at the byte index of the next non-digit char.
+        let end = navigation[start..]
+            .find(|character: char| !character.is_ascii_digit())
+            .map_or(navigation.len(), |offset| start + offset);
         assert!(
             prefix_is_count || suffix_starts_route_key,
-            "ambiguous digit at {index} in {navigation:?}"
+            "ambiguous digit run at {start}..{end} in {navigation:?}"
         );
     }
 
