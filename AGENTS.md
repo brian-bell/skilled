@@ -282,14 +282,17 @@ drill-in shares the row and neither aside tier does; wrapping instead put the
 whole timestamp on the row below at the narrow tier and `UTC` alone at the wide
 one, a time naming no zone under a label naming no value.
 
-Every value in that region with nowhere to wrap — Repository Path, Remote, and
-the catalog path under CATALOG — is one line middle-truncated through
+Repository Path, Remote, and the catalog path under CATALOG — values with
+nowhere to wrap — are one line middle-truncated through
 `detail_field_middle`: wrapped, such a value breaks mid-word, reads as two
 values, and can lose its continuation to the row budget, where an elision in
 the middle keeps the root the path starts from and the directory it ends at.
 That is the elision a repository entry's path line already takes in the
 Repositories pane, rather than the trailing one the inventory table's cells
-take. The classification shares the catalog path's line while both stand whole
+take. The VARIANT path keeps the trailing elision of its one-line bound: what
+a trailing cut loses there is the directory name the Directory field one row
+above has just stated, where the middle of the path is restated by no
+neighbouring field. The classification shares the catalog path's line while both stand whole
 and otherwise falls, whole, to a `Classification:` row of its own — a field the
 prototype does not have. That is where the region parts company with the
 variants group label: a pane row has one line and sheds the qualifier it cannot
