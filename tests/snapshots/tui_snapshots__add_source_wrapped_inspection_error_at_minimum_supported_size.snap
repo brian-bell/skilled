@@ -1,6 +1,6 @@
 ---
 source: tests/tui_snapshots.rs
-expression: rendered
+expression: "render(&app, 80, 24)"
 ---
  ◆ skilled   global                              ● ready · 0 sources registered
  Add source   navigation is locked while this dialog is open
@@ -12,8 +12,8 @@ expression: rendered
   │                                                                          │
   │  Local Git repository                                                    │
   │  >                                                                       │
-  │  [TEMP]                                                     /a-delibera  │
-  │  tely-long-missing-repository-directory/and-an-equally-long-nested-path  │
+  │  /a-deliberately-long-missing-repository-directory/and-an-equally-long-  │
+  │  nested-path                                                             │
   │                                                                          │
   │  × filesystem operation failed: No such file or directory (os error 2)   │
   │  ──────────────────────────────────────────────────────────────────────  │

@@ -14,7 +14,7 @@ expression: rendered
                                  │                                              │
         ┌ Confirm catalogs ───────────────────────────────────────────────────────────────── registration only ┐
         │                                                                                                      │
-        │  Repository: [TEMP]                     /source                                                      │
+        │  Repository: [TEMP]/source                                                                           │
         │  Branch: main   HEAD: [HEAD]                                                                         │
         │  Remote: not configured                                                                              │
         │  Worktree: ✓ clean                                                                                   │
