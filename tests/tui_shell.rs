@@ -1262,11 +1262,12 @@ fn navigation_withholds_a_count_it_could_not_observe() {
             "{subtitle:?} may not state a total: {navigation}"
         );
         // The registry is not the filesystem: it is still fully known.
-        assert!(navigation.contains(" 2 Sources 0 "), "{navigation}");
+        assert!(navigation.contains(" 2 Sources ·0 "), "{navigation}");
 
         // A destination this release cannot open counts nothing, and says so
         // by rendering nothing rather than by a placeholder that reads as an
-        // empty measurement.
+        // empty measurement. The '·' lead-in is reserved for real counts, so
+        // an unavailable tab may not borrow it either.
         for unavailable in ["Updates (soon)", "Doctor (soon)"] {
             match after(&navigation, unavailable) {
                 // Doctor is the last entry, so the row ends after its title.
@@ -1274,6 +1275,7 @@ fn navigation_withholds_a_count_it_could_not_observe() {
                 Some(next) => {
                     assert!(!next.is_ascii_digit(), "{unavailable}: {navigation}");
                     assert_ne!(next, '—', "{unavailable}: {navigation}");
+                    assert_ne!(next, '·', "{unavailable}: {navigation}");
                 }
             }
         }
@@ -1300,7 +1302,7 @@ fn navigation_states_zero_when_a_root_was_read_and_held_nothing() {
         "{}",
         text(&screen)
     );
-    assert!(navigation.contains("▌Inventory 0 "), "{navigation}");
+    assert!(navigation.contains("▌Inventory ·0 "), "{navigation}");
 }
 
 /// Entering the Inventory and the scan that fills it are two moments: the
@@ -1338,7 +1340,7 @@ fn inventory_between_its_transition_and_its_scan_says_not_scanned() {
     );
     // No count may stand beside the tab for a scan that has not happened.
     assert!(
-        navigation.contains("▌Inventory  2 Sources 0 "),
+        navigation.contains("▌Inventory  2 Sources ·0 "),
         "{navigation}"
     );
     // Nothing has been listed, so nothing may be hinted as movable, openable,
@@ -1474,7 +1476,7 @@ fn gap_with_a_deselected_agent_keeps_selection_honest() {
     // No count: the selected roots have not been read.
     let navigation = row_text(&screen, 1);
     assert!(
-        navigation.contains("▌Inventory  2 Sources 0 "),
+        navigation.contains("▌Inventory  2 Sources ·0 "),
         "{navigation}"
     );
 
@@ -1528,13 +1530,105 @@ fn gap_with_every_agent_deselected_does_not_claim_not_scanned() {
     assert_eq!(roots.matches("not selected").count(), 3, "{roots}");
     assert!(!roots.contains("not scanned"), "{roots}");
     assert!(
-        navigation.contains("▌Inventory  2 Sources 0 "),
+        navigation.contains("▌Inventory  2 Sources ·0 "),
         "{navigation}"
     );
 
     app.perform_effects(update.effects()).expect("perform scan");
     let rendered = text(&buffer(&app, 80, 24));
     assert!(rendered.contains("No agent is configured"), "{rendered}");
+}
+
+/// With three registered sources the navigation row reads
+/// '▌Inventory 1 2 Sources 3  Updates (soon) ...'. A bare amber '3' two
+/// cells from the next tab's title teaches two readings of one digit — the
+/// count of the previous entry, or the route key of the next — and the
+/// distinction would otherwise rest on colour alone. The lead-in glyph
+/// '·N' makes the class textual: a count is always prefixed, so no bare
+/// digit followed by a space and a title can be a count at all.
+#[cfg(unix)]
+#[test]
+fn navigation_count_digit_cannot_read_as_a_route_key() {
+    const AMBER: Color = Color::Rgb(0xe6, 0xbd, 0x6a);
+
+    let harness = Harness::new();
+    let home = harness.directory.path().join("home");
+    // One skill in a real Claude Code root so Inventory can state a count,
+    // and three distinct registered sources so Sources has to say '3'.
+    write_skill_fixture(&home.join(".claude/skills/alpha"), "alpha");
+    let mut app = harness.completed_setup();
+    for source in ["library", "annex", "atelier"] {
+        let repository = home.join(source);
+        write_skill_fixture(&repository.join("skills/portable"), "portable");
+        create_repository(&repository);
+        let preview = app.preview_source(&repository).expect("preview source");
+        app.confirm_source(preview).expect("register source");
+    }
+
+    let screen = buffer(&app, 80, 24);
+    let navigation = row_text(&screen, 1);
+
+    // Pin the exact neighbourhood the issue quotes — the active tab's count
+    // on the left and the next tab's amber count on the right.
+    assert!(
+        navigation.contains("▌Inventory ·1  2 Sources ·3  Updates (soon)"),
+        "{navigation}"
+    );
+    // The bare-digit form is the collision itself, so its absence is the
+    // claim.
+    assert!(
+        !navigation.contains("Sources 3 ") && !navigation.contains("Inventory 1 2 Sources 3 "),
+        "{navigation}"
+    );
+
+    // Grammar sweep: every ASCII digit in the row is either a count
+    // (preceded immediately by '·') or a route key (followed by ' ' and an
+    // available title). Anything else would be the old ambiguity.
+    for (index, character) in navigation.char_indices() {
+        if !character.is_ascii_digit() {
+            continue;
+        }
+        let prefix_is_count = navigation[..index].ends_with('·');
+        let suffix_starts_route_key = navigation[index + 1..]
+            .strip_prefix(' ')
+            .is_some_and(|rest| rest.starts_with("Inventory") || rest.starts_with("Sources"));
+        assert!(
+            prefix_is_count || suffix_starts_route_key,
+            "ambiguous digit at {index} in {navigation:?}"
+        );
+    }
+
+    // The dot inherits the count's amber foreground and drops the bold the
+    // digits drop — one token, not a punctuation mark beside a separate one.
+    let dot_style = style_at(&screen, "·3");
+    assert_eq!(dot_style.fg, Some(AMBER));
+    assert!(!dot_style.add_modifier.contains(Modifier::BOLD));
+
+    // No count may leak onto an unavailable tab; with three sources the gap
+    // between 'Updates (soon)' and 'Doctor (soon)' must not start with '·'.
+    if let Some(after_updates) = navigation
+        .find("Updates (soon)")
+        .map(|position| position + "Updates (soon)".len())
+    {
+        let tail = &navigation[after_updates..];
+        let before_doctor = tail.find("Doctor (soon)").unwrap_or(tail.len());
+        assert!(
+            !tail[..before_doctor].contains('·'),
+            "'·' leaked onto an unavailable tab: {navigation}"
+        );
+    }
+
+    // The lead-in survives the underline on an active tab.
+    app.update(Action::OpenSources);
+    let screen = buffer(&app, 80, 24);
+    let navigation = row_text(&screen, 1);
+    assert!(navigation.contains("▌Sources ·3"), "{navigation}");
+    let active_count_style = style_at(&screen, "▌Sources ·3");
+    assert!(
+        active_count_style
+            .add_modifier
+            .contains(Modifier::UNDERLINED)
+    );
 }
 
 /// Filter outrank is not only an all-selected story: a mixed gap still has
@@ -4053,13 +4147,15 @@ mod installed {
         let navigation = row_text(&screen, 1);
 
         // The count says the same thing the Inventory subtitle does: skills,
-        // not every listed entry.
+        // not every listed entry. The '·' lead-in keeps the count from
+        // reading as a route key beside it, so a copy change to either
+        // number has to update this probe in lockstep.
         assert!(
-            navigation.contains(&format!("▌Inventory {skills} ")),
+            navigation.contains(&format!("▌Inventory ·{skills} ")),
             "{navigation}"
         );
         assert!(
-            navigation.contains(&format!(" 2 Sources {sources} ")),
+            navigation.contains(&format!(" 2 Sources ·{sources} ")),
             "{navigation}"
         );
 
@@ -4121,7 +4217,7 @@ mod installed {
         // The tab counts skills, so two stray entries are not two of anything
         // it may report.
         let navigation = row_text(&screen, 1);
-        assert!(navigation.contains("▌Inventory 0 "), "{navigation}");
+        assert!(navigation.contains("▌Inventory ·0 "), "{navigation}");
         assert!(
             rendered.contains("Roots: Claude Code 0 installed"),
             "{rendered}"
