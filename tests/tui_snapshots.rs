@@ -957,16 +957,27 @@ mod installed {
         );
         insta::assert_snapshot!(screen);
 
-        // Beside the table the region is only thirty-seven cells wide, and
-        // the keys belong to the table: the notice advises a bigger terminal
-        // rather than a keystroke, and that phrase does not fit, so it gives
-        // up its advice rather than wrapping off the bottom — the one line
-        // whose job is to report a cut must not itself be cut.
+        // Beside the table the region is only thirty-seven cells wide, and the
+        // keys belong to the table: the notice names the focus that reaches
+        // the window before the keys that move it, and that form still fits.
         app.update(Action::MoveInventoryPane(1));
+        let beside = normalize_inventory(&temporary, render(&app, 100, 26));
+        assert!(
+            beside.contains("! 5 more lines below — Tab, then j/k"),
+            "{beside}"
+        );
+
+        // With the query box holding every printable key, no keystroke reaches
+        // those rows and the notice falls back to advising a bigger terminal —
+        // a phrase too long for this region, so it gives up its words rather
+        // than wrapping off the bottom: the one line whose job is to report a
+        // cut must not itself be cut.
+        app.update(Action::BeginInventoryFilter);
+        assert!(app.inventory_filter_active());
         let narrow = normalize_inventory(&temporary, render(&app, 100, 26));
         assert!(narrow.contains("! 5 more lines"), "{narrow}");
         assert!(!narrow.contains("widen or lengthen"), "{narrow}");
-        assert!(!narrow.contains("j/k to scroll"), "{narrow}");
+        assert!(!narrow.contains("more lines below"), "{narrow}");
     }
 
     /// The rows a cramped region cannot show are reachable rather than merely
