@@ -6,9 +6,9 @@ expression: "normalize_sources_screen(&app, &temporary, render(&app, 80, 24))"
  1 Inventory ▌Sources ·1  Updates (soon)  Doctor (soon)
 ▌ Available variants  3 found
 ────────────────────────────────────────────────────────────────────────────────
-experimental/claude-code/skills · Agent-specific · Claude Code
+experimental/claude-code/skills                     Agent-specific · Claude Code
   ✓ valid experimental
-skills · Common · all agents
+skills                                                       Common · all agents
 ▌ × invalid broken
   ✓ valid portable
 

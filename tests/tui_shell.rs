@@ -1968,22 +1968,32 @@ fn variants_are_grouped_under_a_label_naming_their_catalog() {
     // Wide enough for the longer catalog path to be given whole; how a label
     // too long for its pane is shortened is the crossing test's subject.
     let screen = buffer(&app, 180, 40);
-    let rendered = text(&screen);
 
-    // Each label names its catalog, how the catalog is classified, and which
-    // agents it claims — the compatibility it actually declares.
-    assert!(
-        rendered.contains("skills · Common · all agents"),
-        "{rendered}"
-    );
-    assert!(
-        rendered.contains("experimental/claude-code/skills · Agent-specific · Claude Code"),
-        "{rendered}"
+    // Each label names its catalog at the left, and states how the catalog is
+    // classified and which agents it claims — the compatibility it actually
+    // declares — against the far end of the label.
+    let labelled = |path: &str, qualifiers: &str| {
+        let row = row_containing(&screen, qualifiers);
+        let label = row_text(&screen, row);
+        let path_at = label.find(path).unwrap_or_else(|| panic!("{label:?}"));
+        let qualifiers_at = label.find(qualifiers).expect("qualifiers");
+        // Nothing but the gap between them: the qualifiers are set away from
+        // the path, not appended to it.
+        let gap = &label[path_at + path.len()..qualifiers_at];
+        assert!(
+            gap.len() >= 2 && gap.bytes().all(|byte| byte == b' '),
+            "{label:?}"
+        );
+    };
+    labelled("skills", "Common · all agents");
+    labelled(
+        "experimental/claude-code/skills",
+        "Agent-specific · Claude Code",
     );
 
     // The label is muted text on the band the chrome already uses, so the
     // grouping reads without depending on colour alone.
-    let grouped = row_containing(&screen, "· Common · all agents");
+    let grouped = row_containing(&screen, "Common · all agents");
     assert_eq!(style_in_row(&screen, grouped, "skills").fg, Some(MUTED));
     assert_eq!(style_in_row(&screen, grouped, "skills").bg, Some(BAND));
 
@@ -1997,19 +2007,42 @@ fn variants_are_grouped_under_a_label_naming_their_catalog() {
     // qualifiers, classification first: the path is which catalog, and the
     // rows beneath the label no longer carry that themselves. Which of the
     // qualifiers survives at a given width is the unit tests' subject; that
-    // widening only ever adds is the promise being kept here.
-    let narrow = buffer(&app, 100, 40);
-    let label = row_text(
-        &narrow,
-        row_containing(&narrow, "experimental/claude-code/skills"),
+    // widening the pane only ever adds is the promise being kept here.
+    //
+    // Read only as far as the rule after the variants pane: the detail region
+    // beside it states both facts for the catalog the selection rests in, and
+    // would otherwise answer for the label.
+    let label = |width: u16| {
+        let screen = buffer(&app, width, 40);
+        let row = row_text(
+            &screen,
+            row_containing(&screen, "experimental/claude-code/skills"),
+        );
+        row.split('│').nth(1).expect("variants region").to_owned()
+    };
+    assert!(!label(100).contains("Agent-specific"), "{:?}", label(100));
+    assert!(!label(100).contains("Claude Code"), "{:?}", label(100));
+    let wider = label(120);
+    assert!(wider.contains("Claude Code"), "{wider:?}");
+    assert!(!wider.contains("Agent-specific"), "{wider:?}");
+    // Set away from the path, not appended to it.
+    assert!(wider.contains("skills  "), "{wider:?}");
+
+    // The promise is the pane's, not the terminal's. Widening from 99 to 100
+    // relays the workspace — the variants pane goes from the whole terminal to
+    // a third of it, and gives up the detail region's columns rather than the
+    // label's — so the label says more at 99 than at 100. Recorded so that
+    // crossing stays a deliberate one.
+    app.update(Action::AdvanceSourcesPane);
+    let compact = buffer(&app, 99, 40);
+    let compact = row_text(
+        &compact,
+        row_containing(&compact, "experimental/claude-code/skills"),
     );
-    assert!(!label.contains("Agent-specific"), "{label:?}");
-    let wider = buffer(&app, 120, 40);
-    let label = row_text(
-        &wider,
-        row_containing(&wider, "experimental/claude-code/skills"),
+    assert!(
+        compact.trim_end().ends_with("Agent-specific · Claude Code"),
+        "{compact:?}"
     );
-    assert!(label.contains("skills · Claude Code"), "{label:?}");
 }
 
 /// A variant row is bounded to its pane as well as to the name cap. At the
@@ -2124,7 +2157,7 @@ fn crossing_the_wide_detail_threshold_never_shrinks_the_sources_panes() {
     for (index, needle) in [
         (0, "source-checkout"),
         (0, "@"),
-        (1, "skills · Claude Code"),
+        (1, "experimental/nested/claude-code/skills"),
         (1, "✓ valid"),
     ] {
         assert_eq!(
@@ -2269,9 +2302,11 @@ fn every_catalog_of_an_all_empty_source_is_reachable_by_moving_the_selection() {
         .iter()
         .map(|name| format!("{name}/claude-code/skills"))
         .collect();
-    // The full label, because `skills · ` on its own is a substring of every
-    // `cNN/claude-code/skills · …` label and would be seen on the first frame.
-    labels.push("skills · Common · all agents".to_owned());
+    // Anchored to the start of a row, because `skills` on its own is a
+    // substring of every `cNN/claude-code/skills` label and would be seen on
+    // the first frame. Anchoring on the qualifiers instead would make this
+    // test report an unreachable catalog if they were ever shed here.
+    labels.push("\nskills".to_owned());
     let catalog_count = labels.len();
 
     // Twelve catalogs need twenty-four rows, so the first render cannot hold
@@ -2537,8 +2572,10 @@ fn an_emptied_catalog_is_named_rather_than_flattened_into_the_empty_state() {
     reopened.update(Action::OpenSources);
     reopened.update(Action::AdvanceSourcesPane);
 
-    let rendered = text(&buffer(&reopened, 80, 24));
-    assert!(rendered.contains("skills · "), "{rendered}");
+    let screen = buffer(&reopened, 80, 24);
+    let rendered = text(&screen);
+    let label = row_text(&screen, row_containing(&screen, "Common · all agents"));
+    assert!(label.starts_with("skills  "), "{label:?}");
     assert!(rendered.contains("no variants"), "{rendered}");
     assert!(!rendered.contains("No variants found"), "{rendered}");
     // The hint belongs to catalog errors, and this catalog read cleanly.
