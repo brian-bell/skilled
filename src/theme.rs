@@ -388,6 +388,7 @@ mod tests {
             ("nav_inactive()", nav_inactive()),
             ("nav_count()", nav_count()),
             ("nav_note()", nav_note()),
+            ("focus_marker()", focus_marker()),
             ("section_title()", section_title()),
             ("detail_section_title()", detail_section_title()),
             ("progress_complete()", progress_complete()),
