@@ -1,4 +1,8 @@
-use std::{fs, path::Path, process::Command};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 use ratatui::{Terminal, backend::TestBackend, buffer::Buffer};
 use skilled::{Action, AgentKind, AppEnvironment, SkilledApp};
@@ -221,21 +225,18 @@ fn add_source_wrapped_inspection_error_at_minimum_supported_size() {
     }
     app.update(Action::OpenSources);
     app.update(Action::BeginAddSource);
-    let missing = temporary
-        .path()
-        .join("a-deliberately-long-missing-repository-directory")
-        .join("and-an-equally-long-nested-path");
+    // A fixed, never-real path rather than one under `temporary`: it only
+    // needs to be long and absent, and a literal keeps the wrap position
+    // independent of the host's temporary-directory path length.
+    let missing = PathBuf::from(
+        "/a-deliberately-long-missing-repository-directory/and-an-equally-long-nested-path",
+    );
     for character in missing.to_string_lossy().chars() {
         app.update(Action::AppendSourcePath(character));
     }
     dispatch(&mut app, Action::SubmitSourcePath);
 
-    let temporary_path = temporary.path().to_string_lossy().into_owned();
-    let rendered = render(&app, 80, 24).replace(
-        &temporary_path,
-        &padded_placeholder(&temporary_path, "[TEMP]"),
-    );
-    insta::assert_snapshot!(rendered);
+    insta::assert_snapshot!(render(&app, 80, 24));
 }
 
 #[test]
@@ -263,26 +264,12 @@ fn catalog_confirmation_at_minimum_supported_size() {
     dispatch(&mut app, Action::SubmitSourcePath);
 
     let preview = app.pending_source().expect("pending source preview");
-    let temporary_path = temporary
-        .path()
-        .canonicalize()
-        .expect("canonical temporary directory")
-        .to_string_lossy()
-        .into_owned();
     let short_head = &preview.inspected().head()[..8];
-    let rendered = render(&app, 80, 24)
-        .replace(
-            &temporary_path,
-            &padded_placeholder(&temporary_path, "[TEMP]"),
-        )
+    let rendered = normalize_snapshot_field(render(&app, 80, 24), "Repository: ", "[TEMP]/source")
         .replace(short_head, &padded_placeholder(short_head, "[HEAD]"));
     insta::assert_snapshot!(rendered);
 
-    let rendered = render(&app, 120, 40)
-        .replace(
-            &temporary_path,
-            &padded_placeholder(&temporary_path, "[TEMP]"),
-        )
+    let rendered = normalize_snapshot_field(render(&app, 120, 40), "Repository: ", "[TEMP]/source")
         .replace(short_head, &padded_placeholder(short_head, "[HEAD]"));
     insta::assert_snapshot!("catalog_confirmation_at_wide_size", rendered);
 }
@@ -1096,7 +1083,17 @@ fn normalize_sources_screen(
         !normalized.contains(root),
         "the fixture's temporary path was cut rather than replaced, leaving {root:?} in\n{normalized}"
     );
+    // A placeholder padded to the real path's width can still leave trailing
+    // whitespace at a line's end when nothing follows it, and that width is
+    // one more thing that varies with the host's temporary-directory path
+    // (e.g. macOS resolving `/tmp` through `/private`). Re-trimming each line
+    // keeps the snapshot independent of that length rather than just its
+    // characters.
     normalized
+        .lines()
+        .map(|line| line.trim_end())
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Replaces the `YYYY-MM-DD HH:MM UTC` the scan field states with `[SCAN]`,
