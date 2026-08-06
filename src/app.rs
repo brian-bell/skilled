@@ -4,7 +4,10 @@ use crate::{
     AgentDetection, AgentKind, AppEnvironment, Result,
     agents::{detect_agents, detection_at},
     inventory::{InventoryRow, InventorySnapshot, scan_installations},
-    source::{RegisteredSource, SourcePreview, preview_local_source, revalidate_source_preview},
+    source::{
+        CatalogProposal, RegisteredSource, SkillCandidate, SourcePreview, preview_local_source,
+        revalidate_source_preview,
+    },
     store::Store,
 };
 
@@ -198,6 +201,85 @@ fn wrapped_index(current: usize, delta: i8, count: usize) -> usize {
     }
 }
 
+/// One row the variants pane offers the selection.
+///
+/// Every rendered row of that pane is a focus position, and three things need
+/// to agree on which rows exist and in what order: the count the selection
+/// wraps at, the renderer, and whatever the detail region says the selection
+/// rests on. [`variant_rows`] is the one statement of that order, so those
+/// three are a `.count()`, a `map`, and an `.nth()` over the same sequence
+/// rather than three loops held together by a `debug_assert` that compiles out
+/// of release builds.
+///
+/// A catalog's state row is kept distinct from a variant because the pane
+/// draws each differently — an unreadable catalog is not an empty one — while
+/// the detail region treats both as naming their catalog.
+#[derive(Clone, Copy)]
+pub enum SourceRow<'a> {
+    /// A catalog that could not be scanned, carrying its error.
+    CatalogError(&'a CatalogProposal),
+    /// A skill candidate, and the catalog it was found in.
+    Variant {
+        catalog: &'a CatalogProposal,
+        candidate: &'a SkillCandidate,
+    },
+    /// A catalog that was read and holds nothing.
+    NoVariants(&'a CatalogProposal),
+}
+
+impl<'a> SourceRow<'a> {
+    /// The catalog the row belongs to, whichever kind it is.
+    pub fn catalog(self) -> &'a CatalogProposal {
+        match self {
+            Self::CatalogError(catalog)
+            | Self::Variant { catalog, .. }
+            | Self::NoVariants(catalog) => catalog,
+        }
+    }
+}
+
+/// The rows one catalog contributes: its scan error, then its candidates, then
+/// the `no variants` line an empty catalog shows.
+///
+/// The error leads because it is why the rows beneath it may be missing. A
+/// catalog that failed to scan yields no candidates today, so the two never
+/// appear together and the order between them is only a promise about where
+/// the error would sit; the sequence is written to hold either way rather
+/// than to assume the scanner keeps them exclusive.
+///
+/// `no variants` is reached only by a catalog that was read cleanly and holds
+/// nothing: an unreadable catalog says it is unreadable instead of claiming it
+/// is empty, which is a distinction the scan keeps apart everywhere else.
+pub fn catalog_rows(catalog: &CatalogProposal) -> impl Iterator<Item = SourceRow<'_>> {
+    let error_row = catalog
+        .scan_error()
+        .is_some()
+        .then_some(SourceRow::CatalogError(catalog));
+    let empty_row = (catalog.scan_error().is_none() && catalog.candidates().is_empty())
+        .then_some(SourceRow::NoVariants(catalog));
+    error_row
+        .into_iter()
+        .chain(
+            catalog
+                .candidates()
+                .iter()
+                .map(move |candidate| SourceRow::Variant { catalog, candidate }),
+        )
+        .chain(empty_row)
+}
+
+/// Every row of the variants pane, in the order the pane draws them.
+///
+/// A source that could not be read at all yields no rows: the pane shows the
+/// source error in their place, so there is nothing there to select.
+pub fn variant_rows(source: &RegisteredSource) -> impl Iterator<Item = SourceRow<'_>> {
+    let catalogs = match source.source_error() {
+        Some(_) => &[][..],
+        None => source.catalogs(),
+    };
+    catalogs.iter().flat_map(catalog_rows)
+}
+
 pub struct SkilledApp {
     view: View,
     store: Store,
@@ -330,25 +412,22 @@ impl SkilledApp {
         self.focused_variant
     }
 
-    /// The rows the variants pane offers the selection: every candidate, and
-    /// each catalog's state row — its scan error, or the `no variants` line
-    /// an empty catalog shows. The pane renders exactly these rows in this
-    /// order, so counting them here is what keeps a list taller than the pane
-    /// walkable whatever mixture of skills, errors, and empty catalogs it
-    /// holds. A source that could not be read at all renders no rows — the
-    /// pane shows its source error instead — so it counts none.
+    /// How many rows the variants pane offers the selection.
+    ///
+    /// Counting [`variant_rows`] rather than re-deriving the tally is what
+    /// keeps a list taller than the pane walkable whatever mixture of skills,
+    /// errors, and empty catalogs it holds: the pane draws exactly the rows
+    /// this counts, because both are the same sequence.
     pub fn variants_row_count(&self) -> usize {
         self.selected_source()
-            .filter(|source| source.source_error().is_none())
-            .map(RegisteredSource::catalogs)
-            .unwrap_or_default()
-            .iter()
-            .map(|catalog| {
-                let state_row =
-                    usize::from(catalog.scan_error().is_some() || catalog.candidates().is_empty());
-                catalog.candidates().len() + state_row
-            })
-            .sum()
+            .map(variant_rows)
+            .map_or(0, Iterator::count)
+    }
+
+    /// The row the variants-pane selection rests on, or `None` when the pane
+    /// offers no rows to rest on.
+    pub fn selected_variant_row(&self) -> Option<SourceRow<'_>> {
+        variant_rows(self.selected_source()?).nth(self.focused_variant)
     }
 
     pub fn help_context(&self) -> Option<View> {

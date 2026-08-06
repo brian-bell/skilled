@@ -9,7 +9,7 @@ use ratatui::{
 
 use crate::{
     AgentKind, InventoryPane, SetupStep, SkilledApp, SourcesPane, View,
-    app::MAX_INVENTORY_FILTER,
+    app::{MAX_INVENTORY_FILTER, SourceRow, catalog_rows},
     components::{self, KeyHint},
     inventory::{
         Finding, FindingSeverity, InstallationHealth, InstallationObject,
@@ -1617,14 +1617,14 @@ fn render_source_variants(
     //
     // The focused line, and the label each line belongs under, are recorded as
     // the lines are built rather than computed from the selection, because
-    // group labels and error lines sit between the rows and only this loop
-    // knows where they fell.
-    // Every rendered row is a focus position — each candidate, and each
-    // catalog's state row (its error, or `no variants`) — so
-    // `move_sources_selection` counts exactly these rows, the window follows
-    // the selection, and a list taller than the pane can be walked whatever
-    // mixture of skills, errors, and empty catalogs it holds. `selected_row`
-    // walks the same order to answer what the selection rests on.
+    // group labels sit between the rows and only this loop knows where they
+    // fell.
+    //
+    // Which rows exist, and in what order, is `catalog_rows`' to say — the
+    // same sequence `variants_row_count` counts and `selected_row` indexes
+    // into, so the window follows the selection and a list taller than the
+    // pane can be walked whatever mixture of skills, errors, and empty
+    // catalogs it holds. This loop only draws them.
     let mut lines = Vec::new();
     let mut group_labels = Vec::new();
     let mut focused_line = 0;
@@ -1633,65 +1633,16 @@ fn render_source_variants(
         let label = lines.len();
         lines.push(catalog_group_label(catalog, inner.width, beside_details));
         group_labels.push(label);
-        if let Some(error) = catalog.scan_error() {
+        for row in catalog_rows(catalog) {
             let selected = position == app.focused_variant();
             if selected {
                 focused_line = lines.len();
             }
-            let badge = components::badge(Tone::Critical, "unavailable");
-            // Bounded to the pane like every other row: a wrapped error would
-            // put the marker and the band on one line and the words on the
-            // next. The detail region gives the message more room — three
-            // bounded lines — but a message past those is elided there too.
-            let budget = usize::from(inner.width)
-                .min(VARIANTS_CONTENT_MAX_WIDTH)
-                .saturating_sub(ROW_MARKER_WIDTH + badge.width() + 1);
-            lines.push(components::list_row(
-                vec![
-                    badge,
-                    Span::raw(format!(" {}", terminal_safe_bounded_start(error, budget))),
-                ],
-                selected,
-                inner.width,
-            ));
-            group_labels.push(label);
-            position += 1;
-        }
-        for candidate in catalog.candidates() {
-            let selected = position == app.focused_variant();
-            if selected {
-                focused_line = lines.len();
-            }
-            lines.push(variant_row(candidate, selected, inner.width));
-            group_labels.push(label);
-            position += 1;
-        }
-        if catalog.candidates().is_empty() && catalog.scan_error().is_none() {
-            // Said rather than left blank: two labels in a row would read as
-            // though the rows under the first belonged to both, and a label
-            // with nothing under it would not say whether the catalog is empty
-            // or the list has scrolled.
-            let selected = position == app.focused_variant();
-            if selected {
-                focused_line = lines.len();
-            }
-            lines.push(components::list_row(
-                vec![Span::styled(
-                    "no variants".to_owned(),
-                    theme::pane_subtitle(),
-                )],
-                selected,
-                inner.width,
-            ));
+            lines.push(variants_pane_row(row, selected, inner.width));
             group_labels.push(label);
             position += 1;
         }
     }
-    debug_assert_eq!(
-        position,
-        app.variants_row_count(),
-        "the pane renders exactly the rows the selection counts"
-    );
     if variants.is_empty() && catalog_error_count > 0 {
         // The hint belongs to catalog errors: an all-empty source that read
         // cleanly has nothing further for Details to explain. It travels
@@ -1713,6 +1664,44 @@ fn render_source_variants(
         usize::from(inner.height),
     );
     frame.render_widget(Paragraph::new(visible).wrap(Wrap { trim: false }), inner);
+}
+
+/// One row of the variants pane, drawn according to its kind.
+fn variants_pane_row(row: SourceRow<'_>, selected: bool, width: u16) -> Line<'static> {
+    match row {
+        SourceRow::CatalogError(catalog) => {
+            let error = catalog.scan_error().unwrap_or_default();
+            let badge = components::badge(Tone::Critical, "unavailable");
+            // Bounded to the pane like every other row: a wrapped error would
+            // put the marker and the band on one line and the words on the
+            // next. The detail region gives the message more room — three
+            // bounded lines — but a message past those is elided there too.
+            let budget = usize::from(width)
+                .min(VARIANTS_CONTENT_MAX_WIDTH)
+                .saturating_sub(ROW_MARKER_WIDTH + badge.width() + 1);
+            components::list_row(
+                vec![
+                    badge,
+                    Span::raw(format!(" {}", terminal_safe_bounded_start(error, budget))),
+                ],
+                selected,
+                width,
+            )
+        }
+        SourceRow::Variant { candidate, .. } => variant_row(candidate, selected, width),
+        // Said rather than left blank: two labels in a row would read as
+        // though the rows under the first belonged to both, and a label with
+        // nothing under it would not say whether the catalog is empty or the
+        // list has scrolled.
+        SourceRow::NoVariants(_) => components::list_row(
+            vec![Span::styled(
+                "no variants".to_owned(),
+                theme::pane_subtitle(),
+            )],
+            selected,
+            width,
+        ),
+    }
 }
 
 /// One variant: its validation state and the directory it lives in.
@@ -1938,7 +1927,7 @@ fn render_source_details(
 ) {
     let selected = selected_variant(app);
     let subtitle = selected
-        .map(|variant| terminal_safe(variant.candidate.directory_name()))
+        .map(|variant| terminal_safe(variant.directory_name()))
         .or_else(|| {
             app.selected_source()
                 .map(|source| terminal_safe(source.label()))
@@ -2086,13 +2075,13 @@ fn render_source_details(
     let mut variant_lines = Vec::new();
     push_detail_section(&mut variant_lines, "VARIANT", inner.width);
     if let Some(variant) = selected {
-        let (status, name) = match variant.candidate.validation() {
+        let (status, name) = match variant.validation() {
             SkillValidation::Valid { name, .. } => {
                 (components::badge(Tone::Healthy, "valid"), name.as_str())
             }
             SkillValidation::Invalid { .. } => (
                 components::badge(Tone::Critical, "invalid"),
-                variant.candidate.directory_name(),
+                variant.directory_name(),
             ),
         };
         // One bounded line, not the name in full: in the narrow aside tier
@@ -2104,7 +2093,7 @@ fn render_source_details(
             "Directory",
             &format!(
                 "{} · Name: {}",
-                terminal_safe(variant.candidate.directory_name()),
+                terminal_safe(variant.directory_name()),
                 terminal_safe(name)
             ),
             inner.width,
@@ -2116,7 +2105,7 @@ fn render_source_details(
         // is restated by no neighbouring field.
         variant_lines.push(detail_field_bounded(
             "Path",
-            &variant.candidate.relative_path().display().to_string(),
+            &variant.relative_path().display().to_string(),
             inner.width,
             1,
         ));
@@ -2125,7 +2114,7 @@ fn render_source_details(
             status,
         ]));
         let variant_essential_height = detail_lines_height(&variant_lines, inner.width);
-        match variant.candidate.validation() {
+        match variant.validation() {
             SkillValidation::Valid { description, .. } => {
                 variant_lines.push(detail_field("Description", description));
             }
@@ -2205,74 +2194,25 @@ fn detail_lines_height(lines: &[Line<'_>], width: u16) -> usize {
         .sum()
 }
 
-#[derive(Clone, Copy)]
-struct SourceVariant<'a> {
-    catalog: &'a CatalogProposal,
-    candidate: &'a SkillCandidate,
-}
-
-fn flattened_variants(source: &RegisteredSource) -> Vec<SourceVariant<'_>> {
+/// Every candidate the source holds, for the pane subtitle's count.
+///
+/// A flat tally of skills, not of rows: the subtitle says how many variants
+/// were found, which is not what the selection walks.
+fn flattened_variants(source: &RegisteredSource) -> Vec<&SkillCandidate> {
     source
         .catalogs()
         .iter()
-        .flat_map(|catalog| {
-            catalog
-                .candidates()
-                .iter()
-                .map(move |candidate| SourceVariant { catalog, candidate })
-        })
+        .flat_map(CatalogProposal::candidates)
         .collect()
 }
 
-/// What the variants-pane selection rests on: a variant, or a catalog's
-/// state row (its error, or `no variants`).
-enum SelectedSourceRow<'a> {
-    Variant(SourceVariant<'a>),
-    CatalogState(&'a CatalogProposal),
-}
-
-/// The row the selection rests on, walked in the pane's render order: for
-/// each catalog its error row, then its candidates, then its `no variants`
-/// row. `render_source_variants` builds exactly these rows and asserts the
-/// count against `variants_row_count`, which counts them the same way.
-fn selected_row(app: &SkilledApp) -> Option<SelectedSourceRow<'_>> {
-    let source = app.selected_source()?;
-    // An unavailable source renders its source error and no rows, so nothing
-    // is selected — mirroring `variants_row_count`, which counts none.
-    if source.source_error().is_some() {
-        return None;
-    }
-    let mut position = 0;
-    for catalog in source.catalogs() {
-        if catalog.scan_error().is_some() {
-            if position == app.focused_variant() {
-                return Some(SelectedSourceRow::CatalogState(catalog));
-            }
-            position += 1;
-        }
-        for candidate in catalog.candidates() {
-            if position == app.focused_variant() {
-                return Some(SelectedSourceRow::Variant(SourceVariant {
-                    catalog,
-                    candidate,
-                }));
-            }
-            position += 1;
-        }
-        if catalog.candidates().is_empty() && catalog.scan_error().is_none() {
-            if position == app.focused_variant() {
-                return Some(SelectedSourceRow::CatalogState(catalog));
-            }
-            position += 1;
-        }
-    }
-    None
-}
-
-fn selected_variant(app: &SkilledApp) -> Option<SourceVariant<'_>> {
-    match selected_row(app)? {
-        SelectedSourceRow::Variant(variant) => Some(variant),
-        SelectedSourceRow::CatalogState(_) => None,
+/// The variant the selection rests on, or `None` where it rests on a
+/// catalog's state row — which names no variant, and whose detail region says
+/// so rather than describing the last one that happened to be selected.
+fn selected_variant(app: &SkilledApp) -> Option<&SkillCandidate> {
+    match app.selected_variant_row()? {
+        SourceRow::Variant { candidate, .. } => Some(candidate),
+        SourceRow::CatalogError(_) | SourceRow::NoVariants(_) => None,
     }
 }
 
@@ -2281,10 +2221,7 @@ fn selected_variant(app: &SkilledApp) -> Option<SourceVariant<'_>> {
 /// so the Details CATALOG section follows the band across the region
 /// boundary instead of rendering identically for every position.
 fn selected_catalog(app: &SkilledApp) -> Option<&CatalogProposal> {
-    match selected_row(app)? {
-        SelectedSourceRow::Variant(variant) => Some(variant.catalog),
-        SelectedSourceRow::CatalogState(catalog) => Some(catalog),
-    }
+    Some(app.selected_variant_row()?.catalog())
 }
 
 fn catalog_classification(catalog: &CatalogProposal) -> &'static str {
