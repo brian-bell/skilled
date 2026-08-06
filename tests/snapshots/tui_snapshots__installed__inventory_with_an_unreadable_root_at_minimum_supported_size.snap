@@ -3,7 +3,7 @@ source: tests/tui_snapshots.rs
 expression: "normalize_inventory(&temporary, render(&app, 80, 24))"
 ---
  ◆ skilled   global                              ● ready · 0 sources registered
-▌Inventory  2 Sources 0  Updates (soon)  Doctor (soon)
+▌Inventory  2 Sources ·0  Updates (soon)  Doctor (soon)
 ▌ Global inventory  not fully read
 Roots: Claude Code unreadable · Codex no root · OpenCode no root
 × Claude Code: the skill root is not a directory

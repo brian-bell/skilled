@@ -192,10 +192,17 @@ fn render_navigation(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
             style,
         ));
         // The accent is patched over the entry's own style, so the count keeps
-        // the surface of the tab it belongs to.
+        // the surface of the tab it belongs to. A bare digit before a title
+        // is a route key; a '·'-led digit after a title is a count. The
+        // prototype separates the two classes by colour alone (.tab-key
+        // faint, .tab-count amber — see spec/tui-prototype.html:133-134),
+        // which a terminal may not rest on: with three sources the row reads
+        // '... Sources 3  Updates (soon) ...' and the trailing '3' binds
+        // left or right only by a grammar the reader has not been taught.
+        // '·' makes the class textual at every width and in any palette.
         if let Some(count) = destination.count(app) {
             spans.push(Span::styled(
-                format!("{count} "),
+                format!("·{count} "),
                 style.patch(theme::nav_count()),
             ));
         }
