@@ -1514,8 +1514,11 @@ fn gap_with_every_agent_deselected_does_not_claim_not_scanned() {
     let screen = buffer(&app, 80, 24);
     let rendered = text(&screen);
     let header = row_text(&screen, row_containing(&screen, "Global inventory"));
+    let navigation = row_text(&screen, 1);
 
     assert!(!header.contains("not scanned"), "{header}");
+    // Same subtitle the post-scan all-deselected path already uses.
+    assert!(header.contains("no root read"), "{header}");
     assert!(
         !rendered.contains("Installation roots have not been scanned"),
         "{rendered}"
@@ -1524,9 +1527,119 @@ fn gap_with_every_agent_deselected_does_not_claim_not_scanned() {
     let roots = row_text(&screen, row_containing(&screen, "Roots:"));
     assert_eq!(roots.matches("not selected").count(), 3, "{roots}");
     assert!(!roots.contains("not scanned"), "{roots}");
+    assert!(
+        navigation.contains("▌Inventory  2 Sources 0 "),
+        "{navigation}"
+    );
 
     app.perform_effects(update.effects()).expect("perform scan");
     let rendered = text(&buffer(&app, 80, 24));
+    assert!(rendered.contains("No agent is configured"), "{rendered}");
+}
+
+/// Filter outrank is not only an all-selected story: a mixed gap still has
+/// nothing a filter could have hidden, so "not scanned" beats "0 of 0 listed".
+#[test]
+fn a_surviving_filter_does_not_speak_for_a_mixed_unscanned_gap() {
+    let harness = Harness::new();
+    write_skill_fixture(
+        &harness.directory.path().join("home/.claude/skills/alpha"),
+        "alpha",
+    );
+    let mut app = harness.first_run();
+    app.update(Action::Continue);
+    app.update(Action::MoveSelection(1));
+    app.update(Action::ToggleSelection);
+    for _ in 0..6 {
+        let update = app.update(Action::Continue);
+        app.perform_effects(update.effects())
+            .expect("perform setup effects");
+    }
+    app.update(Action::BeginInventoryFilter);
+    app.update(Action::AppendInventoryFilter('z'));
+    app.update(Action::SubmitInventoryFilter);
+
+    app.update(Action::OpenSources);
+    let update = app.update(Action::OpenInventory);
+    let screen = buffer(&app, 80, 24);
+    let rendered = text(&screen);
+    let header = row_text(&screen, row_containing(&screen, "Global inventory"));
+    let roots = row_text(&screen, row_containing(&screen, "Roots:"));
+
+    assert!(header.contains("not scanned"), "{header}");
+    assert!(!rendered.contains("0 of 0 listed"), "{rendered}");
+    assert!(
+        rendered.contains("Installation roots have not been scanned"),
+        "{rendered}"
+    );
+    assert!(
+        !rendered.contains("No skills match the filter"),
+        "{rendered}"
+    );
+    assert!(roots.contains("Codex not selected"), "{roots}");
+
+    app.perform_effects(update.effects()).expect("perform scan");
+    let rendered = text(&buffer(&app, 80, 24));
+    assert!(rendered.contains("0 of 1 listed"), "{rendered}");
+    assert!(
+        rendered.contains("No skills match the filter"),
+        "{rendered}"
+    );
+}
+
+/// All-deselected is outside the filter's reach too: a query that survived
+/// setup reset must not invent "0 of 0 listed" or promise installed skills
+/// when no agent is configured — in the frozen gap and after the scan lands.
+#[test]
+fn a_surviving_filter_does_not_speak_when_no_agent_is_configured() {
+    let harness = Harness::new();
+    write_skill_fixture(
+        &harness.directory.path().join("home/.claude/skills/alpha"),
+        "alpha",
+    );
+    let mut app = harness.completed_setup();
+    app.update(Action::BeginInventoryFilter);
+    app.update(Action::AppendInventoryFilter('z'));
+    app.update(Action::SubmitInventoryFilter);
+
+    // Rerun setup, deselect every agent, and finish without clearing the query.
+    app.update(Action::OpenSettings);
+    let update = app.update(Action::RerunSetup);
+    app.perform_effects(update.effects()).expect("reset setup");
+    app.update(Action::Continue);
+    for _ in 0..3 {
+        app.update(Action::ToggleSelection);
+        app.update(Action::MoveSelection(1));
+    }
+    for _ in 0..5 {
+        let update = app.update(Action::Continue);
+        app.perform_effects(update.effects())
+            .expect("perform setup effects");
+    }
+    // Last Continue leaves Summary for Inventory; freeze the gap.
+    let update = app.update(Action::Continue);
+    let screen = buffer(&app, 80, 24);
+    let rendered = text(&screen);
+    let header = row_text(&screen, row_containing(&screen, "Global inventory"));
+
+    assert!(header.contains("no root read"), "{header}");
+    assert!(!rendered.contains("0 of 0 listed"), "{rendered}");
+    assert!(
+        !rendered.contains("No skills match the filter"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("No agent is configured"), "{rendered}");
+
+    app.perform_effects(update.effects()).expect("perform scan");
+    let screen = buffer(&app, 80, 24);
+    let rendered = text(&screen);
+    let header = row_text(&screen, row_containing(&screen, "Global inventory"));
+    assert!(header.contains("no root read"), "{header}");
+    assert!(!rendered.contains("0 of 0 listed"), "{rendered}");
+    assert!(
+        !rendered.contains("No skills match the filter"),
+        "{rendered}"
+    );
     assert!(rendered.contains("No agent is configured"), "{rendered}");
 }
 

@@ -598,7 +598,7 @@ impl InventorySnapshot {
     /// never in scope and must not block the "not scanned" claim for the ones
     /// that are. Any real observation — scanned, missing, or unreadable —
     /// means the pass has begun. All-deselected is not pending: nothing will
-    /// be read.
+    /// be read — that case is [`Self::no_agent_configured`].
     pub fn scan_pending(&self) -> bool {
         let mut any_pending = false;
         for root in &self.roots {
@@ -611,6 +611,18 @@ impl InventorySnapshot {
             }
         }
         any_pending
+    }
+
+    /// Whether every root was left alone because no agent is configured.
+    ///
+    /// Peer claim to [`Self::scan_pending`]: nothing is waiting to be read and
+    /// nothing was observed, because the user chose no agents. Surfaces that
+    /// summarise the roots ask this once rather than re-deriving the all-
+    /// [`RootStatus::NotSelected`] check.
+    pub fn no_agent_configured(&self) -> bool {
+        self.roots
+            .iter()
+            .all(|root| root.status() == &RootStatus::NotSelected)
     }
 
     /// The message behind an unreadable root, if any root could not be read.
@@ -1267,21 +1279,44 @@ mod tests {
         }
         let none_selected = InventorySnapshot::not_scanned(&agents);
         assert!(!none_selected.scan_pending());
+        assert!(none_selected.no_agent_configured());
         assert_eq!(none_selected.stated_skill_count(), None);
+        assert!(!all_selected.no_agent_configured());
 
         // Any real observation means the scan has begun, even when some agents
         // stay deselected beside the ones that were read or found absent.
         agents[AgentKind::ClaudeCode.index()].set_selected(true);
-        let observed = scan_with_budget(&agents, &[], InspectionBudget::installation_scan());
+        let missing = scan_with_budget(&agents, &[], InspectionBudget::installation_scan());
         assert!(matches!(
-            observed.root(AgentKind::ClaudeCode).status(),
+            missing.root(AgentKind::ClaudeCode).status(),
             RootStatus::Missing
         ));
         assert_eq!(
-            observed.root(AgentKind::Codex).status(),
+            missing.root(AgentKind::Codex).status(),
             &RootStatus::NotSelected
         );
-        assert!(!observed.scan_pending());
+        assert!(!missing.scan_pending());
+
+        // A root that exists but cannot be listed is an observation too.
+        let blocked = home.join(".claude/skills");
+        fs::create_dir_all(home.join(".claude")).expect("create Claude Code parent");
+        fs::write(&blocked, "not a directory").expect("block the root with a file");
+        let unreadable = scan_with_budget(&agents, &[], InspectionBudget::installation_scan());
+        assert!(matches!(
+            unreadable.root(AgentKind::ClaudeCode).status(),
+            RootStatus::Unreadable { .. }
+        ));
+        assert!(!unreadable.scan_pending());
+
+        // So is a root that was read in full.
+        fs::remove_file(&blocked).expect("clear the blocking file");
+        fs::create_dir_all(&blocked).expect("create an empty root");
+        let scanned = scan_with_budget(&agents, &[], InspectionBudget::installation_scan());
+        assert_eq!(
+            scanned.root(AgentKind::ClaudeCode).status(),
+            &RootStatus::Scanned { installed: 0 }
+        );
+        assert!(!scanned.scan_pending());
     }
 
     /// Finding every root absent is a complete answer about the roots, but it

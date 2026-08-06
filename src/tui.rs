@@ -729,6 +729,12 @@ fn inventory_subtitle(app: &SkilledApp, shown: usize) -> String {
     if inventory.scan_pending() {
         return "not scanned".to_owned();
     }
+    // All-deselected is also outside the filter's reach: nothing was ever in
+    // scope to list, so "0 of 0 listed" would invent a completed scan of an
+    // empty table rather than say no agent is configured.
+    if inventory.no_agent_configured() {
+        return "no root read".to_owned();
+    }
     if !app.inventory_filter().trim().is_empty() {
         return format!("{shown} of {total} listed");
     }
@@ -905,6 +911,17 @@ fn inventory_empty_state(app: &SkilledApp) -> (String, String) {
             "Skilled scans the roots when this view opens.".to_owned(),
         );
     }
+    // Nothing was looked at, so nothing may be said about what exists — and a
+    // surviving filter must not invent installed skills to match against.
+    if app.inventory().no_agent_configured() {
+        return (
+            "No agent is configured".to_owned(),
+            "Skilled reads the skill root of the agents chosen during setup, \
+             and none are chosen, so it read nothing. Rerun setup from \
+             Settings to choose an agent."
+                .to_owned(),
+        );
+    }
     if !app.inventory_filter().trim().is_empty() {
         return (
             "No skills match the filter".to_owned(),
@@ -931,19 +948,6 @@ fn inventory_empty_state(app: &SkilledApp) -> (String, String) {
             "No skills are installed".to_owned(),
             "The agent skill roots Skilled read hold no skill directories. \
              Nothing was created or changed."
-                .to_owned(),
-        );
-    }
-    // Nothing was looked at, so nothing may be said about what exists.
-    if roots
-        .iter()
-        .all(|root| root.status() == &RootStatus::NotSelected)
-    {
-        return (
-            "No agent is configured".to_owned(),
-            "Skilled reads the skill root of the agents chosen during setup, \
-             and none are chosen, so it read nothing. Rerun setup from \
-             Settings to choose an agent."
                 .to_owned(),
         );
     }

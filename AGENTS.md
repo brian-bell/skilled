@@ -127,11 +127,17 @@ installation scan runs as `Effect::ScanInstallations` for this reason. That
 makes entering the Inventory and the scan that fills it two moments, and the
 state between them must not rest on a scan taken for the view just left:
 `enter_inventory` resets the snapshot to `InventorySnapshot::not_scanned` —
-a pure change, the scan still runs as the effect — so the "not scanned"
-subtitle, roots line, and empty state are what any render in that gap would
-say, outranking even a filter that survived the switch. Keep agent
-conventions behind adapters rather than spreading paths or enablement rules
-through UI and scanner code. Build new screens from `components` primitives and
+a pure change, the scan still runs as the effect. That constructor is
+selection-aware: selected roots are `NotScanned`, deselected roots are already
+`NotSelected` (the scan will never touch them). Surfaces ask
+`InventorySnapshot::scan_pending` for the gap claim — true when at least one
+root is still waiting and nothing has been observed yet — so a mixed gap still
+says "not scanned" overall, the Roots line names each agent honestly, and an
+all-deselected gap falls through to "No agent is configured" rather than
+pretending a scan is pending. Both the pending claim and the all-deselected
+claim outrank a filter that survived the switch: a query cannot invent listed
+skills when nothing was in scope to read. Keep agent conventions behind adapters
+rather than spreading paths or enablement rules through UI and scanner code. Build new screens from `components` primitives and
 `theme` tokens rather than ad hoc styles. The title-bar and key-hint rows are
 painted on `theme::chrome_band()` beneath their text, so the shell reads as
 band, navigation surface, and workspace. The key-hint bar and the navigation
