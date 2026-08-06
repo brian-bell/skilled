@@ -1435,6 +1435,101 @@ fn returning_to_the_inventory_says_not_scanned_until_the_scan_lands() {
     assert!(rendered.contains("nothing installed"), "{rendered}");
 }
 
+/// A deselected agent is already terminal for the coming scan. The gap must
+/// label it "not selected" — not "not scanned" — while still saying the
+/// selected roots have not been read yet.
+#[test]
+fn gap_with_a_deselected_agent_keeps_selection_honest() {
+    let harness = Harness::new();
+    fs::create_dir_all(harness.directory.path().join("home/.claude/skills"))
+        .expect("create an empty Claude Code root");
+    let mut app = harness.first_run();
+    app.update(Action::Continue);
+    // DetectAgents focuses Claude Code first; move to Codex and deselect it.
+    app.update(Action::MoveSelection(1));
+    app.update(Action::ToggleSelection);
+    for _ in 0..6 {
+        let update = app.update(Action::Continue);
+        app.perform_effects(update.effects())
+            .expect("perform setup effects");
+    }
+    assert!(text(&buffer(&app, 80, 24)).contains("nothing installed"));
+
+    app.update(Action::OpenSources);
+    let update = app.update(Action::OpenInventory);
+    let screen = buffer(&app, 80, 24);
+    let rendered = text(&screen);
+    let header = row_text(&screen, row_containing(&screen, "Global inventory"));
+    let roots = row_text(&screen, row_containing(&screen, "Roots:"));
+
+    assert!(header.contains("not scanned"), "{header}");
+    assert!(
+        rendered.contains("Installation roots have not been scanned"),
+        "{rendered}"
+    );
+    assert!(roots.contains("Claude Code not scanned"), "{roots}");
+    assert!(roots.contains("Codex not selected"), "{roots}");
+    assert!(roots.contains("OpenCode not scanned"), "{roots}");
+    assert!(!roots.contains("Codex not scanned"), "{roots}");
+    // No count: the selected roots have not been read.
+    let navigation = row_text(&screen, 1);
+    assert!(
+        navigation.contains("▌Inventory  2 Sources 0 "),
+        "{navigation}"
+    );
+
+    app.perform_effects(update.effects()).expect("perform scan");
+    let screen = buffer(&app, 80, 24);
+    let roots = row_text(&screen, row_containing(&screen, "Roots:"));
+    assert!(roots.contains("Codex not selected"), "{roots}");
+    assert!(!roots.contains("not scanned"), "{roots}");
+    assert!(
+        text(&screen).contains("nothing installed"),
+        "{}",
+        text(&screen)
+    );
+}
+
+/// When nothing is selected there is nothing to scan. The gap must not pretend
+/// roots are pending — it should already say no agent is configured.
+#[test]
+fn gap_with_every_agent_deselected_does_not_claim_not_scanned() {
+    let harness = Harness::new();
+    fs::create_dir_all(harness.directory.path().join("home/.claude/skills"))
+        .expect("create a Claude Code root");
+    let mut app = harness.first_run();
+    app.update(Action::Continue);
+    for _ in 0..3 {
+        app.update(Action::ToggleSelection);
+        app.update(Action::MoveSelection(1));
+    }
+    for _ in 0..6 {
+        let update = app.update(Action::Continue);
+        app.perform_effects(update.effects())
+            .expect("perform setup effects");
+    }
+
+    app.update(Action::OpenSources);
+    let update = app.update(Action::OpenInventory);
+    let screen = buffer(&app, 80, 24);
+    let rendered = text(&screen);
+    let header = row_text(&screen, row_containing(&screen, "Global inventory"));
+
+    assert!(!header.contains("not scanned"), "{header}");
+    assert!(
+        !rendered.contains("Installation roots have not been scanned"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("No agent is configured"), "{rendered}");
+    let roots = row_text(&screen, row_containing(&screen, "Roots:"));
+    assert_eq!(roots.matches("not selected").count(), 3, "{roots}");
+    assert!(!roots.contains("not scanned"), "{roots}");
+
+    app.perform_effects(update.effects()).expect("perform scan");
+    let rendered = text(&buffer(&app, 80, 24));
+    assert!(rendered.contains("No agent is configured"), "{rendered}");
+}
+
 #[test]
 fn wide_terminals_gain_a_detail_region_and_compact_ones_do_not() {
     let harness = Harness::new();

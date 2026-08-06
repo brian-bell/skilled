@@ -724,12 +724,9 @@ fn inventory_subtitle(app: &SkilledApp, shown: usize) -> String {
     // A snapshot nothing has been read into has no rows for a filter to
     // narrow: "not scanned" is the only backed claim, and outranks both the
     // filter's count and every hedge below. The filter itself is kept — it
-    // narrows the scan that lands next.
-    if inventory
-        .roots()
-        .iter()
-        .all(|root| root.status() == &RootStatus::NotScanned)
-    {
+    // narrows the scan that lands next. Deselected roots may sit beside
+    // pending ones; scan_pending tolerates that mixture.
+    if inventory.scan_pending() {
         return "not scanned".to_owned();
     }
     if !app.inventory_filter().trim().is_empty() {
@@ -900,11 +897,9 @@ fn inventory_empty_state(app: &SkilledApp) -> (String, String) {
     let roots = app.inventory().roots();
     // Before any filter question: an unscanned snapshot holds nothing a
     // filter could have hidden, so "No skills match the filter" would promise
-    // installed skills that were never read.
-    if roots
-        .iter()
-        .all(|root| root.status() == &RootStatus::NotScanned)
-    {
+    // installed skills that were never read. Deselected roots may sit beside
+    // pending ones without blocking this arm.
+    if app.inventory().scan_pending() {
         return (
             "Installation roots have not been scanned".to_owned(),
             "Skilled scans the roots when this view opens.".to_owned(),

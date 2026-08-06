@@ -504,19 +504,28 @@ impl InventorySnapshot {
             .count()
     }
 
-    /// The snapshot of a session that has not read any root yet.
+    /// The snapshot of a session that has not read any selected root yet.
     ///
     /// First-run setup reads the installation roots at its own step, after the
     /// user has chosen which agents Skilled should configure. Until then there
     /// is nothing to report, and this says so rather than reporting an empty
     /// result that would look like a scan finding nothing.
+    ///
+    /// Deselected agents are already terminal for this pass: the scan that
+    /// lands will leave them [`RootStatus::NotSelected`] and never touch them,
+    /// so the gap must say the same rather than claim they are waiting to be
+    /// read.
     pub(crate) fn not_scanned(agents: &[AgentDetection; 3]) -> Self {
         Self {
             rows: Vec::new(),
             roots: agents.each_ref().map(|agent| RootScan {
                 agent: agent.kind(),
                 path: agent.root().to_path_buf(),
-                status: RootStatus::NotScanned,
+                status: if agent.selected() {
+                    RootStatus::NotScanned
+                } else {
+                    RootStatus::NotSelected
+                },
             }),
         }
     }
@@ -580,6 +589,28 @@ impl InventorySnapshot {
             .iter()
             .any(|root| matches!(root.status(), RootStatus::Scanned { .. }));
         (self.counts_are_complete() && read_a_root).then(|| self.skill_row_count())
+    }
+
+    /// Whether the scan has not started and at least one selected root is still
+    /// waiting to be read.
+    ///
+    /// [`RootStatus::NotSelected`] is allowed beside pending roots: those were
+    /// never in scope and must not block the "not scanned" claim for the ones
+    /// that are. Any real observation — scanned, missing, or unreadable —
+    /// means the pass has begun. All-deselected is not pending: nothing will
+    /// be read.
+    pub fn scan_pending(&self) -> bool {
+        let mut any_pending = false;
+        for root in &self.roots {
+            match root.status() {
+                RootStatus::NotScanned => any_pending = true,
+                RootStatus::NotSelected => {}
+                RootStatus::Scanned { .. }
+                | RootStatus::Missing
+                | RootStatus::Unreadable { .. } => return false,
+            }
+        }
+        any_pending
     }
 
     /// The message behind an unreadable root, if any root could not be read.
@@ -1186,6 +1217,71 @@ mod tests {
             snapshot.root(AgentKind::ClaudeCode).status(),
             &RootStatus::Scanned { installed: 1 }
         );
+    }
+
+    /// The pre-scan snapshot must not claim a deselected root is waiting to be
+    /// read. The scan that lands will leave it NotSelected and never touch it,
+    /// so the gap must say the same rather than flash "not scanned" first.
+    #[test]
+    fn not_scanned_marks_deselected_agents_not_selected() {
+        let temporary = tempfile::tempdir().expect("temporary home");
+        let home = temporary.path().join("home");
+        let environment = AppEnvironment::new(&home, temporary.path().join("data"), "");
+        let mut agents = detect_agents(&environment);
+        agents[AgentKind::Codex.index()].set_selected(false);
+
+        let snapshot = InventorySnapshot::not_scanned(&agents);
+
+        assert!(snapshot.rows().is_empty());
+        assert_eq!(
+            snapshot.root(AgentKind::ClaudeCode).status(),
+            &RootStatus::NotScanned
+        );
+        assert_eq!(
+            snapshot.root(AgentKind::Codex).status(),
+            &RootStatus::NotSelected
+        );
+        assert_eq!(
+            snapshot.root(AgentKind::OpenCode).status(),
+            &RootStatus::NotScanned
+        );
+        assert_eq!(snapshot.stated_skill_count(), None);
+        // A mixed gap is still pending: selected roots have not been read.
+        assert!(snapshot.scan_pending());
+    }
+
+    /// "Not scanned" UI may fire when deselected roots sit beside pending ones,
+    /// but not when every agent was deselected — nothing is waiting to be read.
+    #[test]
+    fn scan_pending_tolerates_not_selected_and_rejects_observations() {
+        let temporary = tempfile::tempdir().expect("temporary home");
+        let home = temporary.path().join("home");
+        let environment = AppEnvironment::new(&home, temporary.path().join("data"), "");
+        let mut agents = detect_agents(&environment);
+
+        let all_selected = InventorySnapshot::not_scanned(&agents);
+        assert!(all_selected.scan_pending());
+
+        for agent in &mut agents {
+            agent.set_selected(false);
+        }
+        let none_selected = InventorySnapshot::not_scanned(&agents);
+        assert!(!none_selected.scan_pending());
+        assert_eq!(none_selected.stated_skill_count(), None);
+
+        // Any real observation means the scan has begun, even when some agents
+        // stay deselected beside the ones that were read or found absent.
+        agents[AgentKind::ClaudeCode.index()].set_selected(true);
+        let observed = scan_with_budget(&agents, &[], InspectionBudget::installation_scan());
+        assert!(matches!(
+            observed.root(AgentKind::ClaudeCode).status(),
+            RootStatus::Missing
+        ));
+        assert_eq!(
+            observed.root(AgentKind::Codex).status(),
+            &RootStatus::NotSelected
+        );
+        assert!(!observed.scan_pending());
     }
 
     /// Finding every root absent is a complete answer about the roots, but it
