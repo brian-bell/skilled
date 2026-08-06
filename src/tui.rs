@@ -26,11 +26,32 @@ use crate::{
 pub const MINIMUM_WIDTH: u16 = 80;
 pub const MINIMUM_HEIGHT: u16 = 24;
 
-pub fn render(frame: &mut Frame<'_>, app: &SkilledApp) {
+/// What a frame measured that the application state has no way to know.
+///
+/// The reducer is deliberately geometry-blind — `update` never learns the
+/// terminal's size — yet a scrollable region has to be clamped to content the
+/// renderer alone can measure. The frame reports what it found and the runner
+/// notes it, the same boundary a typed [`crate::Effect`] crosses for
+/// filesystem work.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct RenderFeedback {
+    inventory_detail_max_scroll: usize,
+}
+
+impl RenderFeedback {
+    /// The furthest the Inventory detail region could be scrolled and still
+    /// show rows that were not already visible; zero when the region is not
+    /// on screen, holds nothing, or holds everything it has.
+    pub fn inventory_detail_max_scroll(self) -> usize {
+        self.inventory_detail_max_scroll
+    }
+}
+
+pub fn render(frame: &mut Frame<'_>, app: &SkilledApp) -> RenderFeedback {
     let area = frame.area();
     if area.width < MINIMUM_WIDTH || area.height < MINIMUM_HEIGHT {
         render_size_notice(frame, area);
-        return;
+        return RenderFeedback::default();
     }
 
     frame.render_widget(Block::new().style(theme::app_surface()), area);
@@ -46,6 +67,11 @@ pub fn render(frame: &mut Frame<'_>, app: &SkilledApp) {
     render_title_bar(frame, title_bar, app);
     render_navigation(frame, navigation, app);
     let body = workspace;
+    // Measured once, for this frame's geometry, and used by everything that
+    // speaks about the detail region: the window drawn, the key hint, and the
+    // help entry then cannot disagree with one another or lag a keystroke
+    // behind the terminal they are describing.
+    let detail_extent = inventory_detail_scroll_extent(app, workspace);
     match app.view() {
         View::Setup(step) => render_setup(frame, body, app, step),
         View::Inventory => render_inventory(frame, body, app),
@@ -61,9 +87,12 @@ pub fn render(frame: &mut Frame<'_>, app: &SkilledApp) {
         render_catalog_confirmation(frame, area, app);
     }
     if let Some(context) = app.help_context() {
-        render_help(frame, area, context, app);
+        render_help(frame, area, context, app, detail_extent);
     }
-    render_footer(frame, key_hints, app);
+    render_footer(frame, key_hints, app, detail_extent);
+    RenderFeedback {
+        inventory_detail_max_scroll: detail_extent,
+    }
 }
 
 fn render_title_bar(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
@@ -978,6 +1007,18 @@ fn render_region_separator(frame: &mut Frame<'_>, area: Rect) {
     );
 }
 
+/// The heading and its rule, which every pane spends before its body.
+const PANE_HEADER_HEIGHT: u16 = 2;
+
+/// The header and body a pane's area divides into.
+///
+/// Shared so a caller that has to measure a body it is not drawing — the
+/// scroll extent the detail region reports — divides the area exactly as the
+/// scaffold that draws it does.
+fn pane_regions(area: Rect) -> [Rect; 2] {
+    Layout::vertical([Constraint::Length(PANE_HEADER_HEIGHT), Constraint::Min(1)]).areas(area)
+}
+
 /// A workspace pane: its header, the rule that closes it, and the body left
 /// for the pane's own content.
 fn render_pane_scaffold(
@@ -987,7 +1028,7 @@ fn render_pane_scaffold(
     subtitle: &str,
     focused: bool,
 ) -> Rect {
-    let [header, body] = Layout::vertical([Constraint::Length(2), Constraint::Min(1)]).areas(area);
+    let [header, body] = pane_regions(area);
     frame.render_widget(
         Paragraph::new(vec![
             pane_header(heading, subtitle, focused, header.width),
@@ -1056,25 +1097,52 @@ fn render_detail_scaffold(
     focused: bool,
     beside_the_primary_region: bool,
 ) -> Rect {
-    let region = if beside_the_primary_region {
+    let region = detail_regions(area, beside_the_primary_region);
+    if let Some(separator) = region.separator {
+        render_region_separator(frame, separator);
+    }
+    // Painted whole, before the margin: the surface is what makes the region
+    // read as a region, so it reaches the edges the text does not.
+    frame.render_widget(Block::new().style(theme::detail_surface()), region.surface);
+    render_pane_scaffold(frame, region.text, heading, subtitle, focused)
+}
+
+/// The rectangles a detail region is built from.
+///
+/// Pure, and the only description of the region's geometry, so the extent the
+/// frame reports for a body is measured against the body that was drawn.
+struct DetailRegions {
+    /// The dividing rule, when the region sits beside a primary one.
+    separator: Option<Rect>,
+    /// Everything the region's surface colour reaches.
+    surface: Rect,
+    /// The surface inside its text margin: header, rule, and body.
+    text: Rect,
+}
+
+impl DetailRegions {
+    /// The rows the region's own lines get, below the header and its rule.
+    fn body(&self) -> Rect {
+        pane_regions(self.text)[1]
+    }
+}
+
+fn detail_regions(area: Rect, beside_the_primary_region: bool) -> DetailRegions {
+    let (separator, surface) = if beside_the_primary_region {
         let [separator, region] =
             Layout::horizontal([Constraint::Length(1), Constraint::Min(1)]).areas(area);
-        render_region_separator(frame, separator);
-        // Painted whole, before the margin: the surface is what makes the
-        // region read as a region, so it reaches the edges the text does not.
-        frame.render_widget(Block::new().style(theme::detail_surface()), region);
-        region.inner(Margin {
-            horizontal: 1,
-            vertical: 0,
-        })
+        (Some(separator), region)
     } else {
-        frame.render_widget(Block::new().style(theme::detail_surface()), area);
-        area.inner(Margin {
+        (None, area)
+    };
+    DetailRegions {
+        separator,
+        surface,
+        text: surface.inner(Margin {
             horizontal: 1,
             vertical: 0,
-        })
-    };
-    render_pane_scaffold(frame, region, heading, subtitle, focused)
+        }),
+    }
 }
 
 /// The detail region: everything observed about the selected installation.
@@ -1112,46 +1180,154 @@ fn render_inventory_detail(
     };
     // The detail region is the only place per-agent observations and findings
     // exist, so content that does not fit is reported as missing rather than
-    // dropped off the bottom without a trace.
+    // dropped off the bottom without a trace — and, where the region has the
+    // keyboard, reached by scrolling rather than only reported.
     let lines = inventory_detail_lines(row, app.home(), body.width);
-    frame.render_widget(
-        Paragraph::new(bounded_detail_lines(lines, body.width, body.height))
-            .wrap(Wrap { trim: false }),
+    render_detail_window(
+        frame,
         body,
+        lines,
+        app.inventory_detail_scroll(),
+        app.inventory_pane() == InventoryPane::Details,
     );
 }
 
-/// Fit detail lines to a region, saying so when some do not fit.
+/// Draw a scrollable detail region, accounting for every row it does not show.
 ///
-/// The last rows are spent on a count of what was left out, because a region
-/// that silently ends mid-section reads as though there were nothing more. The
-/// notice is measured like any other line and shortened rather than wrapped
-/// off the bottom: the one string whose whole job is to report that content
-/// was cut must not itself be cut.
-fn bounded_detail_lines(lines: Vec<Line<'static>>, width: u16, height: u16) -> Vec<Line<'static>> {
-    let available = usize::from(height);
-    if width == 0 || available == 0 || detail_lines_height(&lines, width) <= available {
-        return lines;
+/// The window is described first and drawn second, so the notices at either
+/// end are measured from the same arithmetic that decides what is visible: the
+/// rows claimed above, the rows on screen, and the rows claimed below always
+/// add up to the content the region holds.
+///
+/// The offset is clamped here as well as in the reducer. The reducer can only
+/// clamp against what the previous frame measured, and a terminal that shrank
+/// since then would otherwise scroll the region past its content and show a
+/// blank body — an emptiness the user would read as an absence of content.
+fn render_detail_window(
+    frame: &mut Frame<'_>,
+    body: Rect,
+    lines: Vec<Line<'static>>,
+    offset: usize,
+    focused: bool,
+) {
+    if body.width == 0 {
+        return;
     }
+    let total_rows = detail_lines_height(&lines, body.width);
+    let window = detail_window(total_rows, body.height, offset);
+    let [above, content, below] = Layout::vertical([
+        Constraint::Length(u16::from(window.above > 0)),
+        Constraint::Min(0),
+        Constraint::Length(u16::from(window.below > 0)),
+    ])
+    .areas(body);
 
-    // Rows hidden, not lines hidden: a dropped line that would have wrapped
-    // costs the reader more than one row of content.
-    let total_rows = detail_lines_height(&lines, width);
-    let notice = |hidden: usize| dropped_rows_notice(hidden, width);
-
-    let reserved = wrapped_line_count(&notice(total_rows), width);
-    let mut kept = Vec::new();
-    let mut used = 0;
-    for line in &lines {
-        let rows = wrapped_line_count(line, width);
-        if used + rows > available.saturating_sub(reserved) {
-            break;
-        }
-        kept.push(line.clone());
-        used += rows;
+    if window.above > 0 {
+        frame.render_widget(
+            Paragraph::new(rows_above_notice(window.above, body.width)),
+            above,
+        );
     }
-    kept.push(notice(total_rows - used));
-    kept
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .scroll((u16::try_from(window.above).unwrap_or(u16::MAX), 0)),
+        content,
+    );
+    if window.below > 0 {
+        frame.render_widget(
+            Paragraph::new(rows_below_notice(
+                window.below,
+                body.width,
+                // Advice only where the keys are live: below a region the user
+                // cannot scroll, the way to see more is a bigger terminal.
+                focused && detail_max_scroll(total_rows, body.height) > 0,
+            )),
+            below,
+        );
+    }
+}
+
+/// How a detail region spends its rows at one offset: what it has scrolled
+/// past, what it shows, and what is still below.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct DetailWindow {
+    above: usize,
+    shown: usize,
+    below: usize,
+}
+
+/// Divide a region's rows between the content and the notices at its ends.
+///
+/// The notices cost a row each, and they are counted before the content rather
+/// than after it: a notice that had to be squeezed in afterwards would either
+/// wrap off the bottom or push away the row it was reporting on.
+///
+/// Everything here is counted in rows rather than lines, because that is what
+/// the reader loses: a hidden line that would have wrapped costs more than one
+/// row of the region. It is also what a window can move by, so a wrapped line
+/// at either edge is shown in part rather than withheld whole.
+fn detail_window(total_rows: usize, height: u16, offset: usize) -> DetailWindow {
+    let rows = usize::from(height);
+    let above = offset.min(detail_max_scroll(total_rows, height));
+    let remaining = total_rows - above;
+    let reserved = usize::from(above > 0);
+    if remaining <= rows.saturating_sub(reserved) {
+        return DetailWindow {
+            above,
+            shown: remaining,
+            below: 0,
+        };
+    }
+    let shown = rows.saturating_sub(reserved).saturating_sub(1);
+    DetailWindow {
+        above,
+        shown,
+        below: remaining - shown,
+    }
+}
+
+/// The furthest offset worth scrolling to: the one that brings the last row
+/// into view, and no further, because a window scrolled past its content shows
+/// emptiness that reads as an absence of content.
+///
+/// A region with fewer than two rows can hold a notice or a row of content but
+/// not both, so it cannot scroll usefully and only reports what it dropped.
+fn detail_max_scroll(total_rows: usize, height: u16) -> usize {
+    let rows = usize::from(height);
+    if rows < 2 || total_rows <= rows {
+        return 0;
+    }
+    // One row goes to the notice for everything scrolled past, so the last
+    // offset shows `rows - 1` rows of content ending on the last of them.
+    total_rows - rows + 1
+}
+
+/// How far the Inventory's detail region could be scrolled in this frame.
+///
+/// Measured from the workspace the frame is about to lay out, so a hint or a
+/// help entry gated on it describes the terminal the user is looking at. Zero
+/// wherever the region is not drawn — another view, or a compact viewport
+/// showing the table instead — because a region that is not on screen cannot
+/// be scrolled.
+fn inventory_detail_scroll_extent(app: &SkilledApp, workspace: Rect) -> usize {
+    if app.view() != View::Inventory {
+        return 0;
+    }
+    let (primary, detail) = viewport::workspace_regions(workspace);
+    let body = match (detail, app.inventory_pane()) {
+        (Some(detail), _) => detail_regions(detail, true).body(),
+        (None, InventoryPane::Details) => detail_regions(primary, false).body(),
+        (None, InventoryPane::Skills) => return 0,
+    };
+    let Some(row) = app.selected_installation() else {
+        return 0;
+    };
+    if body.width == 0 {
+        return 0;
+    }
+    let lines = inventory_detail_lines(row, app.home(), body.width);
+    detail_max_scroll(detail_lines_height(&lines, body.width), body.height)
 }
 
 /// The line a detail region spends on what it could not show.
@@ -1164,18 +1340,66 @@ fn bounded_detail_lines(lines: Vec<Line<'static>>, width: u16, height: u16) -> V
 /// bare ellipsis it falls back to can wrap.
 ///
 /// Shared by both detail regions so a reader who has learnt to look for it on
-/// one screen finds the same sentence on the other.
+/// one screen finds the same sentence on the other. The Inventory's region
+/// swaps the advice for the keys once they are live (see [`rows_below_notice`])
+/// — the count, the tone, and the place it is set stay exactly where that
+/// reader learnt to look.
 fn dropped_rows_notice(hidden: usize, width: u16) -> Line<'static> {
-    let plural = if hidden == 1 { "" } else { "s" };
-    [
-        format!("{hidden} more line{plural} — widen or lengthen the terminal"),
-        format!("{hidden} more line{plural}"),
-        format!("+{hidden}"),
-    ]
-    .into_iter()
-    .map(|label| Line::from(components::badge(Tone::Warning, &label)))
-    .find(|line| wrapped_line_count(line, width) == 1)
-    .unwrap_or_else(|| Line::from(components::badge(Tone::Warning, "…")))
+    let plural = plural(hidden);
+    hidden_rows_notice(
+        [
+            format!("{hidden} more line{plural} — widen or lengthen the terminal"),
+            format!("{hidden} more line{plural}"),
+            format!("+{hidden}"),
+        ],
+        width,
+    )
+}
+
+/// The line a scrollable region spends on the rows below its window.
+///
+/// Where the region has the keyboard it names the keys that reach them; where
+/// it does not, it keeps the advice that does apply, because a hint the
+/// focused region would answer to is a promise this one cannot keep.
+fn rows_below_notice(hidden: usize, width: u16, scrollable: bool) -> Line<'static> {
+    if !scrollable {
+        return dropped_rows_notice(hidden, width);
+    }
+    let plural = plural(hidden);
+    hidden_rows_notice(
+        [
+            format!("{hidden} more line{plural} below — j/k to scroll"),
+            format!("{hidden} more line{plural} below"),
+            format!("+{hidden}"),
+        ],
+        width,
+    )
+}
+
+/// The line a scrolled region spends on the rows above its window.
+///
+/// A count, and no advice: the keys that scroll back are the ones that just
+/// scrolled forward, and the notice below the window already names them where
+/// they are live.
+fn rows_above_notice(hidden: usize, width: u16) -> Line<'static> {
+    let plural = plural(hidden);
+    hidden_rows_notice(
+        [format!("{hidden} line{plural} above"), format!("↑{hidden}")],
+        width,
+    )
+}
+
+fn plural(count: usize) -> &'static str {
+    if count == 1 { "" } else { "s" }
+}
+
+/// Set a hidden-row count on one line, in the longest form that fits.
+fn hidden_rows_notice<const FORMS: usize>(forms: [String; FORMS], width: u16) -> Line<'static> {
+    forms
+        .into_iter()
+        .map(|label| Line::from(components::badge(Tone::Warning, &label)))
+        .find(|line| wrapped_line_count(line, width) == 1)
+        .unwrap_or_else(|| Line::from(components::badge(Tone::Warning, "…")))
 }
 
 fn inventory_detail_lines(row: &InventoryRow, home: &Path, width: u16) -> Vec<Line<'static>> {
@@ -3077,7 +3301,13 @@ fn render_settings(frame: &mut Frame<'_>, area: Rect) {
     );
 }
 
-fn render_help(frame: &mut Frame<'_>, area: Rect, context: View, app: &SkilledApp) {
+fn render_help(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    context: View,
+    app: &SkilledApp,
+    inventory_detail_extent: usize,
+) {
     let viewport = viewport::classify(area);
     let (width, height) = match viewport {
         viewport::Viewport::Compact => (76, 18),
@@ -3089,7 +3319,7 @@ fn render_help(frame: &mut Frame<'_>, area: Rect, context: View, app: &SkilledAp
     let block = components::dialog_frame("Keyboard reference", &scope);
     let regions = components::dialog_regions(block.inner(popup), 11);
     frame.render_widget(block, popup);
-    let commands = help_commands(context, app);
+    let commands = help_commands(context, app, inventory_detail_extent);
     match viewport {
         viewport::Viewport::Compact => {
             let mut lines = vec![
@@ -3175,7 +3405,11 @@ struct HelpCommand {
     description: &'static str,
 }
 
-fn help_commands(context: View, app: &SkilledApp) -> Vec<HelpCommand> {
+fn help_commands(
+    context: View,
+    app: &SkilledApp,
+    inventory_detail_extent: usize,
+) -> Vec<HelpCommand> {
     match context {
         View::Setup(step) => {
             let mut commands = Vec::new();
@@ -3245,6 +3479,13 @@ fn help_commands(context: View, app: &SkilledApp) -> Vec<HelpCommand> {
                     key: "Up/Down or j/k",
                     label: "Move",
                     description: "move the selected skill",
+                });
+            }
+            if inventory_can_scroll_detail(app, inventory_detail_extent) {
+                commands.push(HelpCommand {
+                    key: "Up/Down or j/k",
+                    label: "Scroll details",
+                    description: "reach the rows below the detail region",
                 });
             }
             if inventory_can_advance(app) {
@@ -3370,14 +3611,22 @@ fn help_scope(context: View) -> String {
     }
 }
 
-fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
+fn render_footer(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &SkilledApp,
+    inventory_detail_extent: usize,
+) {
     // The band reaches the full width, so the row reads as chrome rather than
     // as a smear the length of the hints. The hint line itself only sets
     // foreground colours, apart from the key caps' own emphasis.
     frame.render_widget(Block::new().style(theme::chrome_band()), area);
     frame.render_widget(
-        Paragraph::new(components::key_hint_line(&key_hints(app), area.width))
-            .style(theme::chrome()),
+        Paragraph::new(components::key_hint_line(
+            &key_hints(app, inventory_detail_extent),
+            area.width,
+        ))
+        .style(theme::chrome()),
         area,
     );
 }
@@ -3388,7 +3637,7 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
 /// a promise the application cannot keep, so unimplemented commands —
 /// installation, updates, repair, uninstall, and forget — are absent by
 /// construction.
-fn key_hints(app: &SkilledApp) -> Vec<KeyHint> {
+fn key_hints(app: &SkilledApp, inventory_detail_extent: usize) -> Vec<KeyHint> {
     if app.help_context().is_some() {
         return vec![
             KeyHint::essential("Esc", "Close"),
@@ -3450,6 +3699,9 @@ fn key_hints(app: &SkilledApp) -> Vec<KeyHint> {
             if inventory_can_move_selection(app) {
                 hints.push(KeyHint::new("j/k", "Move"));
             }
+            if inventory_can_scroll_detail(app, inventory_detail_extent) {
+                hints.push(KeyHint::new("j/k", "Scroll"));
+            }
             if inventory_can_advance(app) {
                 hints.push(KeyHint::essential("Enter", "Open"));
             }
@@ -3504,6 +3756,16 @@ fn inventory_can_advance(app: &SkilledApp) -> bool {
 /// to move it to.
 fn inventory_can_move_selection(app: &SkilledApp) -> bool {
     app.inventory_pane() == InventoryPane::Skills && app.filtered_installation_count() > 1
+}
+
+/// The detail region's window only moves where the region has the keyboard and
+/// the frame just drawn found rows the window does not reach.
+///
+/// The extent is the frame's own measurement rather than the last one noted on
+/// the application, so the hint cannot survive a resize that removed the thing
+/// it advertises.
+fn inventory_can_scroll_detail(app: &SkilledApp, inventory_detail_extent: usize) -> bool {
+    app.inventory_pane() == InventoryPane::Details && inventory_detail_extent > 0
 }
 
 /// Back unwinds an applied filter, then a drilled-in detail region.

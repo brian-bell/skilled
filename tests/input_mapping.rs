@@ -121,6 +121,69 @@ fn a_held_inventory_key_repeats_movement_but_not_navigation() {
     }
 }
 
+/// The movement keys belong to whichever Inventory region has focus: they walk
+/// the table's rows, and they move the detail region's window once the user has
+/// drilled into it. The view alone cannot tell the two apart, so the pure
+/// mapping still answers with the selection and the translation happens where
+/// the application state is in hand.
+#[test]
+fn the_focused_inventory_region_decides_what_the_movement_keys_move() {
+    use skilled::input::{action_for_app_key, action_for_key};
+
+    let temporary = tempfile::tempdir().expect("temporary application directory");
+    let skill = temporary.path().join("home/.claude/skills/portable");
+    fs::create_dir_all(&skill).expect("create skill fixture");
+    fs::write(
+        skill.join("SKILL.md"),
+        "---\nname: portable\ndescription: Portable fixture\n---\n# Portable\n",
+    )
+    .expect("write skill fixture");
+    let mut app = SkilledApp::open(AppEnvironment::new(
+        temporary.path().join("home"),
+        temporary.path().join("data"),
+        "",
+    ))
+    .expect("open application");
+    for _ in 0..7 {
+        let update = app.update(Action::Continue);
+        app.perform_effects(update.effects())
+            .expect("setup effects");
+    }
+    assert_eq!(
+        action_for_app_key(&app, key(KeyCode::Char('j'))),
+        Some(Action::MoveInventorySelection(1))
+    );
+
+    app.update(Action::AdvanceInventoryPane);
+
+    for (code, expected) in [
+        (KeyCode::Char('j'), Action::ScrollInventoryDetail(1)),
+        (KeyCode::Down, Action::ScrollInventoryDetail(1)),
+        (KeyCode::Char('k'), Action::ScrollInventoryDetail(-1)),
+        (KeyCode::Up, Action::ScrollInventoryDetail(-1)),
+    ] {
+        assert_eq!(
+            action_for_app_key(&app, key(code)),
+            Some(expected),
+            "{code:?}"
+        );
+    }
+    // Reading a long region is exactly where a key is held down.
+    assert_eq!(
+        action_for_app_key(&app, repeat(KeyCode::Char('j'))),
+        Some(Action::ScrollInventoryDetail(1))
+    );
+    // Everything else the Inventory binds is unchanged by the region in focus.
+    assert_eq!(
+        action_for_app_key(&app, key(KeyCode::Tab)),
+        Some(Action::MoveInventoryPane(1))
+    );
+    assert_eq!(
+        action_for_key(View::Inventory, key(KeyCode::Char('j'))),
+        Some(Action::MoveInventorySelection(1))
+    );
+}
+
 #[test]
 fn actions_remain_copyable_values() {
     fn assert_copy<T: Copy>() {}

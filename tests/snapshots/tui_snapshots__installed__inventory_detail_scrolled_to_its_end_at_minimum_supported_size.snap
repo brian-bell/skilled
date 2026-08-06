@@ -1,19 +1,13 @@
 ---
 source: tests/tui_snapshots.rs
-assertion_line: 958
+assertion_line: 981
 expression: screen
 ---
  ◆ skilled   global                               ● ready · 1 source registered
 ▌Inventory ·3  2 Sources ·1  Updates (soon)  Doctor (soon)
  ▌ Details  alpha
  ──────────────────────────────────────────────────────────────────────────────
- SKILL
- ──────────────────────────────────────────────────────────────────────────────
- alpha
- ✓ healthy
- Description: alpha fixture
- SOURCE
- ──────────────────────────────────────────────────────────────────────────────
+ ! 7 lines above
  Source: library
  CLAUDE CODE  ✓ healthy
  ──────────────────────────────────────────────────────────────────────────────
@@ -25,5 +19,11 @@ expression: screen
  CODEX  ✓ healthy
  ──────────────────────────────────────────────────────────────────────────────
  Path: ~/.agents/skills/alpha
- ! 7 more lines below — j/k to scroll
+ Object: symbolic link
+ Variant: skills · skills/alpha
+ Target: ~/library/skills/alpha
+ Validation: ✓ valid as alpha
+ NOT INSTALLED
+ ──────────────────────────────────────────────────────────────────────────────
+ - OpenCode
  Tab/Shift-Tab Region   j/k Scroll   2 Sources   q Quit   Esc Back …
