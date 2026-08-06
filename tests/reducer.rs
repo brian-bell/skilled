@@ -921,6 +921,7 @@ mod installed {
         finish_setup(&mut app);
         app.update(Action::MoveInventorySelection(1));
         let before = app.selected_installation().map(|row| row.name().to_owned());
+        assert!(before.is_some());
 
         app.update(Action::OpenSources);
         let update = app.update(Action::OpenInventory);
@@ -933,7 +934,6 @@ mod installed {
             app.selected_installation().map(|row| row.name()),
             before.as_deref()
         );
-        assert!(before.is_some());
     }
 
     fn write_skill_fixture(directory: &Path, name: &str) {
