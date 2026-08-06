@@ -1384,8 +1384,9 @@ fn repositories_pane_width(primary_width: u16) -> u16 {
 }
 
 /// Past this a variant name stops earning width, exactly as a skill name does
-/// in the inventory table; the detail region beside the list still gives the
-/// name in full.
+/// in the inventory table; the detail region beside the list states the name
+/// on its own bounded line, so a name too long for that line is elided there
+/// too.
 const MAX_VARIANT_WIDTH: usize = MAX_SKILL_WIDTH;
 
 /// The widest content the variants pane lays out.
@@ -1622,7 +1623,8 @@ fn render_source_variants(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
             let badge = components::badge(Tone::Critical, "unavailable");
             // Bounded to the pane like every other row: a wrapped error would
             // put the marker and the band on one line and the words on the
-            // next. The detail region gives the message in full.
+            // next. The detail region gives the message more room — three
+            // bounded lines — but a message past those is elided there too.
             let budget = usize::from(inner.width)
                 .min(VARIANTS_CONTENT_MAX_WIDTH)
                 .saturating_sub(ROW_MARKER_WIDTH + badge.width() + 1);
@@ -1791,12 +1793,15 @@ fn group_label(path: &str, classification: &str, claim: &str, width: u16) -> Lin
     )
 }
 
-/// Which agents a catalog is registered for.
+/// Which agents a catalog is registered for, for the variants group label and
+/// the detail region's CATALOG section alike.
 ///
 /// Skilled proposes this from the catalog's place in the checkout and the user
 /// confirms or edits it; the catalog itself declares nothing and no agent was
 /// asked. So the phrase names what is stored and nothing more. A catalog
-/// registered for none says so rather than rendering an empty phrase.
+/// registered for none says so rather than rendering an empty phrase, and one
+/// registered for some names those and stops: the agents left out are the ones
+/// not claimed, which is what the setup dialog's exhaustive yes/no list is for.
 fn compatibility_claim(compatibility: Compatibility) -> String {
     if compatibility.all_supported() {
         return "all agents".to_owned();
@@ -1810,6 +1815,51 @@ fn compatibility_claim(compatibility: Compatibility) -> String {
         return "no agents".to_owned();
     }
     claimed.join(" + ")
+}
+
+/// A stored scan time as `YYYY-MM-DD HH:MM UTC`.
+///
+/// The civil date is computed here rather than taken from a date crate, which
+/// would be a production dependency for one field. The algorithm is Howard
+/// Hinnant's `civil_from_days`. The two divisions that can be handed a
+/// negative value — the split into days and seconds here, and the split into
+/// eras below — are Euclidean, so a time before the epoch names the day it
+/// falls on instead of rounding towards zero into the day after it; every
+/// division downstream of those is given a non-negative operand by
+/// construction. UTC is named in the text because nothing converts the value
+/// to the reader's zone.
+fn format_scan_timestamp(seconds: i64) -> String {
+    // Split first, so the time of day is taken from the remainder of the day
+    // the date names — negative seconds included.
+    const SECONDS_PER_DAY: i64 = 86_400;
+    let days = seconds.div_euclid(SECONDS_PER_DAY);
+    let second_of_day = seconds.rem_euclid(SECONDS_PER_DAY);
+    let (year, month, day) = civil_from_days(days);
+    let hour = second_of_day / 3_600;
+    let minute = (second_of_day % 3_600) / 60;
+    format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02} UTC")
+}
+
+/// The civil date `days` after 1970-01-01, by Hinnant's algorithm: shift the
+/// epoch to a 400-year era beginning on 1 March, so the leap day is the last
+/// day of the era's year and every other month has a fixed length.
+fn civil_from_days(days: i64) -> (i64, i64, i64) {
+    const DAYS_FROM_0000_03_01_TO_EPOCH: i64 = 719_468;
+    const DAYS_PER_ERA: i64 = 146_097;
+
+    let shifted = days + DAYS_FROM_0000_03_01_TO_EPOCH;
+    let era = shifted.div_euclid(DAYS_PER_ERA);
+    // Day of the era, and from here every operand is non-negative.
+    let day_of_era = shifted - era * DAYS_PER_ERA;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    // Month counted from March, which is what makes the lengths regular.
+    let shifted_month = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * shifted_month + 2) / 5 + 1;
+    let month = shifted_month + if shifted_month < 10 { 3 } else { -9 };
+    let year = year_of_era + era * 400 + i64::from(month <= 2);
+    (year, month, day)
 }
 
 fn render_source_details(
@@ -1848,7 +1898,6 @@ fn render_source_details(
         return;
     };
 
-    let bounded_lines = 2;
     let mut repository_lines = Vec::new();
     push_detail_section(&mut repository_lines, "REPOSITORY", inner.width);
     repository_lines.push(detail_field_bounded(
@@ -1861,26 +1910,49 @@ fn render_source_details(
         inner.width,
         1,
     ));
-    repository_lines.push(detail_field_bounded(
+    repository_lines.push(detail_field_middle(
         "Path",
         &source.git_top_level().display().to_string(),
         inner.width,
-        bounded_lines,
     ));
-    repository_lines.push(detail_field("HEAD", source.head()));
-    repository_lines.push(detail_field_bounded(
+    // The abbreviation Git prints, not the whole revision: forty characters
+    // outrun the narrow tier of this region, and a value wrapped below its
+    // label can be cut away from it by the row budget.
+    repository_lines.push(detail_field("HEAD", source.short_head()));
+    repository_lines.push(detail_field_middle(
         "Remote",
         source.remote_url().unwrap_or("not configured"),
         inner.width,
-        bounded_lines,
     ));
-    repository_lines.push(Line::from(vec![
-        Span::styled("Status: ", theme::pane_subtitle()),
-        source_status_badge(source),
-        Span::raw(" · "),
-        Span::styled("Last scan: ", theme::pane_subtitle()),
-        Span::raw(source.last_scan_at().to_string()),
-    ]));
+    // The scan time shares the status line while both stand on it whole, and
+    // takes the line below where they do not — the way the catalog states its
+    // classification. Left to wrap it outran both aside tiers, and what landed
+    // on the row beneath was the whole timestamp at the narrow one and `UTC`
+    // alone at the wide one: a time naming no zone, under a label naming no
+    // value. Sharing where it fits keeps the row for the sections below, which
+    // the drill-in has no aside to spare.
+    let status_label = Span::styled("Status: ", theme::pane_subtitle());
+    let status = source_status_badge(source);
+    let separator = Span::raw(" · ");
+    let scan_label = Span::styled("Last scan: ", theme::pane_subtitle());
+    let scanned = Span::raw(format_scan_timestamp(source.last_scan_at()));
+    let shared = status_label.width()
+        + status.width()
+        + separator.width()
+        + scan_label.width()
+        + scanned.width();
+    if shared <= usize::from(inner.width) {
+        repository_lines.push(Line::from(vec![
+            status_label,
+            status,
+            separator,
+            scan_label,
+            scanned,
+        ]));
+    } else {
+        repository_lines.push(Line::from(vec![status_label, status]));
+        repository_lines.push(Line::from(vec![scan_label, scanned]));
+    }
     if let Some(error) = source.source_error() {
         repository_lines.push(detail_field_bounded("Source error", error, inner.width, 3));
     }
@@ -1891,27 +1963,33 @@ fn render_source_details(
     // its catalog as surely as a variant does, so moving the band in the
     // variants pane always changes what this section says.
     if let Some(catalog) = selected_catalog(app) {
-        catalog_lines.push(detail_field_bounded(
-            "Path",
-            &format!(
-                "{} · Classification: {}",
-                terminal_safe(&catalog.relative_path().display().to_string()),
-                catalog_classification(catalog)
-            ),
-            inner.width,
-            if inner.width >= 60 { 1 } else { 2 },
-        ));
-        let compatibility = catalog.compatibility();
+        // The classification shares the path's line while the path is whole
+        // beside it. It is never cut to make room, and never crowds the path
+        // down to an elision short enough to pass for a path of its own: where
+        // the two do not fit, the classification states itself on the line
+        // below. That is where this parts company with the variants group
+        // label, which sheds a qualifier it cannot fit — a pane row has one
+        // line to give and this region has another to spend, so the fact is
+        // moved here rather than dropped.
+        let path = terminal_safe(&catalog.relative_path().display().to_string());
+        let classification = format!(" · Classification: {}", catalog_classification(catalog));
+        let budget = detail_value_budget("Path", inner.width);
+        if Span::raw(&path).width() + Span::raw(&classification).width() <= budget {
+            catalog_lines.push(detail_field("Path", &format!("{path}{classification}")));
+        } else {
+            catalog_lines.push(detail_field_middle("Path", &path, inner.width));
+            catalog_lines.push(detail_field(
+                "Classification",
+                catalog_classification(catalog),
+            ));
+        }
+        // The same phrase the variants group label uses, so the region and the
+        // pane beside it name a catalog's claim in one vocabulary.
         catalog_lines.push(detail_field_bounded(
             "Compatibility",
-            &format!(
-                "Claude Code: {} · Codex: {} · OpenCode: {}",
-                yes_no(compatibility.claude_code()),
-                yes_no(compatibility.codex()),
-                yes_no(compatibility.opencode())
-            ),
+            &compatibility_claim(catalog.compatibility()),
             inner.width,
-            2,
+            1,
         ));
     } else {
         catalog_lines.push(Line::from(
@@ -2186,6 +2264,25 @@ fn detail_field(label: &str, value: &str) -> Line<'static> {
         Span::styled(format!("{label}: "), theme::pane_subtitle()),
         Span::raw(terminal_safe(value)),
     ])
+}
+
+/// A field whose value has nowhere to wrap: a path, a remote URL. Wrapped, it
+/// breaks mid-word and reads as two values, and the row budget can cut the
+/// continuation away from its label. Bounded to one line in the middle, both
+/// ends of it survive instead — given a line with room for them. A budget too
+/// narrow to hold anything either side of the ellipsis leaves the ellipsis
+/// alone, which for a path would read as a path; no detail region is that
+/// narrow, and a unit test holds the floor where it is.
+fn detail_field_middle(label: &str, value: &str, width: u16) -> Line<'static> {
+    detail_field(
+        label,
+        &terminal_safe_bounded_middle(value, detail_value_budget(label, width)),
+    )
+}
+
+/// What one line of `width` leaves a field's value once its label is set.
+fn detail_value_budget(label: &str, width: u16) -> usize {
+    usize::from(width).saturating_sub(Span::raw(format!("{label}: ")).width())
 }
 
 fn detail_field_bounded(
@@ -3317,6 +3414,10 @@ fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
 mod tests {
     use super::*;
 
+    /// What the narrowest detail region leaves its text: the region less the
+    /// column of rule that opens it, less the margin either side.
+    const NARROWEST_INNER_WIDTH: u16 = viewport::DETAIL_REGION_WIDTH - 1 - 2;
+
     fn label_text(line: &Line<'_>) -> String {
         line.spans
             .iter()
@@ -3508,5 +3609,85 @@ mod tests {
         let text = visible.iter().map(label_text).collect::<Vec<_>>();
         assert_eq!(text[0], "catalog 1", "{text:?}");
         assert!(text.contains(&"row 1.8".to_owned()), "{text:?}");
+    }
+
+    /// A stored scan time is seconds since the epoch, which says nothing to a
+    /// reader. Every case here was checked against `date -u`.
+    #[test]
+    fn a_scan_timestamp_reads_as_a_civil_date_in_utc() {
+        assert_eq!(format_scan_timestamp(1_785_903_291), "2026-08-05 04:14 UTC");
+        assert_eq!(format_scan_timestamp(0), "1970-01-01 00:00 UTC");
+        // The far end of a plausible stored value, and the last minute of a
+        // year, so a day-of-year that rolls over is caught.
+        assert_eq!(format_scan_timestamp(4_102_444_799), "2099-12-31 23:59 UTC");
+        // A leap day in a century year that is a leap year.
+        assert_eq!(format_scan_timestamp(951_825_600), "2000-02-29 12:00 UTC");
+    }
+
+    /// A timestamp before the epoch is not something Skilled stores, but the
+    /// formatter is given an `i64` and must answer rather than panic or wrap.
+    #[test]
+    fn a_scan_timestamp_before_the_epoch_still_reads_as_a_date() {
+        assert_eq!(format_scan_timestamp(-1), "1969-12-31 23:59 UTC");
+        // The extremes of the type answer as well, rather than overflowing.
+        for seconds in [i64::MIN, i64::MAX] {
+            assert!(
+                format_scan_timestamp(seconds).ends_with(" UTC"),
+                "{seconds} should still format"
+            );
+        }
+    }
+
+    /// A middle-truncated value falls back to the ellipsis itself when there is
+    /// no room for anything either side of it, and a `Path` field showing `.`
+    /// or `..` would be stating a path rather than eliding one. The narrowest
+    /// detail region leaves every field far more than that, and this pins it:
+    /// the fallback stays unreachable however the region is laid out.
+    #[test]
+    fn every_middle_truncated_detail_field_has_room_for_both_ends_of_its_value() {
+        const ELLIPSIS_ONLY: usize = 3;
+        for label in ["Path", "Remote"] {
+            let budget = detail_value_budget(label, NARROWEST_INNER_WIDTH);
+            assert!(
+                budget > ELLIPSIS_ONLY,
+                "{label:?} has only {budget} cells in the narrowest detail region"
+            );
+            let elided = terminal_safe_bounded_middle(&"a/".repeat(64), budget);
+            assert!(
+                elided.starts_with('a') && elided.ends_with('/') && elided.contains("..."),
+                "{elided:?} should keep both ends of the value it stands for"
+            );
+        }
+    }
+
+    /// The claim names agents, so a claim cut short names a different one:
+    /// `Claude Code + Open...` is not what was stored, and unlike a path it
+    /// carries no sense of the value it stands for. The longest two agents can
+    /// make of it fills the narrowest region's line to the cell, so every
+    /// combination is checked rather than the one a fixture happens to hold.
+    #[test]
+    fn every_compatibility_claim_stands_whole_in_the_narrowest_detail_region() {
+        for claude_code in [false, true] {
+            for codex in [false, true] {
+                for opencode in [false, true] {
+                    let claim = compatibility_claim(Compatibility::from_flags(
+                        claude_code,
+                        codex,
+                        opencode,
+                    ));
+                    let stated = label_text(&detail_field_bounded(
+                        "Compatibility",
+                        &claim,
+                        NARROWEST_INNER_WIDTH,
+                        1,
+                    ));
+                    assert_eq!(
+                        stated,
+                        format!("Compatibility: {claim}"),
+                        "the claim should be stated whole"
+                    );
+                }
+            }
+        }
     }
 }

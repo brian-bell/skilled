@@ -342,8 +342,13 @@ fn sources_show_the_persisted_catalog_classification_and_compatibility() {
     let screen = render(&reopened, 120, 40);
 
     assert!(screen.contains("Agent-specific"));
-    assert!(screen.contains("Compatibility: Claude Code: yes ·"));
-    assert!(screen.contains("Codex: yes · OpenCode: no"));
+    // The claim names the agents the catalog is registered for and stops; the
+    // agent switched off during setup is one of the ones it does not name.
+    assert!(
+        screen.contains("Compatibility: Claude Code + Codex"),
+        "{screen}"
+    );
+    assert!(!screen.contains("OpenCode"), "{screen}");
 }
 
 #[test]
@@ -403,6 +408,64 @@ fn responsive_sources_workspace_at_wide_and_compact_sizes() {
     app.update(Action::AdvanceSourcesPane);
     insta::assert_snapshot!(
         "sources_details_at_minimum_supported_size",
+        normalize_sources_screen(&app, &temporary, render(&app, 80, 24))
+    );
+}
+
+/// A catalog path deep enough to outrun the region it is stated in. Every
+/// path field is one line cut in its middle, and the classification the
+/// catalog path is stated with is never cut to make room: where the two do not
+/// share a line, it takes the line below.
+#[test]
+fn sources_details_with_a_long_catalog_path_at_wide_and_compact_sizes() {
+    let temporary = tempfile::tempdir_in("/tmp").expect("temporary application directory");
+    let repository = temporary.path().join("source");
+    let variant = repository.join("deeply/nested/experimental/claude-code/skills/experimental");
+    fs::create_dir_all(&variant).expect("create nested catalog");
+    fs::write(
+        variant.join("SKILL.md"),
+        "---\nname: experimental\ndescription: Experimental fixture\n---\n# Experimental\n",
+    )
+    .expect("write nested candidate");
+    git(&repository, &["init", "-b", "main"]);
+    git(&repository, &["config", "user.name", "Skilled Test"]);
+    git(
+        &repository,
+        &["config", "user.email", "skilled@example.test"],
+    );
+    git(&repository, &["add", "."]);
+    git(&repository, &["commit", "-m", "fixture"]);
+    git(
+        &repository,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://example.test/an-organisation-with-a-long-name/source.git",
+        ],
+    );
+    let mut app = SkilledApp::open(AppEnvironment::new(
+        temporary.path().join("home"),
+        temporary.path().join("data"),
+        "",
+    ))
+    .expect("open application");
+    let preview = app.preview_source(&repository).expect("preview source");
+    app.confirm_source(preview).expect("confirm source");
+    for _ in 0..7 {
+        dispatch(&mut app, Action::Continue);
+    }
+    app.update(Action::OpenSources);
+
+    insta::assert_snapshot!(
+        "sources_long_catalog_path_at_wide_size",
+        normalize_sources_screen(&app, &temporary, render(&app, 120, 40))
+    );
+
+    app.update(Action::AdvanceSourcesPane);
+    app.update(Action::AdvanceSourcesPane);
+    insta::assert_snapshot!(
+        "sources_long_catalog_path_at_minimum_supported_size",
         normalize_sources_screen(&app, &temporary, render(&app, 80, 24))
     );
 }
@@ -995,42 +1058,31 @@ fn normalize_sources_screen(
             &temporary_path,
             &padded_placeholder(&temporary_path, "[TEMP]"),
         )
-        .replace(source.head(), &padded_placeholder(source.head(), "[HEAD]"))
-        .replace(
-            &source.last_scan_at().to_string(),
-            &padded_placeholder(&source.last_scan_at().to_string(), "[SCAN]"),
-        );
-    // A detail region narrower than the revision wraps it, and where the wrap
-    // falls follows the region's width, so the split is searched for rather
-    // than assumed. Only splits long enough to be unmistakably part of a
-    // revision are considered.
-    const SHORTEST_RECOGNISABLE_SPLIT: usize = 8;
-    let head = source.head();
-    if !normalized.contains(head) && head.len() > SHORTEST_RECOGNISABLE_SPLIT {
-        for split in (SHORTEST_RECOGNISABLE_SPLIT..head.len()).rev() {
-            let (wrapped, remainder) = head.split_at(split);
-            let Some(index) = normalized.find(wrapped) else {
-                continue;
-            };
-            // The tail after the wrap can be a couple of characters, which
-            // could occur anywhere on the screen, so only the occurrence
-            // continuing this revision is blanked.
-            let (head_of_screen, rest) = normalized.split_at(index + wrapped.len());
-            let rest = rest.replacen(remainder, &" ".repeat(remainder.len()), 1);
-            let head_of_screen =
-                head_of_screen.replacen(wrapped, &padded_placeholder(wrapped, "[HEAD]"), 1);
-            normalized = format!("{head_of_screen}{rest}");
-            break;
-        }
-    }
+        .replace(source.head(), &padded_placeholder(source.head(), "[HEAD]"));
+    // The scan time is rendered as the civil date it stands for, which is as
+    // unstable as the seconds behind it. It is a fixed twenty cells wide, so
+    // the placeholder keeps the layout the application produced.
+    normalized = normalize_scan_timestamp(normalized);
     // The repository rows carry the abbreviated revision, which is as
-    // unstable as the whole one. Replaced after it, so a region that shows
-    // the revision in full is normalized as one value rather than in two
-    // pieces.
+    // unstable as the whole one. Replaced after the whole revision — which no
+    // Sources surface states any more, though the replacement above stands
+    // ready for one that does — so a region showing both is normalized as two
+    // values rather than one and a fragment.
     // The placeholder is the same width as the abbreviation it stands in for,
     // so the row's columns are the ones the application laid out.
     let short_head = source.short_head();
     normalized = normalized.replace(short_head, &padded_placeholder(short_head, "[SHORT]"));
+    // A path field states its value on one line and cuts it in the middle when
+    // it does not fit, and a cut path is not the string these replacements
+    // looked for: it would survive normalization and commit this machine's
+    // temporary directory to the snapshot. The head of the path outlives any
+    // such cut, so finding it here means a fixture has outgrown the region and
+    // says so, rather than leaving a mystery diff on another machine.
+    let root = &temporary_path[..temporary_path.len().min(10)];
+    assert!(
+        !normalized.contains(root),
+        "the fixture's temporary path was cut rather than replaced, leaving {root:?} in\n{normalized}"
+    );
     // A placeholder padded to the real path's width can still leave trailing
     // whitespace at a line's end when nothing follows it, and that width is
     // one more thing that varies with the host's temporary-directory path
@@ -1042,6 +1094,40 @@ fn normalize_sources_screen(
         .map(|line| line.trim_end())
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// Replaces the `YYYY-MM-DD HH:MM UTC` the scan field states with `[SCAN]`,
+/// padded to the twenty cells the timestamp occupies.
+///
+/// Only a timestamp the label introduces is replaced, so a date-shaped string
+/// in fixture prose stays in the snapshot where it can be read.
+fn normalize_scan_timestamp(screen: String) -> String {
+    const SHAPE: &str = "dddd-dd-dd dd:dd UTC";
+    const LABEL: &str = "Last scan: ";
+    let characters = screen.chars().collect::<Vec<_>>();
+    let mut normalized = String::new();
+    let mut index = 0;
+    while index < characters.len() {
+        let window = characters.get(index..index + SHAPE.len());
+        let matches = normalized.ends_with(LABEL)
+            && window.is_some_and(|window| {
+                window.iter().zip(SHAPE.chars()).all(|(actual, expected)| {
+                    if expected == 'd' {
+                        actual.is_ascii_digit()
+                    } else {
+                        *actual == expected
+                    }
+                })
+            });
+        if matches {
+            normalized.push_str(&padded_placeholder(SHAPE, "[SCAN]"));
+            index += SHAPE.len();
+        } else {
+            normalized.push(characters[index]);
+            index += 1;
+        }
+    }
+    normalized
 }
 
 fn padded_placeholder(value: &str, placeholder: &str) -> String {

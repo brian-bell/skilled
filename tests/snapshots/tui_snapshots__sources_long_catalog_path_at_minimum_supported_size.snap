@@ -4,25 +4,25 @@ expression: "normalize_sources_screen(&app, &temporary, render(&app, 80, 24))"
 ---
  ◆ skilled   global                               ● ready · 1 source registered
  1 Inventory ▌Sources 1  Updates (soon)  Doctor (soon)
- ▌ Details  broken
+ ▌ Details  experimental
  ──────────────────────────────────────────────────────────────────────────────
  REPOSITORY
  ──────────────────────────────────────────────────────────────────────────────
  Label: source · Branch: main
  Path: [TEMP]/source
  HEAD: [SHORT]
- Remote: https://example.test/source.git
+ Remote: https://example.test/an-organisation-with-a-long-name/source.git
  Status: ✓ clean · Last scan: [SCAN]
  CATALOG
  ──────────────────────────────────────────────────────────────────────────────
- Path: skills · Classification: Common
- Compatibility: all agents
+ Path: deeply/nested/experimental/claude-code/skills
+ Classification: Agent-specific
+ Compatibility: Claude Code
  VARIANT
  ──────────────────────────────────────────────────────────────────────────────
- Directory: broken · Name: broken
- Path: skills/broken
- Status: × invalid
- Validation error: skill does not contain a readable file named exactly
- SKILL.md
+ Directory: experimental · Name: experimental
+ Path: deeply/nested/experimental/claude-code/skills/experimental
+ Status: ✓ valid
+ Description: Experimental fixture
 
  Tab/Shift-Tab Region   a Add source   1 Inventory   ? Help   q Quit   Esc Back
