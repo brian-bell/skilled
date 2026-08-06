@@ -763,7 +763,10 @@ impl SkilledApp {
         // The scan is the effect that follows, so between the transition and
         // the effect there is no scan for this view. Say so rather than rest
         // on one taken for the view just left: whatever is rendered beside
-        // the Inventory was observed for the Inventory.
+        // the Inventory was observed for the Inventory. The runner performs
+        // effects before drawing, so no frame of this state reaches a user
+        // today; the reset is what keeps the reducer honest at every instant
+        // should that ever change.
         self.inventory = InventorySnapshot::not_scanned(&self.agents);
         self.refilter_installations();
         vec![Effect::ScanInstallations]

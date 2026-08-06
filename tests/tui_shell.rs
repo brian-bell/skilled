@@ -1341,12 +1341,66 @@ fn inventory_between_its_transition_and_its_scan_says_not_scanned() {
         navigation.contains("▌Inventory  2 Sources 0 "),
         "{navigation}"
     );
+    // Nothing has been listed, so nothing may be hinted as movable, openable,
+    // or filterable. The hint row is located by its one constant entry.
+    let hints = row_text(&screen, row_containing(&screen, "Quit"));
+    for hint in ["Move", "Open", "Filter"] {
+        assert!(!hints.contains(hint), "{hint}: {hints}");
+    }
+    // The wide detail region has no selection to describe either.
+    let wide = text(&buffer(&app, 120, 40));
+    assert!(wide.contains("Nothing to show"), "{wide}");
 
     // Once the effect lands the screen reports the scan, not the gap.
     app.perform_effects(update.effects()).expect("perform scan");
     let rendered = text(&buffer(&app, 80, 24));
     assert!(!rendered.contains("not scanned"), "{rendered}");
     assert!(rendered.contains("no root read"), "{rendered}");
+}
+
+/// A filter survives switching away and back, so in the gap before the rescan
+/// lands it is the one stale claim left: "0 of 0 listed" would say skills were
+/// read and hidden, and "No skills match the filter" would promise installed
+/// skills to show again — over a snapshot nothing has been read into. The
+/// scan state is the more fundamental fact and outranks the filter.
+#[test]
+fn a_surviving_filter_does_not_speak_for_the_unscanned_gap() {
+    let harness = Harness::new();
+    write_skill_fixture(
+        &harness.directory.path().join("home/.claude/skills/alpha"),
+        "alpha",
+    );
+    let mut app = harness.completed_setup();
+    app.update(Action::BeginInventoryFilter);
+    app.update(Action::AppendInventoryFilter('z'));
+    app.update(Action::SubmitInventoryFilter);
+
+    app.update(Action::OpenSources);
+    let update = app.update(Action::OpenInventory);
+    let screen = buffer(&app, 80, 24);
+    let rendered = text(&screen);
+
+    let header = row_text(&screen, row_containing(&screen, "Global inventory"));
+    assert!(header.contains("not scanned"), "{header}");
+    assert!(!rendered.contains("0 of 0 listed"), "{rendered}");
+    assert!(
+        rendered.contains("Installation roots have not been scanned"),
+        "{rendered}"
+    );
+    assert!(
+        !rendered.contains("No skills match the filter"),
+        "{rendered}"
+    );
+
+    // The filter is not discarded: once the scan lands it narrows the fresh
+    // rows, and says so against a snapshot that exists.
+    app.perform_effects(update.effects()).expect("perform scan");
+    let rendered = text(&buffer(&app, 80, 24));
+    assert!(rendered.contains("0 of 1 listed"), "{rendered}");
+    assert!(
+        rendered.contains("No skills match the filter"),
+        "{rendered}"
+    );
 }
 
 /// The same gap exists on every path into the Inventory, not only at the end

@@ -721,6 +721,17 @@ fn render_inventory_skills(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) 
 fn inventory_subtitle(app: &SkilledApp, shown: usize) -> String {
     let inventory = app.inventory();
     let total = inventory.rows().len();
+    // A snapshot nothing has been read into has no rows for a filter to
+    // narrow: "not scanned" is the only backed claim, and outranks both the
+    // filter's count and every hedge below. The filter itself is kept — it
+    // narrows the scan that lands next.
+    if inventory
+        .roots()
+        .iter()
+        .all(|root| root.status() == &RootStatus::NotScanned)
+    {
+        return "not scanned".to_owned();
+    }
     if !app.inventory_filter().trim().is_empty() {
         return format!("{shown} of {total} listed");
     }
@@ -754,13 +765,6 @@ fn inventory_subtitle(app: &SkilledApp, shown: usize) -> String {
         Some(0) => "nothing installed".to_owned(),
         Some(1) => "1 skill".to_owned(),
         Some(skills) => format!("{skills} skills"),
-        None if inventory
-            .roots()
-            .iter()
-            .all(|root| root.status() == &RootStatus::NotScanned) =>
-        {
-            "not scanned".to_owned()
-        }
         None if inventory.unreadable_roots().next().is_some() => "not fully read".to_owned(),
         None => "no root read".to_owned(),
     }
@@ -893,13 +897,10 @@ fn installation_tone(health: InstallationHealth) -> Tone {
 
 /// What an empty table can honestly say, given what the scan observed.
 fn inventory_empty_state(app: &SkilledApp) -> (String, String) {
-    if !app.inventory_filter().trim().is_empty() {
-        return (
-            "No skills match the filter".to_owned(),
-            "Press Esc to clear the filter and show every installed skill again.".to_owned(),
-        );
-    }
     let roots = app.inventory().roots();
+    // Before any filter question: an unscanned snapshot holds nothing a
+    // filter could have hidden, so "No skills match the filter" would promise
+    // installed skills that were never read.
     if roots
         .iter()
         .all(|root| root.status() == &RootStatus::NotScanned)
@@ -907,6 +908,12 @@ fn inventory_empty_state(app: &SkilledApp) -> (String, String) {
         return (
             "Installation roots have not been scanned".to_owned(),
             "Skilled scans the roots when this view opens.".to_owned(),
+        );
+    }
+    if !app.inventory_filter().trim().is_empty() {
+        return (
+            "No skills match the filter".to_owned(),
+            "Press Esc to clear the filter and show every installed skill again.".to_owned(),
         );
     }
     if roots
