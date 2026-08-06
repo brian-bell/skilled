@@ -33,8 +33,11 @@ it does not yet install, repair, update, or uninstall skills.
 - A responsive Sources browser with Repositories, Variants, and structured
   Details regions for current Git state, catalog classification, agent
   compatibility, valid or invalid skills, and recoverable source or catalog
-  errors. Wide terminals show all three regions; compact terminals show the
-  focused region.
+  errors. Each repository names its checkout and the branch and revision it was
+  last seen at; variants are listed under the catalog they come from, which
+  states its path and as much of its classification and agent registration as
+  the pane can hold. Wide terminals show all three regions; compact terminals
+  show the focused region.
 - Versioned SQLite persistence for setup, configured agents, source metadata,
   and confirmed catalog roots.
 - A read-only inventory of the documented global skill roots — `~/.claude/skills`,

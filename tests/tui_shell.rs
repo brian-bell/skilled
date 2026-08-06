@@ -483,7 +483,12 @@ fn surfaces_are_painted_where_the_design_calls_for_them() {
     // their own band.
     assert_eq!(style_in_row(&screen, 0, "skilled").bg, Some(BAND));
     assert_eq!(
-        style_in_row(&screen, row_containing(&screen, "Repositories"), "┌").bg,
+        style_in_row(
+            &screen,
+            row_containing(&screen, "Repositories"),
+            "Repositories"
+        )
+        .bg,
         Some(TERMINAL)
     );
     // The title row is laid out as two rectangles, so the band is only right
@@ -528,18 +533,17 @@ fn surfaces_are_painted_where_the_design_calls_for_them() {
     // The focused row is tinted across the pane, not just behind its label.
     let focused = row_containing(&screen, "▌ source");
     assert_eq!(style_in_row(&screen, focused, "source").bg, Some(SURFACE_3));
-    // The band must reach the end of the pane's text area, which is what
-    // distinguishes it from a label-length smear. The pane keeps one column of
-    // padding inside its border, so the last text cell is two columns in.
+    // The band must reach the end of the pane, which is what distinguishes it
+    // from a label-length smear. The pane is unboxed, so it ends at the rule
+    // column dividing it from the variants beside it.
     let row = row_text(&screen, focused);
-    let right_border = row
+    let divider = row
         .char_indices()
-        .filter(|(_, character)| *character == '│')
-        .nth(1)
+        .find(|(_, character)| *character == '│')
         .map(|(index, _)| u16::try_from(row[..index].chars().count()).expect("column"))
-        .expect("Repositories pane right border");
+        .expect("Repositories region divider");
     assert_eq!(
-        screen[(right_border - 2, focused)].style().bg,
+        screen[(divider - 1, focused)].style().bg,
         Some(SURFACE_3),
         "the tint should reach the end of the pane, not stop at the label"
     );
@@ -1333,6 +1337,125 @@ fn sources_wide_workspace_shows_three_regions_and_marks_focus_in_text() {
     assert!(rendered.contains("Details"), "{rendered}");
 }
 
+/// Sources reads as the same application as Inventory: no pane boxes, a rule
+/// under every pane header, and a single column of vertical rule between one
+/// region and the next.
+#[test]
+fn sources_regions_use_the_shared_unboxed_pane_scaffold() {
+    let harness = Harness::new();
+    let repository = harness.directory.path().join("source");
+    create_source_fixture(&repository);
+    let mut app = harness.completed_setup();
+    let preview = app.preview_source(&repository).expect("preview source");
+    app.confirm_source(preview).expect("register source");
+    app.update(Action::OpenSources);
+
+    let screen = buffer(&app, 120, 40);
+    let rendered = text(&screen);
+
+    for corner in ['┌', '┐', '└', '┘'] {
+        assert!(
+            !rendered.contains(corner),
+            "a boxed Sources region survived: {rendered}"
+        );
+    }
+
+    // The header row carries all three headings, so the regions sit beside one
+    // another with two rule columns dividing them.
+    let header = row_starting_with(&screen, "▌ Repositories");
+    let heading_row = row_text(&screen, header);
+    assert!(heading_row.contains("Available variants"), "{heading_row}");
+    assert!(heading_row.contains("Details"), "{heading_row}");
+    assert_eq!(
+        heading_row.matches('│').count(),
+        2,
+        "three regions need two dividers: {heading_row:?}"
+    );
+    assert!(
+        row_text(&screen, header + 1).starts_with("───"),
+        "{:?}",
+        row_text(&screen, header + 1)
+    );
+
+    // The border that used to carry focus is gone, so the header has to carry
+    // it: a cyan marker and an emphasised heading on the focused region, and
+    // no marker at all on the regions beside it.
+    const CYAN: Color = Color::Rgb(0x73, 0xd7, 0xee);
+    const TEXT_STRONG: Color = Color::Rgb(0xf2, 0xf6, 0xfa);
+    assert_eq!(style_in_row(&screen, header, "▌").fg, Some(CYAN));
+    let heading = style_in_row(&screen, header, "Repositories");
+    assert_eq!(heading.fg, Some(TEXT_STRONG));
+    assert!(heading.add_modifier.contains(Modifier::BOLD), "{heading:?}");
+    assert_eq!(
+        heading_row.matches('▌').count(),
+        1,
+        "only the focused region is marked: {heading_row:?}"
+    );
+}
+
+/// A repository entry carries the prototype's `.source-row` anatomy: the
+/// label, the checkout it names, and the state it was last seen in.
+#[test]
+fn repository_entries_name_their_checkout_and_revision_beneath_their_label() {
+    const MUTED: Color = Color::Rgb(0x84, 0x91, 0xa1);
+    const CYAN: Color = Color::Rgb(0x73, 0xd7, 0xee);
+    const SURFACE_3: Color = Color::Rgb(0x17, 0x21, 0x2c);
+
+    let harness = Harness::new();
+    let repository = harness.directory.path().join("source");
+    create_source_fixture(&repository);
+    let mut app = harness.completed_setup();
+    let preview = app.preview_source(&repository).expect("preview source");
+    app.confirm_source(preview).expect("register source");
+    let head = app.sources()[0].head().to_owned();
+    app.update(Action::OpenSources);
+
+    let screen = buffer(&app, 120, 40);
+    let label = row_starting_with(&screen, "▌ source");
+    // Rows are read up to the rule that ends the pane, so the variants beside
+    // it cannot satisfy an assertion about a repository entry.
+    let pane_row = |y: u16| {
+        let line = row_text(&screen, y);
+        line[..line.find('│').expect("Repositories region divider")].to_owned()
+    };
+    let path = pane_row(label + 1);
+    let state = pane_row(label + 2);
+
+    // The path is bounded to the pane rather than wrapped, and set back: it
+    // locates the checkout, so it is readable muted text and not faint.
+    assert!(path.trim_end().ends_with("source"), "{path:?}");
+    assert_eq!(style_in_row(&screen, label + 1, "/").fg, Some(MUTED));
+
+    // The state line pairs the worktree badge with the branch and the short
+    // revision Git itself prints.
+    assert!(state.contains("✓ clean"), "{state:?}");
+    assert!(state.contains(&format!("main@{}", &head[..7])), "{state:?}");
+    assert!(
+        !state.contains(&head),
+        "the whole revision is not a row: {state:?}"
+    );
+
+    // The marker runs down every line of the selected entry, and the band
+    // crosses the whole pane on each of them.
+    let divider = row_text(&screen, label)
+        .char_indices()
+        .find(|(_, character)| *character == '│')
+        .map(|(index, _)| {
+            u16::try_from(row_text(&screen, label)[..index].chars().count()).expect("column")
+        })
+        .expect("Repositories region divider");
+    for row in [label, label + 1, label + 2] {
+        let line = row_text(&screen, row);
+        assert!(line.starts_with("▌ "), "{line:?}");
+        assert_eq!(style_in_row(&screen, row, "▌").fg, Some(CYAN), "{line:?}");
+        assert_eq!(
+            screen[(divider - 1, row)].style().bg,
+            Some(SURFACE_3),
+            "{line:?}"
+        );
+    }
+}
+
 #[test]
 fn sources_compact_workspace_replaces_regions_as_enter_advances() {
     let harness = Harness::new();
@@ -1369,6 +1492,217 @@ fn sources_compact_workspace_replaces_regions_as_enter_advances() {
     app.update(Action::Back);
     let repositories = text(&buffer(&app, 80, 24));
     assert!(repositories.contains("▌ Repositories"), "{repositories}");
+}
+
+/// Variants are read under the catalog that holds them, so the catalog path
+/// is stated once as a group label instead of once per row.
+#[test]
+fn variants_are_grouped_under_a_label_naming_their_catalog() {
+    const MUTED: Color = Color::Rgb(0x84, 0x91, 0xa1);
+    const BAND: Color = Color::Rgb(0x0d, 0x12, 0x18);
+
+    let harness = Harness::new();
+    let repository = harness.directory.path().join("source");
+    create_two_catalog_source_fixture(&repository);
+    let mut app = harness.completed_setup();
+    let preview = app.preview_source(&repository).expect("preview source");
+    app.confirm_source(preview).expect("register source");
+    app.update(Action::OpenSources);
+
+    // Wide enough for the longer catalog path to be given whole; how a label
+    // too long for its pane is shortened is the crossing test's subject.
+    let screen = buffer(&app, 180, 40);
+    let rendered = text(&screen);
+
+    // Each label names its catalog, how the catalog is classified, and which
+    // agents it claims — the compatibility it actually declares.
+    assert!(
+        rendered.contains("skills · Common · all agents"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("experimental/claude-code/skills · Agent-specific · Claude Code"),
+        "{rendered}"
+    );
+
+    // The label is muted text on the band the chrome already uses, so the
+    // grouping reads without depending on colour alone.
+    let grouped = row_containing(&screen, "· Common · all agents");
+    assert_eq!(style_in_row(&screen, grouped, "skills").fg, Some(MUTED));
+    assert_eq!(style_in_row(&screen, grouped, "skills").bg, Some(BAND));
+
+    // A variant row names its directory; the path it sat in is the label's
+    // job now, so the parenthetical is gone.
+    let variant = row_text(&screen, row_containing(&screen, "✓ valid portable"));
+    assert!(!variant.contains("(skills/portable)"), "{variant:?}");
+    assert!(!variant.contains("(experimental"), "{variant:?}");
+
+    // A pane too narrow for all three keeps the path whole and sheds the
+    // qualifiers, classification first: the path is which catalog, and the
+    // rows beneath the label no longer carry that themselves. Which of the
+    // qualifiers survives at a given width is the unit tests' subject; that
+    // widening only ever adds is the promise being kept here.
+    let narrow = buffer(&app, 100, 40);
+    let label = row_text(
+        &narrow,
+        row_containing(&narrow, "experimental/claude-code/skills"),
+    );
+    assert!(!label.contains("Agent-specific"), "{label:?}");
+    let wider = buffer(&app, 120, 40);
+    let label = row_text(
+        &wider,
+        row_containing(&wider, "experimental/claude-code/skills"),
+    );
+    assert!(label.contains("skills · Claude Code"), "{label:?}");
+}
+
+/// A variant row is bounded to its pane as well as to the name cap. At the
+/// narrowest wide terminal the variants pane is 33 columns, and a row that
+/// wrapped would carry its marker and the head of its band on one line and
+/// the name they identify on the next.
+#[test]
+fn a_variant_row_is_bounded_to_its_pane_and_never_wraps() {
+    const SURFACE_3: Color = Color::Rgb(0x17, 0x21, 0x2c);
+
+    let harness = Harness::new();
+    let repository = harness.directory.path().join("source");
+    let variant = "portable-variant-with-a-very-long-directory-name";
+    let directory = repository.join("skills").join(variant);
+    fs::create_dir_all(&directory).expect("create variant fixture");
+    fs::write(
+        directory.join("SKILL.md"),
+        format!("---\nname: {variant}\ndescription: Bounded fixture\n---\n# Fixture\n"),
+    )
+    .expect("write variant fixture");
+    create_repository(&repository);
+    let mut app = harness.completed_setup();
+    let preview = app.preview_source(&repository).expect("preview source");
+    app.confirm_source(preview).expect("register source");
+    app.update(Action::OpenSources);
+
+    let screen = buffer(&app, 100, 40);
+    let selected = row_containing(&screen, "▌ ✓ valid");
+    // The variants region of one row, read between the rules that divide the
+    // three regions.
+    let region = |y: u16| {
+        let line = row_text(&screen, y);
+        let dividers = line
+            .char_indices()
+            .filter(|(_, character)| *character == '│')
+            .map(|(byte_index, _)| byte_index)
+            .collect::<Vec<_>>();
+        line[dividers[0] + '│'.len_utf8()..dividers[1]].to_owned()
+    };
+
+    let row = region(selected);
+    assert!(
+        row.trim_start().starts_with("▌ ✓ valid portable-variant"),
+        "{row:?}"
+    );
+    assert!(
+        region(selected + 1).trim().is_empty(),
+        "the name spilled onto the row beneath it: {:?}",
+        region(selected + 1)
+    );
+
+    let line = row_text(&screen, selected);
+    let divider = line
+        .char_indices()
+        .filter(|(_, character)| *character == '│')
+        .nth(1)
+        .map(|(byte_index, _)| u16::try_from(line[..byte_index].chars().count()).expect("column"))
+        .expect("variants region divider");
+    assert_eq!(
+        screen[(divider - 1, selected)].style().bg,
+        Some(SURFACE_3),
+        "the band should reach the end of the pane: {line:?}"
+    );
+}
+
+/// The aside takes its full share at 151 columns. The Sources panes are
+/// bounded so that crossing it costs them slack and nothing else: every row
+/// reads the same on both sides.
+#[test]
+fn crossing_the_wide_detail_threshold_never_shrinks_the_sources_panes() {
+    let harness = Harness::new();
+    let repository = harness
+        .directory
+        .path()
+        .join("source-checkout-with-a-long-directory-name");
+    // Both bounds have to bind for the comparison to mean anything: a catalog
+    // path and a variant name short enough to fit the pane on either side of
+    // the crossing would read the same however the panes were laid out.
+    let catalog = "experimental/nested/claude-code/skills";
+    let variant = "portable-variant-with-a-very-long-and-descriptive-directory-name";
+    let directory = repository.join(catalog).join(variant);
+    fs::create_dir_all(&directory).expect("create crossing fixture");
+    fs::write(
+        directory.join("SKILL.md"),
+        format!("---\nname: {variant}\ndescription: Crossing fixture\n---\n# Fixture\n"),
+    )
+    .expect("write crossing fixture");
+    create_repository(&repository);
+    let mut app = harness.completed_setup();
+    let preview = app.preview_source(&repository).expect("preview source");
+    app.confirm_source(preview).expect("register source");
+    app.update(Action::OpenSources);
+
+    // The content of one region on the row holding `needle`, read between the
+    // rules that divide the regions.
+    let region = |width: u16, index: usize, needle: &str| {
+        let screen = buffer(&app, width, 40);
+        let line = row_text(&screen, row_containing(&screen, needle));
+        let dividers = line
+            .char_indices()
+            .filter(|(_, character)| *character == '│')
+            .map(|(byte_index, _)| byte_index)
+            .collect::<Vec<_>>();
+        let start = if index == 0 {
+            0
+        } else {
+            dividers[index - 1] + '│'.len_utf8()
+        };
+        line[start..dividers[index]].trim_end().to_owned()
+    };
+
+    for (index, needle) in [
+        (0, "source-checkout"),
+        (0, "@"),
+        (1, "skills · Claude Code"),
+        (1, "✓ valid"),
+    ] {
+        assert_eq!(
+            region(150, index, needle),
+            region(151, index, needle),
+            "the Sources panes gave up columns to the aside at the crossing"
+        );
+    }
+
+    // Bounding the content leaves slack on a very wide terminal, and the
+    // selected row's band crosses it: a band stopping where the name does
+    // would read as a row ending mid-region.
+    const SURFACE_3: Color = Color::Rgb(0x17, 0x21, 0x2c);
+    let screen = buffer(&app, 200, 40);
+    let selected = row_containing(&screen, "▌ ✓ valid");
+    let line = row_text(&screen, selected);
+    let divider_index = line
+        .char_indices()
+        .filter(|(_, character)| *character == '│')
+        .nth(1)
+        .map(|(byte_index, _)| byte_index)
+        .expect("variants region divider");
+    let divider = u16::try_from(line[..divider_index].chars().count()).expect("column");
+    // The name is capped, so the row's content ends well before the pane does.
+    let content = u16::try_from(line[..divider_index].trim_end().chars().count()).expect("column");
+    assert!(
+        divider > content + 10,
+        "expected slack beside the bounded pane: {line:?}"
+    );
+    assert_eq!(
+        screen[(divider - 1, selected)].style().bg,
+        Some(SURFACE_3),
+        "the band should cross the slack, not stop at the name"
+    );
 }
 
 #[test]
@@ -1452,6 +1786,310 @@ fn sources_distinguish_clean_and_unavailable_repositories_semantically() {
     );
 }
 
+/// A source with more empty catalogs than the pane has rows keeps every one
+/// of them reachable: the catalog-state rows are the pane's rows when no
+/// candidates exist, so focus moves over them and the window follows, instead
+/// of an unwindowed list clipping the tail with nothing to scroll it by.
+#[test]
+fn every_catalog_of_an_all_empty_source_is_reachable_by_moving_the_selection() {
+    let harness = Harness::new();
+    let repository = harness.directory.path().join("source");
+    fs::create_dir_all(repository.join("skills")).expect("create common catalog");
+    fs::write(repository.join("skills/.keep"), "empty catalog fixture").expect("write keep file");
+    let names: Vec<String> = (1..=11).map(|index| format!("c{index:02}")).collect();
+    for name in &names {
+        let catalog = repository.join(name).join("claude-code/skills");
+        fs::create_dir_all(&catalog).expect("create agent catalog");
+        fs::write(catalog.join(".keep"), "empty catalog fixture").expect("write keep file");
+    }
+    create_repository(&repository);
+    let mut app = harness.completed_setup();
+    let preview = app.preview_source(&repository).expect("preview source");
+    app.confirm_source(preview).expect("register source");
+    app.update(Action::OpenSources);
+    app.update(Action::AdvanceSourcesPane);
+
+    let mut labels: Vec<String> = names
+        .iter()
+        .map(|name| format!("{name}/claude-code/skills"))
+        .collect();
+    // The full label, because `skills · ` on its own is a substring of every
+    // `cNN/claude-code/skills · …` label and would be seen on the first frame.
+    labels.push("skills · Common · all agents".to_owned());
+    let catalog_count = labels.len();
+
+    // Twelve catalogs need twenty-four rows, so the first render cannot hold
+    // them all — otherwise this test would pass without any windowing.
+    let rendered = text(&buffer(&app, 80, 24));
+    assert!(
+        labels
+            .iter()
+            .any(|label| !rendered.contains(label.as_str())),
+        "every catalog label fit on one screen, so nothing is clipped:\n{rendered}"
+    );
+    assert!(rendered.contains("▌ no variants"), "{rendered}");
+    // The rows are movable, so the key-hint bar must say so: reaching the
+    // clipped catalogs is only real if the way there is advertised.
+    assert!(rendered.contains("j/k Move"), "{rendered}");
+
+    // Walking the selection across every catalog brings each label into view.
+    let mut seen: Vec<bool> = vec![false; catalog_count];
+    for _ in 0..catalog_count {
+        let rendered = text(&buffer(&app, 80, 24));
+        assert!(rendered.contains("▌ no variants"), "{rendered}");
+        for (index, label) in labels.iter().enumerate() {
+            seen[index] |= rendered.contains(label.as_str());
+        }
+        app.update(Action::MoveSourcesSelection(1));
+    }
+    for (index, label) in labels.iter().enumerate() {
+        assert!(
+            seen[index],
+            "catalog {label:?} was never scrolled into view"
+        );
+    }
+}
+
+/// One candidate somewhere must not strand the other catalogs: every rendered
+/// row is a focus position — each candidate, and each catalog's state row —
+/// so a source mixing one skill with many empty catalogs can still be walked
+/// to its end.
+#[test]
+fn a_source_with_one_candidate_and_many_empty_catalogs_is_still_walkable() {
+    let harness = Harness::new();
+    let repository = harness.directory.path().join("source");
+    fs::create_dir_all(repository.join("skills/portable")).expect("create candidate");
+    fs::write(
+        repository.join("skills/portable/SKILL.md"),
+        "---\nname: portable\ndescription: Portable fixture\n---\n# Portable\n",
+    )
+    .expect("write candidate");
+    let names: Vec<String> = (1..=11).map(|index| format!("c{index:02}")).collect();
+    for name in &names {
+        let catalog = repository.join(name).join("claude-code/skills");
+        fs::create_dir_all(&catalog).expect("create agent catalog");
+        fs::write(catalog.join(".keep"), "empty catalog fixture").expect("write keep file");
+    }
+    create_repository(&repository);
+    let mut app = harness.completed_setup();
+    let preview = app.preview_source(&repository).expect("preview source");
+    app.confirm_source(preview).expect("register source");
+    app.update(Action::OpenSources);
+    app.update(Action::AdvanceSourcesPane);
+
+    let labels: Vec<String> = names
+        .iter()
+        .map(|name| format!("{name}/claude-code/skills"))
+        .collect();
+    let row_count = labels.len() + 1;
+
+    let rendered = text(&buffer(&app, 80, 24));
+    assert!(
+        labels
+            .iter()
+            .any(|label| !rendered.contains(label.as_str())),
+        "every catalog label fit on one screen, so nothing is clipped:\n{rendered}"
+    );
+
+    let mut seen: Vec<bool> = vec![false; labels.len()];
+    for _ in 0..row_count {
+        let rendered = text(&buffer(&app, 80, 24));
+        for (index, label) in labels.iter().enumerate() {
+            seen[index] |= rendered.contains(label.as_str());
+        }
+        app.update(Action::MoveSourcesSelection(1));
+    }
+    for (index, label) in labels.iter().enumerate() {
+        assert!(
+            seen[index],
+            "catalog {label:?} was never scrolled into view"
+        );
+    }
+}
+
+/// A source that could not be read at all renders no rows, so it counts
+/// none: the `j/k Move` hint must not appear for an unavailable source even
+/// when several catalog roots are registered, because pressing the key would
+/// walk a selection nothing on screen shows.
+#[test]
+fn an_unavailable_source_offers_no_selection_to_move() {
+    let harness = Harness::new();
+    let repository = harness.directory.path().join("source");
+    let moved = harness.directory.path().join("source-moved");
+    create_two_catalog_source_fixture(&repository);
+    let environment = harness.environment();
+    let mut app = harness.completed_setup();
+    let preview = app.preview_source(&repository).expect("preview source");
+    app.confirm_source(preview).expect("register source");
+    drop(app);
+    fs::rename(&repository, &moved).expect("move registered checkout");
+    let mut reopened = SkilledApp::open(environment).expect("reopen application");
+    reopened.update(Action::OpenSources);
+    reopened.update(Action::AdvanceSourcesPane);
+
+    let before = buffer(&reopened, 80, 24);
+    assert!(text(&before).contains("× unavailable"), "{}", text(&before));
+    assert!(
+        !text(&before).contains("j/k Move"),
+        "the hint offers a move the pane cannot show:\n{}",
+        text(&before)
+    );
+
+    reopened.update(Action::MoveSourcesSelection(1));
+    let after = buffer(&reopened, 80, 24);
+    assert_eq!(
+        text(&before),
+        text(&after),
+        "moving the selection changed a pane that renders no rows"
+    );
+}
+
+/// A catalog's error row is a focus position like any other row, so its text
+/// is bounded to the pane the way a variant name is: a wrapped error would
+/// put the marker and the band on one line and the words on the next.
+#[test]
+fn a_selected_catalog_error_row_is_bounded_and_banded_like_any_row() {
+    const SURFACE_3: Color = Color::Rgb(0x17, 0x21, 0x2c);
+
+    let harness = Harness::new();
+    let repository = harness.directory.path().join("source");
+    for (catalog, skill) in [("catalog-a", "portable"), ("catalog-b", "second")] {
+        let directory = repository.join(catalog).join("codex/skills").join(skill);
+        fs::create_dir_all(&directory).expect("create catalog fixture");
+        fs::write(
+            directory.join("SKILL.md"),
+            format!("---\nname: {skill}\ndescription: {skill} fixture\n---\n# Fixture\n"),
+        )
+        .expect("write catalog fixture");
+    }
+    create_repository(&repository);
+    let environment = harness.environment();
+    let mut app = harness.completed_setup();
+    let preview = app.preview_source(&repository).expect("preview source");
+    app.confirm_source(preview).expect("register source");
+    drop(app);
+    let connection =
+        rusqlite::Connection::open(harness.directory.path().join("data/skilled.sqlite3"))
+            .expect("open application database");
+    connection
+        .execute(
+            "UPDATE catalog_roots SET relative_path = '../outside' \
+             WHERE relative_path LIKE 'catalog-b/%'",
+            [],
+        )
+        .expect("corrupt one stored catalog path");
+    drop(connection);
+    let mut reopened = SkilledApp::open(environment).expect("reopen application");
+    reopened.update(Action::OpenSources);
+    reopened.update(Action::AdvanceSourcesPane);
+
+    // The corrupted catalog sorts first, so its error row is the selection.
+    let screen = buffer(&reopened, 100, 40);
+    let selected = row_containing(&screen, "▌ × unavailable");
+    let region = |y: u16| {
+        let line = row_text(&screen, y);
+        let dividers = line
+            .char_indices()
+            .filter(|(_, character)| *character == '│')
+            .map(|(byte_index, _)| byte_index)
+            .collect::<Vec<_>>();
+        line[dividers[0] + '│'.len_utf8()..dividers[1]].to_owned()
+    };
+    // Bounded, with the ellipsis saying there was more; the rest of the
+    // message is given in the detail region.
+    assert!(
+        region(selected).trim_end().ends_with("..."),
+        "{:?}",
+        region(selected)
+    );
+    // The next region row is the healthy catalog's label, not a wrapped
+    // continuation of the error.
+    assert!(
+        region(selected + 1).trim_start().starts_with("catalog-a"),
+        "{:?}",
+        region(selected + 1)
+    );
+    assert_eq!(
+        style_in_row(&screen, selected, "× unavailable").bg,
+        Some(SURFACE_3)
+    );
+}
+
+/// The selection the pane shows carries across the region boundary: a focused
+/// catalog-state row selects its catalog, so the Details CATALOG section
+/// names the catalog the band is on rather than rendering identically for
+/// every position.
+#[test]
+fn focusing_an_empty_catalog_row_selects_that_catalog_in_details() {
+    let harness = Harness::new();
+    let repository = harness.directory.path().join("source");
+    fs::create_dir_all(repository.join("skills/portable")).expect("create candidate");
+    fs::write(
+        repository.join("skills/portable/SKILL.md"),
+        "---\nname: portable\ndescription: Portable fixture\n---\n# Portable\n",
+    )
+    .expect("write candidate");
+    let empty = repository.join("experimental/claude-code/skills");
+    fs::create_dir_all(&empty).expect("create empty catalog");
+    fs::write(empty.join(".keep"), "empty catalog fixture").expect("write keep file");
+    create_repository(&repository);
+    let mut app = harness.completed_setup();
+    let preview = app.preview_source(&repository).expect("preview source");
+    app.confirm_source(preview).expect("register source");
+    app.update(Action::OpenSources);
+    app.update(Action::AdvanceSourcesPane);
+
+    // Walk the selection until the band rests on the empty catalog's state
+    // row — bounded, so a selection that cannot reach it fails rather than
+    // spins — then open Details.
+    for _ in 0..4 {
+        if text(&buffer(&app, 80, 24)).contains("▌ no variants") {
+            break;
+        }
+        app.update(Action::MoveSourcesSelection(1));
+    }
+    assert!(
+        text(&buffer(&app, 80, 24)).contains("▌ no variants"),
+        "the selection never reached the empty catalog's state row"
+    );
+    app.update(Action::AdvanceSourcesPane);
+
+    let details = text(&buffer(&app, 80, 24));
+    assert!(
+        details.contains("Path: experimental/claude-code/skills"),
+        "{details}"
+    );
+    assert!(!details.contains("Directory: portable"), "{details}");
+}
+
+/// The generic empty state is reserved for a source with no catalogs at all.
+/// A catalog that scanned clean but holds nothing is still named, with the
+/// `no variants` line beneath its label: flattening it into the empty state
+/// would hide which catalogs the source has and that each was read.
+#[test]
+fn an_emptied_catalog_is_named_rather_than_flattened_into_the_empty_state() {
+    let harness = Harness::new();
+    let repository = harness.directory.path().join("source");
+    create_source_fixture(&repository);
+    let environment = harness.environment();
+    let mut app = harness.completed_setup();
+    let preview = app.preview_source(&repository).expect("preview source");
+    app.confirm_source(preview).expect("register source");
+    drop(app);
+    fs::remove_dir_all(repository.join("skills/portable")).expect("empty the catalog");
+    let mut reopened = SkilledApp::open(environment).expect("reopen application");
+    reopened.update(Action::OpenSources);
+    reopened.update(Action::AdvanceSourcesPane);
+
+    let rendered = text(&buffer(&reopened, 80, 24));
+    assert!(rendered.contains("skills · "), "{rendered}");
+    assert!(rendered.contains("no variants"), "{rendered}");
+    assert!(!rendered.contains("No variants found"), "{rendered}");
+    // The hint belongs to catalog errors, and this catalog read cleanly.
+    assert!(!rendered.contains("Open Details"), "{rendered}");
+    assert!(rendered.contains("0 found"), "{rendered}");
+}
+
 #[test]
 fn sources_surface_catalog_scan_errors_in_variants_and_details() {
     let harness = Harness::new();
@@ -1525,6 +2163,9 @@ fn details_keep_failed_catalog_errors_beside_a_healthy_selected_variant() {
     let mut reopened = SkilledApp::open(environment).expect("reopen application");
     reopened.update(Action::OpenSources);
     reopened.update(Action::AdvanceSourcesPane);
+    // The failed catalog sorts first and its error row is a focus position,
+    // so the healthy variant is one move down.
+    reopened.update(Action::MoveSourcesSelection(1));
     reopened.update(Action::AdvanceSourcesPane);
 
     let details = text(&buffer(&reopened, 80, 24));
@@ -1699,7 +2340,19 @@ fn long_wrapped_metadata_keeps_variant_identity_and_status_visible() {
         "{rendered}"
     );
     assert!(rendered.contains("Status: ✓ valid"), "{rendered}");
-    assert!(rendered.contains("remote-segment/..."), "{rendered}");
+    // The remote is bounded rather than given whole, so it cannot crowd the
+    // fields below it off the region. Where its ellipsis falls depends on the
+    // region's width, so the assertion is that it is bounded, not where.
+    assert!(
+        rendered
+            .lines()
+            .any(|line| line.contains("remote-segment") && line.trim_end().ends_with("...")),
+        "{rendered}"
+    );
+    assert!(
+        !rendered.contains(&"remote-segment/".repeat(16)),
+        "{rendered}"
+    );
 }
 
 #[test]
@@ -2022,8 +2675,8 @@ fn the_focused_row_is_marked_and_emphasised_not_merely_tinted() {
     let screen = buffer(&app, 120, 40);
     // Registration focuses the newest source. Rows are matched by their whole
     // prefix so the repository list is not confused with the variants pane.
-    let focused = row_starting_with(&screen, "│ ▌ second");
-    let unfocused = row_starting_with(&screen, "│   first");
+    let focused = row_starting_with(&screen, "▌ second");
+    let unfocused = row_starting_with(&screen, "  first");
 
     assert!(
         style_in_row(&screen, focused, "second")
@@ -2390,6 +3043,28 @@ fn create_source_fixture(repository: &Path) {
         "---\nname: portable\ndescription: Portable fixture\n---\n# Portable\n",
     )
     .expect("write source fixture");
+    create_repository(repository);
+}
+
+/// A checkout holding a common catalog and an agent-specific one, so grouping
+/// has two groups to keep apart and two classifications to state.
+fn create_two_catalog_source_fixture(repository: &Path) {
+    for (catalog, skill, description) in [
+        ("skills", "portable", "Portable fixture"),
+        (
+            "experimental/claude-code/skills",
+            "experimental",
+            "Experimental fixture",
+        ),
+    ] {
+        let directory = repository.join(catalog).join(skill);
+        fs::create_dir_all(&directory).expect("create catalog fixture");
+        fs::write(
+            directory.join("SKILL.md"),
+            format!("---\nname: {skill}\ndescription: {description}\n---\n# Fixture\n"),
+        )
+        .expect("write catalog fixture");
+    }
     create_repository(repository);
 }
 

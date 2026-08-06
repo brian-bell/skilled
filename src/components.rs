@@ -256,26 +256,52 @@ pub(crate) const FOCUS_MARKER: &str = "▌";
 /// accent bar. A terminal cannot rely on either alone, so focus is carried by a
 /// leading marker and bold text as well.
 pub(crate) fn list_row(content: Vec<Span<'static>>, selected: bool, width: u16) -> Line<'static> {
-    let mut spans = vec![Span::styled(
-        if selected { FOCUS_MARKER } else { " " },
-        theme::focus_marker(),
-    )];
-    spans.push(Span::raw(" "));
-    spans.extend(content);
+    list_row_lines(vec![content], selected, width)
+        .pop()
+        .expect("one line in, one line out")
+}
 
-    if !selected {
-        return Line::from(spans);
-    }
+/// A selectable entry that occupies several lines.
+///
+/// The prototype draws its multi-line rows with an inset accent bar running
+/// the full height of the selected entry. A terminal has one column to spend
+/// on that, so the marker repeats down every line of the entry rather than
+/// sitting only beside its first: a marker on the first line alone would say
+/// where the entry starts, not how far it reaches. The band pads each line to
+/// the region width for the same reason it does on a flat row, and unselected
+/// entries keep the marker column as indent so the lines stay in one column.
+pub(crate) fn list_row_lines(
+    lines: Vec<Vec<Span<'static>>>,
+    selected: bool,
+    width: u16,
+) -> Vec<Line<'static>> {
+    lines
+        .into_iter()
+        .map(|content| {
+            let mut spans = vec![
+                Span::styled(
+                    if selected { FOCUS_MARKER } else { " " },
+                    theme::focus_marker(),
+                ),
+                Span::raw(" "),
+            ];
+            spans.extend(content);
 
-    // Pad to the region width so the tint reads as a band across the row
-    // rather than stopping at the end of the label.
-    let line = Line::from(spans);
-    let padding = usize::from(width).saturating_sub(line.width());
-    let mut spans = line.spans;
-    if padding > 0 {
-        spans.push(Span::raw(" ".repeat(padding)));
-    }
-    Line::from(spans).style(theme::selected_row())
+            if !selected {
+                return Line::from(spans);
+            }
+
+            // Pad to the region width so the tint reads as a band across the
+            // row rather than stopping at the end of the label.
+            let line = Line::from(spans);
+            let padding = usize::from(width).saturating_sub(line.width());
+            let mut spans = line.spans;
+            if padding > 0 {
+                spans.push(Span::raw(" ".repeat(padding)));
+            }
+            Line::from(spans).style(theme::selected_row())
+        })
+        .collect()
 }
 
 /// A pane heading with a subtitle that quantifies what the pane contains, and
@@ -424,6 +450,60 @@ mod tests {
         assert_eq!(unique.len(), glyphs.len(), "glyphs must be distinguishable");
     }
 
+    fn line_text(line: &Line<'_>) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect()
+    }
+
+    #[test]
+    fn a_selected_entry_marks_every_one_of_its_lines_and_bands_them_all() {
+        let rows = list_row_lines(
+            vec![
+                vec![Span::raw("source")],
+                vec![Span::raw("/checkout/source")],
+                vec![Span::raw("main@0123456")],
+            ],
+            true,
+            30,
+        );
+
+        assert_eq!(rows.len(), 3);
+        for row in &rows {
+            assert!(line_text(row).starts_with("▌ "), "{:?}", line_text(row));
+            assert_eq!(row.width(), 30, "{:?}", line_text(row));
+            assert_eq!(row.style.bg, theme::selected_row().bg);
+        }
+    }
+
+    #[test]
+    fn an_unselected_entry_keeps_the_marker_column_as_indent_and_no_band() {
+        let rows = list_row_lines(
+            vec![vec![Span::raw("source")], vec![Span::raw("/checkout")]],
+            false,
+            30,
+        );
+
+        assert_eq!(line_text(&rows[0]), "  source");
+        assert_eq!(line_text(&rows[1]), "  /checkout");
+        for row in &rows {
+            assert_eq!(row.style.bg, None);
+        }
+    }
+
+    /// A single-line entry is the same row the flat helper produces, so a list
+    /// that grows a second line does not also change how its first one reads.
+    #[test]
+    fn a_single_line_entry_matches_the_flat_row() {
+        for selected in [false, true] {
+            assert_eq!(
+                list_row_lines(vec![vec![Span::raw("source")]], selected, 24),
+                vec![list_row(vec![Span::raw("source")], selected, 24)]
+            );
+        }
+    }
+
     #[test]
     fn focused_pane_header_has_a_text_marker_independent_of_row_selection() {
         let active = focused_pane_header("Repositories", "2 registered", true);
@@ -438,6 +518,22 @@ mod tests {
         assert_eq!(text(&active), "▌ Repositories  2 registered");
         assert_eq!(text(&inactive), "Repositories  2 registered");
         assert_ne!(text(&active), text(&inactive));
+    }
+
+    /// A caller bounding a subtitle to its pane has to know what the header
+    /// spends around it. That arithmetic lives here, so it is stated here:
+    /// a two-cell marker only when focused, and a two-cell gap always.
+    #[test]
+    fn a_pane_header_spends_a_marker_when_focused_and_a_gap_of_two_always() {
+        for (focused, marker) in [(false, 0), (true, 2)] {
+            for (heading, subtitle) in [("Repositories", "2 registered"), ("あ", "")] {
+                assert_eq!(
+                    focused_pane_header(heading, subtitle, focused).width(),
+                    marker + Span::raw(heading).width() + 2 + Span::raw(subtitle).width(),
+                    "{heading:?} {subtitle:?} focused={focused}"
+                );
+            }
+        }
     }
 
     #[test]

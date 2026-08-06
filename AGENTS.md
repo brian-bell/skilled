@@ -20,7 +20,8 @@ and eventually managing global coding-agent skills. Implemented so far:
 prototype-aligned seven-step first-run setup with segmented progress, agent
 detection and selection, SQLite-backed setup persistence, local Git source
 registration with catalog confirmation, responsive three-region Sources
-browsing of registered repositories, skill variants, and structured details,
+browsing of registered repositories, catalog-grouped skill variants, and
+structured details,
 a read-only installation inventory of the documented native agent skill roots
 with per-agent status, detail, filtering, and health findings, shared-dialog
 Settings setup reset, reducer-owned contextual help, responsive size handling,
@@ -96,14 +97,19 @@ not an acceptable cue.
   test enforces that `Color::` appears in no other module. Information-bearing
   text must meet WCAG 4.5:1 against its surface; a theme unit test guards
   every such role, and the two accepted `FAINT` exemptions (`empty_glyph`,
-  `nav_disabled`) are recorded on their doc comments.
+  `nav_disabled`) are recorded on their doc comments. A new surface reuses an
+  existing one where it can rather than minting a tint: `group_label()`, the
+  line that names the catalog a run of variants belongs to, is muted text on
+  the same band the persistent chrome uses.
 - `src/viewport.rs`: responsive viewport classes and workspace region geometry.
   Screens ask whether the terminal is `Compact` or `Wide` instead of comparing
   raw widths, and the detail region's two width tiers are decided here rather
   than by the screen that draws into it.
 - `src/components.rs`: pure shared primitives — status badges, list rows, pane
   headers, empty states, segmented setup progress, the modal dialog frame and
-  footer regions, and the key-hint bar.
+  footer regions, and the key-hint bar. A row may be several lines tall:
+  `list_row_lines` is the primitive, and `list_row` is the one-line case of it,
+  so a multi-line entry bands and marks itself exactly as a flat row does.
 - `src/tui.rs`: composes the persistent shell (title bar, navigation, session
   status, workspace, Setup and Settings dialogs, contextual help, key hints)
   from those primitives. Pure: it does not access SQLite, the filesystem, or
@@ -178,9 +184,70 @@ to 140 would ellipsize skill names that fit just before — the opposite of what
 widening should do. That reasoning is recorded on
 `DETAIL_REGION_WIDE_THRESHOLD` and pinned by a rendering test that fails if the
 threshold is lowered. The split is one geometry for every screen so the aside
-does not jump between tabs, which means the Sources panes — whose columns are
-not capped — do yield width at the crossing; that cost is accepted and stands
-until the Sources region rework bounds its panes.
+does not jump between tabs, and the Sources panes are bounded for the same
+reason the table's columns are, so the crossing costs them slack there too: the
+Repositories pane is capped at `REPOSITORIES_PANE_MAX_WIDTH`, and the variants
+pane lays its content out to at most `VARIANTS_CONTENT_MAX_WIDTH`, which is the
+width it keeps on the far side of the crossing.
+
+The Sources regions are drawn on the same unboxed scaffold as the inventory
+table, and record their own departures. `render_pane_scaffold` gives a pane its
+header line, the rule that closes it, and the body beneath; regions are divided
+by a column of vertical rule, and a region that opens on one is set in from it
+by a single column of gutter. The gutter belongs to the rule rather than to the
+pane, so a region at the screen edge keeps none and the detail region — whose
+scaffold is that same separator plus a one-column margin — reads as one anatomy
+with the panes beside it rather than a second one. Bounding a header is one shared
+`pane_header` helper: the subtitle is cut to what the pane can hold, because a
+status cut mid-word says neither what it is nor that there was more of it,
+while the heading that names the pane is never cut. The Repositories pane takes
+42% of a narrow primary region and stops at 34 columns, which binds from a
+primary of 81; the wide-detail crossing takes the primary from 110 columns to
+101, so the pane is 34 either side of it and every repository entry is laid out
+identically. The variants pane keeps the 65 columns that are left there — 101
+less the pane, the rule, and the gutter — and bounds its content to that rather
+than to its own width, so widening past the threshold takes columns out of
+slack and never out of a catalog path or a variant name that was readable a
+column earlier. A variant name stops earning width at the same cap a skill name
+does in the inventory table, and the detail region still gives it in full.
+
+A repository entry is the prototype's three-line `.source-row`: what the source
+is called, the checkout it names, and the state it was last seen in beside
+`branch@short head`. It is built from `components::list_row_lines`, so the
+focus marker repeats down all three lines — a marker beside the first alone
+would say where the entry starts, not how far it reaches — and the selection
+band crosses every one of them. Each line is bounded to the pane rather than
+wrapped: a wrapped path would push one entry's state line into the next and
+leave the list without a fixed entry height, so it could no longer be windowed
+or banded. The path line is muted where the prototype's `.source-path` is
+faint, for the reason the table headings are: it names the checkout the entry
+stands for. Variants are grouped under their catalog, with each catalog's own
+scan failure beneath its own label rather than stacked above the whole list,
+and an empty catalog saying `no variants` rather than showing a bare label.
+Every rendered row is a focus position — each candidate, and each catalog's
+state row — so the selection can rest on an error or an empty catalog as well
+as on a variant, the window follows it, and a source with more rows than the
+pane holds keeps every one reachable whatever mixture it is; the Details
+CATALOG section follows whichever row the band is on. The
+label gives the catalog's path first and then whichever qualifiers — its
+classification, and which agents it is registered for — the pane can hold
+whole, shedding the classification first because a claim of every agent or of
+one named agent is the more specific fact. Chosen that way the label can only
+ever say more as the pane widens, which is the promise
+`DETAIL_REGION_WIDE_THRESHOLD` makes for the table's columns. A shed qualifier
+leaves no mark where a shortened path leaves an ellipsis, and nothing on the
+line claims the qualifiers were stated; the detail region gives both facts in
+full under CATALOG. Two departures from the prototype's `.catalog-title`: its
+path and qualifiers are set `space-between`, hard to either edge, and here they
+are adjacent, because the pane's slack is what a selected row's band crosses
+and a label split across it would read as two columns the rows beneath do not
+have. And its band is a surface rather than a cue — barely above the terminal
+background, as `#0b1016` is against `#0b0f14` in the prototype — so what
+separates a label from its rows is that the label is muted and starts flush
+where the rows are indented past their marker column. A window scrolled deep
+into a long group pins that group's label to its own first row, because rows
+read without it name a variant without naming the catalog it came from, which
+is the question the per-row path used to answer.
 
 ## Quick Reference
 

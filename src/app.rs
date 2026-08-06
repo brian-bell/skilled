@@ -330,6 +330,27 @@ impl SkilledApp {
         self.focused_variant
     }
 
+    /// The rows the variants pane offers the selection: every candidate, and
+    /// each catalog's state row — its scan error, or the `no variants` line
+    /// an empty catalog shows. The pane renders exactly these rows in this
+    /// order, so counting them here is what keeps a list taller than the pane
+    /// walkable whatever mixture of skills, errors, and empty catalogs it
+    /// holds. A source that could not be read at all renders no rows — the
+    /// pane shows its source error instead — so it counts none.
+    pub fn variants_row_count(&self) -> usize {
+        self.selected_source()
+            .filter(|source| source.source_error().is_none())
+            .map(RegisteredSource::catalogs)
+            .unwrap_or_default()
+            .iter()
+            .map(|catalog| {
+                let state_row =
+                    usize::from(catalog.scan_error().is_some() || catalog.candidates().is_empty());
+                catalog.candidates().len() + state_row
+            })
+            .sum()
+    }
+
     pub fn help_context(&self) -> Option<View> {
         self.help_context
     }
@@ -916,12 +937,7 @@ impl SkilledApp {
                 }
             }
             SourcesPane::Variants => {
-                let count = self
-                    .selected_source()
-                    .into_iter()
-                    .flat_map(RegisteredSource::catalogs)
-                    .map(|catalog| catalog.candidates().len())
-                    .sum::<usize>();
+                let count = self.variants_row_count();
                 self.focused_variant = wrapped_index(self.focused_variant, delta, count);
             }
             SourcesPane::Repositories | SourcesPane::Details => {}

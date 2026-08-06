@@ -4,25 +4,25 @@ expression: "normalize_sources_screen(&app, &temporary, render(&app, 80, 24))"
 ---
  ◆ skilled   global                               ● ready · 1 source registered
  1 Inventory ▌Sources 1  Updates (soon)  Doctor (soon)
-┌▌ Repositories  1 registered──────────────────────────────────────────────────┐
-│ ▌ source  ✓ clean                                                            │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-└──────────────────────────────────────────────────────────────────────────────┘
+▌ Repositories  1 registered
+────────────────────────────────────────────────────────────────────────────────
+▌ source
+▌ [TEMP]/source                 
+▌ ✓ clean main@[SHORT]
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
  Tab/Shift-Tab Region   Enter Open   a Add source   1 Inventory   Esc Back …

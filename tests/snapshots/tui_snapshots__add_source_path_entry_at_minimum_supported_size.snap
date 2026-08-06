@@ -4,25 +4,25 @@ expression: "render(&app, 80, 24)"
 ---
  ◆ skilled   global                              ● ready · 0 sources registered
  Add source   navigation is locked while this dialog is open
-┌▌ Repositories  0 registered──────────────────────────────────────────────────┐
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│ ┌ Add source ────────────────────────────────────────── local Git checkout ┐ │
-│ │                                                                          │ │
-│ │  Local Git repository                                                    │ │
-│ │  Enter a path inside a local Git checkout:                               │ │
-│ │                                                                          │ │
-│ │  > /Users/example/dev/skills                                             │ │
-│ │                                                                          │ │
-│ │                                                                          │ │
-│ │  ──────────────────────────────────────────────────────────────────────  │ │
-│ │  Read-only checkout and catalog scan         Esc Cancel   Enter Inspect  │ │
-│ │                                                                          │ │
-│ └──────────────────────────────────────────────────────────────────────────┘ │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-└──────────────────────────────────────────────────────────────────────────────┘
+▌ Repositories  0 registered
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ┌ Add source ────────────────────────────────────────── local Git checkout ┐
+  │                                                                          │
+  │  Local Git repository                                                    │
+  │  Enter a path inside a local Git checkout:                               │
+  │                                                                          │
+  │  > /Users/example/dev/skills                                             │
+  │                                                                          │
+  │                                                                          │
+  │  ──────────────────────────────────────────────────────────────────────  │
+  │  Read-only checkout and catalog scan         Esc Cancel   Enter Inspect  │
+  │                                                                          │
+  └──────────────────────────────────────────────────────────────────────────┘
+
+
+
+
+
  Enter Inspect   Esc Cancel   Ctrl-C Quit

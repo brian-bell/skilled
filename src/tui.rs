@@ -16,7 +16,8 @@ use crate::{
         InstalledSkillObservation, InventoryRow, RootScan, RootStatus, RowProvenance,
     },
     source::{
-        CatalogClassification, CatalogProposal, RegisteredSource, SkillCandidate, SkillValidation,
+        CatalogClassification, CatalogProposal, Compatibility, RegisteredSource, SkillCandidate,
+        SkillValidation,
     },
     theme::{self, Tone},
     viewport,
@@ -638,10 +639,11 @@ fn inventory_columns(width: u16) -> InventoryColumns {
 
 fn render_inventory_skills(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
     let rows = app.filtered_rows();
-    let mut header_lines = vec![components::focused_pane_header(
+    let mut header_lines = vec![pane_header(
         "Global inventory",
         &inventory_subtitle(app, rows.len()),
         app.inventory_pane() == InventoryPane::Skills,
+        area.width,
     )];
     if app.inventory_filter_active() || !app.inventory_filter().is_empty() {
         header_lines.push(inventory_filter_line(app));
@@ -953,23 +955,100 @@ fn inventory_empty_state(app: &SkilledApp) -> (String, String) {
     )
 }
 
-/// The detail region: everything observed about the selected installation.
-fn render_inventory_detail(
+/// The column of vertical rule that divides one workspace region from the
+/// next.
+fn render_region_separator(frame: &mut Frame<'_>, area: Rect) {
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(Span::styled("│", theme::rule()));
+            usize::from(area.height)
+        ]),
+        area,
+    );
+}
+
+/// A workspace pane: its header, the rule that closes it, and the body left
+/// for the pane's own content.
+fn render_pane_scaffold(
     frame: &mut Frame<'_>,
     area: Rect,
-    app: &SkilledApp,
-    beside_the_table: bool,
-) {
-    let region = if beside_the_table {
+    heading: &str,
+    subtitle: &str,
+    focused: bool,
+) -> Rect {
+    let [header, body] = Layout::vertical([Constraint::Length(2), Constraint::Min(1)]).areas(area);
+    frame.render_widget(
+        Paragraph::new(vec![
+            pane_header(heading, subtitle, focused, header.width),
+            components::rule(header.width),
+        ]),
+        header,
+    );
+    body
+}
+
+/// The gap `components::focused_pane_header` sets between a heading and its
+/// subtitle. A components test holds the two together.
+const SUBTITLE_GAP: usize = 2;
+
+/// A pane header bounded to the pane it heads.
+///
+/// The subtitle quantifies the pane and can be a phrase rather than a count,
+/// so it is bounded rather than left to run off the end of the header: a
+/// status cut mid-word says neither what it is nor that there was more of it.
+/// The heading names the pane and is never cut — a pane whose name did not fit
+/// would have nothing left to say.
+fn pane_header(heading: &str, subtitle: &str, focused: bool, width: u16) -> Line<'static> {
+    let subtitle = bounded_subtitle(
+        subtitle,
+        usize::from(width)
+            .saturating_sub(Span::raw(heading).width())
+            .saturating_sub(if focused { ROW_MARKER_WIDTH } else { 0 })
+            .saturating_sub(SUBTITLE_GAP),
+    );
+    components::focused_pane_header(heading, &subtitle, focused)
+}
+
+/// Bound a subtitle by shedding whole ` · ` clauses from its end, the way a
+/// group label sheds its qualifiers: `scan error · 3 found` in a narrow pane
+/// says `scan error`, not `scan erro...`, because the clauses lead with the
+/// fact the pane cannot restate and a cut word destroys exactly that fact. A
+/// shed clause leaves no mark; nothing on the row claims it was stated. Only
+/// a first clause too long for the pane on its own is cut, ellipsized so the
+/// row still says there was more.
+fn bounded_subtitle(subtitle: &str, budget: usize) -> String {
+    let safe = terminal_safe(subtitle);
+    let mut clauses = safe.as_str();
+    loop {
+        if Span::raw(clauses).width() <= budget {
+            return clauses.to_owned();
+        }
+        match clauses.rfind(" · ") {
+            Some(cut) => clauses = &clauses[..cut],
+            None => return terminal_safe_bounded_start(clauses, budget),
+        }
+    }
+}
+
+/// The detail region's frame, shared by every screen that has one.
+///
+/// Beside a primary region it opens with the dividing rule; drilled into on a
+/// compact terminal it fills the workspace. Either way the surface is painted
+/// whole, before the text margin, and the header and its rule sit inside —
+/// the two screens' detail regions cannot drift apart because they are the
+/// same scaffold. The body left for the caller's lines is returned.
+fn render_detail_scaffold(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    heading: &str,
+    subtitle: &str,
+    focused: bool,
+    beside_the_primary_region: bool,
+) -> Rect {
+    let region = if beside_the_primary_region {
         let [separator, region] =
             Layout::horizontal([Constraint::Length(1), Constraint::Min(1)]).areas(area);
-        frame.render_widget(
-            Paragraph::new(vec![
-                Line::from(Span::styled("│", theme::rule()));
-                usize::from(separator.height)
-            ]),
-            separator,
-        );
+        render_region_separator(frame, separator);
         // Painted whole, before the margin: the surface is what makes the
         // region read as a region, so it reaches the edges the text does not.
         frame.render_widget(Block::new().style(theme::detail_surface()), region);
@@ -984,23 +1063,27 @@ fn render_inventory_detail(
             vertical: 0,
         })
     };
+    render_pane_scaffold(frame, region, heading, subtitle, focused)
+}
 
+/// The detail region: everything observed about the selected installation.
+fn render_inventory_detail(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &SkilledApp,
+    beside_the_table: bool,
+) {
     let selected = app.selected_installation();
-    let [header, body] =
-        Layout::vertical([Constraint::Length(2), Constraint::Min(1)]).areas(region);
-    frame.render_widget(
-        Paragraph::new(vec![
-            components::focused_pane_header(
-                "Details",
-                &selected.map_or_else(
-                    || "no selection".to_owned(),
-                    |row| terminal_safe(row.name()),
-                ),
-                app.inventory_pane() == InventoryPane::Details,
-            ),
-            components::rule(header.width),
-        ]),
-        header,
+    let body = render_detail_scaffold(
+        frame,
+        area,
+        "Details",
+        &selected.map_or_else(
+            || "no selection".to_owned(),
+            |row| terminal_safe(row.name()),
+        ),
+        app.inventory_pane() == InventoryPane::Details,
+        beside_the_table,
     );
 
     let Some(row) = selected else {
@@ -1277,52 +1360,75 @@ fn padded(value: &str, width: usize) -> String {
     format!("{bounded}{}", " ".repeat(width.saturating_sub(used)))
 }
 
+/// The Repositories pane's share of a wide primary region, matching the
+/// prototype's fixed 270px column at roughly eight pixels a cell.
+///
+/// The cap is what makes the workspace's wide-detail crossing
+/// ([`viewport::DETAIL_REGION_WIDE_THRESHOLD`]) cost this pane nothing: it
+/// binds from a primary region of 81 columns, and the crossing takes the
+/// primary from 110 columns to 101, so the pane is 34 either side of it and
+/// every repository entry is laid out identically. Below 81 the share is
+/// proportional, because a pane that took its full 34 out of a narrow primary
+/// would leave the variants beside it too little to read.
+const REPOSITORIES_PANE_MAX_WIDTH: u16 = 34;
+
+fn repositories_pane_width(primary_width: u16) -> u16 {
+    // Saturation is only reachable far above the cap, so it cannot change the
+    // share a real terminal is given.
+    (primary_width.saturating_mul(42) / 100).min(REPOSITORIES_PANE_MAX_WIDTH)
+}
+
+/// Past this a variant name stops earning width, exactly as a skill name does
+/// in the inventory table; the detail region beside the list still gives the
+/// name in full.
+const MAX_VARIANT_WIDTH: usize = MAX_SKILL_WIDTH;
+
+/// The widest content the variants pane lays out.
+///
+/// This is what the pane keeps on the far side of the wide-detail crossing:
+/// at 151 columns the primary region is 101, less 34 for the Repositories
+/// pane, one for the rule between them and one for the gutter after it.
+/// Bounding the pane's content here rather than at its own width means
+/// widening the terminal past the threshold takes the columns out of slack —
+/// which the group label's band and a selected row's band still cross — and
+/// never out of a catalog path or a variant name that was readable a column
+/// earlier.
+const VARIANTS_CONTENT_MAX_WIDTH: usize = 65;
+
 fn render_sources(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
-    match viewport::classify(area) {
-        viewport::Viewport::Wide => {
-            let (primary, details) = viewport::workspace_regions(area);
-            let details = details.expect("wide Sources workspace has a detail region");
-            let [repositories, _, variants] = Layout::horizontal([
-                Constraint::Percentage(42),
+    match viewport::workspace_regions(area) {
+        (primary, Some(details)) => {
+            // A region that opens on a rule is set in from it, the way the
+            // detail region beside it is: the gutter belongs to the rule, not
+            // to the pane, so a region at the screen edge keeps none.
+            let [repositories, separator, _gutter, variants] = Layout::horizontal([
+                Constraint::Length(repositories_pane_width(primary.width)),
+                Constraint::Length(1),
                 Constraint::Length(1),
                 Constraint::Min(1),
             ])
             .areas(primary);
+            render_region_separator(frame, separator);
             render_source_repositories(frame, repositories, app);
             render_source_variants(frame, variants, app);
-            render_source_details(frame, details, app);
+            render_source_details(frame, details, app, true);
         }
-        viewport::Viewport::Compact => match app.sources_pane() {
-            SourcesPane::Repositories => render_source_repositories(frame, area, app),
-            SourcesPane::Variants => render_source_variants(frame, area, app),
-            SourcesPane::Details => render_source_details(frame, area, app),
+        (primary, None) => match app.sources_pane() {
+            SourcesPane::Repositories => render_source_repositories(frame, primary, app),
+            SourcesPane::Variants => render_source_variants(frame, primary, app),
+            SourcesPane::Details => render_source_details(frame, primary, app, false),
         },
     }
 }
 
-fn source_region_block(
-    heading: &str,
-    subtitle: &str,
-    pane: SourcesPane,
-    app: &SkilledApp,
-) -> Block<'static> {
-    let focused = app.sources_pane() == pane;
-    Block::default()
-        .title(components::focused_pane_header(heading, subtitle, focused))
-        .borders(Borders::ALL)
-        .border_style(theme::pane_border(focused))
-        .padding(Padding::horizontal(1))
-}
-
 fn render_source_repositories(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
-    let block = source_region_block(
+    let inner = render_pane_scaffold(
+        frame,
+        area,
         "Repositories",
         &format!("{} registered", app.sources().len()),
-        SourcesPane::Repositories,
-        app,
+        app.sources_pane() == SourcesPane::Repositories,
     );
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
 
     if app.sources().is_empty() {
         frame.render_widget(
@@ -1337,7 +1443,10 @@ fn render_source_repositories(frame: &mut Frame<'_>, area: Rect, app: &SkilledAp
         return;
     }
 
-    let capacity = usize::from(inner.height.max(1));
+    // Entries are three lines tall, so the pane holds a third as many of them
+    // as it has rows. A pane too short for one still shows the top of the
+    // focused entry rather than nothing.
+    let capacity = (usize::from(inner.height) / REPOSITORY_ENTRY_LINES).max(1);
     let start = visible_window_start(app.focused_source(), capacity);
     let lines = app
         .sources()
@@ -1345,18 +1454,63 @@ fn render_source_repositories(frame: &mut Frame<'_>, area: Rect, app: &SkilledAp
         .enumerate()
         .skip(start)
         .take(capacity)
-        .map(|(index, source)| {
-            components::list_row(
-                vec![
-                    Span::raw(format!("{}  ", terminal_safe(source.label()))),
-                    source_status_badge(source),
-                ],
-                index == app.focused_source(),
-                inner.width,
-            )
+        .flat_map(|(index, source)| {
+            repository_entry_lines(source, index == app.focused_source(), inner.width)
         })
         .collect::<Vec<_>>();
     frame.render_widget(Paragraph::new(lines), inner);
+}
+
+/// How many lines one repository entry occupies.
+const REPOSITORY_ENTRY_LINES: usize = 3;
+
+/// One registered repository, in the prototype's `.source-row` anatomy: what
+/// the source is called, the checkout it names, and the state it was last seen
+/// in.
+///
+/// Every line is bounded to the pane rather than wrapped. A wrapped path would
+/// push the state line of one entry into the next and leave the list without a
+/// fixed entry height, so the row could no longer be windowed or banded; the
+/// detail region beside the list still gives the path in full.
+///
+/// The path is muted where the prototype's `.source-path` is faint: it names
+/// the checkout this entry stands for, which is information and has to meet
+/// 4.5:1, the same reason the inventory table's column headings are muted
+/// rather than faint.
+fn repository_entry_lines(
+    source: &RegisteredSource,
+    selected: bool,
+    width: u16,
+) -> Vec<Line<'static>> {
+    let budget = usize::from(width).saturating_sub(ROW_MARKER_WIDTH);
+    let state = source_status_badge(source);
+    let state_width = state.width();
+    let revision = format!(
+        " {}@{}",
+        terminal_safe(source.branch().unwrap_or("detached")),
+        terminal_safe(source.short_head())
+    );
+    components::list_row_lines(
+        vec![
+            vec![Span::raw(terminal_safe_bounded_start(
+                source.label(),
+                budget,
+            ))],
+            vec![Span::styled(
+                terminal_safe_bounded_middle(&source.git_top_level().display().to_string(), budget),
+                theme::pane_subtitle(),
+            )],
+            vec![
+                state,
+                Span::styled(
+                    terminal_safe_bounded_start(&revision, budget.saturating_sub(state_width)),
+                    theme::pane_subtitle(),
+                ),
+            ],
+        ],
+        selected,
+        width,
+    )
 }
 
 fn render_source_variants(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
@@ -1373,13 +1527,19 @@ fn render_source_variants(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
     let subtitle = match app.selected_source() {
         Some(source) if source.source_error().is_some() => "unavailable".to_owned(),
         Some(_) if catalog_error_count > 0 && variants.is_empty() => "scan unavailable".to_owned(),
-        Some(_) if catalog_error_count > 0 => format!("{} found · scan error", variants.len()),
+        // The failure leads, so a subtitle bounded to a narrow pane gives up
+        // the count rather than the warning.
+        Some(_) if catalog_error_count > 0 => format!("scan error · {} found", variants.len()),
         Some(_) => format!("{} found", variants.len()),
         None => "no source".to_owned(),
     };
-    let block = source_region_block("Available variants", &subtitle, SourcesPane::Variants, app);
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
+    let inner = render_pane_scaffold(
+        frame,
+        area,
+        "Available variants",
+        &subtitle,
+        app.sources_pane() == SourcesPane::Variants,
+    );
 
     let Some(source) = app.selected_source() else {
         frame.render_widget(
@@ -1406,80 +1566,253 @@ fn render_source_variants(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
         return;
     }
 
-    let catalog_errors = source
-        .catalogs()
-        .iter()
-        .filter_map(|catalog| {
-            catalog.scan_error().map(|error| {
-                Line::from(vec![
-                    components::badge(Tone::Critical, "unavailable"),
-                    Span::raw(format!(
-                        " {}: {}",
-                        terminal_safe(&catalog.relative_path().display().to_string()),
-                        terminal_safe(error)
-                    )),
-                ])
-            })
-        })
-        .collect::<Vec<_>>();
-
-    if variants.is_empty() {
-        if catalog_errors.is_empty() {
-            frame.render_widget(
-                components::empty_state(
-                    "·",
-                    "No variants found",
-                    "The selected source contains no immediate skill definitions.",
-                    inner,
-                ),
+    // Reserved for a source with no catalogs at all: a catalog that scanned
+    // clean but holds nothing is still named by the grouping below, with the
+    // `no variants` line beneath its label, because flattening it into this
+    // state would hide which catalogs the source has and that each was read.
+    // Registration refuses a source with no included catalog, so this is a
+    // defensive fallback — and it says nowhere to look, not nothing found,
+    // because a source with no roots was never scanned at all.
+    if source.catalogs().is_empty() {
+        frame.render_widget(
+            components::empty_state(
+                "·",
+                "No catalog roots registered",
+                "This source has no confirmed catalog roots, so there was \
+                 nowhere to look for variants.",
                 inner,
-            );
-        } else {
-            frame.render_widget(
-                Paragraph::new(
-                    catalog_errors
-                        .into_iter()
-                        .chain([Line::from("Open Details for the catalog error.")])
-                        .collect::<Vec<_>>(),
-                )
-                .wrap(Wrap { trim: false }),
-                inner,
-            );
-        }
+            ),
+            inner,
+        );
         return;
     }
 
-    let mut lines = catalog_errors;
-    lines.extend(variants.iter().enumerate().map(|(index, variant)| {
-        let valid = variant.candidate.validation().is_valid();
-        components::list_row(
-            vec![
-                components::badge(
-                    if valid { Tone::Healthy } else { Tone::Critical },
-                    if valid { "valid" } else { "invalid" },
-                ),
-                Span::raw(format!(
-                    " {}  ({})",
-                    terminal_safe(variant.candidate.directory_name()),
-                    terminal_safe(&variant.candidate.relative_path().display().to_string())
-                )),
-            ],
-            index == app.focused_variant(),
-            inner.width,
-        )
-    }));
-    let error_count = source
-        .catalogs()
-        .iter()
-        .filter(|catalog| catalog.scan_error().is_some())
-        .count();
-    let focused_line = error_count.saturating_add(app.focused_variant());
-    let visible =
-        visible_wrapped_lines(&lines, focused_line, inner.width, usize::from(inner.height));
+    // Each catalog states its own path once, above the variants it holds, and
+    // keeps its own scan failure beneath that label: an error stacked above
+    // the whole list would not say which catalog could not be read.
+    //
+    // The focused line, and the label each line belongs under, are recorded as
+    // the lines are built rather than computed from the selection, because
+    // group labels and error lines sit between the rows and only this loop
+    // knows where they fell.
+    // Every rendered row is a focus position — each candidate, and each
+    // catalog's state row (its error, or `no variants`) — so
+    // `move_sources_selection` counts exactly these rows, the window follows
+    // the selection, and a list taller than the pane can be walked whatever
+    // mixture of skills, errors, and empty catalogs it holds. `selected_row`
+    // walks the same order to answer what the selection rests on.
+    let mut lines = Vec::new();
+    let mut group_labels = Vec::new();
+    let mut focused_line = 0;
+    let mut position = 0;
+    for catalog in source.catalogs() {
+        let label = lines.len();
+        lines.push(catalog_group_label(catalog, inner.width));
+        group_labels.push(label);
+        if let Some(error) = catalog.scan_error() {
+            let selected = position == app.focused_variant();
+            if selected {
+                focused_line = lines.len();
+            }
+            let badge = components::badge(Tone::Critical, "unavailable");
+            // Bounded to the pane like every other row: a wrapped error would
+            // put the marker and the band on one line and the words on the
+            // next. The detail region gives the message in full.
+            let budget = usize::from(inner.width)
+                .min(VARIANTS_CONTENT_MAX_WIDTH)
+                .saturating_sub(ROW_MARKER_WIDTH + badge.width() + 1);
+            lines.push(components::list_row(
+                vec![
+                    badge,
+                    Span::raw(format!(" {}", terminal_safe_bounded_start(error, budget))),
+                ],
+                selected,
+                inner.width,
+            ));
+            group_labels.push(label);
+            position += 1;
+        }
+        for candidate in catalog.candidates() {
+            let selected = position == app.focused_variant();
+            if selected {
+                focused_line = lines.len();
+            }
+            lines.push(variant_row(candidate, selected, inner.width));
+            group_labels.push(label);
+            position += 1;
+        }
+        if catalog.candidates().is_empty() && catalog.scan_error().is_none() {
+            // Said rather than left blank: two labels in a row would read as
+            // though the rows under the first belonged to both, and a label
+            // with nothing under it would not say whether the catalog is empty
+            // or the list has scrolled.
+            let selected = position == app.focused_variant();
+            if selected {
+                focused_line = lines.len();
+            }
+            lines.push(components::list_row(
+                vec![Span::styled(
+                    "no variants".to_owned(),
+                    theme::pane_subtitle(),
+                )],
+                selected,
+                inner.width,
+            ));
+            group_labels.push(label);
+            position += 1;
+        }
+    }
+    debug_assert_eq!(
+        position,
+        app.variants_row_count(),
+        "the pane renders exactly the rows the selection counts"
+    );
+    if variants.is_empty() && catalog_error_count > 0 {
+        // The hint belongs to catalog errors: an all-empty source that read
+        // cleanly has nothing further for Details to explain. It travels
+        // with the last group and scrolls as the rows do.
+        lines.push(Line::from("Open Details for the catalog error."));
+        group_labels.push(group_labels.last().copied().unwrap_or(0));
+    }
+    debug_assert_eq!(
+        lines.len(),
+        group_labels.len(),
+        "every line belongs under a label"
+    );
+
+    let visible = visible_grouped_lines(
+        &lines,
+        &group_labels,
+        focused_line,
+        inner.width,
+        usize::from(inner.height),
+    );
     frame.render_widget(Paragraph::new(visible).wrap(Wrap { trim: false }), inner);
 }
 
-fn render_source_details(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
+/// One variant: its validation state and the directory it lives in.
+///
+/// The directory name alone, because the catalog above the row already gives
+/// the path it sits in and the detail region gives the path in full.
+fn variant_row(candidate: &SkillCandidate, selected: bool, width: u16) -> Line<'static> {
+    let valid = candidate.validation().is_valid();
+    let state = components::badge(
+        if valid { Tone::Healthy } else { Tone::Critical },
+        if valid { "valid" } else { "invalid" },
+    );
+    // Bounded to the pane as well as to the name cap. A row wide enough to
+    // wrap would leave its marker and the head of its band on one line and the
+    // name they identify on the next, which is the one thing the marker is
+    // there to say.
+    let budget = usize::from(width)
+        .saturating_sub(ROW_MARKER_WIDTH + state.width() + 1)
+        .min(MAX_VARIANT_WIDTH);
+    components::list_row(
+        vec![
+            state,
+            Span::raw(format!(
+                " {}",
+                terminal_safe_bounded_start(candidate.directory_name(), budget)
+            )),
+        ],
+        selected,
+        width,
+    )
+}
+
+/// The line naming the catalog a run of variants belongs to (prototype
+/// `.catalog-title`): where it is, and as much of how it is classified and
+/// which agents it is registered for as the pane has room for.
+fn catalog_group_label(catalog: &CatalogProposal, width: u16) -> Line<'static> {
+    group_label(
+        &catalog.relative_path().display().to_string(),
+        catalog_classification(catalog),
+        &compatibility_claim(catalog.compatibility()),
+        width,
+    )
+}
+
+/// A group label: the path, then whichever qualifiers the pane can hold beside
+/// it whole.
+///
+/// The qualifiers describe the catalog; the path is which catalog, and the
+/// rows beneath the label no longer carry that themselves. So a qualifier is
+/// added only once it costs the path nothing, and dropped in the order that
+/// gives up the least: the classification goes first, because a claim of every
+/// agent or of one named agent is the more specific fact and the one a reader
+/// scanning for their own agent is looking for.
+///
+/// Chosen this way, widening the terminal can only ever add: the path shown is
+/// `min(path, budget)` and the qualifiers only grow with the budget. That is
+/// the same promise [`viewport::DETAIL_REGION_WIDE_THRESHOLD`] makes for the
+/// inventory table's columns — a name readable at one width must not be
+/// ellipsized at the next one up.
+///
+/// A shed qualifier leaves no mark, where a shortened path leaves an ellipsis.
+/// That is deliberate: the qualifiers are a description of the catalog, and
+/// the same two facts are given in full in the detail region under CATALOG, so
+/// a narrow pane is not the reader's only account of them. Nothing on the line
+/// claims they were stated.
+///
+/// The prototype sets its `.catalog-title` with `space-between`, the path at
+/// the left and the qualifiers hard against the right. Here they are adjacent,
+/// because the pane's slack is what a selected row's band crosses and a label
+/// split across it would read as two columns the rows beneath do not have.
+fn group_label(path: &str, classification: &str, claim: &str, width: u16) -> Line<'static> {
+    let budget = usize::from(width).min(VARIANTS_CONTENT_MAX_WIDTH);
+    let path = terminal_safe(path);
+    let path_width = Span::raw(&path).width();
+    let qualifiers = [
+        format!(" · {classification} · {claim}"),
+        format!(" · {claim}"),
+        String::new(),
+    ]
+    .into_iter()
+    .find(|qualifiers| Span::raw(qualifiers).width().saturating_add(path_width) <= budget)
+    .unwrap_or_default();
+    // Either the qualifiers left the path whole, or there are none and the
+    // path has the budget to itself. So the label fits the pane and the band
+    // beneath it is a single row.
+    let label = format!(
+        "{}{qualifiers}",
+        terminal_safe_bounded_middle(&path, budget.saturating_sub(Span::raw(&qualifiers).width()))
+    );
+    // Padded to the pane so the band crosses the whole region, the way a
+    // selected row's band does, rather than stopping at the words.
+    let padding = usize::from(width).saturating_sub(Span::raw(&label).width());
+    Line::styled(
+        format!("{label}{}", " ".repeat(padding)),
+        theme::group_label(),
+    )
+}
+
+/// Which agents a catalog is registered for.
+///
+/// Skilled proposes this from the catalog's place in the checkout and the user
+/// confirms or edits it; the catalog itself declares nothing and no agent was
+/// asked. So the phrase names what is stored and nothing more. A catalog
+/// registered for none says so rather than rendering an empty phrase.
+fn compatibility_claim(compatibility: Compatibility) -> String {
+    if compatibility.all_supported() {
+        return "all agents".to_owned();
+    }
+    let claimed = AgentKind::ALL
+        .into_iter()
+        .filter(|agent| compatibility.supports(*agent))
+        .map(AgentKind::display_name)
+        .collect::<Vec<_>>();
+    if claimed.is_empty() {
+        return "no agents".to_owned();
+    }
+    claimed.join(" + ")
+}
+
+fn render_source_details(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &SkilledApp,
+    beside_the_primary_region: bool,
+) {
     let selected = selected_variant(app);
     let subtitle = selected
         .map(|variant| terminal_safe(variant.candidate.directory_name()))
@@ -1488,9 +1821,14 @@ fn render_source_details(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
                 .map(|source| terminal_safe(source.label()))
         })
         .unwrap_or_else(|| "no selection".to_owned());
-    let block = source_region_block("Details", &subtitle, SourcesPane::Details, app);
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
+    let inner = render_detail_scaffold(
+        frame,
+        area,
+        "Details",
+        &subtitle,
+        app.sources_pane() == SourcesPane::Details,
+        beside_the_primary_region,
+    );
 
     let Some(source) = app.selected_source() else {
         frame.render_widget(
@@ -1544,18 +1882,21 @@ fn render_source_details(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
 
     let mut catalog_lines = Vec::new();
     push_detail_section(&mut catalog_lines, "CATALOG", inner.width);
-    if let Some(variant) = selected {
+    // The catalog of whichever row the selection rests on — a state row names
+    // its catalog as surely as a variant does, so moving the band in the
+    // variants pane always changes what this section says.
+    if let Some(catalog) = selected_catalog(app) {
         catalog_lines.push(detail_field_bounded(
             "Path",
             &format!(
                 "{} · Classification: {}",
-                terminal_safe(&variant.catalog.relative_path().display().to_string()),
-                catalog_classification(variant.catalog)
+                terminal_safe(&catalog.relative_path().display().to_string()),
+                catalog_classification(catalog)
             ),
             inner.width,
             if inner.width >= 60 { 1 } else { 2 },
         ));
-        let compatibility = variant.catalog.compatibility();
+        let compatibility = catalog.compatibility();
         catalog_lines.push(detail_field_bounded(
             "Compatibility",
             &format!(
@@ -1569,7 +1910,7 @@ fn render_source_details(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
         ));
     } else {
         catalog_lines.push(Line::from(
-            "No variant selected; catalog metadata is unavailable.",
+            "No catalog selected; catalog metadata is unavailable.",
         ));
     }
     let catalog_essential_height = detail_lines_height(&catalog_lines, inner.width);
@@ -1723,10 +2064,67 @@ fn flattened_variants(source: &RegisteredSource) -> Vec<SourceVariant<'_>> {
         .collect()
 }
 
+/// What the variants-pane selection rests on: a variant, or a catalog's
+/// state row (its error, or `no variants`).
+enum SelectedSourceRow<'a> {
+    Variant(SourceVariant<'a>),
+    CatalogState(&'a CatalogProposal),
+}
+
+/// The row the selection rests on, walked in the pane's render order: for
+/// each catalog its error row, then its candidates, then its `no variants`
+/// row. `render_source_variants` builds exactly these rows and asserts the
+/// count against `variants_row_count`, which counts them the same way.
+fn selected_row(app: &SkilledApp) -> Option<SelectedSourceRow<'_>> {
+    let source = app.selected_source()?;
+    // An unavailable source renders its source error and no rows, so nothing
+    // is selected — mirroring `variants_row_count`, which counts none.
+    if source.source_error().is_some() {
+        return None;
+    }
+    let mut position = 0;
+    for catalog in source.catalogs() {
+        if catalog.scan_error().is_some() {
+            if position == app.focused_variant() {
+                return Some(SelectedSourceRow::CatalogState(catalog));
+            }
+            position += 1;
+        }
+        for candidate in catalog.candidates() {
+            if position == app.focused_variant() {
+                return Some(SelectedSourceRow::Variant(SourceVariant {
+                    catalog,
+                    candidate,
+                }));
+            }
+            position += 1;
+        }
+        if catalog.candidates().is_empty() && catalog.scan_error().is_none() {
+            if position == app.focused_variant() {
+                return Some(SelectedSourceRow::CatalogState(catalog));
+            }
+            position += 1;
+        }
+    }
+    None
+}
+
 fn selected_variant(app: &SkilledApp) -> Option<SourceVariant<'_>> {
-    app.selected_source()
-        .map(flattened_variants)
-        .and_then(|variants| variants.into_iter().nth(app.focused_variant()))
+    match selected_row(app)? {
+        SelectedSourceRow::Variant(variant) => Some(variant),
+        SelectedSourceRow::CatalogState(_) => None,
+    }
+}
+
+/// The catalog the selection rests in, whichever row kind carries it: a
+/// selected state row names its catalog as surely as a selected variant does,
+/// so the Details CATALOG section follows the band across the region
+/// boundary instead of rendering identically for every position.
+fn selected_catalog(app: &SkilledApp) -> Option<&CatalogProposal> {
+    match selected_row(app)? {
+        SelectedSourceRow::Variant(variant) => Some(variant.catalog),
+        SelectedSourceRow::CatalogState(catalog) => Some(catalog),
+    }
 }
 
 fn catalog_classification(catalog: &CatalogProposal) -> &'static str {
@@ -1821,17 +2219,18 @@ fn wrapped_line_count(line: &Line<'_>, width: u16) -> usize {
         .line_count(width)
 }
 
-fn visible_wrapped_lines(
+/// The first line of the window that keeps `focused` visible: as far back as
+/// the region has room for, so the focused line is read in the context above
+/// it rather than pinned to the top of the region.
+fn visible_wrapped_start(
     lines: &[Line<'static>],
     focused: usize,
     width: u16,
     height: usize,
-) -> Vec<Line<'static>> {
-    let Some(focused_line) = lines.get(focused) else {
-        return Vec::new();
-    };
+) -> Option<usize> {
+    let focused_line = lines.get(focused)?;
     if width == 0 || height == 0 {
-        return Vec::new();
+        return None;
     }
     let mut start = focused;
     let mut used_rows = wrapped_line_count(focused_line, width);
@@ -1843,6 +2242,15 @@ fn visible_wrapped_lines(
         start -= 1;
         used_rows = used_rows.saturating_add(previous_rows);
     }
+    Some(start)
+}
+
+fn wrapped_lines_from(
+    lines: &[Line<'static>],
+    start: usize,
+    width: u16,
+    height: usize,
+) -> Vec<Line<'static>> {
     let mut visible = Vec::new();
     let mut used_rows = 0_usize;
     for line in &lines[start..] {
@@ -1857,6 +2265,72 @@ fn visible_wrapped_lines(
         }
     }
     visible
+}
+
+/// The window of a grouped list, with the label of the group it opens inside
+/// pinned to its first row.
+///
+/// `group_labels` gives, for every line, the line that labels its group.
+/// Scrolled deep into a long group the label would otherwise sit above the
+/// window, and rows read without it name a variant without naming the catalog
+/// it came from — the question the per-row path used to answer. The pinned
+/// label costs the window a row, so the window is measured again against what
+/// is left rather than pushing the focused line off the bottom.
+fn visible_grouped_lines(
+    lines: &[Line<'static>],
+    group_labels: &[usize],
+    focused: usize,
+    width: u16,
+    height: usize,
+) -> Vec<Line<'static>> {
+    let label_above = |start: usize| {
+        group_labels
+            .get(start)
+            .copied()
+            .filter(|label| *label < start)
+    };
+
+    // Paying for a label can move the window forward into a group whose own
+    // label costs something else, so the window and the label it pins are
+    // settled together.
+    let mut budget = height;
+    loop {
+        let Some(start) = visible_wrapped_start(lines, focused, width, budget) else {
+            return Vec::new();
+        };
+        let Some(label) = label_above(start) else {
+            // The window opens on a label of its own; nothing to pin above it.
+            return wrapped_lines_from(lines, start, width, height);
+        };
+        let Some(remaining) = height
+            .checked_sub(wrapped_line_count(&lines[label], width))
+            .filter(|rows| *rows > 0)
+        else {
+            // No room to pin one; the rows themselves are what the reader
+            // came for.
+            return wrapped_lines_from(lines, start, width, height);
+        };
+        if remaining >= budget {
+            // This label costs no more than the window has already given up,
+            // so the two agree and it can be pinned — unless the rows
+            // themselves need every row of the region, in which case they
+            // keep it and the label stays where it is.
+            let body = wrapped_lines_from(lines, start, width, remaining);
+            let rows = body
+                .iter()
+                .map(|line| wrapped_line_count(line, width))
+                .sum::<usize>();
+            if rows <= remaining {
+                let mut visible = vec![lines[label].clone()];
+                visible.extend(body);
+                return visible;
+            }
+            return wrapped_lines_from(lines, start, width, height);
+        }
+        // Strictly smaller every pass, and a budget of nothing has already
+        // returned above, so the loop settles.
+        budget = remaining;
+    }
 }
 
 fn visible_window_start(focused: usize, capacity: usize) -> usize {
@@ -2789,9 +3263,9 @@ fn inventory_can_go_back(app: &SkilledApp) -> bool {
 fn sources_can_move_selection(app: &SkilledApp) -> bool {
     match app.sources_pane() {
         SourcesPane::Repositories => app.sources().len() > 1,
-        SourcesPane::Variants => app
-            .selected_source()
-            .is_some_and(|source| flattened_variants(source).len() > 1),
+        // Rows, not variants: catalog-state rows are focus positions too, and
+        // a hint must appear exactly when the binding does something.
+        SourcesPane::Variants => app.variants_row_count() > 1,
         SourcesPane::Details => false,
     }
 }
@@ -2831,5 +3305,203 @@ fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
         y: area.y + area.height.saturating_sub(height) / 2,
         width,
         height,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn label_text(line: &Line<'_>) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>()
+            .trim_end()
+            .to_owned()
+    }
+
+    /// A subtitle that does not fit sheds its trailing ` · ` clauses whole
+    /// before any word is cut: `scan error · 3 found` in a narrow pane says
+    /// `scan error`, never `scan erro...`, because a cut word says neither
+    /// what it was nor that there was more of it. Only a first clause too
+    /// long for the pane on its own falls back to the ellipsized cut.
+    #[test]
+    fn a_bounded_subtitle_sheds_whole_clauses_before_cutting_a_word() {
+        let heading = "Available variants";
+        let width = |budget: usize| {
+            u16::try_from(Span::raw(heading).width() + SUBTITLE_GAP + budget)
+                .expect("test widths fit a terminal")
+        };
+        let subtitle = |budget: usize| {
+            label_text(&pane_header(
+                heading,
+                "scan error · 3 found",
+                false,
+                width(budget),
+            ))
+        };
+
+        // Room for the whole phrase: nothing is shed.
+        assert!(
+            subtitle(20).ends_with("scan error · 3 found"),
+            "{:?}",
+            subtitle(20)
+        );
+        // Room for the warning but not the count: the count is shed whole
+        // rather than the warning cut mid-word.
+        assert!(subtitle(10).ends_with("scan error"), "{:?}", subtitle(10));
+        assert!(!subtitle(10).contains("..."), "{:?}", subtitle(10));
+        // Not even room for the warning: the ellipsized cut remains, so the
+        // row still says there was more.
+        assert!(subtitle(9).ends_with("scan e..."), "{:?}", subtitle(9));
+    }
+
+    /// The label is padded to the pane so its band crosses the region, which
+    /// only reads as a band if it is one row of exactly that width.
+    #[test]
+    fn a_group_label_fills_its_pane_exactly_and_never_overruns_it() {
+        for width in 0..=90_u16 {
+            for path in [
+                "skills",
+                "experimental/nested/claude-code/skills",
+                &"very-long-segment/".repeat(12),
+                "日本語のカタログ/skills",
+            ] {
+                let line = group_label(path, "Agent-specific", "Claude Code + OpenCode", width);
+                assert_eq!(
+                    line.width(),
+                    usize::from(width),
+                    "{width} columns, {path:?}: {:?}",
+                    label_text(&line)
+                );
+            }
+        }
+    }
+
+    /// Widening the terminal may only ever add. A path readable at one width
+    /// that ellipsizes at the next one up is the failure
+    /// `viewport::DETAIL_REGION_WIDE_THRESHOLD` exists to prevent for the
+    /// inventory table, and a group label is under the same obligation.
+    #[test]
+    fn widening_the_pane_never_shortens_what_a_group_label_says() {
+        for (path, classification, claim) in [
+            ("skills", "Common", "all agents"),
+            (
+                "experimental/claude-code/skills",
+                "Agent-specific",
+                "Claude Code",
+            ),
+            (
+                "experimental/nested/claude-code/skills",
+                "Agent-specific",
+                "Claude Code + OpenCode",
+            ),
+        ] {
+            // What the label says of the catalog itself, before the first
+            // qualifier: a wider label that spent its extra columns on
+            // qualifiers and took them out of the path would say less, not
+            // more, so the path is measured on its own as well as the whole.
+            let named = |label: &str| {
+                label
+                    .split_once(" · ")
+                    .map_or_else(|| label.to_owned(), |(path, _)| path.to_owned())
+            };
+            let mut previous = String::new();
+            for width in 0..=90_u16 {
+                let current = label_text(&group_label(path, classification, claim, width));
+                assert!(
+                    Span::raw(&current).width() >= Span::raw(&previous).width(),
+                    "{path:?} lost content between {} and {width} columns: \
+                     {previous:?} then {current:?}",
+                    width.saturating_sub(1)
+                );
+                assert!(
+                    Span::raw(named(&current)).width() >= Span::raw(named(&previous)).width(),
+                    "{path:?} lost path between {} and {width} columns: \
+                     {previous:?} then {current:?}",
+                    width.saturating_sub(1)
+                );
+                if usize::from(width) >= Span::raw(path).width() {
+                    assert_eq!(named(&current), path, "{width} columns");
+                }
+                previous = current;
+            }
+        }
+    }
+
+    /// A grouped list of the given shape. `wrapping` gives every row more text
+    /// than the window is wide, so the window is exercised in rows rather than
+    /// in lines — the variants pane bounds its rows, but the helper is not
+    /// entitled to assume that.
+    fn grouped(shape: &[usize], wrapping: bool) -> (Vec<Line<'static>>, Vec<usize>) {
+        let mut lines = Vec::new();
+        let mut group_labels = Vec::new();
+        for (group, rows) in shape.iter().enumerate() {
+            let label = lines.len();
+            lines.push(Line::from(format!("catalog {group}")));
+            group_labels.push(label);
+            for row in 0..*rows {
+                let padding = if wrapping { " and more words" } else { "" };
+                lines.push(Line::from(format!("row {group}.{row}{padding}{padding}")));
+                group_labels.push(label);
+            }
+        }
+        (lines, group_labels)
+    }
+
+    /// Whatever the window does with the label, it must still show the row the
+    /// selection is on, must not overrun the region, and must not show one
+    /// line twice.
+    #[test]
+    fn a_grouped_window_always_holds_its_focused_line_once_and_fits_the_region() {
+        for shape in [
+            vec![1],
+            vec![9],
+            vec![1, 1],
+            vec![0, 4],
+            vec![6, 0, 3],
+            vec![12, 1],
+        ] {
+            for wrapping in [false, true] {
+                let (lines, group_labels) = grouped(&shape, wrapping);
+                for height in 1..=12_usize {
+                    for focused in 0..lines.len() {
+                        let visible =
+                            visible_grouped_lines(&lines, &group_labels, focused, 20, height);
+                        let text = visible.iter().map(label_text).collect::<Vec<_>>();
+                        let wanted = label_text(&lines[focused]);
+                        let where_ = format!(
+                            "{shape:?} wrapping={wrapping} at height {height}, \
+                             line {focused}: {text:?}"
+                        );
+                        assert!(text.contains(&wanted), "{where_}");
+                        let rows = visible
+                            .iter()
+                            .map(|line| wrapped_line_count(line, 20))
+                            .sum::<usize>();
+                        assert!(rows <= height || visible.len() == 1, "{where_}");
+                        let mut unique = text.clone();
+                        unique.sort();
+                        unique.dedup();
+                        assert_eq!(unique.len(), text.len(), "{where_}");
+                    }
+                }
+            }
+        }
+    }
+
+    /// Scrolled deep into a group, the label the rows belong under is pinned
+    /// to the top of the window rather than left above it.
+    #[test]
+    fn a_grouped_window_pins_the_label_of_the_group_it_opens_inside() {
+        let (lines, group_labels) = grouped(&[2, 9], false);
+        let focused = lines.len() - 1;
+
+        let visible = visible_grouped_lines(&lines, &group_labels, focused, 20, 4);
+
+        let text = visible.iter().map(label_text).collect::<Vec<_>>();
+        assert_eq!(text[0], "catalog 1", "{text:?}");
+        assert!(text.contains(&"row 1.8".to_owned()), "{text:?}");
     }
 }

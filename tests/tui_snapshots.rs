@@ -367,6 +367,15 @@ fn responsive_sources_workspace_at_wide_and_compact_sizes() {
     fs::create_dir_all(repository.join("skills/broken")).expect("create invalid candidate");
     fs::write(repository.join("skills/broken/skill.md"), "wrong filename")
         .expect("write invalid candidate");
+    // A second catalog, classified and claimed differently from the first, so
+    // the grouped list shows two labels that do not read alike.
+    let agent_specific = repository.join("experimental/claude-code/skills/experimental");
+    fs::create_dir_all(&agent_specific).expect("create agent-specific catalog");
+    fs::write(
+        agent_specific.join("SKILL.md"),
+        "---\nname: experimental\ndescription: Experimental fixture\n---\n# Experimental\n",
+    )
+    .expect("write agent-specific candidate");
     git(&repository, &["add", "."]);
     git(&repository, &["commit", "-m", "add invalid candidate"]);
     git(
@@ -494,7 +503,18 @@ fn sources_keeps_a_variant_selection_and_details_visible_beyond_the_first_viewpo
 
     assert_eq!(app.focused_variant(), 25);
     assert!(variants.contains(&format!("▌ ✓ valid {expected}")));
-    assert!(variants.contains("(skills/"), "{variants}");
+    // The catalog is named once, by the group label above its variants, so a
+    // row deep in the list does not repeat the path it sits in. Which means
+    // the label has to stay on screen once the list scrolls past it: pinned to
+    // the first row of the pane, under the header and its rule.
+    assert!(!variants.contains("(skills/"), "{variants}");
+    assert!(
+        variants
+            .lines()
+            .nth(4)
+            .is_some_and(|line| line.starts_with("skills · Common · all agents")),
+        "{variants}"
+    );
 
     app.update(Action::AdvanceSourcesPane);
     let details = render(&app, 80, 24);
@@ -993,14 +1013,37 @@ fn normalize_sources_screen(
             &source.last_scan_at().to_string(),
             &padded_placeholder(&source.last_scan_at().to_string(), "[SCAN]"),
         );
-    if source.head().len() > 36 {
-        normalized = normalized
-            .replace(
-                &source.head()[..36],
-                &padded_placeholder(&source.head()[..36], "[HEAD]"),
-            )
-            .replace(&source.head()[36..], &" ".repeat(source.head().len() - 36));
+    // A detail region narrower than the revision wraps it, and where the wrap
+    // falls follows the region's width, so the split is searched for rather
+    // than assumed. Only splits long enough to be unmistakably part of a
+    // revision are considered.
+    const SHORTEST_RECOGNISABLE_SPLIT: usize = 8;
+    let head = source.head();
+    if !normalized.contains(head) && head.len() > SHORTEST_RECOGNISABLE_SPLIT {
+        for split in (SHORTEST_RECOGNISABLE_SPLIT..head.len()).rev() {
+            let (wrapped, remainder) = head.split_at(split);
+            let Some(index) = normalized.find(wrapped) else {
+                continue;
+            };
+            // The tail after the wrap can be a couple of characters, which
+            // could occur anywhere on the screen, so only the occurrence
+            // continuing this revision is blanked.
+            let (head_of_screen, rest) = normalized.split_at(index + wrapped.len());
+            let rest = rest.replacen(remainder, &" ".repeat(remainder.len()), 1);
+            let head_of_screen =
+                head_of_screen.replacen(wrapped, &padded_placeholder(wrapped, "[HEAD]"), 1);
+            normalized = format!("{head_of_screen}{rest}");
+            break;
+        }
     }
+    // The repository rows carry the abbreviated revision, which is as
+    // unstable as the whole one. Replaced after it, so a region that shows
+    // the revision in full is normalized as one value rather than in two
+    // pieces.
+    // The placeholder is the same width as the abbreviation it stands in for,
+    // so the row's columns are the ones the application laid out.
+    let short_head = source.short_head();
+    normalized = normalized.replace(short_head, &padded_placeholder(short_head, "[SHORT]"));
     normalized
 }
 

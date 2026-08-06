@@ -130,6 +130,90 @@ fn moving_a_singleton_repository_preserves_the_selected_variant() {
     assert_eq!(app.focused_variant(), 1);
 }
 
+/// With no candidates anywhere, the catalog-state rows — `no variants`, or a
+/// catalog's error — are the variants pane's rows, so focus moves over the
+/// catalogs rather than dying at zero variants and leaving clipped catalogs
+/// unreachable.
+#[test]
+fn an_all_empty_source_moves_its_variant_focus_over_catalog_rows() {
+    let temporary = tempfile::tempdir().expect("temporary application directory");
+    let mut app = app_in(&temporary);
+    finish_setup(&mut app);
+    let repository = temporary.path().join("source");
+    fs::create_dir_all(repository.join("skills")).expect("create common catalog");
+    fs::write(repository.join("skills/.keep"), "empty catalog fixture").expect("write keep file");
+    fs::create_dir_all(repository.join("experimental/claude-code/skills"))
+        .expect("create agent catalog");
+    fs::write(
+        repository.join("experimental/claude-code/skills/.keep"),
+        "empty catalog fixture",
+    )
+    .expect("write keep file");
+    git(&repository, &["init", "-b", "main"]);
+    git(&repository, &["config", "user.name", "Skilled Test"]);
+    git(
+        &repository,
+        &["config", "user.email", "skilled@example.test"],
+    );
+    git(&repository, &["add", "."]);
+    git(&repository, &["commit", "-m", "fixture"]);
+    let preview = app.preview_source(&repository).expect("preview source");
+    app.confirm_source(preview).expect("register source");
+    app.update(Action::OpenSources);
+    app.update(Action::MoveSourcesPane(1));
+    assert_eq!(app.focused_variant(), 0);
+
+    app.update(Action::MoveSourcesSelection(1));
+    assert_eq!(app.focused_variant(), 1);
+
+    app.update(Action::MoveSourcesSelection(1));
+    assert_eq!(app.focused_variant(), 0);
+}
+
+/// A candidate somewhere must not strand the other catalogs: the selection
+/// counts every row the pane renders — candidates and catalog-state rows
+/// alike — so a mixed source is walkable end to end.
+#[test]
+fn a_mixed_source_moves_its_focus_over_candidate_and_catalog_state_rows() {
+    let temporary = tempfile::tempdir().expect("temporary application directory");
+    let mut app = app_in(&temporary);
+    finish_setup(&mut app);
+    let repository = temporary.path().join("source");
+    let skill = repository.join("skills/portable");
+    fs::create_dir_all(&skill).expect("create candidate");
+    fs::write(
+        skill.join("SKILL.md"),
+        "---\nname: portable\ndescription: Portable fixture\n---\n# Portable\n",
+    )
+    .expect("write candidate");
+    fs::create_dir_all(repository.join("experimental/claude-code/skills"))
+        .expect("create empty catalog");
+    fs::write(
+        repository.join("experimental/claude-code/skills/.keep"),
+        "empty catalog fixture",
+    )
+    .expect("write keep file");
+    git(&repository, &["init", "-b", "main"]);
+    git(&repository, &["config", "user.name", "Skilled Test"]);
+    git(
+        &repository,
+        &["config", "user.email", "skilled@example.test"],
+    );
+    git(&repository, &["add", "."]);
+    git(&repository, &["commit", "-m", "fixture"]);
+    let preview = app.preview_source(&repository).expect("preview source");
+    app.confirm_source(preview).expect("register source");
+    app.update(Action::OpenSources);
+    app.update(Action::MoveSourcesPane(1));
+    assert_eq!(app.focused_variant(), 0);
+
+    app.update(Action::MoveSourcesSelection(1));
+    assert_eq!(app.focused_variant(), 1);
+
+    app.update(Action::MoveSourcesSelection(1));
+    assert_eq!(app.focused_variant(), 0);
+}
+
 #[test]
 fn sources_enter_opens_details_for_a_selected_source_with_no_variants() {
     let temporary = tempfile::tempdir().expect("temporary application directory");
