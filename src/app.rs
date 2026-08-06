@@ -768,7 +768,12 @@ impl SkilledApp {
         // today; the reset is what keeps the reducer honest at every instant
         // should that ever change.
         self.inventory = InventorySnapshot::not_scanned(&self.agents);
-        self.refilter_installations();
+        // The gap snapshot holds no rows, so the only consistent filtered
+        // list is empty whatever the query. Clearing it directly — rather
+        // than refiltering — leaves the focused row alone: the scan that
+        // lands refilters and re-clamps it against the fresh rows, so a row
+        // that is still there keeps its selection.
+        self.filtered_installations.clear();
         vec![Effect::ScanInstallations]
     }
 
