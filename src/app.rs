@@ -760,6 +760,20 @@ impl SkilledApp {
     fn enter_inventory(&mut self) -> Vec<Effect> {
         self.view = View::Inventory;
         self.inventory_pane = InventoryPane::Skills;
+        // The scan is the effect that follows, so between the transition and
+        // the effect there is no scan for this view. Say so rather than rest
+        // on one taken for the view just left: whatever is rendered beside
+        // the Inventory was observed for the Inventory. The runner performs
+        // effects before drawing, so no frame of this state reaches a user
+        // today; the reset is what keeps the reducer honest at every instant
+        // should that ever change.
+        self.inventory = InventorySnapshot::not_scanned(&self.agents);
+        // The gap snapshot holds no rows, so the only consistent filtered
+        // list is empty whatever the query. Clearing it directly — rather
+        // than refiltering — leaves the focused row alone: the scan that
+        // lands refilters and re-clamps it against the fresh rows, so a row
+        // that is still there keeps its selection.
+        self.filtered_installations.clear();
         vec![Effect::ScanInstallations]
     }
 

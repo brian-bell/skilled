@@ -912,6 +912,30 @@ mod installed {
             .expect("installation scan");
         app
     }
+    #[test]
+    fn returning_to_the_inventory_keeps_the_focused_row() {
+        let temporary = tempfile::tempdir().expect("temporary application directory");
+        write_skill_fixture(&temporary.path().join("home/.claude/skills/alpha"), "alpha");
+        write_skill_fixture(&temporary.path().join("home/.claude/skills/beta"), "beta");
+        let mut app = app_in(&temporary);
+        finish_setup(&mut app);
+        app.update(Action::MoveInventorySelection(1));
+        let before = app.selected_installation().map(|row| row.name().to_owned());
+        assert!(before.is_some());
+
+        app.update(Action::OpenSources);
+        let update = app.update(Action::OpenInventory);
+        app.perform_effects(update.effects())
+            .expect("installation scan");
+
+        // The gap reset must not clamp the selection away: the row the user
+        // was on survives the leave-and-rescan round trip.
+        assert_eq!(
+            app.selected_installation().map(|row| row.name()),
+            before.as_deref()
+        );
+    }
+
     fn write_skill_fixture(directory: &Path, name: &str) {
         fs::create_dir_all(directory).expect("create skill fixture directory");
         fs::write(
