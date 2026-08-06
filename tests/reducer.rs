@@ -306,14 +306,14 @@ fn variant_rows_are_ordered_by_catalog_then_error_candidates_and_empty_state() {
 }
 
 /// A row as `catalog path: what the row says` — the error's catalog, the
-/// candidate's directory name, or the empty state.
+/// candidate's directory name, or the empty state. Errors are described by
+/// their kind rather than their message, which names a path this fixture
+/// builds under a temporary directory.
 fn describe_row(row: SourceRow<'_>) -> String {
     let catalog = row.catalog().relative_path().display().to_string();
     match row {
-        SourceRow::CatalogError(catalog_proposal) => {
-            catalog_proposal
-                .scan_error()
-                .expect("an error row states its error");
+        SourceRow::CatalogError { error, .. } => {
+            assert!(!error.is_empty(), "an error row states its error");
             format!("{catalog}: scan error")
         }
         SourceRow::Variant { candidate, .. } => {

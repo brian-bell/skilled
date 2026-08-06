@@ -2932,7 +2932,7 @@ fn sources_details_name_the_agents_a_catalog_claims_in_the_group_label_words() {
             .lines()
             .find_map(|line| line.split_once("Registered for:"))
             .map(|(_, claim)| format!("Registered for:{}", claim.trim_end()))
-            .unwrap_or_else(|| String::from("<no compatibility line>"))
+            .unwrap_or_else(|| String::from("<no registration line>"))
     };
 
     // The agent-specific catalog claims the one agent its path names.
@@ -2993,9 +2993,54 @@ fn a_truncated_sources_detail_region_reports_the_cut() {
 
     // A region tall enough for every section says nothing: the notice is a
     // report of a cut, not a permanent fixture of the screen.
-    let whole = text(&buffer(&app, 120, 40));
+    let whole = text(&buffer(&app, 120, 60));
     assert!(!whole.contains("more line"), "{whole}");
     assert!(whole.contains("this sentence."), "{whole}");
+
+    // The count is a measurement, so it is checked against the screen rather
+    // than against itself: at every height the region can be cut at, what it
+    // says it dropped is what a region tall enough to hold everything shows
+    // and this one does not. A stated count that drifts from the rows on
+    // screen is worse than no notice, because it is read as a fact.
+    let detail_rows = |height: u16| {
+        text(&buffer(&app, 120, height))
+            .lines()
+            .filter_map(|line| line.rsplit_once('│'))
+            .map(|(_, region)| region.trim().to_owned())
+            .filter(|region| !region.is_empty())
+            .collect::<Vec<_>>()
+    };
+    let whole_rows = detail_rows(60).len();
+    let mut cut_heights = 0;
+    for height in 24..40 {
+        let rows = detail_rows(height);
+        let stated = rows
+            .iter()
+            .find_map(|row| row.split_once(" more line"))
+            .and_then(|(count, _)| count.trim_start_matches("! ").parse::<usize>().ok());
+        match stated {
+            // The notice's own row is not content the region showed.
+            Some(stated) => {
+                cut_heights += 1;
+                assert_eq!(
+                    stated,
+                    whole_rows - (rows.len() - 1),
+                    "at height {height} the region showed {} of {whole_rows} rows",
+                    rows.len() - 1
+                );
+            }
+            // Silence is a claim too: it says everything is here.
+            None => assert_eq!(
+                rows.len(),
+                whole_rows,
+                "at height {height} the region dropped rows without saying so"
+            ),
+        }
+    }
+    assert!(
+        cut_heights > 0,
+        "the sweep should reach heights where the region is cut"
+    );
 }
 
 /// The longest claim two agents can make outruns the narrowest detail region's

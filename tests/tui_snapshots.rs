@@ -312,7 +312,7 @@ fn sources_browse_valid_and_invalid_immediate_variants_without_nested_examples()
 }
 
 #[test]
-fn sources_show_the_persisted_catalog_classification_and_compatibility() {
+fn sources_show_the_persisted_catalog_classification_and_registration() {
     let temporary = tempfile::tempdir().expect("temporary application directory");
     let repository = temporary.path().join("source");
     create_source_fixture(&repository);

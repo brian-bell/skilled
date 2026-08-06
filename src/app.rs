@@ -216,8 +216,19 @@ fn wrapped_index(current: usize, delta: i8, count: usize) -> usize {
 /// the detail region treats both as naming their catalog.
 #[derive(Clone, Copy)]
 pub enum SourceRow<'a> {
-    /// A catalog that could not be scanned, carrying its error.
-    CatalogError(&'a CatalogProposal),
+    /// A catalog that could not be scanned, and what went wrong.
+    ///
+    /// The message is carried rather than looked up again from the catalog,
+    /// so no site that builds one of these can omit it: a renderer that had to
+    /// ask for it a second time would need something to draw when the answer
+    /// came back `None`, and an `unavailable` badge beside an empty message
+    /// states a failure while withholding what it was. [`catalog_rows`] is the
+    /// only place in the crate that builds this row, and it takes both from
+    /// the same catalog.
+    CatalogError {
+        catalog: &'a CatalogProposal,
+        error: &'a str,
+    },
     /// A skill candidate, and the catalog it was found in.
     Variant {
         catalog: &'a CatalogProposal,
@@ -231,7 +242,7 @@ impl<'a> SourceRow<'a> {
     /// The catalog the row belongs to, whichever kind it is.
     pub fn catalog(self) -> &'a CatalogProposal {
         match self {
-            Self::CatalogError(catalog)
+            Self::CatalogError { catalog, .. }
             | Self::Variant { catalog, .. }
             | Self::NoVariants(catalog) => catalog,
         }
@@ -250,11 +261,10 @@ impl<'a> SourceRow<'a> {
 /// `no variants` is reached only by a catalog that was read cleanly and holds
 /// nothing: an unreadable catalog says it is unreadable instead of claiming it
 /// is empty, which is a distinction the scan keeps apart everywhere else.
-pub fn catalog_rows(catalog: &CatalogProposal) -> impl Iterator<Item = SourceRow<'_>> {
+pub(crate) fn catalog_rows(catalog: &CatalogProposal) -> impl Iterator<Item = SourceRow<'_>> {
     let error_row = catalog
         .scan_error()
-        .is_some()
-        .then_some(SourceRow::CatalogError(catalog));
+        .map(|error| SourceRow::CatalogError { catalog, error });
     let empty_row = (catalog.scan_error().is_none() && catalog.candidates().is_empty())
         .then_some(SourceRow::NoVariants(catalog));
     error_row
@@ -270,8 +280,10 @@ pub fn catalog_rows(catalog: &CatalogProposal) -> impl Iterator<Item = SourceRow
 
 /// Every row of the variants pane, in the order the pane draws them.
 ///
-/// A source that could not be read at all yields no rows: the pane shows the
-/// source error in their place, so there is nothing there to select.
+/// A source that could not be read at all yields no rows, so there is nothing
+/// there to select. What the pane puts in their place is the pane's own
+/// decision — it renders the source error and returns before it reaches this
+/// sequence — and the two agree on the condition rather than on the outcome.
 pub fn variant_rows(source: &RegisteredSource) -> impl Iterator<Item = SourceRow<'_>> {
     let catalogs = match source.source_error() {
         Some(_) => &[][..],
@@ -1045,5 +1057,64 @@ impl SkilledApp {
             .position(|source| source.git_top_level() == path)
             .unwrap_or(0);
         self.focused_variant = 0;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn describe(row: &SourceRow<'_>) -> String {
+        match row {
+            SourceRow::CatalogError { error, .. } => format!("error: {error}"),
+            SourceRow::Variant { candidate, .. } => candidate.directory_name().to_owned(),
+            SourceRow::NoVariants(_) => "no variants".to_owned(),
+        }
+    }
+
+    /// The scanner empties a catalog's candidates whenever it records an
+    /// error, so the two never arrive together today. The order between them
+    /// is stated anyway, and stated here, so that the day a scan reports what
+    /// it managed to read alongside what defeated it, the pane does not
+    /// silently start listing skills above the reason the list is short.
+    #[test]
+    fn a_catalog_holding_both_an_error_and_candidates_states_the_error_first() {
+        let catalog = CatalogProposal::for_test(
+            "skills",
+            vec![
+                SkillCandidate::for_test("first"),
+                SkillCandidate::for_test("second"),
+            ],
+            Some("permission denied"),
+        );
+
+        let rows = catalog_rows(&catalog)
+            .map(|row| describe(&row))
+            .collect::<Vec<_>>();
+
+        assert_eq!(rows, ["error: permission denied", "first", "second"]);
+    }
+
+    /// `no variants` belongs to a catalog that was read and holds nothing —
+    /// never to one that could not be read, which says it is unreadable
+    /// instead. Flattening the two would report an absence Skilled never
+    /// observed.
+    #[test]
+    fn an_unreadable_catalog_never_also_claims_to_be_empty() {
+        let unreadable = CatalogProposal::for_test("skills", Vec::new(), Some("permission denied"));
+        let empty = CatalogProposal::for_test("skills", Vec::new(), None);
+
+        assert_eq!(
+            catalog_rows(&unreadable)
+                .map(|row| describe(&row))
+                .collect::<Vec<_>>(),
+            ["error: permission denied"]
+        );
+        assert_eq!(
+            catalog_rows(&empty)
+                .map(|row| describe(&row))
+                .collect::<Vec<_>>(),
+            ["no variants"]
+        );
     }
 }
