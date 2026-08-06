@@ -2,7 +2,9 @@ use std::{fs, path::Path, process::Command};
 
 use skilled::{
     Action, AgentKind, AppEnvironment, Effect, InventoryPane, SetupStep, SkilledApp, SourcesPane,
-    UpdateOutcome, View, inventory::InstallationHealth,
+    UpdateOutcome, View,
+    app::{SourceRow, variant_rows},
+    inventory::InstallationHealth,
 };
 
 #[test]
@@ -212,6 +214,113 @@ fn a_mixed_source_moves_its_focus_over_candidate_and_catalog_state_rows() {
 
     app.update(Action::MoveSourcesSelection(1));
     assert_eq!(app.focused_variant(), 0);
+}
+
+/// The variants pane, the selection count, and the detail region all read the
+/// same sequence, so the order itself is worth stating once in a test: for
+/// each catalog, its scan error, then its candidates, then the `no variants`
+/// line an empty catalog shows.
+///
+/// Asserted over a source holding all three row kinds at once, because a
+/// mixture is where an order maintained in three places used to be able to
+/// drift — one catalog unreadable, one holding skills, one read and empty.
+#[test]
+fn variant_rows_are_ordered_by_catalog_then_error_candidates_and_empty_state() {
+    let temporary = tempfile::tempdir().expect("temporary application directory");
+    let mut app = app_in(&temporary);
+    finish_setup(&mut app);
+    let repository = temporary.path().join("source");
+    for catalog in ["unreadable", "populated"] {
+        let directory = repository.join(catalog).join("codex/skills");
+        for skill in ["first", "second"] {
+            let candidate = directory.join(format!("{catalog}-{skill}"));
+            fs::create_dir_all(&candidate).expect("create candidate fixture");
+            fs::write(
+                candidate.join("SKILL.md"),
+                format!(
+                    "---\nname: {catalog}-{skill}\ndescription: {catalog} {skill}\n---\n# Fixture\n"
+                ),
+            )
+            .expect("write candidate fixture");
+        }
+    }
+    let empty = repository.join("empty/codex/skills");
+    fs::create_dir_all(&empty).expect("create empty catalog fixture");
+    fs::write(empty.join(".keep"), "empty catalog fixture").expect("write keep file");
+    git(&repository, &["init", "-b", "main"]);
+    git(&repository, &["config", "user.name", "Skilled Test"]);
+    git(
+        &repository,
+        &["config", "user.email", "skilled@example.test"],
+    );
+    git(&repository, &["add", "."]);
+    git(&repository, &["commit", "-m", "fixture"]);
+    let environment = AppEnvironment::new(
+        temporary.path().join("home"),
+        temporary.path().join("data"),
+        "",
+    );
+    let preview = app.preview_source(&repository).expect("preview source");
+    app.confirm_source(preview).expect("register source");
+    drop(app);
+    // One catalog is made unscannable where it is stored, which is the only
+    // way a registered catalog acquires a scan error: the path it names is
+    // rejected on the next read.
+    let connection = rusqlite::Connection::open(temporary.path().join("data/skilled.sqlite3"))
+        .expect("open application database");
+    connection
+        .execute(
+            "UPDATE catalog_roots SET relative_path = '../outside' \
+             WHERE relative_path LIKE 'unreadable%'",
+            [],
+        )
+        .expect("create unscannable stored catalog fixture");
+    drop(connection);
+    let mut app = SkilledApp::open(environment).expect("reopen application");
+    app.update(Action::OpenSources);
+
+    let source = app.selected_source().expect("registered source");
+    let rows = variant_rows(source).map(describe_row).collect::<Vec<_>>();
+
+    assert_eq!(
+        rows,
+        vec![
+            "../outside: scan error".to_owned(),
+            "empty/codex/skills: no variants".to_owned(),
+            "populated/codex/skills: populated-first".to_owned(),
+            "populated/codex/skills: populated-second".to_owned(),
+        ]
+    );
+    // The three readers of that order agree by construction, and this is what
+    // says so: the count the selection wraps at, and the row the detail region
+    // resolves at every position, are the same sequence.
+    assert_eq!(app.variants_row_count(), rows.len());
+    app.update(Action::MoveSourcesPane(1));
+    for expected in &rows {
+        assert_eq!(
+            app.selected_variant_row().map(describe_row).as_ref(),
+            Some(expected)
+        );
+        app.update(Action::MoveSourcesSelection(1));
+    }
+}
+
+/// A row as `catalog path: what the row says` — the error's catalog, the
+/// candidate's directory name, or the empty state. Errors are described by
+/// their kind rather than their message, which names a path this fixture
+/// builds under a temporary directory.
+fn describe_row(row: SourceRow<'_>) -> String {
+    let catalog = row.catalog().relative_path().display().to_string();
+    match row {
+        SourceRow::CatalogError { error, .. } => {
+            assert!(!error.is_empty(), "an error row states its error");
+            format!("{catalog}: scan error")
+        }
+        SourceRow::Variant { candidate, .. } => {
+            format!("{catalog}: {}", candidate.directory_name())
+        }
+        SourceRow::NoVariants(_) => format!("{catalog}: no variants"),
+    }
 }
 
 #[test]

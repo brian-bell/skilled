@@ -312,7 +312,7 @@ fn sources_browse_valid_and_invalid_immediate_variants_without_nested_examples()
 }
 
 #[test]
-fn sources_show_the_persisted_catalog_classification_and_compatibility() {
+fn sources_show_the_persisted_catalog_classification_and_registration() {
     let temporary = tempfile::tempdir().expect("temporary application directory");
     let repository = temporary.path().join("source");
     create_source_fixture(&repository);
@@ -345,7 +345,7 @@ fn sources_show_the_persisted_catalog_classification_and_compatibility() {
     // The claim names the agents the catalog is registered for and stops; the
     // agent switched off during setup is one of the ones it does not name.
     assert!(
-        screen.contains("Compatibility: Claude Code + Codex"),
+        screen.contains("Registered for: Claude Code + Codex"),
         "{screen}"
     );
     assert!(!screen.contains("OpenCode"), "{screen}");
@@ -468,6 +468,48 @@ fn sources_details_with_a_long_catalog_path_at_wide_and_compact_sizes() {
         "sources_long_catalog_path_at_minimum_supported_size",
         normalize_sources_screen(&app, &temporary, render(&app, 80, 24))
     );
+}
+
+/// Detail that outgrows the Sources region says how much it left out, the way
+/// the Inventory region does. A region that simply ends mid-sentence reads as
+/// though the description it was stating had ended there.
+#[test]
+fn sources_detail_too_tall_for_the_region_reports_what_it_dropped() {
+    let temporary = tempfile::tempdir_in("/tmp").expect("temporary application directory");
+    let repository = temporary.path().join("source");
+    let variant = repository.join("skills/verbose");
+    fs::create_dir_all(&variant).expect("create catalog fixture");
+    fs::write(
+        variant.join("SKILL.md"),
+        "---\nname: verbose\ndescription: A description long enough to outgrow the detail \
+         region at twenty-four rows, so the region has to say what it could not \
+         show rather than ending in the middle of this sentence.\n---\n# Verbose\n",
+    )
+    .expect("write catalog fixture");
+    git(&repository, &["init", "-b", "main"]);
+    git(&repository, &["config", "user.name", "Skilled Test"]);
+    git(
+        &repository,
+        &["config", "user.email", "skilled@example.test"],
+    );
+    git(&repository, &["add", "."]);
+    git(&repository, &["commit", "-m", "fixture"]);
+    let mut app = SkilledApp::open(AppEnvironment::new(
+        temporary.path().join("home"),
+        temporary.path().join("data"),
+        "",
+    ))
+    .expect("open application");
+    let preview = app.preview_source(&repository).expect("preview source");
+    app.confirm_source(preview).expect("confirm source");
+    for _ in 0..7 {
+        dispatch(&mut app, Action::Continue);
+    }
+    app.update(Action::OpenSources);
+
+    let screen = normalize_sources_screen(&app, &temporary, render(&app, 120, 24));
+    assert!(screen.contains("more line"), "{screen}");
+    insta::assert_snapshot!("sources_detail_too_tall_at_wide_size", screen);
 }
 
 #[test]

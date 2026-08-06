@@ -9,7 +9,7 @@ use ratatui::{
 
 use crate::{
     AgentKind, InventoryPane, SetupStep, SkilledApp, SourcesPane, View,
-    app::MAX_INVENTORY_FILTER,
+    app::{MAX_INVENTORY_FILTER, SourceRow, catalog_rows},
     components::{self, KeyHint},
     inventory::{
         Finding, FindingSeverity, InstallationHealth, InstallationObject,
@@ -1137,18 +1137,7 @@ fn bounded_detail_lines(lines: Vec<Line<'static>>, width: u16, height: u16) -> V
     // Rows hidden, not lines hidden: a dropped line that would have wrapped
     // costs the reader more than one row of content.
     let total_rows = detail_lines_height(&lines, width);
-    let notice = |hidden: usize| {
-        let plural = if hidden == 1 { "" } else { "s" };
-        [
-            format!("{hidden} more line{plural} — widen or lengthen the terminal"),
-            format!("{hidden} more line{plural}"),
-            format!("+{hidden}"),
-        ]
-        .into_iter()
-        .map(|label| Line::from(components::badge(Tone::Warning, &label)))
-        .find(|line| wrapped_line_count(line, width) == 1)
-        .unwrap_or_else(|| Line::from(components::badge(Tone::Warning, "…")))
-    };
+    let notice = |hidden: usize| dropped_rows_notice(hidden, width);
 
     let reserved = wrapped_line_count(&notice(total_rows), width);
     let mut kept = Vec::new();
@@ -1163,6 +1152,30 @@ fn bounded_detail_lines(lines: Vec<Line<'static>>, width: u16, height: u16) -> V
     }
     kept.push(notice(total_rows - used));
     kept
+}
+
+/// The line a detail region spends on what it could not show.
+///
+/// Stated in rows, and on one of them at every width a supported terminal can
+/// give a detail region: the phrase gives up its advice, then its words,
+/// before it would wrap, because the one string whose whole job is to report
+/// that content was cut must not itself be cut. Narrower than the shortest
+/// form — a handful of cells, which no supported layout produces — even the
+/// bare ellipsis it falls back to can wrap.
+///
+/// Shared by both detail regions so a reader who has learnt to look for it on
+/// one screen finds the same sentence on the other.
+fn dropped_rows_notice(hidden: usize, width: u16) -> Line<'static> {
+    let plural = if hidden == 1 { "" } else { "s" };
+    [
+        format!("{hidden} more line{plural} — widen or lengthen the terminal"),
+        format!("{hidden} more line{plural}"),
+        format!("+{hidden}"),
+    ]
+    .into_iter()
+    .map(|label| Line::from(components::badge(Tone::Warning, &label)))
+    .find(|line| wrapped_line_count(line, width) == 1)
+    .unwrap_or_else(|| Line::from(components::badge(Tone::Warning, "…")))
 }
 
 fn inventory_detail_lines(row: &InventoryRow, home: &Path, width: u16) -> Vec<Line<'static>> {
@@ -1617,14 +1630,14 @@ fn render_source_variants(
     //
     // The focused line, and the label each line belongs under, are recorded as
     // the lines are built rather than computed from the selection, because
-    // group labels and error lines sit between the rows and only this loop
-    // knows where they fell.
-    // Every rendered row is a focus position — each candidate, and each
-    // catalog's state row (its error, or `no variants`) — so
-    // `move_sources_selection` counts exactly these rows, the window follows
-    // the selection, and a list taller than the pane can be walked whatever
-    // mixture of skills, errors, and empty catalogs it holds. `selected_row`
-    // walks the same order to answer what the selection rests on.
+    // group labels sit between the rows and only this loop knows where they
+    // fell.
+    //
+    // Which rows exist, and in what order, is `catalog_rows`' to say — the
+    // same sequence `variants_row_count` counts and `selected_variant_row`
+    // indexes into, so the window follows the selection and a list taller than
+    // the pane can be walked whatever mixture of skills, errors, and empty
+    // catalogs it holds. This loop only draws them.
     let mut lines = Vec::new();
     let mut group_labels = Vec::new();
     let mut focused_line = 0;
@@ -1633,65 +1646,16 @@ fn render_source_variants(
         let label = lines.len();
         lines.push(catalog_group_label(catalog, inner.width, beside_details));
         group_labels.push(label);
-        if let Some(error) = catalog.scan_error() {
+        for row in catalog_rows(catalog) {
             let selected = position == app.focused_variant();
             if selected {
                 focused_line = lines.len();
             }
-            let badge = components::badge(Tone::Critical, "unavailable");
-            // Bounded to the pane like every other row: a wrapped error would
-            // put the marker and the band on one line and the words on the
-            // next. The detail region gives the message more room — three
-            // bounded lines — but a message past those is elided there too.
-            let budget = usize::from(inner.width)
-                .min(VARIANTS_CONTENT_MAX_WIDTH)
-                .saturating_sub(ROW_MARKER_WIDTH + badge.width() + 1);
-            lines.push(components::list_row(
-                vec![
-                    badge,
-                    Span::raw(format!(" {}", terminal_safe_bounded_start(error, budget))),
-                ],
-                selected,
-                inner.width,
-            ));
-            group_labels.push(label);
-            position += 1;
-        }
-        for candidate in catalog.candidates() {
-            let selected = position == app.focused_variant();
-            if selected {
-                focused_line = lines.len();
-            }
-            lines.push(variant_row(candidate, selected, inner.width));
-            group_labels.push(label);
-            position += 1;
-        }
-        if catalog.candidates().is_empty() && catalog.scan_error().is_none() {
-            // Said rather than left blank: two labels in a row would read as
-            // though the rows under the first belonged to both, and a label
-            // with nothing under it would not say whether the catalog is empty
-            // or the list has scrolled.
-            let selected = position == app.focused_variant();
-            if selected {
-                focused_line = lines.len();
-            }
-            lines.push(components::list_row(
-                vec![Span::styled(
-                    "no variants".to_owned(),
-                    theme::pane_subtitle(),
-                )],
-                selected,
-                inner.width,
-            ));
+            lines.push(variants_pane_row(row, selected, inner.width));
             group_labels.push(label);
             position += 1;
         }
     }
-    debug_assert_eq!(
-        position,
-        app.variants_row_count(),
-        "the pane renders exactly the rows the selection counts"
-    );
     if variants.is_empty() && catalog_error_count > 0 {
         // The hint belongs to catalog errors: an all-empty source that read
         // cleanly has nothing further for Details to explain. It travels
@@ -1713,6 +1677,43 @@ fn render_source_variants(
         usize::from(inner.height),
     );
     frame.render_widget(Paragraph::new(visible).wrap(Wrap { trim: false }), inner);
+}
+
+/// One row of the variants pane, drawn according to its kind.
+fn variants_pane_row(row: SourceRow<'_>, selected: bool, width: u16) -> Line<'static> {
+    match row {
+        SourceRow::CatalogError { error, .. } => {
+            let badge = components::badge(Tone::Critical, "unavailable");
+            // Bounded to the pane like every other row: a wrapped error would
+            // put the marker and the band on one line and the words on the
+            // next. The detail region gives the message more room — three
+            // bounded lines — but a message past those is elided there too.
+            let budget = usize::from(width)
+                .min(VARIANTS_CONTENT_MAX_WIDTH)
+                .saturating_sub(ROW_MARKER_WIDTH + badge.width() + 1);
+            components::list_row(
+                vec![
+                    badge,
+                    Span::raw(format!(" {}", terminal_safe_bounded_start(error, budget))),
+                ],
+                selected,
+                width,
+            )
+        }
+        SourceRow::Variant { candidate, .. } => variant_row(candidate, selected, width),
+        // Said rather than left blank: two labels in a row would read as
+        // though the rows under the first belonged to both, and a label with
+        // nothing under it would not say whether the catalog is empty or the
+        // list has scrolled.
+        SourceRow::NoVariants(_) => components::list_row(
+            vec![Span::styled(
+                "no variants".to_owned(),
+                theme::pane_subtitle(),
+            )],
+            selected,
+            width,
+        ),
+    }
 }
 
 /// One variant: its validation state and the directory it lives in.
@@ -1756,7 +1757,7 @@ fn catalog_group_label(
     group_label(
         &catalog.relative_path().display().to_string(),
         catalog_classification(catalog),
-        &compatibility_claim(catalog.compatibility()),
+        &registration_claim(catalog.compatibility()),
         width,
         beside_details,
     )
@@ -1861,6 +1862,39 @@ fn group_label(
     )
 }
 
+/// What the detail region calls the set of agents a catalog is registered for.
+///
+/// The label is Skilled's own. The prototype holds this as a `compatibility`
+/// key and renders it only as a bare qualifier in the catalog title — which is
+/// where [`catalog_group_label`] still renders it, wording untouched — and its
+/// source detail has no such field at all. So the departure recorded here is
+/// not from the prototype's label but from Skilled's earlier one, which called
+/// the field `Compatibility`.
+///
+/// Nothing here is a compatibility statement: the value is the registration
+/// Skilled proposed and the user confirmed, and no skill was inspected for
+/// what it can run under and no agent was asked. `Compatibility: Claude Code`
+/// would read as a finding about the catalog; `Registered for: Claude Code`
+/// says who it was filed under, which is the fact that exists.
+///
+/// The inventory's `Registered for some agents but not others` speaks of a
+/// different subject — an installed skill that resolved to a registered source
+/// in some agent roots and not others. Both are true uses of the word: this
+/// field says what a catalog was filed under, that line says where an object
+/// came from. They are never on screen together, and each states its subject.
+const REGISTRATION_LABEL: &str = "Registered for";
+
+/// How many lines the registration claim may occupy in the detail region.
+///
+/// Two, not one. The label is a column longer than the one it replaces, and
+/// the longest claim — two agents named in full — then outruns the narrowest
+/// region's line by exactly that column. Given one line it would be elided,
+/// and an elided claim names agents that were never registered, which is the
+/// one thing this field must not do. So it wraps: the claim stands whole and
+/// spends a second row only in the narrowest region and only where a shorter
+/// claim would not have needed it.
+const REGISTRATION_CLAIM_LINES: usize = 2;
+
 /// Which agents a catalog is registered for, for the variants group label and
 /// the detail region's CATALOG section alike.
 ///
@@ -1870,7 +1904,7 @@ fn group_label(
 /// registered for none says so rather than rendering an empty phrase, and one
 /// registered for some names those and stops: the agents left out are the ones
 /// not claimed, which is what the setup dialog's exhaustive yes/no list is for.
-fn compatibility_claim(compatibility: Compatibility) -> String {
+fn registration_claim(compatibility: Compatibility) -> String {
     if compatibility.all_supported() {
         return "all agents".to_owned();
     }
@@ -1938,7 +1972,7 @@ fn render_source_details(
 ) {
     let selected = selected_variant(app);
     let subtitle = selected
-        .map(|variant| terminal_safe(variant.candidate.directory_name()))
+        .map(|variant| terminal_safe(variant.directory_name()))
         .or_else(|| {
             app.selected_source()
                 .map(|source| terminal_safe(source.label()))
@@ -2054,10 +2088,10 @@ fn render_source_details(
         // The same phrase the variants group label uses, so the region and the
         // pane beside it name a catalog's claim in one vocabulary.
         catalog_lines.push(detail_field_bounded(
-            "Compatibility",
-            &compatibility_claim(catalog.compatibility()),
+            REGISTRATION_LABEL,
+            &registration_claim(catalog.compatibility()),
             inner.width,
-            1,
+            REGISTRATION_CLAIM_LINES,
         ));
     } else {
         catalog_lines.push(Line::from(
@@ -2086,13 +2120,13 @@ fn render_source_details(
     let mut variant_lines = Vec::new();
     push_detail_section(&mut variant_lines, "VARIANT", inner.width);
     if let Some(variant) = selected {
-        let (status, name) = match variant.candidate.validation() {
+        let (status, name) = match variant.validation() {
             SkillValidation::Valid { name, .. } => {
                 (components::badge(Tone::Healthy, "valid"), name.as_str())
             }
             SkillValidation::Invalid { .. } => (
                 components::badge(Tone::Critical, "invalid"),
-                variant.candidate.directory_name(),
+                variant.directory_name(),
             ),
         };
         // One bounded line, not the name in full: in the narrow aside tier
@@ -2104,7 +2138,7 @@ fn render_source_details(
             "Directory",
             &format!(
                 "{} · Name: {}",
-                terminal_safe(variant.candidate.directory_name()),
+                terminal_safe(variant.directory_name()),
                 terminal_safe(name)
             ),
             inner.width,
@@ -2116,7 +2150,7 @@ fn render_source_details(
         // is restated by no neighbouring field.
         variant_lines.push(detail_field_bounded(
             "Path",
-            &variant.candidate.relative_path().display().to_string(),
+            &variant.relative_path().display().to_string(),
             inner.width,
             1,
         ));
@@ -2125,7 +2159,7 @@ fn render_source_details(
             status,
         ]));
         let variant_essential_height = detail_lines_height(&variant_lines, inner.width);
-        match variant.candidate.validation() {
+        match variant.validation() {
             SkillValidation::Valid { description, .. } => {
                 variant_lines.push(detail_field("Description", description));
             }
@@ -2157,6 +2191,20 @@ fn render_source_details(
     }
 }
 
+/// Lay the three sections into the region, saying so when they do not fit.
+///
+/// The sections are budgeted against each other — the variant and catalog
+/// essentials are reserved first, and the repository section gives up its
+/// lines before either — but whichever section ends up short, what it drops
+/// falls off the bottom of the region unremarked. So the region reports it,
+/// the way the inventory's does: the last row is spent on a count of the rows
+/// none of the three could show, because a region that ends mid-sentence reads
+/// as though the sentence had ended.
+///
+/// One notice for the region rather than one per section: three apologies
+/// would cost three rows of the content they are apologising for, and the
+/// reader's question is what this screen is not telling them, not which of its
+/// headings the answer sat under.
 fn render_detail_regions(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -2166,24 +2214,36 @@ fn render_detail_regions(
     variant_lines: Vec<Line<'static>>,
     variant_essential_height: usize,
 ) {
-    let available = usize::from(area.height);
-    let reserved_variant = variant_essential_height.min(available);
-    let reserved_catalog = catalog_essential_height.min(available.saturating_sub(reserved_variant));
-    let repository_height = detail_lines_height(&repository_lines, area.width).min(
-        available
-            .saturating_sub(reserved_catalog)
-            .saturating_sub(reserved_variant),
-    );
-    let after_repository = available.saturating_sub(repository_height);
-    let catalog_height = detail_lines_height(&catalog_lines, area.width)
-        .min(after_repository.saturating_sub(reserved_variant));
-    let variant_height = after_repository.saturating_sub(catalog_height);
-    let [repository_area, catalog_area, variant_area] = Layout::vertical([
-        Constraint::Length(u16::try_from(repository_height).unwrap_or(u16::MAX)),
-        Constraint::Length(u16::try_from(catalog_height).unwrap_or(u16::MAX)),
-        Constraint::Length(u16::try_from(variant_height).unwrap_or(u16::MAX)),
+    let section_rows = [&repository_lines, &catalog_lines, &variant_lines]
+        .map(|lines| detail_lines_height(lines, area.width));
+    // Measured before the sections are budgeted, because the row the notice
+    // takes is a row they cannot have. It is measured against the total, which
+    // stands in for the count only known once they have been laid out — and
+    // that count can only be smaller, so the notice finally rendered is never
+    // wider, and never needs a row this reservation did not buy it.
+    let total_rows = section_rows.iter().sum::<usize>();
+    let notice_rows = if total_rows > usize::from(area.height) {
+        wrapped_line_count(&dropped_rows_notice(total_rows, area.width), area.width)
+    } else {
+        0
+    };
+    let [content, notice_area] = Layout::vertical([
+        Constraint::Min(0),
+        Constraint::Length(u16::try_from(notice_rows).unwrap_or(u16::MAX)),
     ])
     .areas(area);
+
+    let layout = detail_region_layout(
+        section_rows,
+        [catalog_essential_height, variant_essential_height],
+        usize::from(content.height),
+    );
+    let [repository_area, catalog_area, variant_area] = Layout::vertical(
+        layout
+            .heights
+            .map(|height| Constraint::Length(u16::try_from(height).unwrap_or(u16::MAX))),
+    )
+    .areas(content);
     frame.render_widget(
         Paragraph::new(repository_lines).wrap(Wrap { trim: false }),
         repository_area,
@@ -2196,6 +2256,70 @@ fn render_detail_regions(
         Paragraph::new(variant_lines).wrap(Wrap { trim: false }),
         variant_area,
     );
+    if notice_rows > 0 {
+        frame.render_widget(
+            Paragraph::new(dropped_rows_notice(layout.hidden, content.width))
+                .wrap(Wrap { trim: false }),
+            notice_area,
+        );
+    }
+}
+
+/// How the three detail sections divide a region, and what that leaves unsaid.
+struct DetailRegionLayout {
+    /// Rows given to the repository, catalog, and variant sections in order.
+    heights: [usize; 3],
+    /// Rows of content none of them had room for.
+    hidden: usize,
+}
+
+/// Divide `available` rows between the three sections, reporting what did not
+/// fit.
+///
+/// The variant and catalog essentials are reserved first and the repository
+/// section gives up its rows before either, because the sections below it are
+/// the ones the selection just moved to. Every row of the region is handed to
+/// some section — the last one takes whatever the first two left — so what is
+/// hidden is what the sections wanted beyond the region, and no arithmetic
+/// over the rendered widgets is needed to find it.
+///
+/// An essential taller than the section that asked for it is clamped to it: a
+/// section cannot be promised more rows than it has content to put in them,
+/// and a reservation held open for rows that do not exist would push another
+/// section's content off the region while this count, which measures the rows
+/// the sections were given, saw nothing missing. Today's callers derive both
+/// essentials from the same lines at the same width and so never exceed them,
+/// but the count is the one thing here that must not depend on a caller
+/// getting that right.
+///
+/// Split out from the rendering so the count the region states can be checked
+/// against every shape of content, rather than only against the shapes a
+/// fixture happens to produce: a notice that misreports is worse than no
+/// notice, because it is read as a measurement.
+fn detail_region_layout(
+    section_rows: [usize; 3],
+    essential_heights: [usize; 2],
+    available: usize,
+) -> DetailRegionLayout {
+    let [repository_rows, catalog_rows, variant_rows] = section_rows;
+    let [catalog_essential, variant_essential] = essential_heights;
+    let catalog_essential = catalog_essential.min(catalog_rows);
+    let variant_essential = variant_essential.min(variant_rows);
+    let reserved_variant = variant_essential.min(available);
+    let reserved_catalog = catalog_essential.min(available.saturating_sub(reserved_variant));
+    let repository_height = repository_rows.min(
+        available
+            .saturating_sub(reserved_catalog)
+            .saturating_sub(reserved_variant),
+    );
+    let after_repository = available.saturating_sub(repository_height);
+    let catalog_height = catalog_rows.min(after_repository.saturating_sub(reserved_variant));
+    let variant_height = after_repository.saturating_sub(catalog_height);
+    DetailRegionLayout {
+        heights: [repository_height, catalog_height, variant_height],
+        hidden: (repository_rows + catalog_rows + variant_rows)
+            .saturating_sub(repository_height + catalog_height + variant_height),
+    }
 }
 
 fn detail_lines_height(lines: &[Line<'_>], width: u16) -> usize {
@@ -2205,74 +2329,25 @@ fn detail_lines_height(lines: &[Line<'_>], width: u16) -> usize {
         .sum()
 }
 
-#[derive(Clone, Copy)]
-struct SourceVariant<'a> {
-    catalog: &'a CatalogProposal,
-    candidate: &'a SkillCandidate,
-}
-
-fn flattened_variants(source: &RegisteredSource) -> Vec<SourceVariant<'_>> {
+/// Every candidate the source holds, for the pane subtitle's count.
+///
+/// A flat tally of skills, not of rows: the subtitle says how many variants
+/// were found, which is not what the selection walks.
+fn flattened_variants(source: &RegisteredSource) -> Vec<&SkillCandidate> {
     source
         .catalogs()
         .iter()
-        .flat_map(|catalog| {
-            catalog
-                .candidates()
-                .iter()
-                .map(move |candidate| SourceVariant { catalog, candidate })
-        })
+        .flat_map(CatalogProposal::candidates)
         .collect()
 }
 
-/// What the variants-pane selection rests on: a variant, or a catalog's
-/// state row (its error, or `no variants`).
-enum SelectedSourceRow<'a> {
-    Variant(SourceVariant<'a>),
-    CatalogState(&'a CatalogProposal),
-}
-
-/// The row the selection rests on, walked in the pane's render order: for
-/// each catalog its error row, then its candidates, then its `no variants`
-/// row. `render_source_variants` builds exactly these rows and asserts the
-/// count against `variants_row_count`, which counts them the same way.
-fn selected_row(app: &SkilledApp) -> Option<SelectedSourceRow<'_>> {
-    let source = app.selected_source()?;
-    // An unavailable source renders its source error and no rows, so nothing
-    // is selected — mirroring `variants_row_count`, which counts none.
-    if source.source_error().is_some() {
-        return None;
-    }
-    let mut position = 0;
-    for catalog in source.catalogs() {
-        if catalog.scan_error().is_some() {
-            if position == app.focused_variant() {
-                return Some(SelectedSourceRow::CatalogState(catalog));
-            }
-            position += 1;
-        }
-        for candidate in catalog.candidates() {
-            if position == app.focused_variant() {
-                return Some(SelectedSourceRow::Variant(SourceVariant {
-                    catalog,
-                    candidate,
-                }));
-            }
-            position += 1;
-        }
-        if catalog.candidates().is_empty() && catalog.scan_error().is_none() {
-            if position == app.focused_variant() {
-                return Some(SelectedSourceRow::CatalogState(catalog));
-            }
-            position += 1;
-        }
-    }
-    None
-}
-
-fn selected_variant(app: &SkilledApp) -> Option<SourceVariant<'_>> {
-    match selected_row(app)? {
-        SelectedSourceRow::Variant(variant) => Some(variant),
-        SelectedSourceRow::CatalogState(_) => None,
+/// The variant the selection rests on, or `None` where it rests on a
+/// catalog's state row — which names no variant, and whose detail region says
+/// so rather than describing the last one that happened to be selected.
+fn selected_variant(app: &SkilledApp) -> Option<&SkillCandidate> {
+    match app.selected_variant_row()? {
+        SourceRow::Variant { candidate, .. } => Some(candidate),
+        SourceRow::CatalogError { .. } | SourceRow::NoVariants(_) => None,
     }
 }
 
@@ -2281,10 +2356,7 @@ fn selected_variant(app: &SkilledApp) -> Option<SourceVariant<'_>> {
 /// so the Details CATALOG section follows the band across the region
 /// boundary instead of rendering identically for every position.
 fn selected_catalog(app: &SkilledApp) -> Option<&CatalogProposal> {
-    match selected_row(app)? {
-        SelectedSourceRow::Variant(variant) => Some(variant.catalog),
-        SelectedSourceRow::CatalogState(catalog) => Some(catalog),
-    }
+    Some(app.selected_variant_row()?.catalog())
 }
 
 fn catalog_classification(catalog: &CatalogProposal) -> &'static str {
@@ -3816,30 +3888,87 @@ mod tests {
 
     /// The claim names agents, so a claim cut short names a different one:
     /// `Claude Code + Open...` is not what was stored, and unlike a path it
-    /// carries no sense of the value it stands for. The longest two agents can
-    /// make of it fills the narrowest region's line to the cell, so every
-    /// combination is checked rather than the one a fixture happens to hold.
+    /// carries no sense of the value it stands for. Every combination is
+    /// checked rather than the one a fixture happens to hold, because the
+    /// longest two agents can make of it outruns the narrowest region's line
+    /// by a single column — which is the whole reason the field is given the
+    /// room to wrap instead of a budget to elide against.
     #[test]
-    fn every_compatibility_claim_stands_whole_in_the_narrowest_detail_region() {
+    fn every_registration_claim_stands_whole_in_the_narrowest_detail_region() {
         for claude_code in [false, true] {
             for codex in [false, true] {
                 for opencode in [false, true] {
-                    let claim = compatibility_claim(Compatibility::from_flags(
-                        claude_code,
-                        codex,
-                        opencode,
-                    ));
+                    let claim =
+                        registration_claim(Compatibility::from_flags(claude_code, codex, opencode));
                     let stated = label_text(&detail_field_bounded(
-                        "Compatibility",
+                        REGISTRATION_LABEL,
                         &claim,
                         NARROWEST_INNER_WIDTH,
-                        1,
+                        REGISTRATION_CLAIM_LINES,
                     ));
                     assert_eq!(
                         stated,
-                        format!("Compatibility: {claim}"),
+                        format!("{REGISTRATION_LABEL}: {claim}"),
                         "the claim should be stated whole"
                     );
+                }
+            }
+        }
+    }
+
+    /// The dropped-rows count is a measurement, and a measurement that is
+    /// wrong is worse than none at all — it is read as a fact about the
+    /// terminal rather than as an apology. So it is checked against every
+    /// shape three sections can take rather than against the one a fixture
+    /// happens to produce: the count must equal the rows the sections wanted
+    /// and did not get, where what a section got is what it could actually
+    /// fill and never the blank a generous allotment leaves under it.
+    #[test]
+    fn the_detail_region_reports_exactly_the_rows_its_sections_could_not_show() {
+        for repository in 0..5 {
+            for catalog in 0..5 {
+                for variant in 0..5 {
+                    // Deliberately past what each section holds. The render
+                    // path derives both essentials from the section's own
+                    // lines and so cannot exceed them, but a count that only
+                    // holds while its caller behaves is not a measurement, and
+                    // the excluded half of this domain is where it would fail.
+                    for catalog_essential in 0..6 {
+                        for variant_essential in 0..6 {
+                            for available in 0..12 {
+                                let rows = [repository, catalog, variant];
+                                let layout = detail_region_layout(
+                                    rows,
+                                    [catalog_essential, variant_essential],
+                                    available,
+                                );
+                                let shown: usize = rows
+                                    .iter()
+                                    .zip(layout.heights)
+                                    .map(|(wanted, height)| (*wanted).min(height))
+                                    .sum();
+                                let total: usize = rows.iter().sum();
+                                assert_eq!(
+                                    layout.hidden,
+                                    total - shown,
+                                    "rows {rows:?}, essentials \
+                                     [{catalog_essential}, {variant_essential}], \
+                                     available {available}, heights {:?}",
+                                    layout.heights
+                                );
+                                assert!(
+                                    layout.heights.iter().sum::<usize>() <= available,
+                                    "the sections should not outrun the region"
+                                );
+                                assert_eq!(
+                                    layout.hidden == 0,
+                                    total <= available,
+                                    "a region with room for everything hides nothing, \
+                                     and one without says so"
+                                );
+                            }
+                        }
+                    }
                 }
             }
         }

@@ -119,6 +119,21 @@ impl SkillValidation {
 }
 
 impl SkillCandidate {
+    /// A candidate assembled without a scan, for tests that need a catalog in
+    /// a state the scanner does not currently produce.
+    #[cfg(test)]
+    pub(crate) fn for_test(directory_name: &str) -> Self {
+        Self {
+            directory_name: directory_name.to_owned(),
+            relative_path: PathBuf::from(directory_name),
+            validation: SkillValidation::Valid {
+                name: directory_name.to_owned(),
+                description: format!("{directory_name} fixture"),
+            },
+            content_fingerprint: None,
+        }
+    }
+
     pub fn directory_name(&self) -> &str {
         &self.directory_name
     }
@@ -143,6 +158,29 @@ pub struct CatalogProposal {
 }
 
 impl CatalogProposal {
+    /// A catalog with the candidates and scan error a test asks for, and
+    /// settled defaults for everything else.
+    ///
+    /// The scanning constructors below empty the candidates whenever they
+    /// record an error, so a catalog holding both is unreachable through
+    /// them. This exists for the tests that need to prove the rest of the
+    /// application does not depend on that coincidence.
+    #[cfg(test)]
+    pub(crate) fn for_test(
+        relative_path: &str,
+        candidates: Vec<SkillCandidate>,
+        scan_error: Option<&str>,
+    ) -> Self {
+        Self {
+            relative_path: PathBuf::from(relative_path),
+            classification: CatalogClassification::Common,
+            compatibility: Compatibility::ALL,
+            candidates,
+            included: true,
+            scan_error: scan_error.map(str::to_owned),
+        }
+    }
+
     pub fn relative_path(&self) -> &Path {
         &self.relative_path
     }

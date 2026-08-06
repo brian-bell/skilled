@@ -2741,7 +2741,7 @@ fn sources_details_render_stored_repository_catalog_and_variant_metadata() {
         "Last scan:",
         "CATALOG",
         "Classification: Common",
-        "Compatibility: all agents",
+        "Registered for: all agents",
         "VARIANT",
         "Directory: portable · Name: portable",
         "Path: skills/portable",
@@ -2930,13 +2930,13 @@ fn sources_details_name_the_agents_a_catalog_claims_in_the_group_label_words() {
         );
         rendered
             .lines()
-            .find_map(|line| line.split_once("Compatibility:"))
-            .map(|(_, claim)| format!("Compatibility:{}", claim.trim_end()))
-            .unwrap_or_else(|| String::from("<no compatibility line>"))
+            .find_map(|line| line.split_once("Registered for:"))
+            .map(|(_, claim)| format!("Registered for:{}", claim.trim_end()))
+            .unwrap_or_else(|| String::from("<no registration line>"))
     };
 
     // The agent-specific catalog claims the one agent its path names.
-    assert_eq!(claim(&app), "Compatibility: Claude Code");
+    assert_eq!(claim(&app), "Registered for: Claude Code");
 
     // Moving into the common catalog changes the claim with the selection. The
     // walk is asserted to have arrived: a claim read off a selection that never
@@ -2956,7 +2956,138 @@ fn sources_details_name_the_agents_a_catalog_claims_in_the_group_label_words() {
         "the selection should reach the common catalog\n{}",
         text(&buffer(&app, 120, 40))
     );
-    assert_eq!(claim(&app), "Compatibility: all agents");
+    assert_eq!(claim(&app), "Registered for: all agents");
+}
+
+/// The Sources detail region reports a cut in words and in a tone, the way the
+/// Inventory region does — colour alone is not a signal a terminal can be
+/// relied on to carry, and a description that simply stops reads as a
+/// description that ended.
+#[test]
+fn a_truncated_sources_detail_region_reports_the_cut() {
+    let harness = Harness::new();
+    let repository = harness.directory.path().join("source");
+    let variant = repository.join("skills/verbose");
+    fs::create_dir_all(&variant).expect("create catalog fixture");
+    fs::write(
+        variant.join("SKILL.md"),
+        "---\nname: verbose\ndescription: A description long enough to outgrow the detail \
+         region at twenty-four rows, so the region has to say what it could not show \
+         rather than ending in the middle of this sentence.\n---\n# Verbose\n",
+    )
+    .expect("write catalog fixture");
+    create_repository(&repository);
+    let mut app = harness.completed_setup();
+    let preview = app.preview_source(&repository).expect("preview source");
+    app.confirm_source(preview).expect("register source");
+    app.update(Action::OpenSources);
+
+    let screen = buffer(&app, 120, 24);
+    let notice = row_containing(&screen, "more line");
+    let line = row_text(&screen, notice);
+    assert!(line.contains("! "), "{line}");
+    assert_eq!(
+        style_in_row(&screen, notice, "!").fg,
+        Some(Color::Rgb(0xe6, 0xbd, 0x6a))
+    );
+
+    // A region tall enough for every section says nothing: the notice is a
+    // report of a cut, not a permanent fixture of the screen.
+    let whole = text(&buffer(&app, 120, 60));
+    assert!(!whole.contains("more line"), "{whole}");
+    assert!(whole.contains("this sentence."), "{whole}");
+
+    // The count is a measurement, so it is checked against the screen rather
+    // than against itself: at every height the region can be cut at, what it
+    // says it dropped is what a region tall enough to hold everything shows
+    // and this one does not. A stated count that drifts from the rows on
+    // screen is worse than no notice, because it is read as a fact.
+    let detail_rows = |height: u16| {
+        text(&buffer(&app, 120, height))
+            .lines()
+            .filter_map(|line| line.rsplit_once('│'))
+            .map(|(_, region)| region.trim().to_owned())
+            .filter(|region| !region.is_empty())
+            .collect::<Vec<_>>()
+    };
+    let whole_rows = detail_rows(60).len();
+    let mut cut_heights = 0;
+    for height in 24..40 {
+        let rows = detail_rows(height);
+        let stated = rows
+            .iter()
+            .find_map(|row| row.split_once(" more line"))
+            .and_then(|(count, _)| count.trim_start_matches("! ").parse::<usize>().ok());
+        match stated {
+            // The notice's own row is not content the region showed.
+            Some(stated) => {
+                cut_heights += 1;
+                assert_eq!(
+                    stated,
+                    whole_rows - (rows.len() - 1),
+                    "at height {height} the region showed {} of {whole_rows} rows",
+                    rows.len() - 1
+                );
+            }
+            // Silence is a claim too: it says everything is here.
+            None => assert_eq!(
+                rows.len(),
+                whole_rows,
+                "at height {height} the region dropped rows without saying so"
+            ),
+        }
+    }
+    assert!(
+        cut_heights > 0,
+        "the sweep should reach heights where the region is cut"
+    );
+}
+
+/// The longest claim two agents can make outruns the narrowest detail region's
+/// line by a column, so it wraps onto a second one. This pins that the wrap is
+/// all that happens to it: both agents are still named, in order, and the
+/// continuation is not cut away by the section's row budget — an elided claim
+/// would name a registration the user never confirmed.
+#[test]
+fn the_longest_two_agent_registration_claim_survives_the_narrowest_detail_region() {
+    let harness = Harness::new();
+    let repository = harness.directory.path().join("source");
+    create_source_fixture(&repository);
+    let mut app = harness.completed_setup();
+    app.update(Action::OpenSources);
+    app.update(Action::BeginAddSource);
+    for character in repository.to_string_lossy().chars() {
+        app.update(Action::AppendSourcePath(character));
+    }
+    let update = app.update(Action::SubmitSourcePath);
+    app.perform_effects(update.effects())
+        .expect("inspect source");
+    // The common catalog claims every agent by default; dropping Codex leaves
+    // the two whose names are longest.
+    app.update(Action::ToggleCatalogCompatibility(AgentKind::Codex));
+    let update = app.update(Action::ConfirmPendingSource);
+    app.perform_effects(update.effects())
+        .expect("register source");
+    app.update(Action::OpenSources);
+    app.update(Action::AdvanceSourcesPane);
+
+    // 120 columns is the narrow aside: wide enough for the detail region to
+    // sit beside the variants, narrow enough that it takes its lesser share.
+    let rendered = text(&buffer(&app, 120, 40));
+    let stated = rendered
+        .lines()
+        .filter_map(|line| line.rsplit_once('│'))
+        .map(|(_, region)| region.trim_end())
+        .skip_while(|region| !region.trim_start().starts_with("Registered for:"))
+        .take(2)
+        .map(|region| region.trim().to_owned())
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    assert_eq!(
+        stated, "Registered for: Claude Code + OpenCode",
+        "the claim should wrap whole rather than elide\n{rendered}"
+    );
 }
 
 /// A forty-character revision does not fit the detail region at any supported
@@ -3153,7 +3284,7 @@ fn sources_details_state_their_last_line_at_the_minimum_supported_size() {
 
     for expected in [
         "Classification: Agent-specific",
-        "Compatibility: Claude Code",
+        "Registered for: Claude Code",
         "Directory: broken · Name: broken",
         "Status: × invalid",
         // The last line of the last section: the tail of the wrapped
