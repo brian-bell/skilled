@@ -134,10 +134,11 @@ selection-aware: selected roots are `NotScanned`, deselected roots are already
 root is still waiting and nothing has been observed yet — so a mixed gap still
 says "not scanned" overall, the Roots line names each agent honestly, and an
 all-deselected gap falls through to "No agent is configured" rather than
-pretending a scan is pending. Both the pending claim and the all-deselected
-claim outrank a filter that survived the switch: a query cannot invent listed
-skills when nothing was in scope to read. Keep agent conventions behind adapters
-rather than spreading paths or enablement rules through UI and scanner code. Build new screens from `components` primitives and
+pretending a scan is pending. That all-deselected claim is
+`InventorySnapshot::no_agent_configured`. Both it and the pending claim outrank
+a filter that survived the switch: a query cannot invent listed skills when
+nothing was in scope to read. Keep agent conventions behind adapters rather than
+spreading paths or enablement rules through UI and scanner code. Build new screens from `components` primitives and
 `theme` tokens rather than ad hoc styles. The title-bar and key-hint rows are
 painted on `theme::chrome_band()` beneath their text, so the shell reads as
 band, navigation surface, and workspace. The key-hint bar and the navigation
