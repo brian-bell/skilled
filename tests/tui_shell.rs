@@ -1303,6 +1303,138 @@ fn navigation_states_zero_when_a_root_was_read_and_held_nothing() {
     assert!(navigation.contains("▌Inventory 0 "), "{navigation}");
 }
 
+/// Entering the Inventory and the scan that fills it are two moments: the
+/// reducer changes the view, and the scan is the effect performed after.
+/// Between them the screen may not rest on a scan taken for the view the user
+/// was just looking at — the only honest thing it can say is "not scanned".
+#[test]
+fn inventory_between_its_transition_and_its_scan_says_not_scanned() {
+    let harness = Harness::new();
+    let mut app = harness.first_run();
+    for _ in 0..6 {
+        let update = app.update(Action::Continue);
+        app.perform_effects(update.effects())
+            .expect("perform setup effects");
+    }
+
+    // The last Continue leaves Setup for the Inventory; its scan effect has
+    // not been performed yet.
+    let update = app.update(Action::Continue);
+    let screen = buffer(&app, 80, 24);
+    let rendered = text(&screen);
+    let navigation = row_text(&screen, 1);
+
+    let header = row_text(&screen, row_containing(&screen, "Global inventory"));
+    assert!(header.contains("not scanned"), "{header}");
+    let roots = row_text(&screen, row_containing(&screen, "Roots:"));
+    assert_eq!(roots.matches("not scanned").count(), 3, "{roots}");
+    assert!(
+        rendered.contains("Installation roots have not been scanned"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("Skilled scans the roots when this view opens."),
+        "{rendered}"
+    );
+    // No count may stand beside the tab for a scan that has not happened.
+    assert!(
+        navigation.contains("▌Inventory  2 Sources 0 "),
+        "{navigation}"
+    );
+    // Nothing has been listed, so nothing may be hinted as movable, openable,
+    // or filterable. The hint row is located by its one constant entry.
+    let hints = row_text(&screen, row_containing(&screen, "Quit"));
+    for hint in ["Move", "Open", "Filter"] {
+        assert!(!hints.contains(hint), "{hint}: {hints}");
+    }
+    // The wide detail region has no selection to describe either.
+    let wide = text(&buffer(&app, 120, 40));
+    assert!(wide.contains("Nothing to show"), "{wide}");
+
+    // Once the effect lands the screen reports the scan, not the gap.
+    app.perform_effects(update.effects()).expect("perform scan");
+    let rendered = text(&buffer(&app, 80, 24));
+    assert!(!rendered.contains("not scanned"), "{rendered}");
+    assert!(rendered.contains("no root read"), "{rendered}");
+}
+
+/// A filter survives switching away and back, so in the gap before the rescan
+/// lands it is the one stale claim left: "0 of 0 listed" would say skills were
+/// read and hidden, and "No skills match the filter" would promise installed
+/// skills to show again — over a snapshot nothing has been read into. The
+/// scan state is the more fundamental fact and outranks the filter.
+#[test]
+fn a_surviving_filter_does_not_speak_for_the_unscanned_gap() {
+    let harness = Harness::new();
+    write_skill_fixture(
+        &harness.directory.path().join("home/.claude/skills/alpha"),
+        "alpha",
+    );
+    let mut app = harness.completed_setup();
+    app.update(Action::BeginInventoryFilter);
+    app.update(Action::AppendInventoryFilter('z'));
+    app.update(Action::SubmitInventoryFilter);
+
+    app.update(Action::OpenSources);
+    let update = app.update(Action::OpenInventory);
+    let screen = buffer(&app, 80, 24);
+    let rendered = text(&screen);
+
+    let header = row_text(&screen, row_containing(&screen, "Global inventory"));
+    assert!(header.contains("not scanned"), "{header}");
+    assert!(!rendered.contains("0 of 0 listed"), "{rendered}");
+    assert!(
+        rendered.contains("Installation roots have not been scanned"),
+        "{rendered}"
+    );
+    assert!(
+        !rendered.contains("No skills match the filter"),
+        "{rendered}"
+    );
+
+    // The filter is not discarded: once the scan lands it narrows the fresh
+    // rows, and says so against a snapshot that exists.
+    app.perform_effects(update.effects()).expect("perform scan");
+    let rendered = text(&buffer(&app, 80, 24));
+    assert!(rendered.contains("0 of 1 listed"), "{rendered}");
+    assert!(
+        rendered.contains("No skills match the filter"),
+        "{rendered}"
+    );
+}
+
+/// The same gap exists on every path into the Inventory, not only at the end
+/// of setup: switching over from Sources returns the scan effect too, and
+/// until it is performed the scan taken the last time the Inventory was on
+/// screen is just as stale.
+#[test]
+fn returning_to_the_inventory_says_not_scanned_until_the_scan_lands() {
+    let harness = Harness::new();
+    fs::create_dir_all(harness.directory.path().join("home/.claude/skills"))
+        .expect("create an empty root");
+    let mut app = harness.completed_setup();
+    // A scan exists to be stale: the empty root was read as "nothing
+    // installed", which the gap must not keep showing.
+    assert!(text(&buffer(&app, 80, 24)).contains("nothing installed"));
+
+    app.update(Action::OpenSources);
+    let update = app.update(Action::OpenInventory);
+
+    let screen = buffer(&app, 80, 24);
+    let rendered = text(&screen);
+    let header = row_text(&screen, row_containing(&screen, "Global inventory"));
+    assert!(header.contains("not scanned"), "{header}");
+    assert!(!rendered.contains("nothing installed"), "{rendered}");
+    assert!(
+        rendered.contains("Installation roots have not been scanned"),
+        "{rendered}"
+    );
+
+    app.perform_effects(update.effects()).expect("perform scan");
+    let rendered = text(&buffer(&app, 80, 24));
+    assert!(rendered.contains("nothing installed"), "{rendered}");
+}
+
 #[test]
 fn wide_terminals_gain_a_detail_region_and_compact_ones_do_not() {
     let harness = Harness::new();
