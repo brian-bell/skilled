@@ -4726,14 +4726,27 @@ mod installed {
     #[test]
     fn the_scrolled_detail_region_accounts_for_every_row_it_does_not_show() {
         fn region_rows(app: &SkilledApp, width: u16, height: u16) -> Vec<String> {
-            let mut rows = text(&buffer(app, width, height))
-                .lines()
-                .filter_map(|line| line.rsplit_once('│'))
-                .map(|(_, region)| region.trim().to_owned())
-                // The pane's own heading and rule are the scaffold around the
-                // window, not rows of the content it is windowing.
-                .skip(2)
-                .collect::<Vec<_>>();
+            let screen = text(&buffer(app, width, height));
+            let screen: Vec<&str> = screen.lines().collect();
+            let mut rows: Vec<String> = if screen.iter().any(|row| row.contains('│')) {
+                // Beside the table, the region is everything past the rule.
+                screen
+                    .iter()
+                    .filter_map(|row| row.rsplit_once('│'))
+                    .map(|(_, region)| region.trim().to_owned())
+                    .collect()
+            } else {
+                // Drilled into on a compact terminal, it is the whole
+                // workspace: below the title bar and navigation, above the
+                // key hints.
+                screen[2..screen.len() - 1]
+                    .iter()
+                    .map(|row| row.trim().to_owned())
+                    .collect()
+            };
+            // The pane's own heading and rule are the scaffold around the
+            // window, not rows of the content it is windowing.
+            rows.drain(..2);
             // Trailing blanks are room the region did not need, not content
             // it showed. Blanks between sections are content and stay counted,
             // because a hidden one costs the reader a row like any other.
@@ -4753,10 +4766,10 @@ mod installed {
         app.update(Action::AdvanceInventoryPane);
         let mut cut_heights = 0;
 
-        // Two widths: one where every line fits on a row, and one narrow
-        // enough to wrap the description, which is the whole reason the window
-        // is counted in rows rather than lines.
-        for width in [120, 100] {
+        // Three widths: the two sides of the wide breakpoint, where the region
+        // is beside the table and wraps differently, and the minimum supported
+        // terminal, where it is drilled into and fills the workspace.
+        for width in [120, 100, 80] {
             let whole = region_rows(&app, width, 80);
             for height in 24..40 {
                 let extent = measured_extent(&app, width, height);
@@ -4961,29 +4974,46 @@ mod installed {
     }
 
     /// The notice below the window names the way to the rows beneath it, so it
-    /// answers for the same contract a key hint does. With the filter bar open
-    /// every printable key is text and navigation is locked, so the region
-    /// beside the table names no keystroke at all — the screen already says
-    /// navigation is locked, and a notice pointing at Tab would contradict it.
+    /// answers for the same contract a key hint does. A dialog holds the
+    /// keyboard while it is open and the filter bar takes every printable key,
+    /// so under either the notice names no keystroke at all — both screens
+    /// already say navigation is locked, and a notice pointing at a movement
+    /// key would contradict them about the very rows it is reporting on.
     #[test]
-    fn the_notice_names_no_keys_the_filter_bar_has_taken() {
+    fn the_notice_names_no_keys_a_dialog_or_the_filter_bar_has_taken() {
+        fn notice(app: &SkilledApp) -> String {
+            let screen = buffer(app, 120, 24);
+            row_text(&screen, row_containing(&screen, "more line"))
+        }
         let harness = Harness::new();
         let mut app = harness.everywhere_installed_inventory();
 
-        let beside = row_text(
-            &buffer(&app, 120, 24),
-            row_containing(&buffer(&app, 120, 24), "more line"),
-        );
-        assert!(beside.contains("Tab, then j/k"), "{beside}");
+        assert!(notice(&app).contains("Tab, then j/k"), "{}", notice(&app));
 
+        app.update(Action::OpenHelp);
+        let with_help = notice(&app);
+        assert!(with_help.contains("more line"), "{with_help}");
+        assert!(!with_help.contains("j/k"), "{with_help}");
+        assert!(!with_help.contains("Tab"), "{with_help}");
+
+        app.update(Action::CloseHelp);
+        app.update(Action::AdvanceInventoryPane);
+        assert!(notice(&app).contains("j/k to scroll"), "{}", notice(&app));
+
+        // Drilled in, where the movement keys really are the region's, a
+        // dialog still answers for them first.
+        app.update(Action::OpenHelp);
+        let drilled_in = notice(&app);
+        assert!(!drilled_in.contains("j/k"), "{drilled_in}");
+        app.update(Action::CloseHelp);
+
+        app.update(Action::MoveInventoryPane(1));
         app.update(Action::BeginInventoryFilter);
         assert!(app.inventory_filter_active());
-
-        let screen = buffer(&app, 120, 24);
-        let filtering = row_text(&screen, row_containing(&screen, "more line"));
+        let filtering = notice(&app);
+        assert!(filtering.contains("more line"), "{filtering}");
         assert!(!filtering.contains("j/k"), "{filtering}");
         assert!(!filtering.contains("Tab"), "{filtering}");
-        assert!(filtering.contains("more line"), "{filtering}");
     }
 
     /// An entry whose type could not be read never claims to know what it is.

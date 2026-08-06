@@ -931,6 +931,10 @@ mod installed {
         let update = app.update(Action::OpenSources);
         app.perform_effects(update.effects()).expect("effects");
         let update = app.update(Action::OpenInventory);
+        // Before the scan, not only after it: the transition into the view
+        // states that nothing has been scanned for it, and a window scrolled
+        // into the last view's rows would outlive the rows it belonged to.
+        assert_eq!(app.inventory_detail_scroll(), 0);
         app.perform_effects(update.effects())
             .expect("installation scan");
         assert_eq!(app.inventory_detail_scroll(), 0);

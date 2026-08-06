@@ -1196,12 +1196,15 @@ fn render_inventory_detail(
 /// What the region can honestly tell a reader about reaching the rows below
 /// its window, from wherever the keyboard currently is.
 ///
-/// The filter bar takes every printable key for its query and locks
-/// navigation, so while it is open no keystroke named here would reach
-/// anything — the region is drawn beside the table, but the way back to it is
-/// through `Esc`, not through the keys the notice would otherwise advertise.
+/// A dialog answers for the keyboard while it is open, and the filter bar
+/// takes every printable key for its query: under either, no keystroke this
+/// notice could name would reach anything. Both screens say as much elsewhere
+/// — the help overlay locks navigation, the filter bar says so on the
+/// navigation row — and a region contradicting them from underneath is the
+/// worse of the two claims, because it is the one about the rows in question.
+/// The way out of both is `Esc`, which is not a scroll and is not named here.
 fn rows_below_advice(app: &SkilledApp) -> RowsBelow {
-    if app.inventory_filter_active() {
+    if app.help_context().is_some() || app.inventory_filter_active() {
         RowsBelow::NotFromHere
     } else if app.inventory_pane() == InventoryPane::Details {
         RowsBelow::UnderTheseKeys
@@ -1261,7 +1264,10 @@ fn render_detail_window(
     );
     if window.below > 0 {
         // A region too short to scroll answers to no keystroke, whatever the
-        // caller had in mind for one that can.
+        // caller had in mind for one that can. No terminal the shell agrees to
+        // draw in is that short, so nothing on screen can reach this: it is
+        // here so the advice is a property of the region rather than of the
+        // floor that currently protects it.
         let advice = if detail_max_scroll(&rows_per_line, body.height) == 0 {
             RowsBelow::NotFromHere
         } else {
@@ -3585,7 +3591,7 @@ fn help_commands(
                 commands.push(HelpCommand {
                     key: "Up/Down or j/k",
                     label: "Scroll details",
-                    description: "reach the rows below the detail region",
+                    description: "reach the rows the region cannot show at once",
                 });
             }
             if inventory_can_advance(app) {
