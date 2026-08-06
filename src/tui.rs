@@ -1819,10 +1819,13 @@ fn compatibility_claim(compatibility: Compatibility) -> String {
 ///
 /// The civil date is computed here rather than taken from a date crate, which
 /// would be a production dependency for one field. The algorithm is Howard
-/// Hinnant's `civil_from_days`, and every division is Euclidean so a time
-/// before the epoch names the day it falls on instead of rounding towards
-/// zero into the wrong one. UTC is named in the text because nothing converts
-/// the value to the reader's zone.
+/// Hinnant's `civil_from_days`. The two divisions that can be handed a
+/// negative value — the split into days and seconds here, and the split into
+/// eras below — are Euclidean, so a time before the epoch names the day it
+/// falls on instead of rounding towards zero into the day after it; every
+/// division downstream of those is given a non-negative operand by
+/// construction. UTC is named in the text because nothing converts the value
+/// to the reader's zone.
 fn format_scan_timestamp(seconds: i64) -> String {
     // Split first, so the time of day is taken from the remainder of the day
     // the date names — negative seconds included.
@@ -1911,21 +1914,43 @@ fn render_source_details(
         inner.width,
     ));
     // The abbreviation Git prints, not the whole revision: forty characters
-    // wrap in this region at every supported width, and a wrapped value can be
-    // cut away from its label by the row budget.
+    // outrun the narrow tier of this region, and a value wrapped below its
+    // label can be cut away from it by the row budget.
     repository_lines.push(detail_field("HEAD", source.short_head()));
     repository_lines.push(detail_field_middle(
         "Remote",
         source.remote_url().unwrap_or("not configured"),
         inner.width,
     ));
-    repository_lines.push(Line::from(vec![
-        Span::styled("Status: ", theme::pane_subtitle()),
-        source_status_badge(source),
-        Span::raw(" · "),
-        Span::styled("Last scan: ", theme::pane_subtitle()),
-        Span::raw(format_scan_timestamp(source.last_scan_at())),
-    ]));
+    // The scan time shares the status line while both stand on it whole, and
+    // takes the line below where they do not — the way the catalog states its
+    // classification. Left to wrap it outran both aside tiers, and what landed
+    // on the row beneath was the whole timestamp at the narrow one and `UTC`
+    // alone at the wide one: a time naming no zone, under a label naming no
+    // value. Sharing where it fits keeps the row for the sections below, which
+    // the drill-in has no aside to spare.
+    let status_label = Span::styled("Status: ", theme::pane_subtitle());
+    let status = source_status_badge(source);
+    let separator = Span::raw(" · ");
+    let scan_label = Span::styled("Last scan: ", theme::pane_subtitle());
+    let scanned = Span::raw(format_scan_timestamp(source.last_scan_at()));
+    let shared = status_label.width()
+        + status.width()
+        + separator.width()
+        + scan_label.width()
+        + scanned.width();
+    if shared <= usize::from(inner.width) {
+        repository_lines.push(Line::from(vec![
+            status_label,
+            status,
+            separator,
+            scan_label,
+            scanned,
+        ]));
+    } else {
+        repository_lines.push(Line::from(vec![status_label, status]));
+        repository_lines.push(Line::from(vec![scan_label, scanned]));
+    }
     if let Some(error) = source.source_error() {
         repository_lines.push(detail_field_bounded("Source error", error, inner.width, 3));
     }
@@ -1937,10 +1962,13 @@ fn render_source_details(
     // variants pane always changes what this section says.
     if let Some(catalog) = selected_catalog(app) {
         // The classification shares the path's line while the path is whole
-        // beside it, the way a variants group label takes its qualifiers. It
-        // is never cut to make room, and never crowds the path down to an
-        // elision short enough to pass for a path of its own: where the two do
-        // not fit, the classification states itself on the line below.
+        // beside it. It is never cut to make room, and never crowds the path
+        // down to an elision short enough to pass for a path of its own: where
+        // the two do not fit, the classification states itself on the line
+        // below. That is where this parts company with the variants group
+        // label, which sheds a qualifier it cannot fit — a pane row has one
+        // line to give and this region has another to spend, so the fact is
+        // moved here rather than dropped.
         let path = terminal_safe(&catalog.relative_path().display().to_string());
         let classification = format!(" · Classification: {}", catalog_classification(catalog));
         let budget = detail_value_budget("Path", inner.width);
@@ -2239,7 +2267,10 @@ fn detail_field(label: &str, value: &str) -> Line<'static> {
 /// A field whose value has nowhere to wrap: a path, a remote URL. Wrapped, it
 /// breaks mid-word and reads as two values, and the row budget can cut the
 /// continuation away from its label. Bounded to one line in the middle, both
-/// ends of it survive instead.
+/// ends of it survive instead — given a line with room for them. A budget too
+/// narrow to hold anything either side of the ellipsis leaves the ellipsis
+/// alone, which for a path would read as a path; no detail region is that
+/// narrow, and a unit test holds the floor where it is.
 fn detail_field_middle(label: &str, value: &str, width: u16) -> Line<'static> {
     detail_field(
         label,
@@ -3381,6 +3412,10 @@ fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
 mod tests {
     use super::*;
 
+    /// What the narrowest detail region leaves its text: the region less the
+    /// column of rule that opens it, less the margin either side.
+    const NARROWEST_INNER_WIDTH: u16 = viewport::DETAIL_REGION_WIDTH - 1 - 2;
+
     fn label_text(line: &Line<'_>) -> String {
         line.spans
             .iter()
@@ -3598,6 +3633,59 @@ mod tests {
                 format_scan_timestamp(seconds).ends_with(" UTC"),
                 "{seconds} should still format"
             );
+        }
+    }
+
+    /// A middle-truncated value falls back to the ellipsis itself when there is
+    /// no room for anything either side of it, and a `Path` field showing `.`
+    /// or `..` would be stating a path rather than eliding one. The narrowest
+    /// detail region leaves every field far more than that, and this pins it:
+    /// the fallback stays unreachable however the region is laid out.
+    #[test]
+    fn every_middle_truncated_detail_field_has_room_for_both_ends_of_its_value() {
+        const ELLIPSIS_ONLY: usize = 3;
+        for label in ["Path", "Remote"] {
+            let budget = detail_value_budget(label, NARROWEST_INNER_WIDTH);
+            assert!(
+                budget > ELLIPSIS_ONLY,
+                "{label:?} has only {budget} cells in the narrowest detail region"
+            );
+            let elided = terminal_safe_bounded_middle(&"a/".repeat(64), budget);
+            assert!(
+                elided.starts_with('a') && elided.ends_with('/') && elided.contains("..."),
+                "{elided:?} should keep both ends of the value it stands for"
+            );
+        }
+    }
+
+    /// The claim names agents, so a claim cut short names a different one:
+    /// `Claude Code + Open...` is not what was stored, and unlike a path it
+    /// carries no sense of the value it stands for. The longest two agents can
+    /// make of it fills the narrowest region's line to the cell, so every
+    /// combination is checked rather than the one a fixture happens to hold.
+    #[test]
+    fn every_compatibility_claim_stands_whole_in_the_narrowest_detail_region() {
+        for claude_code in [false, true] {
+            for codex in [false, true] {
+                for opencode in [false, true] {
+                    let claim = compatibility_claim(Compatibility::from_flags(
+                        claude_code,
+                        codex,
+                        opencode,
+                    ));
+                    let stated = label_text(&detail_field_bounded(
+                        "Compatibility",
+                        &claim,
+                        NARROWEST_INNER_WIDTH,
+                        1,
+                    ));
+                    assert_eq!(
+                        stated,
+                        format!("Compatibility: {claim}"),
+                        "the claim should be stated whole"
+                    );
+                }
+            }
         }
     }
 }

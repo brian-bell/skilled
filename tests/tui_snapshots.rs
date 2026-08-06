@@ -1077,34 +1077,51 @@ fn normalize_sources_screen(
     // the placeholder keeps the layout the application produced.
     normalized = normalize_scan_timestamp(normalized);
     // The repository rows carry the abbreviated revision, which is as
-    // unstable as the whole one. Replaced after it, so a region that shows
-    // the revision in full is normalized as one value rather than in two
-    // pieces.
+    // unstable as the whole one. Replaced after the whole revision — which no
+    // Sources surface states any more, though the replacement above stands
+    // ready for one that does — so a region showing both is normalized as two
+    // values rather than one and a fragment.
     // The placeholder is the same width as the abbreviation it stands in for,
     // so the row's columns are the ones the application laid out.
     let short_head = source.short_head();
     normalized = normalized.replace(short_head, &padded_placeholder(short_head, "[SHORT]"));
+    // A path field states its value on one line and cuts it in the middle when
+    // it does not fit, and a cut path is not the string these replacements
+    // looked for: it would survive normalization and commit this machine's
+    // temporary directory to the snapshot. The head of the path outlives any
+    // such cut, so finding it here means a fixture has outgrown the region and
+    // says so, rather than leaving a mystery diff on another machine.
+    let root = &temporary_path[..temporary_path.len().min(10)];
+    assert!(
+        !normalized.contains(root),
+        "the fixture's temporary path was cut rather than replaced, leaving {root:?} in\n{normalized}"
+    );
     normalized
 }
 
-/// Replaces every `YYYY-MM-DD HH:MM UTC` on the screen with `[SCAN]`, padded
-/// to the twenty cells the timestamp occupies.
+/// Replaces the `YYYY-MM-DD HH:MM UTC` the scan field states with `[SCAN]`,
+/// padded to the twenty cells the timestamp occupies.
+///
+/// Only a timestamp the label introduces is replaced, so a date-shaped string
+/// in fixture prose stays in the snapshot where it can be read.
 fn normalize_scan_timestamp(screen: String) -> String {
     const SHAPE: &str = "dddd-dd-dd dd:dd UTC";
+    const LABEL: &str = "Last scan: ";
     let characters = screen.chars().collect::<Vec<_>>();
     let mut normalized = String::new();
     let mut index = 0;
     while index < characters.len() {
         let window = characters.get(index..index + SHAPE.len());
-        let matches = window.is_some_and(|window| {
-            window.iter().zip(SHAPE.chars()).all(|(actual, expected)| {
-                if expected == 'd' {
-                    actual.is_ascii_digit()
-                } else {
-                    *actual == expected
-                }
-            })
-        });
+        let matches = normalized.ends_with(LABEL)
+            && window.is_some_and(|window| {
+                window.iter().zip(SHAPE.chars()).all(|(actual, expected)| {
+                    if expected == 'd' {
+                        actual.is_ascii_digit()
+                    } else {
+                        *actual == expected
+                    }
+                })
+            });
         if matches {
             normalized.push_str(&padded_placeholder(SHAPE, "[SCAN]"));
             index += SHAPE.len();
