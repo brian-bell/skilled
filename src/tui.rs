@@ -1404,7 +1404,9 @@ const MAX_VARIANT_WIDTH: usize = MAX_SKILL_WIDTH;
 /// widening the terminal past the threshold takes the columns out of slack —
 /// which the group label's band and a selected row's band still cross — and
 /// never out of a catalog path or a variant name that was readable a column
-/// earlier.
+/// earlier. That slack is not empty: [`group_label`] sets its qualifiers
+/// against the pane's right edge, so the columns past the cap are what a wide
+/// single-pane terminal spends on saying more about the catalog.
 const VARIANTS_CONTENT_MAX_WIDTH: usize = 65;
 
 fn render_sources(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
@@ -1422,12 +1424,12 @@ fn render_sources(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
             .areas(primary);
             render_region_separator(frame, separator);
             render_source_repositories(frame, repositories, app);
-            render_source_variants(frame, variants, app);
+            render_source_variants(frame, variants, app, true);
             render_source_details(frame, details, app, true);
         }
         (primary, None) => match app.sources_pane() {
             SourcesPane::Repositories => render_source_repositories(frame, primary, app),
-            SourcesPane::Variants => render_source_variants(frame, primary, app),
+            SourcesPane::Variants => render_source_variants(frame, primary, app, false),
             SourcesPane::Details => render_source_details(frame, primary, app, false),
         },
     }
@@ -1525,7 +1527,15 @@ fn repository_entry_lines(
     )
 }
 
-fn render_source_variants(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
+/// `beside_details` says whether the detail region is on screen beside the
+/// pane; a group label spends the pane's slack only when it is not (see
+/// [`group_label`]).
+fn render_source_variants(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &SkilledApp,
+    beside_details: bool,
+) {
     let variants = app
         .selected_source()
         .map(flattened_variants)
@@ -1619,7 +1629,7 @@ fn render_source_variants(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
     let mut position = 0;
     for catalog in source.catalogs() {
         let label = lines.len();
-        lines.push(catalog_group_label(catalog, inner.width));
+        lines.push(catalog_group_label(catalog, inner.width, beside_details));
         group_labels.push(label);
         if let Some(error) = catalog.scan_error() {
             let selected = position == app.focused_variant();
@@ -1736,30 +1746,46 @@ fn variant_row(candidate: &SkillCandidate, selected: bool, width: u16) -> Line<'
 /// The line naming the catalog a run of variants belongs to (prototype
 /// `.catalog-title`): where it is, and as much of how it is classified and
 /// which agents it is registered for as the pane has room for.
-fn catalog_group_label(catalog: &CatalogProposal, width: u16) -> Line<'static> {
+fn catalog_group_label(
+    catalog: &CatalogProposal,
+    width: u16,
+    beside_details: bool,
+) -> Line<'static> {
     group_label(
         &catalog.relative_path().display().to_string(),
         catalog_classification(catalog),
         &compatibility_claim(catalog.compatibility()),
         width,
+        beside_details,
     )
 }
 
-/// A group label: the path, then whichever qualifiers the pane can hold beside
-/// it whole.
+/// The least gap between a group label's path and its qualifiers.
+///
+/// Set against the right edge, the qualifiers need enough space that they read
+/// as a separate statement about the catalog and not as the tail of its path —
+/// which is exactly what a single space, the gap inside `Common · all agents`,
+/// would make them.
+const GROUP_LABEL_QUALIFIER_GAP: usize = 2;
+
+/// A group label: the path at the left, and whichever qualifiers the pane can
+/// hold whole against its right edge.
 ///
 /// The qualifiers describe the catalog; the path is which catalog, and the
-/// rows beneath the label no longer carry that themselves. So a qualifier is
-/// added only once it costs the path nothing, and dropped in the order that
-/// gives up the least: the classification goes first, because a claim of every
-/// agent or of one named agent is the more specific fact and the one a reader
-/// scanning for their own agent is looking for.
+/// rows beneath the label no longer carry that themselves. So the path is laid
+/// out first, bounded by [`VARIANTS_CONTENT_MAX_WIDTH`] like every other piece
+/// of content in the pane, and the qualifiers take the slack past it. A
+/// qualifier is added only once it costs the path nothing, and dropped in the
+/// order that gives up the least: the classification goes first, because a
+/// claim of every agent or of one named agent is the more specific fact and
+/// the one a reader scanning for their own agent is looking for.
 ///
 /// Chosen this way, widening the terminal can only ever add: the path shown is
-/// `min(path, budget)` and the qualifiers only grow with the budget. That is
-/// the same promise [`viewport::DETAIL_REGION_WIDE_THRESHOLD`] makes for the
-/// inventory table's columns — a name readable at one width must not be
-/// ellipsized at the next one up.
+/// `min(path, cap, width)`, which never shrinks, and each column past it is a
+/// column the qualifiers may spend. That is the same promise
+/// [`viewport::DETAIL_REGION_WIDE_THRESHOLD`] makes for the inventory table's
+/// columns — a name readable at one width must not be ellipsized at the next
+/// one up.
 ///
 /// A shed qualifier leaves no mark, where a shortened path leaves an ellipsis.
 /// That is deliberate: the qualifiers are a description of the catalog, and
@@ -1767,34 +1793,62 @@ fn catalog_group_label(catalog: &CatalogProposal, width: u16) -> Line<'static> {
 /// a narrow pane is not the reader's only account of them. Nothing on the line
 /// claims they were stated.
 ///
-/// The prototype sets its `.catalog-title` with `space-between`, the path at
-/// the left and the qualifiers hard against the right. Here they are adjacent,
-/// because the pane's slack is what a selected row's band crosses and a label
-/// split across it would read as two columns the rows beneath do not have.
-fn group_label(path: &str, classification: &str, claim: &str, width: u16) -> Line<'static> {
-    let budget = usize::from(width).min(VARIANTS_CONTENT_MAX_WIDTH);
-    let path = terminal_safe(path);
+/// This follows the prototype's `.catalog-title`, which sets path and
+/// qualifiers `space-between`. The objection recorded when they were first set
+/// adjacent — that the pane's slack is what a selected row's band crosses, so
+/// a label spanning it would read as two columns the rows beneath do not have
+/// — is answered by that band: it already crosses the same slack, and the
+/// label's own band crosses it whether or not a word sits at the far end.
+///
+/// What splitting them buys is the shedding the cap would otherwise force on a
+/// pane far wider than the cap. That is only the compact viewport, where the
+/// variants pane is the whole workspace and no detail region is on screen to
+/// restate what was shed, so `beside_details` is where the qualifiers stop:
+/// beside the detail region they end at the content cap like everything else
+/// in the pane. Spending that slack there would cost more than it gave — the
+/// pane is 75 columns at 150 and 65 at 151, so a qualifier held only by the
+/// slack would vanish as the terminal widened past the crossing
+/// [`viewport::DETAIL_REGION_WIDE_THRESHOLD`] and the cap exist to survive.
+fn group_label(
+    path: &str,
+    classification: &str,
+    claim: &str,
+    width: u16,
+    beside_details: bool,
+) -> Line<'static> {
+    let width = usize::from(width);
+    // The path is bounded to the pane's content cap; the qualifiers are what
+    // the slack past it is spent on, and only where that slack is stable.
+    let content = width.min(VARIANTS_CONTENT_MAX_WIDTH);
+    let path = terminal_safe_bounded_middle(&terminal_safe(path), content);
     let path_width = Span::raw(&path).width();
-    let qualifiers = [
-        format!(" · {classification} · {claim}"),
-        format!(" · {claim}"),
-        String::new(),
-    ]
-    .into_iter()
-    .find(|qualifiers| Span::raw(qualifiers).width().saturating_add(path_width) <= budget)
-    .unwrap_or_default();
-    // Either the qualifiers left the path whole, or there are none and the
-    // path has the budget to itself. So the label fits the pane and the band
-    // beneath it is a single row.
-    let label = format!(
-        "{}{qualifiers}",
-        terminal_safe_bounded_middle(&path, budget.saturating_sub(Span::raw(&qualifiers).width()))
-    );
-    // Padded to the pane so the band crosses the whole region, the way a
-    // selected row's band does, rather than stopping at the words.
-    let padding = usize::from(width).saturating_sub(Span::raw(&label).width());
+    let qualifiers_end = if beside_details { content } else { width };
+    let qualifiers = [format!("{classification} · {claim}"), claim.to_owned()]
+        .into_iter()
+        .find(|qualifiers| {
+            path_width
+                .saturating_add(GROUP_LABEL_QUALIFIER_GAP)
+                .saturating_add(Span::raw(qualifiers).width())
+                <= qualifiers_end
+        })
+        .unwrap_or_default();
+    // The qualifiers are set flush against the end they were fitted to, and
+    // the line is then padded to the pane: its band crosses the whole region,
+    // the way a selected row's band does, and is a single row.
+    let qualifiers_width = Span::raw(&qualifiers).width();
+    let gap = qualifiers_end
+        .saturating_sub(path_width)
+        .saturating_sub(qualifiers_width);
+    let padding = width
+        .saturating_sub(path_width)
+        .saturating_sub(gap)
+        .saturating_sub(qualifiers_width);
     Line::styled(
-        format!("{label}{}", " ".repeat(padding)),
+        format!(
+            "{path}{}{qualifiers}{}",
+            " ".repeat(gap),
+            " ".repeat(padding)
+        ),
         theme::group_label(),
     )
 }
@@ -3489,13 +3543,21 @@ mod tests {
                 &"very-long-segment/".repeat(12),
                 "日本語のカタログ/skills",
             ] {
-                let line = group_label(path, "Agent-specific", "Claude Code + OpenCode", width);
-                assert_eq!(
-                    line.width(),
-                    usize::from(width),
-                    "{width} columns, {path:?}: {:?}",
-                    label_text(&line)
-                );
+                for beside_details in [false, true] {
+                    let line = group_label(
+                        path,
+                        "Agent-specific",
+                        "Claude Code + OpenCode",
+                        width,
+                        beside_details,
+                    );
+                    assert_eq!(
+                        line.width(),
+                        usize::from(width),
+                        "{width} columns, {path:?}, beside_details {beside_details}: {:?}",
+                        label_text(&line)
+                    );
+                }
             }
         }
     }
@@ -3523,30 +3585,92 @@ mod tests {
             // qualifier: a wider label that spent its extra columns on
             // qualifiers and took them out of the path would say less, not
             // more, so the path is measured on its own as well as the whole.
+            // The qualifiers are set flush right, so what the label says of
+            // the catalog itself is what precedes the interior gap.
             let named = |label: &str| {
                 label
-                    .split_once(" · ")
+                    .split_once("  ")
                     .map_or_else(|| label.to_owned(), |(path, _)| path.to_owned())
             };
-            let mut previous = String::new();
-            for width in 0..=90_u16 {
-                let current = label_text(&group_label(path, classification, claim, width));
-                assert!(
-                    Span::raw(&current).width() >= Span::raw(&previous).width(),
-                    "{path:?} lost content between {} and {width} columns: \
-                     {previous:?} then {current:?}",
-                    width.saturating_sub(1)
-                );
-                assert!(
-                    Span::raw(named(&current)).width() >= Span::raw(named(&previous)).width(),
-                    "{path:?} lost path between {} and {width} columns: \
-                     {previous:?} then {current:?}",
-                    width.saturating_sub(1)
-                );
-                if usize::from(width) >= Span::raw(path).width() {
-                    assert_eq!(named(&current), path, "{width} columns");
+            for beside_details in [false, true] {
+                let mut previous = String::new();
+                for width in 0..=90_u16 {
+                    let current = label_text(&group_label(
+                        path,
+                        classification,
+                        claim,
+                        width,
+                        beside_details,
+                    ));
+                    assert!(
+                        Span::raw(&current).width() >= Span::raw(&previous).width(),
+                        "{path:?} lost content between {} and {width} columns: \
+                         {previous:?} then {current:?}",
+                        width.saturating_sub(1)
+                    );
+                    assert!(
+                        Span::raw(named(&current)).width() >= Span::raw(named(&previous)).width(),
+                        "{path:?} lost path between {} and {width} columns: \
+                         {previous:?} then {current:?}",
+                        width.saturating_sub(1)
+                    );
+                    if usize::from(width) >= Span::raw(path).width() {
+                        assert_eq!(named(&current), path, "{width} columns");
+                    }
+                    previous = current;
                 }
-                previous = current;
+            }
+        }
+    }
+
+    /// The qualifiers are set flush against the end of the label, with enough
+    /// gap that they read as a separate statement about the catalog rather
+    /// than a continuation of its path. That end is the pane's last column
+    /// where the pane is the workspace, and the content cap where the detail
+    /// region is beside it and the slack past the cap is not the pane's to
+    /// keep across the wide crossing.
+    #[test]
+    fn a_group_labels_qualifiers_are_set_flush_against_the_end_of_the_label() {
+        const GAP: usize = 2;
+
+        for width in 0..=120_u16 {
+            for beside_details in [false, true] {
+                for (path, classification, claim) in [
+                    ("skills", "Common", "all agents"),
+                    (
+                        "experimental/nested/claude-code/skills",
+                        "Agent-specific",
+                        "Claude Code + OpenCode",
+                    ),
+                    ("日本語のカタログ/skills", "Common", "all agents"),
+                ] {
+                    let end = if beside_details {
+                        usize::from(width).min(VARIANTS_CONTENT_MAX_WIDTH)
+                    } else {
+                        usize::from(width)
+                    };
+                    let line = group_label(path, classification, claim, width, beside_details);
+                    let text = label_text(&line);
+                    let Some((named, qualifiers)) = text.split_once("  ") else {
+                        // No qualifiers survived; the path has the line to
+                        // itself.
+                        assert!(!text.contains(claim), "{width} columns: {text:?}");
+                        continue;
+                    };
+                    let qualifiers = qualifiers.trim_start();
+                    assert!(
+                        qualifiers == claim || qualifiers == format!("{classification} · {claim}"),
+                        "{width} columns: {text:?}"
+                    );
+                    assert_eq!(
+                        Span::raw(&text).width(),
+                        end,
+                        "{width} columns, beside_details {beside_details}: \
+                         qualifiers not flush against the end: {text:?}"
+                    );
+                    let gap = end - Span::raw(named).width() - Span::raw(qualifiers).width();
+                    assert!(gap >= GAP, "{width} columns: gap of {gap}: {text:?}");
+                }
             }
         }
     }

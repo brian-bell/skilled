@@ -559,10 +559,9 @@ fn sources_keeps_a_variant_selection_and_details_visible_beyond_the_first_viewpo
     // the first row of the pane, under the header and its rule.
     assert!(!variants.contains("(skills/"), "{variants}");
     assert!(
-        variants
-            .lines()
-            .nth(4)
-            .is_some_and(|line| line.starts_with("skills · Common · all agents")),
+        variants.lines().nth(4).is_some_and(|line| {
+            line.starts_with("skills  ") && line.trim_end().ends_with("Common · all agents")
+        }),
         "{variants}"
     );
 
