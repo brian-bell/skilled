@@ -129,6 +129,10 @@ pub(crate) fn nav_inactive() -> Style {
 /// count included — but it drops the bold, which is emphasis on the
 /// destination's name rather than on the number beside it.
 ///
+/// The textual '·' lead-in is decided at the render site, not here: this
+/// token styles the count and the dot together, the glyph is what keeps a
+/// '·N' from reading as a route key in a row that already carries one.
+///
 /// A count may only be rendered when the underlying condition it summarises
 /// actually holds; this token styles it, it does not license it.
 pub(crate) fn nav_count() -> Style {

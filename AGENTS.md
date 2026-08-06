@@ -81,7 +81,9 @@ signal needs both, because colour alone is not an acceptable cue.
   conventions behind the `agents.rs` adapters.
 - Key hints and navigation destinations are contracts: show one only when
   `src/input.rs` handles it in that context, and show a count only when the
-  data behind it supports one.
+  data behind it supports one. Counts render as `·N` so a bare amber digit
+  cannot read as the next tab's route key — the prototype separates the
+  two classes by colour alone, which a terminal may not rest on.
 - Production dependencies require explicit review.
 
 ## Non-Interactive Shell Commands
