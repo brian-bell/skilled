@@ -1623,12 +1623,18 @@ fn navigation_count_digit_cannot_read_as_a_route_key() {
     let screen = buffer(&app, 80, 24);
     let navigation = row_text(&screen, 1);
     assert!(navigation.contains("▌Sources ·3"), "{navigation}");
-    let active_count_style = style_at(&screen, "▌Sources ·3");
+    // Probe the cell right after the title — that is the '·' cell, which is
+    // the first character of the count span and so carries the patched
+    // style. Asking `style_at` for "▌Sources ·3" would land on the
+    // marker's own style and the underline would pass trivially.
+    let active_count_style = style_following(&screen, 1, "▌Sources ");
+    assert_eq!(active_count_style.fg, Some(AMBER));
     assert!(
         active_count_style
             .add_modifier
             .contains(Modifier::UNDERLINED)
     );
+    assert!(!active_count_style.add_modifier.contains(Modifier::BOLD));
 }
 
 /// Filter outrank is not only an all-selected story: a mixed gap still has
