@@ -2026,6 +2026,11 @@ fn render_source_details(
                 variant.candidate.directory_name(),
             ),
         };
+        // One bounded line, not the name in full: in the narrow aside tier
+        // the directory and the declared name together have fewer cells than
+        // the variants pane's cap alone allows a row. What the region adds is
+        // the second fact — the name the skill declares beside the directory
+        // it lives in — which a pane row has no room to name at all.
         variant_lines.push(detail_field_bounded(
             "Directory",
             &format!(
@@ -2036,6 +2041,10 @@ fn render_source_details(
             inner.width,
             1,
         ));
+        // Trailing elision, not the middle one Repository Path and Remote
+        // take: what a trailing cut loses here is the directory name the
+        // field one row above has just stated, where the middle of the path
+        // is restated by no neighbouring field.
         variant_lines.push(detail_field_bounded(
             "Path",
             &variant.candidate.relative_path().display().to_string(),
