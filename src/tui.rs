@@ -906,9 +906,7 @@ fn inventory_empty_state(app: &SkilledApp) -> (String, String) {
     {
         return (
             "Installation roots have not been scanned".to_owned(),
-            "Skilled reads them during setup, after you have chosen which \
-             agents it should configure."
-                .to_owned(),
+            "Skilled scans the roots when this view opens.".to_owned(),
         );
     }
     if roots

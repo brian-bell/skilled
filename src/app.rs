@@ -760,6 +760,12 @@ impl SkilledApp {
     fn enter_inventory(&mut self) -> Vec<Effect> {
         self.view = View::Inventory;
         self.inventory_pane = InventoryPane::Skills;
+        // The scan is the effect that follows, so between the transition and
+        // the effect there is no scan for this view. Say so rather than rest
+        // on one taken for the view just left: whatever is rendered beside
+        // the Inventory was observed for the Inventory.
+        self.inventory = InventorySnapshot::not_scanned(&self.agents);
+        self.refilter_installations();
         vec![Effect::ScanInstallations]
     }
 
