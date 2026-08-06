@@ -1384,8 +1384,9 @@ fn repositories_pane_width(primary_width: u16) -> u16 {
 }
 
 /// Past this a variant name stops earning width, exactly as a skill name does
-/// in the inventory table; the detail region beside the list still gives the
-/// name in full.
+/// in the inventory table; the detail region beside the list states the name
+/// on its own bounded line, so a name too long for that line is elided there
+/// too.
 const MAX_VARIANT_WIDTH: usize = MAX_SKILL_WIDTH;
 
 /// The widest content the variants pane lays out.
@@ -1622,7 +1623,8 @@ fn render_source_variants(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
             let badge = components::badge(Tone::Critical, "unavailable");
             // Bounded to the pane like every other row: a wrapped error would
             // put the marker and the band on one line and the words on the
-            // next. The detail region gives the message in full.
+            // next. The detail region gives the message more room — three
+            // bounded lines — but a message past those is elided there too.
             let budget = usize::from(inner.width)
                 .min(VARIANTS_CONTENT_MAX_WIDTH)
                 .saturating_sub(ROW_MARKER_WIDTH + badge.width() + 1);
