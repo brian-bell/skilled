@@ -461,6 +461,60 @@ fn an_unread_root_leaves_opencode_unstated_rather_than_unverified() {
     assert_eq!(app.receipts().expect("receipts").len(), 2);
 }
 
+/// The postcondition is the directory OpenCode loads, not the shape of the
+/// answer. Content that changes under a name while the classification stays the
+/// same is still not what the plan described.
+#[test]
+fn a_different_winner_under_the_same_classification_is_a_verification_failure() {
+    let fixture = Fixture::new();
+    let repository = fixture.source("library", &["portable"]);
+    let mut app = fixture.registered(&repository);
+    fixture.create_root_parents();
+    // OpenCode already holds the very link the plan would create, so it is not
+    // a step this install writes — which is the case where the plan's own
+    // expectation is what the check afterwards compares against.
+    fixture.install_symlink(
+        AgentKind::OpenCode,
+        "portable",
+        &repository.join("skills/portable"),
+    );
+    focus_first_variant(&mut app);
+    dispatch(&mut app, Action::BeginInstall);
+    dispatch(&mut app, Action::ConfirmInstall);
+    let Some(InstallPrompt::Report(outcome)) = app.pending_install() else {
+        panic!("a report follows the apply");
+    };
+    assert!(outcome.step(AgentKind::OpenCode).is_none());
+    let plan = outcome.plan().clone();
+    let applied = outcome.applied().clone();
+    // The plan expected OpenCode to load through its own root. Take that link
+    // away and Codex's remains: still one directory selected, reached through a
+    // different slot from the one the plan named.
+    fs::remove_file(fixture.home().join(OPENCODE_ROOT).join("portable"))
+        .expect("remove OpenCode's link");
+    dispatch(&mut app, Action::DismissInstall);
+    dispatch(&mut app, Action::OpenInventory);
+
+    let report = verify_install(&plan, &applied, app.inventory());
+
+    assert!(!report.is_verified(), "{report:?}");
+    assert_eq!(
+        report
+            .failures()
+            .iter()
+            .map(VerifyFailure::agent)
+            .collect::<Vec<_>>(),
+        [AgentKind::OpenCode]
+    );
+    assert!(
+        report.failures()[0]
+            .observed()
+            .contains("not what the plan described"),
+        "{:?}",
+        report.failures()[0]
+    );
+}
+
 /// Spec 20.5: what an install leaves behind survives the process that made it.
 ///
 /// A fresh application, opened over the same home and the same metadata, sees
