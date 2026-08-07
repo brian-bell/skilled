@@ -14,6 +14,10 @@ Roots: Claude Code 2 installed · Codex 2 installed · OpenCode no root         
                                                                                 │ SOURCE
                                                                                 │ ─────────────────────────────────────
                                                                                 │ Source: library
+                                                                                │ OPENCODE RESOLUTION  ✓ resolved
+                                                                                │ ─────────────────────────────────────
+                                                                                │ Loads: ~/.agents/skills/alpha
+                                                                                │ Also at: ~/.claude/skills/alpha
                                                                                 │ CLAUDE CODE  ✓ healthy
                                                                                 │ ─────────────────────────────────────
                                                                                 │ Path: ~/.claude/skills/alpha
@@ -31,10 +35,6 @@ Roots: Claude Code 2 installed · Codex 2 installed · OpenCode no root         
                                                                                 │ NOT INSTALLED
                                                                                 │ ─────────────────────────────────────
                                                                                 │ - OpenCode
-                                                                                │
-                                                                                │
-                                                                                │
-                                                                                │
                                                                                 │
                                                                                 │
                                                                                 │

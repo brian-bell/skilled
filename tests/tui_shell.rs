@@ -3833,6 +3833,42 @@ impl Harness {
         app
     }
 
+    /// Two rows whose verdict comes from OpenCode's effective resolution
+    /// rather than from any one installation: one name resolving to two
+    /// different directories, and one Claude Code edition reaching OpenCode
+    /// through a compatibility root with nothing OpenCode-compatible behind it.
+    #[cfg(unix)]
+    fn resolution_inventory(&self) -> SkilledApp {
+        let home = self.directory.path().join("home");
+        let first = home.join("alpha");
+        write_skill_fixture(&first.join("skills/review"), "review");
+        write_skill_fixture(&first.join("claude/skills/exposed"), "exposed");
+        create_repository(&first);
+        let second = home.join("beta");
+        write_skill_fixture(&second.join("skills/review"), "review");
+        create_repository(&second);
+
+        let mut app = self.completed_setup();
+        for repository in [&first, &second] {
+            let preview = app.preview_source(repository).expect("preview source");
+            app.confirm_source(preview).expect("register source");
+        }
+        let claude = home.join(".claude/skills");
+        let opencode = home.join(".config/opencode/skills");
+        fs::create_dir_all(&claude).expect("create Claude Code root");
+        fs::create_dir_all(&opencode).expect("create OpenCode root");
+        fs::create_dir_all(home.join(".agents/skills")).expect("create Codex root");
+        symlink(first.join("skills/review"), opencode.join("review"));
+        symlink(second.join("skills/review"), claude.join("review"));
+        symlink(first.join("claude/skills/exposed"), claude.join("exposed"));
+
+        app.update(Action::OpenSources);
+        let update = app.update(Action::OpenInventory);
+        app.perform_effects(update.effects())
+            .expect("installation scan");
+        app
+    }
+
     /// One `alpha` skill linked into all three agent roots from the
     /// registered checkout.
     ///
@@ -4224,6 +4260,34 @@ mod installed {
         assert!(rendered.contains("SKILL "), "{rendered}");
         for heading in ["CLAUDE", "CODEX", "OPENCODE", "HEALTH", "SOURCE"] {
             assert!(rendered.contains(heading), "{heading} in\n{rendered}");
+        }
+    }
+
+    /// The two verdicts the effective resolution adds are cells like any
+    /// other: a glyph and a word carry the meaning, and the tone only
+    /// reinforces it.
+    #[test]
+    fn an_effective_resolution_verdict_pairs_its_colour_with_a_glyph_and_a_word() {
+        let harness = Harness::new();
+        let app = harness.resolution_inventory();
+
+        let screen = buffer(&app, 80, 24);
+
+        for (name, glyph, word, colour) in [
+            ("review", "×", "conflict", Color::Rgb(0xee, 0x6b, 0x73)),
+            ("exposed", "!", "foreign", Color::Rgb(0xe6, 0xbd, 0x6a)),
+        ] {
+            let row = row_containing(&screen, name);
+            let line = row_text(&screen, row);
+            assert!(
+                line.contains(&format!("{glyph} {word}")),
+                "{glyph} {word} missing from {line:?}"
+            );
+            assert_eq!(
+                style_in_row(&screen, row, word).fg,
+                Some(colour),
+                "wrong tone for {name}"
+            );
         }
     }
 
@@ -4706,11 +4770,15 @@ mod installed {
         // Scrolling as far as the frame reported reaches the last agent's
         // section, which is what makes the extent an extent rather than a
         // number: unreachable rows are the whole complaint behind the region.
+        // The OpenCode agent's own section, not the row's resolution section:
+        // the latter states what OpenCode would load and stands above the fold.
         let cut = text(&buffer(&app, 80, 24));
-        assert!(!cut.contains("OPENCODE"), "{cut}");
+        assert!(
+            !cut.contains("Path: ~/.config/opencode/skills/alpha"),
+            "{cut}"
+        );
         scroll_detail(&mut app, 80, 24, cramped);
         let scrolled = text(&buffer(&app, 80, 24));
-        assert!(scrolled.contains("OPENCODE"), "{scrolled}");
         assert!(
             scrolled.contains("Path: ~/.config/opencode/skills/alpha"),
             "{scrolled}"
@@ -5141,12 +5209,12 @@ mod installed {
 
         let table = text(&buffer(&app, 80, 24));
         assert!(table.contains("▌ Global inventory"), "{table}");
-        assert!(!table.contains("Object: symbolic link"), "{table}");
+        assert!(!table.contains("Description: alpha fixture"), "{table}");
 
         app.update(Action::AdvanceInventoryPane);
         let detail = text(&buffer(&app, 80, 24));
         assert!(detail.contains("▌ Details  alpha"), "{detail}");
-        assert!(detail.contains("Object: symbolic link"), "{detail}");
+        assert!(detail.contains("Description: alpha fixture"), "{detail}");
         assert!(!detail.contains("Global inventory"), "{detail}");
         // Neither selection nor filtering acts in the detail region — the
         // query box is drawn above the table, which is not on screen — so the

@@ -956,6 +956,41 @@ mod installed {
         type_filter(&mut app, "unmanaged");
         assert_eq!(names(&app), ["foreign"]);
     }
+    /// The Health column gained two words that come from the effective
+    /// resolution rather than from any one installation, and the same box
+    /// narrows by them.
+    #[test]
+    fn the_filter_narrows_by_the_words_the_effective_resolution_adds() {
+        let temporary = tempfile::tempdir().expect("temporary application directory");
+        let mut app = app_in(&temporary);
+        finish_setup(&mut app);
+        let first = temporary.path().join("alpha");
+        let second = temporary.path().join("beta");
+        register_source(&mut app, &first, 1);
+        register_source(&mut app, &second, 1);
+        // One name, two different directories, in two roots OpenCode reads.
+        install_link(
+            &temporary,
+            AgentKind::OpenCode,
+            "variant-0",
+            &first.join("skills/variant-0"),
+        );
+        install_link(
+            &temporary,
+            AgentKind::ClaudeCode,
+            "variant-0",
+            &second.join("skills/variant-0"),
+        );
+        let update = app.update(Action::OpenSources);
+        app.perform_effects(update.effects()).expect("effects");
+        let update = app.update(Action::OpenInventory);
+        app.perform_effects(update.effects())
+            .expect("installation scan");
+
+        type_filter(&mut app, "conflict");
+
+        assert_eq!(names(&app), ["variant-0"]);
+    }
     /// A row that mixes a managed installation with an unmanaged one still
     /// holds an installation that resolved to no registered source, so the
     /// provenance query that surfaces unmanaged installations must admit it.

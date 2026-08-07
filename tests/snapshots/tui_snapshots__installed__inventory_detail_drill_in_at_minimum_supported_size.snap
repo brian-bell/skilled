@@ -14,6 +14,9 @@ expression: "normalize_inventory(&temporary, render(&app, 80, 24))"
  SOURCE
  ──────────────────────────────────────────────────────────────────────────────
  Not resolved to any registered source; Skilled does not manage it.
+ OPENCODE RESOLUTION  ✓ resolved
+ ──────────────────────────────────────────────────────────────────────────────
+ Loads: ~/.agents/skills/copied
  CODEX  U unmanaged
  ──────────────────────────────────────────────────────────────────────────────
  Finding: install.unmanaged · info
@@ -21,8 +24,5 @@ expression: "normalize_inventory(&temporary, render(&app, 80, 24))"
  Path: ~/.agents/skills/copied
  Object: directory
  Validation: ✓ valid as copied
- NOT INSTALLED
- ──────────────────────────────────────────────────────────────────────────────
- - Claude Code, OpenCode
-
- Tab/Shift-Tab Region   2 Sources   s Settings   ? Help   q Quit   Esc Back
+ ! 3 more lines below — j/k to scroll
+ Tab/Shift-Tab Region   j/k Scroll   2 Sources   q Quit   Esc Back …

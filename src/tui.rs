@@ -13,8 +13,9 @@ use crate::{
     components::{self, KeyHint},
     inventory::{
         Finding, FindingSeverity, InstallationHealth, InstallationObject,
-        InstalledSkillObservation, InventoryRow, RootScan, RootStatus, RowProvenance,
+        InstalledSkillObservation, InventoryRow, RootScan, RootStatus, RowProvenance, RowVerdict,
     },
+    resolution::{OpenCodeEntry, OpenCodeResolution},
     source::{
         CatalogClassification, CatalogProposal, Compatibility, RegisteredSource, SkillCandidate,
         SkillValidation,
@@ -915,12 +916,28 @@ fn inventory_row_line(
             theme::tone_style(tone),
         ));
     }
-    let tone = installation_tone(row.health());
-    spans.push(components::badge(tone, row.health().label()));
+    let verdict = row.verdict();
+    spans.push(components::badge(verdict_tone(verdict), verdict.label()));
     // `width` is the whole table region, not the width the capped columns
     // happen to use, so the selection band crosses the slack rather than
     // stopping where the health badge does.
     components::list_row(spans, selected, width)
+}
+
+/// The tone of a row's verdict.
+///
+/// The two verdicts the effective resolution adds take the tones their
+/// severity already carries elsewhere: a conflicting duplicate is critical
+/// because an agent would resolve content nobody chose, and foreign exposure
+/// is a warning because usability is uncertain rather than lost.
+fn verdict_tone(verdict: RowVerdict) -> Tone {
+    match verdict {
+        RowVerdict::NotASkill => Tone::Inactive,
+        RowVerdict::Healthy => Tone::Healthy,
+        RowVerdict::Unverified | RowVerdict::Unmanaged => Tone::Unmanaged,
+        RowVerdict::ForeignVariant => Tone::Warning,
+        RowVerdict::Broken | RowVerdict::Conflict => Tone::Critical,
+    }
 }
 
 fn installation_tone(health: InstallationHealth) -> Tone {
@@ -1521,8 +1538,8 @@ fn inventory_detail_lines(row: &InventoryRow, home: &Path, width: u16) -> Vec<Li
         theme::pane_heading(),
     ));
     lines.push(Line::from(components::badge(
-        installation_tone(row.health()),
-        row.health().label(),
+        verdict_tone(row.verdict()),
+        row.verdict().label(),
     )));
     if let Some(SkillValidation::Valid { description, .. }) = row
         .observations()
@@ -1559,6 +1576,8 @@ fn inventory_detail_lines(row: &InventoryRow, home: &Path, width: u16) -> Vec<Li
             "Not a skill installation, so no source applies.",
         )),
     }
+
+    push_opencode_resolution(&mut lines, row, home, width);
 
     for observation in row.observations() {
         // The row's own health is a rollup across the agents; each section
@@ -1598,6 +1617,110 @@ fn inventory_detail_lines(row: &InventoryRow, home: &Path, width: u16) -> Vec<Li
         )));
     }
     lines
+}
+
+/// What OpenCode would load for this name, where that is not already implied
+/// by the agent sections below.
+///
+/// A row OpenCode holds itself, aliased nowhere, is fully described by its own
+/// OPENCODE section; saying so twice would spend the region's scarcest resource
+/// on a restatement. Everything else — an alias, a conflict, an exposure, a
+/// root that was not read, or content OpenCode reaches only through another
+/// agent's root — is a fact no single section carries.
+fn push_opencode_resolution(
+    lines: &mut Vec<Line<'static>>,
+    row: &InventoryRow,
+    home: &Path,
+    width: u16,
+) {
+    let Some(resolution) = row.opencode_resolution() else {
+        return;
+    };
+    let badge = match resolution {
+        OpenCodeResolution::NothingVisible => return,
+        OpenCodeResolution::Selected { winner, aliases }
+            if aliases.is_empty() && winner.root() == AgentKind::OpenCode =>
+        {
+            return;
+        }
+        OpenCodeResolution::Selected { .. } => components::badge(Tone::Healthy, "resolved"),
+        OpenCodeResolution::ForeignExposure { .. } => {
+            components::badge(Tone::Warning, "foreign variant")
+        }
+        OpenCodeResolution::Conflict { .. } => components::badge(Tone::Critical, "conflict"),
+        // The same "could not tell" the scanner keeps everywhere else: a root
+        // Skilled was asked to leave alone was not read, and a lower root can
+        // hold the very directory that would make this a conflict.
+        OpenCodeResolution::Incomplete { .. } => {
+            components::badge(Tone::Inactive, "could not tell")
+        }
+    };
+    push_detail_section_badge(lines, "OPENCODE RESOLUTION", badge, width);
+    // Findings first, as in every agent section: the reason a resolution is
+    // weakened is what this region exists to report.
+    //
+    // Informational ones are left to the fields below, which state the same
+    // paths in the reader's own notation: a benign alias is exactly what
+    // `Loads` and `Also at` already say, and repeating it as a paragraph would
+    // spend four rows of the region's scarcest space on the arrangement a user
+    // who installed one skill for three agents has deliberately made. Doctor
+    // still lists it under its code, with its evidence whole.
+    lines.extend(
+        row.resolution_findings()
+            .iter()
+            .filter(|finding| finding.severity() > FindingSeverity::Info)
+            .flat_map(|finding| finding_lines(finding, width)),
+    );
+    match resolution {
+        OpenCodeResolution::NothingVisible => {}
+        OpenCodeResolution::Selected { winner, aliases }
+        | OpenCodeResolution::ForeignExposure { winner, aliases } => {
+            lines.push(loaded_field("Loads", winner, home, width));
+            if !aliases.is_empty() {
+                lines.push(detail_field_bounded(
+                    "Also at",
+                    &joined_entry_paths(aliases, home),
+                    width,
+                    3,
+                ));
+            }
+        }
+        OpenCodeResolution::Conflict { entries } => {
+            if let Some(winner) = entries.first() {
+                lines.push(loaded_field("Would load", winner, home, width));
+            }
+            lines.push(detail_field_bounded(
+                "Also at",
+                &joined_entry_paths(&entries[1.min(entries.len())..], home),
+                width,
+                3,
+            ));
+        }
+        OpenCodeResolution::Incomplete { roots } => {
+            let unread: Vec<&str> = roots
+                .iter()
+                .map(|root| AgentKind::display_name(*root))
+                .collect();
+            lines.push(detail_field_bounded(
+                "Not read",
+                &unread.join(", "),
+                width,
+                2,
+            ));
+        }
+    }
+}
+
+fn loaded_field(label: &str, entry: &OpenCodeEntry, home: &Path, width: u16) -> Line<'static> {
+    detail_field_bounded(label, &home_relative(entry.path(), home), width, 2)
+}
+
+fn joined_entry_paths(entries: &[OpenCodeEntry], home: &Path) -> String {
+    entries
+        .iter()
+        .map(|entry| home_relative(entry.path(), home))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn observation_lines(

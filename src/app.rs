@@ -858,8 +858,10 @@ impl SkilledApp {
     /// Recompute which rows the query admits, and keep the selection on one.
     ///
     /// A row matches when the query appears in its name, the label of its
-    /// provenance or of any installation's own provenance, or the word naming
-    /// its health, so the same box narrows by identity, provenance, or state.
+    /// provenance or of any installation's own provenance, or the word the
+    /// Health column states for it, so the same box narrows by identity,
+    /// provenance, or state — including the states that come from OpenCode's
+    /// effective resolution rather than from any one installation.
     /// Matching each installation keeps a mixed row findable by the source it
     /// partly came from and by "not registered" alike; stray content is not an
     /// installation and answers for no provenance.
@@ -882,7 +884,7 @@ impl SkilledApp {
                                 .to_lowercase()
                                 .contains(&needle)
                     })
-                    || row.health().label().contains(needle.as_str())
+                    || row.verdict().label().contains(needle.as_str())
             })
             .map(|(index, _)| index)
             .collect();
