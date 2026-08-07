@@ -513,6 +513,39 @@ impl InstallTarget {
     }
 }
 
+/// What the plan expects OpenCode to resolve the name to once it has run.
+///
+/// Carried so the check afterwards has something to check *against*. Spec 11.4
+/// asks whether the machine ended up the way the plan said it would, which is
+/// a different question from whether the arrangement is one Skilled would have
+/// chosen: an install that knowingly leaves OpenCode ambiguous says so before
+/// it runs, and a user who confirmed that has not been surprised by it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OpenCodeOutlook {
+    /// OpenCode will load one directory.
+    Selected,
+    /// The only definition it can see will be another agent's edition.
+    Exposure,
+    /// More than one directory will answer to the name.
+    Conflict,
+    /// Nothing will.
+    Nothing,
+    /// A root Skilled did not read leaves it unknowable.
+    Unknown,
+}
+
+impl OpenCodeOutlook {
+    fn of(resolution: &OpenCodeResolution) -> Self {
+        match resolution {
+            OpenCodeResolution::Selected { .. } => Self::Selected,
+            OpenCodeResolution::ForeignExposure { .. } => Self::Exposure,
+            OpenCodeResolution::Conflict { .. } => Self::Conflict,
+            OpenCodeResolution::NothingVisible => Self::Nothing,
+            OpenCodeResolution::Incomplete { .. } => Self::Unknown,
+        }
+    }
+}
+
 /// One immutable statement of everything an install would do.
 ///
 /// Built only by [`plan_install`], and never modified afterwards: what the user
@@ -524,6 +557,7 @@ pub struct InstallPlan {
     source_dir: PathBuf,
     targets: Vec<InstallTarget>,
     warnings: Vec<String>,
+    opencode_outlook: Option<OpenCodeOutlook>,
 }
 
 impl InstallPlan {
@@ -553,6 +587,12 @@ impl InstallPlan {
     /// before confirming it.
     pub fn warnings(&self) -> &[String] {
         &self.warnings
+    }
+
+    /// What this plan expects OpenCode to resolve the name to afterwards, or
+    /// `None` where OpenCode is not an agent Skilled was asked to manage.
+    pub fn opencode_outlook(&self) -> Option<OpenCodeOutlook> {
+        self.opencode_outlook
     }
 
     /// Every finding that stops this plan, with the agent it concerns.
@@ -636,15 +676,18 @@ pub fn plan_install(
         .collect();
 
     let mut warnings = plan_warnings(sources, variant);
-    if detection_at(agents, AgentKind::OpenCode).selected() {
-        apply_opencode_prediction(&mut targets, probe, variant, &source_dir, &mut warnings);
-    }
+    let opencode_outlook = detection_at(agents, AgentKind::OpenCode)
+        .selected()
+        .then(|| {
+            apply_opencode_prediction(&mut targets, probe, variant, &source_dir, &mut warnings)
+        });
 
     Ok(InstallPlan {
         variant: variant.clone(),
         source_dir,
         targets,
         warnings,
+        opencode_outlook,
     })
 }
 
@@ -680,16 +723,18 @@ fn apply_opencode_prediction(
     variant: &VariantRef,
     source_dir: &Path,
     warnings: &mut Vec<String>,
-) {
+) -> OpenCodeOutlook {
     let index = AgentKind::OpenCode.index();
     if matches!(
         targets[index].disposition,
         TargetDisposition::Blocked { .. }
     ) {
-        // Its own finding is the more direct account of the same slot.
-        return;
+        // Its own finding is the more direct account of the same slot, and a
+        // target nothing will be written to has no outlook to state.
+        return OpenCodeOutlook::Unknown;
     }
     let predicted = resolve_opencode(sightings(targets, probe, variant, source_dir, true));
+    let outlook = OpenCodeOutlook::of(&predicted);
     if targets[index].is_work() {
         if matches!(predicted, OpenCodeResolution::Conflict { .. }) {
             targets[index].disposition = TargetDisposition::Blocked {
@@ -703,7 +748,7 @@ fn apply_opencode_prediction(
                     ),
                 ),
             };
-            return;
+            return outlook;
         }
         if let OpenCodeResolution::Incomplete { roots } = &predicted {
             warnings.push(format!(
@@ -712,7 +757,7 @@ fn apply_opencode_prediction(
                 unknown_roots(roots)
             ));
         }
-        return;
+        return outlook;
     }
     let current = resolve_opencode(sightings(targets, probe, variant, source_dir, false));
     if predicted_kind(&predicted) != predicted_kind(&current)
@@ -723,6 +768,7 @@ fn apply_opencode_prediction(
             variant.skill_name()
         ));
     }
+    outlook
 }
 
 /// What each native root would hold under the name, before or after the plan.
@@ -1577,23 +1623,36 @@ pub fn verify_install(
     // install that leaves OpenCode loading another agent's copy of a common
     // skill, or seeing an edition it cannot use, is the arrangement the plan
     // described and warned about, not a broken one.
-    if !opencode_native && applied.steps.iter().any(AppliedStep::wrote) {
-        match row.and_then(InventoryRow::opencode_resolution) {
-            Some(OpenCodeResolution::Conflict { .. }) => failures.push(VerifyFailure {
+    if !opencode_native
+        && applied.steps.iter().any(AppliedStep::wrote)
+        && let Some(observed) = row.and_then(InventoryRow::opencode_resolution)
+    {
+        // Checked against what the plan said, not against what Skilled would
+        // have preferred. An install that knowingly leaves OpenCode ambiguous
+        // says so before it runs and is confirmed with that in front of the
+        // reader; a conflict that has been there all along is Doctor's. What
+        // this catches is the arrangement changing into something the plan did
+        // not describe, which is the whole reason a postcondition is checked.
+        match (plan.opencode_outlook(), OpenCodeOutlook::of(observed)) {
+            (_, OpenCodeOutlook::Unknown) => {
+                let OpenCodeResolution::Incomplete { roots } = observed else {
+                    unreachable!("only an incomplete resolution is unknown")
+                };
+                withheld.push(VerifyWithheld {
+                    agent: AgentKind::OpenCode,
+                    reason: format!(
+                        "what OpenCode resolves the name to could not be established: {}",
+                        unknown_roots(roots)
+                    ),
+                });
+            }
+            (Some(expected), actual) if expected != actual => failures.push(VerifyFailure {
                 agent: AgentKind::OpenCode,
-                observed: "the roots OpenCode reads now hold more than one directory under that \
-                           name"
-                    .to_owned(),
-            }),
-            Some(OpenCodeResolution::Incomplete { roots }) => withheld.push(VerifyWithheld {
-                agent: AgentKind::OpenCode,
-                reason: format!(
-                    "what OpenCode resolves the name to could not be established: {}",
-                    unknown_roots(roots)
+                observed: format!(
+                    "this was not what the plan described: {}",
+                    observed_summary(observed)
                 ),
             }),
-            // `None` is OpenCode deselected, which the roll-up above already
-            // accounts for: the scan was not asked about it at all.
             _ => {}
         }
     }

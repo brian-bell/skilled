@@ -385,7 +385,7 @@ fn write_plan(output: &mut dyn Write, plan: &InstallPlan, home: &Path) -> std::i
             output,
             "  {:<12} {}",
             target.agent().display_name(),
-            target_verdict(target)
+            target_verdict(target, plan.is_blocked())
         )?;
         writeln!(
             output,
@@ -399,10 +399,19 @@ fn write_plan(output: &mut dyn Write, plan: &InstallPlan, home: &Path) -> std::i
     Ok(())
 }
 
-fn target_verdict(target: &InstallTarget) -> String {
+/// What the plan will do about one target, printed.
+///
+/// A plan blocks whole, so a target that would have been work is not work: the
+/// screen says "would create…" for the same reason, and a printed plan that
+/// promised "create the link" three lines above "Blocked: nothing was written"
+/// would be contradicting itself in the channel a script reads.
+fn target_verdict(target: &InstallTarget, plan_is_blocked: bool) -> String {
+    let would = if plan_is_blocked { "would " } else { "" };
     match target.disposition() {
-        TargetDisposition::CreateLink => "create the link".to_owned(),
-        TargetDisposition::CreateRootAndLink => "create the skill root, then the link".to_owned(),
+        TargetDisposition::CreateLink => format!("{would}create the link"),
+        TargetDisposition::CreateRootAndLink => {
+            format!("{would}create the skill root, then the link")
+        }
         TargetDisposition::AlreadyInstalled { receipted: true } => {
             "already installed, and Skilled holds a receipt for this path".to_owned()
         }
