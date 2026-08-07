@@ -21,12 +21,16 @@ use std::{
 use crate::{
     AgentDetection, AgentKind,
     agents::detection_at,
-    inventory::{Finding, FindingSeverity},
+    inventory::{
+        Finding, FindingSeverity, InstallationHealth, InstallationObject,
+        InstalledSkillObservation, InventoryRow, InventorySnapshot,
+    },
     resolution::{
         CandidateSelection, OpenCodeResolution, RootSighting, SightedEntry, VariantRef, narrow,
         resolve_opencode, variants_by_name,
     },
-    source::RegisteredSource,
+    source::{RegisteredSource, SkillValidation},
+    store::Store,
     validation::{InspectionBudget, PortableValidationError, validate_portable_skill_with_budget},
 };
 
@@ -907,6 +911,385 @@ fn slot_disposition(
             ),
         },
     }
+}
+
+/// What happened to one target the plan called work.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum StepOutcome {
+    /// The link was created and its ownership receipt recorded.
+    Created,
+    /// The link was created but the receipt could not be written, so Skilled
+    /// does not own something it put on disk. Stated rather than hidden: the
+    /// link is real, and a later repair will not recognise it.
+    CreatedUnrecorded(String),
+    /// Nothing was written to this target, and why.
+    Failed(String),
+    /// The run stopped before reaching this target.
+    Unattempted,
+}
+
+/// One target, and what the apply did about it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AppliedStep {
+    agent: AgentKind,
+    link_path: PathBuf,
+    outcome: StepOutcome,
+}
+
+impl AppliedStep {
+    pub fn agent(&self) -> AgentKind {
+        self.agent
+    }
+
+    pub fn link_path(&self) -> &Path {
+        &self.link_path
+    }
+
+    pub fn outcome(&self) -> &StepOutcome {
+        &self.outcome
+    }
+
+    fn wrote(&self) -> bool {
+        matches!(
+            self.outcome,
+            StepOutcome::Created | StepOutcome::CreatedUnrecorded(_)
+        )
+    }
+}
+
+/// Everything one apply did, step by step (spec 19).
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ApplyReport {
+    steps: Vec<AppliedStep>,
+}
+
+impl ApplyReport {
+    pub fn steps(&self) -> &[AppliedStep] {
+        &self.steps
+    }
+
+    pub fn step(&self, agent: AgentKind) -> Option<&AppliedStep> {
+        self.steps.iter().find(|step| step.agent == agent)
+    }
+}
+
+/// One postcondition the fresh scan did not bear out.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VerifyFailure {
+    agent: AgentKind,
+    observed: String,
+}
+
+impl VerifyFailure {
+    pub fn agent(&self) -> AgentKind {
+        self.agent
+    }
+
+    /// What the scan taken after the apply actually found.
+    pub fn observed(&self) -> &str {
+        &self.observed
+    }
+}
+
+/// What a scan taken after the apply made of the links it wrote.
+///
+/// Spec 11.4: exit status zero is not sufficient by itself, so every created
+/// link is re-observed and checked against what the plan said it would be.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct VerifyReport {
+    failures: Vec<VerifyFailure>,
+}
+
+impl VerifyReport {
+    pub fn is_verified(&self) -> bool {
+        self.failures.is_empty()
+    }
+
+    pub fn failures(&self) -> &[VerifyFailure] {
+        &self.failures
+    }
+}
+
+/// The single word an install run ends on.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InstallStatus {
+    /// The plan held no work, so nothing was written and nothing failed.
+    NothingToDo,
+    /// Every planned link was created and every postcondition held.
+    Installed,
+    /// Some links were created and the run stopped before the rest.
+    PartiallyApplied,
+    /// The run stopped before writing anything at all.
+    NotApplied,
+    /// Everything was written, and the scan afterwards did not bear it out.
+    VerificationFailed,
+}
+
+/// One completed install run: what was planned, what was done, and what the
+/// scan afterwards made of it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InstallOutcome {
+    plan: InstallPlan,
+    applied: ApplyReport,
+    verification: VerifyReport,
+}
+
+impl InstallOutcome {
+    pub(crate) fn new(plan: InstallPlan, applied: ApplyReport, verification: VerifyReport) -> Self {
+        Self {
+            plan,
+            applied,
+            verification,
+        }
+    }
+
+    pub fn plan(&self) -> &InstallPlan {
+        &self.plan
+    }
+
+    pub fn applied(&self) -> &ApplyReport {
+        &self.applied
+    }
+
+    pub fn verification(&self) -> &VerifyReport {
+        &self.verification
+    }
+
+    pub fn step(&self, agent: AgentKind) -> Option<&AppliedStep> {
+        self.applied.step(agent)
+    }
+
+    /// The verdict, settled in the order a reader would want it.
+    ///
+    /// What was written is decided before what the scan made of it: a run that
+    /// stopped part way through is partially applied whatever the links it did
+    /// manage to write turned out to be, and calling it a verification failure
+    /// would name the smaller of the two problems.
+    pub fn status(&self) -> InstallStatus {
+        if self.applied.steps.is_empty() {
+            return InstallStatus::NothingToDo;
+        }
+        if !self.applied.steps.iter().all(AppliedStep::wrote) {
+            return if self.applied.steps.iter().any(AppliedStep::wrote) {
+                InstallStatus::PartiallyApplied
+            } else {
+                InstallStatus::NotApplied
+            };
+        }
+        if !self.verification.is_verified() {
+            return InstallStatus::VerificationFailed;
+        }
+        InstallStatus::Installed
+    }
+}
+
+/// What the install flow is showing, and therefore what it will accept.
+///
+/// Held by [`crate::SkilledApp`] and rendered as a modal dialog. The two states
+/// are not interchangeable: a preview is a question, and only a preview accepts
+/// a confirmation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum InstallPrompt {
+    /// What would happen, awaiting the user's answer.
+    Preview(InstallPlan),
+    /// What did happen.
+    Report(InstallOutcome),
+    /// No plan could be made at all, and why.
+    Failed(String),
+}
+
+/// Create every link the plan calls work, in [`AgentKind::ALL`] order.
+///
+/// Spec 15 is applied literally. Each target is read again immediately before
+/// it is written, because the preview the user confirmed described an earlier
+/// moment; a target that changed is not written to, and the run stops there
+/// rather than carrying on into the targets behind it. Nothing is ever
+/// replaced, so a link that appeared in the meantime is a failed precondition
+/// and never an unlink-and-retry.
+///
+/// There is no rollback. The links written before a failure are real, healthy,
+/// receipted installations, and deleting them would be a second unrequested
+/// write on top of an operation that already went wrong. Spec 19 permits
+/// same-operation rollback and does not require it; the report says exactly
+/// what exists.
+pub(crate) fn apply_install(plan: &InstallPlan, store: &Store) -> ApplyReport {
+    let mut steps: Vec<AppliedStep> = Vec::new();
+    let mut stopped = false;
+    for target in plan.targets().iter().filter(|target| target.is_work()) {
+        if stopped {
+            steps.push(AppliedStep {
+                agent: target.agent,
+                link_path: target.link_path.clone(),
+                outcome: StepOutcome::Unattempted,
+            });
+            continue;
+        }
+        let outcome = apply_target(plan, target, store);
+        stopped = !matches!(outcome, StepOutcome::Created);
+        steps.push(AppliedStep {
+            agent: target.agent,
+            link_path: target.link_path.clone(),
+            outcome,
+        });
+    }
+    ApplyReport { steps }
+}
+
+fn apply_target(plan: &InstallPlan, target: &InstallTarget, store: &Store) -> StepOutcome {
+    let root = match target.link_path.parent() {
+        Some(root) => root,
+        None => return StepOutcome::Failed("the target has no parent directory".to_owned()),
+    };
+    // The guard, not a convenience: what the plan described and what is there
+    // now must still agree, or this target is left exactly as it is.
+    if probe_entry(&target.link_path) != EntryProbe::Absent {
+        return StepOutcome::Failed(
+            "something arrived at this path after the plan was shown, so nothing was written to it"
+                .to_owned(),
+        );
+    }
+    let root_now = probe_root(root);
+    match (&target.disposition, &root_now) {
+        (TargetDisposition::CreateLink, RootProbe::Present) => {}
+        (
+            TargetDisposition::CreateRootAndLink,
+            RootProbe::Missing {
+                parent_present: true,
+            },
+        ) => {
+            // One level, never recursive: the plan named this directory and
+            // only this directory.
+            if let Err(error) = fs::create_dir(root) {
+                return StepOutcome::Failed(format!(
+                    "the skill root could not be created: {error}"
+                ));
+            }
+        }
+        _ => {
+            return StepOutcome::Failed(
+                "the agent's skill root changed after the plan was shown, so nothing was written \
+                 to it"
+                    .to_owned(),
+            );
+        }
+    }
+    if let Err(error) = create_directory_symlink(plan.source_dir(), &target.link_path) {
+        return StepOutcome::Failed(format!("the link could not be created: {error}"));
+    }
+    let receipt = Receipt {
+        agent: target.agent,
+        skill_name: plan.skill_name().to_owned(),
+        link_path: target.link_path.clone(),
+        link_target: plan.source_dir().to_path_buf(),
+        source_id: Some(plan.variant.source_id()),
+        catalog_relative_path: Some(plan.variant.catalog_relative_path().to_path_buf()),
+        variant_relative_path: Some(plan.variant.variant_relative_path().to_path_buf()),
+    };
+    match store.record_receipt(&receipt) {
+        Ok(()) => StepOutcome::Created,
+        Err(error) => StepOutcome::CreatedUnrecorded(error.to_string()),
+    }
+}
+
+#[cfg(unix)]
+fn create_directory_symlink(target: &Path, link_path: &Path) -> io::Result<()> {
+    std::os::unix::fs::symlink(target, link_path)
+}
+
+#[cfg(not(unix))]
+fn create_directory_symlink(target: &Path, link_path: &Path) -> io::Result<()> {
+    std::os::windows::fs::symlink_dir(target, link_path)
+}
+
+/// Check every link the apply wrote against the plan that called for it.
+///
+/// Pure, over a scan taken after the apply. The observation has to be a
+/// symbolic link resolving to a registered variant with this identity, valid
+/// and healthy — and where OpenCode was written to, its effective resolution
+/// has to be the link that was just written rather than something reached
+/// through a compatibility root.
+pub fn verify_install(
+    plan: &InstallPlan,
+    applied: &ApplyReport,
+    snapshot: &InventorySnapshot,
+) -> VerifyReport {
+    let mut failures = Vec::new();
+    let row = snapshot.row(plan.skill_name());
+    for step in applied.steps.iter().filter(|step| step.wrote()) {
+        let Some(observed) = row.and_then(|row| row.observation(step.agent)) else {
+            failures.push(VerifyFailure {
+                agent: step.agent,
+                observed: "the scan taken afterwards found nothing at this path".to_owned(),
+            });
+            continue;
+        };
+        if let Some(observed) = mismatch(plan, observed) {
+            failures.push(VerifyFailure {
+                agent: step.agent,
+                observed,
+            });
+            continue;
+        }
+        if step.agent == AgentKind::OpenCode
+            && let Some(resolution) = row.and_then(InventoryRow::opencode_resolution)
+            && !matches!(
+                resolution,
+                OpenCodeResolution::Selected { winner, .. } if winner.path() == step.link_path
+            )
+        {
+            failures.push(VerifyFailure {
+                agent: step.agent,
+                observed: format!(
+                    "OpenCode does not resolve the name to this link: {}",
+                    predicted_summary(resolution)
+                ),
+            });
+        }
+    }
+    VerifyReport { failures }
+}
+
+/// What the fresh observation says that the plan did not, or `None` where the
+/// two agree.
+fn mismatch(plan: &InstallPlan, observed: &InstalledSkillObservation) -> Option<String> {
+    let InstallationObject::Symlink { .. } = observed.object() else {
+        return Some(format!(
+            "what is there is {}, not a symbolic link",
+            observed.object().description()
+        ));
+    };
+    match observed.resolution() {
+        Some(resolution) if resolution == plan.variant() => {}
+        Some(resolution) => {
+            return Some(format!(
+                "it resolves to {} instead",
+                resolution.evidence_label()
+            ));
+        }
+        None => {
+            return Some(format!(
+                "it does not resolve to a registered variant: {}",
+                observed.provenance().label()
+            ));
+        }
+    }
+    if !observed.validation().is_some_and(SkillValidation::is_valid) {
+        return Some(
+            observed
+                .validation()
+                .and_then(SkillValidation::message)
+                .map_or_else(
+                    || "the installed content could not be validated".to_owned(),
+                    |message| format!("the installed content does not validate: {message}"),
+                ),
+        );
+    }
+    (observed.health() != InstallationHealth::Healthy).then(|| {
+        format!(
+            "the scan taken afterwards calls it {}",
+            observed.health().label()
+        )
+    })
 }
 
 /// Evidence that Skilled created one particular link.

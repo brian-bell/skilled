@@ -4,6 +4,11 @@ use crate::{
     AgentDetection, AgentKind, AppEnvironment, Result,
     agents::{detect_agents, detection_at},
     inventory::{DoctorEntry, InventoryRow, InventorySnapshot, scan_installations},
+    operations::{
+        InstallOutcome, InstallPrompt, Receipt, apply_install, plan_install, probe_install,
+        verify_install,
+    },
+    resolution::VariantRef,
     source::{
         CatalogProposal, RegisteredSource, SkillCandidate, SourcePreview, preview_local_source,
         revalidate_source_preview,
@@ -151,6 +156,13 @@ pub enum Action {
     AppendInventoryFilter(char),
     DeleteInventoryFilterCharacter,
     SubmitInventoryFilter,
+    /// Plan installing the focused variant, and show what it would do.
+    ///
+    /// Nothing is written by this, and nothing is written by anything until
+    /// [`Action::ConfirmInstall`] is applied to the preview it produces.
+    BeginInstall,
+    ConfirmInstall,
+    DismissInstall,
     RerunSetup,
     Quit,
 }
@@ -163,12 +175,29 @@ pub enum UpdateOutcome {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Effect {
-    PersistSetup { agent_selections: [bool; 3] },
+    PersistSetup {
+        agent_selections: [bool; 3],
+    },
     ResetSetup,
-    RedetectAgents { agent_selections: [bool; 3] },
-    InspectSource { path: PathBuf },
-    RegisterSource { preview: SourcePreview },
+    RedetectAgents {
+        agent_selections: [bool; 3],
+    },
+    InspectSource {
+        path: PathBuf,
+    },
+    RegisterSource {
+        preview: SourcePreview,
+    },
     ScanInstallations,
+    /// Read the machine and build an install preview for the focused variant.
+    ///
+    /// The variant is not carried on the effect: the reducer decided that this
+    /// is what the user is standing on, and the runner reads it back from the
+    /// same state the reducer read, exactly as [`Effect::ScanInstallations`]
+    /// carries no roots.
+    PlanInstall,
+    /// Create the links the shown preview calls work, then rescan and verify.
+    ApplyInstall,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -353,6 +382,12 @@ pub struct SkilledApp {
     detail_max_scroll: usize,
     doctor_pane: DoctorPane,
     focused_finding: usize,
+    /// The install dialog, when one is open.
+    ///
+    /// While it is set it owns the keyboard, the way the help overlay and the
+    /// catalog confirmation do: a preview is a question, and a stray navigation
+    /// key must not answer it.
+    pending_install: Option<InstallPrompt>,
     help_context: Option<View>,
 }
 
@@ -406,6 +441,7 @@ impl SkilledApp {
             detail_max_scroll: 0,
             doctor_pane: DoctorPane::Findings,
             focused_finding: 0,
+            pending_install: None,
             help_context: None,
         };
         app.refilter_installations();
@@ -484,6 +520,32 @@ impl SkilledApp {
 
     pub fn help_context(&self) -> Option<View> {
         self.help_context
+    }
+
+    pub fn pending_install(&self) -> Option<&InstallPrompt> {
+        self.pending_install.as_ref()
+    }
+
+    /// Whether the focused row is one the install flow would act on.
+    ///
+    /// The variants pane and the detail region beside it both stand on a row;
+    /// the repositories pane stands on a source, and its variant selection is
+    /// whatever it was left at, which is not something the user is looking at.
+    pub fn can_install_selection(&self) -> bool {
+        self.view == View::Sources
+            && matches!(
+                self.sources_pane,
+                SourcesPane::Variants | SourcesPane::Details
+            )
+            && matches!(self.selected_variant_row(), Some(SourceRow::Variant { .. }))
+    }
+
+    /// Every ownership receipt Skilled holds.
+    ///
+    /// Spec 7 evidence, exposed so a caller can see what Skilled claims to have
+    /// put on disk. Nothing reads one as an instruction.
+    pub fn receipts(&self) -> Result<Vec<Receipt>> {
+        self.store.receipts()
     }
 
     pub fn inventory(&self) -> &InventorySnapshot {
@@ -619,6 +681,21 @@ impl SkilledApp {
                     UpdateResult::continuing(Vec::new())
                 }
                 Action::Quit => UpdateResult::quit(),
+                _ => UpdateResult::continuing(Vec::new()),
+            };
+        }
+
+        // A preview is a question about writes that have not happened yet, so
+        // it owns the keyboard until it is answered: nothing may navigate out
+        // from under it, and nothing but a confirmation may confirm it.
+        if self.pending_install.is_some() {
+            return match action {
+                Action::Quit => UpdateResult::quit(),
+                Action::ConfirmInstall => UpdateResult::continuing(self.confirm_install()),
+                Action::DismissInstall => {
+                    self.pending_install = None;
+                    UpdateResult::continuing(Vec::new())
+                }
                 _ => UpdateResult::continuing(Vec::new()),
             };
         }
@@ -856,6 +933,16 @@ impl SkilledApp {
             Action::AppendInventoryFilter(_)
             | Action::DeleteInventoryFilterCharacter
             | Action::SubmitInventoryFilter => Vec::new(),
+            Action::BeginInstall => {
+                if self.can_install_selection() {
+                    vec![Effect::PlanInstall]
+                } else {
+                    Vec::new()
+                }
+            }
+            // Reachable only with no prompt open, where there is nothing to
+            // confirm and nothing to dismiss.
+            Action::ConfirmInstall | Action::DismissInstall => Vec::new(),
             Action::RerunSetup => self.rerun_setup(),
             Action::Quit => return UpdateResult::quit(),
         };
@@ -925,9 +1012,83 @@ impl SkilledApp {
                     self.rescan_installations();
                 }
                 Effect::ScanInstallations => self.rescan_installations(),
+                Effect::PlanInstall => self.pending_install = Some(self.build_install_preview()),
+                Effect::ApplyInstall => self.apply_pending_install(),
             }
         }
         Ok(())
+    }
+
+    /// Only a preview of executable work accepts a confirmation.
+    ///
+    /// A blocked plan and a plan with nothing left to do both stay on screen
+    /// rather than turning into a report of an install that never ran.
+    fn confirm_install(&mut self) -> Vec<Effect> {
+        match &self.pending_install {
+            Some(InstallPrompt::Preview(plan)) if plan.is_executable() => {
+                vec![Effect::ApplyInstall]
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// Read the machine and decide what installing the focused variant would
+    /// do.
+    ///
+    /// A failure here becomes something the dialog states rather than an error
+    /// out of `perform_effects`, which would end the process: the user asked a
+    /// question about their machine and is owed the answer, not an exit.
+    fn build_install_preview(&self) -> InstallPrompt {
+        let Some(SourceRow::Variant { catalog, candidate }) = self.selected_variant_row() else {
+            return InstallPrompt::Failed(
+                "the focused row is not a skill variant, so there is nothing to install".to_owned(),
+            );
+        };
+        let Some(source) = self.selected_source() else {
+            return InstallPrompt::Failed("no source is selected".to_owned());
+        };
+        let variant = VariantRef::of(source, catalog, candidate);
+        let receipts = match self.store.receipts() {
+            Ok(receipts) => receipts,
+            Err(error) => {
+                return InstallPrompt::Failed(format!(
+                    "the ownership receipts could not be read, so Skilled cannot tell its own \
+                     links from anyone else's: {error}"
+                ));
+            }
+        };
+        let probe = probe_install(&self.agents, &self.sources, &variant);
+        match plan_install(
+            &self.agents,
+            &self.sources,
+            &variant,
+            [true; 3],
+            &probe,
+            &receipts,
+        ) {
+            Ok(plan) => InstallPrompt::Preview(plan),
+            Err(failure) => InstallPrompt::Failed(failure.to_string()),
+        }
+    }
+
+    /// Apply the shown preview, then restate the inventory and check the plan
+    /// against it.
+    ///
+    /// The rescan happens before verification and not after, because the scan
+    /// is the evidence verification rests on; and it happens whatever the apply
+    /// did, so the inventory left behind describes the machine as it now is.
+    fn apply_pending_install(&mut self) {
+        let Some(InstallPrompt::Preview(plan)) = self.pending_install.take() else {
+            return;
+        };
+        let applied = apply_install(&plan, &self.store);
+        self.rescan_installations();
+        let verification = verify_install(&plan, &applied, &self.inventory);
+        self.pending_install = Some(InstallPrompt::Report(InstallOutcome::new(
+            plan,
+            applied,
+            verification,
+        )));
     }
 
     /// Replace the inventory with a fresh read-only pass over the native roots.
