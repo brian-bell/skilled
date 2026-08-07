@@ -344,6 +344,27 @@ pub fn variant_rows(source: &RegisteredSource) -> impl Iterator<Item = SourceRow
     catalogs.iter().flat_map(catalog_rows)
 }
 
+/// Why no install plan could be built.
+///
+/// The two are kept apart because a caller acts on them differently: a request
+/// Skilled cannot honour is the user's to correct, and metadata Skilled cannot
+/// read is not something a different request would fix.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PlanRequestFailure {
+    /// The request names no variant Skilled can plan an install for.
+    Unplannable(String),
+    /// Skilled's own metadata could not be read.
+    Metadata(String),
+}
+
+impl PlanRequestFailure {
+    pub fn message(&self) -> &str {
+        match self {
+            Self::Unplannable(message) | Self::Metadata(message) => message,
+        }
+    }
+}
+
 pub struct SkilledApp {
     view: View,
     store: Store,
@@ -1070,7 +1091,10 @@ impl SkilledApp {
         let variant = VariantRef::of(source, catalog, candidate);
         match self.plan_install_for(&variant, [true; 3]) {
             Ok(plan) => InstallPrompt::Preview(plan),
-            Err(message) => InstallPrompt::Failed(message),
+            // The dialog states either, because either is the answer to the
+            // question the user asked. Only a caller that has to choose an exit
+            // status needs them apart.
+            Err(failure) => InstallPrompt::Failed(failure.message().to_owned()),
         }
     }
 
@@ -1083,12 +1107,12 @@ impl SkilledApp {
         &self,
         variant: &VariantRef,
         requested: [bool; 3],
-    ) -> std::result::Result<InstallPlan, String> {
+    ) -> std::result::Result<InstallPlan, PlanRequestFailure> {
         let receipts = self.store.receipts().map_err(|error| {
-            format!(
+            PlanRequestFailure::Metadata(format!(
                 "the ownership receipts could not be read, so Skilled cannot tell its own links \
                  from anyone else\'s: {error}"
-            )
+            ))
         })?;
         let probe = probe_install(&self.agents, &self.sources, variant, self.home());
         plan_install(
@@ -1099,7 +1123,7 @@ impl SkilledApp {
             &probe,
             &receipts,
         )
-        .map_err(|failure| failure.to_string())
+        .map_err(|failure| PlanRequestFailure::Unplannable(failure.to_string()))
     }
 
     /// Apply a plan, restate the inventory, and check the plan against it.

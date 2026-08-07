@@ -18,6 +18,7 @@ use std::{
 use crate::{
     AgentKind, AppEnvironment, SkilledApp,
     agents::adapter,
+    app::PlanRequestFailure,
     components::terminal_safe,
     operations::{
         ExcludedReason, InstallOutcome, InstallPlan, InstallStatus, InstallTarget, LocateFailure,
@@ -263,7 +264,12 @@ fn execute(
 
     let plan = match app.plan_install_for(&variant, requested) {
         Ok(plan) => plan,
-        Err(message) => return Ok(refuse(output, &message)),
+        Err(PlanRequestFailure::Unplannable(message)) => {
+            return Ok(refuse(output, &message));
+        }
+        // Not a request error: a different request would not fix it, and
+        // printing usage would tell the reader to look in the wrong place.
+        Err(PlanRequestFailure::Metadata(message)) => return Err(message),
     };
     write_plan(output, &plan, app.home()).map_err(|error| error.to_string())?;
 
