@@ -1001,12 +1001,12 @@ mod installed {
     fn scroll_detail_to_the_end(app: &mut SkilledApp, width: u16, height: u16) {
         let extent = drawn(app, width, height)
             .1
-            .inventory_detail_max_scroll()
+            .detail_max_scroll()
             .expect("the frame drew the detail region");
         assert!(extent > 0, "the region should have somewhere to scroll");
-        app.note_inventory_detail_max_scroll(extent);
+        app.note_detail_max_scroll(extent);
         for _ in 0..extent {
-            app.update(Action::ScrollInventoryDetail(1));
+            app.update(Action::ScrollDetail(1));
         }
     }
 
@@ -1036,13 +1036,11 @@ mod installed {
         insta::assert_snapshot!(normalize_inventory(&temporary, render(&app, 80, 24)));
     }
 
-    /// One healthy skill installed for two agents, one dangling link, and one
-    /// physical copy, with the OpenCode root absent entirely.
-    ///
-    /// The source checkout lives inside the temporary home so every path the
-    /// screen shows is home-relative and therefore stable across machines.
     /// Every classification the effective resolution can reach, plus a broken
     /// installation, so the Doctor list shows its whole ordering at once.
+    ///
+    /// The source checkouts live inside the temporary home so every path the
+    /// screen shows is home-relative and therefore stable across machines.
     fn doctor_app(temporary: &tempfile::TempDir) -> SkilledApp {
         let home = temporary.path().join("home");
         let first = home.join("alpha");
@@ -1136,11 +1134,95 @@ mod installed {
         app.update(Action::AdvanceDoctorPane);
 
         let screen = normalize_inventory(&temporary, render(&app, 80, 24));
+        insta::assert_snapshot!(screen);
 
-        // No repair exists in this release, so the region says so and the key
-        // hints offer nothing that would perform one.
-        assert!(screen.contains("Repair: not offered"), "{screen}");
-        assert!(!screen.contains("r Repair"), "{screen}");
+        // The rows a finding this long leaves below the window are reachable
+        // rather than merely counted, and the last of them says what no key
+        // offers: no repair exists in this release.
+        scroll_detail_to_the_end(&mut app, 80, 24);
+        let end = normalize_inventory(&temporary, render(&app, 80, 24));
+        assert!(
+            end.contains("Variant: alpha · skills · skills/review"),
+            "{end}"
+        );
+        assert!(end.contains("Repair: not offered"), "{end}");
+        assert!(!end.contains("r Repair"), "{end}");
+    }
+
+    /// The two findings that share `variant.duplicate_for_agent` state
+    /// different consequences, because they are different complaints: an
+    /// effective resolution does pick one definition, and a registry ambiguity
+    /// picks nothing. Each must be shown beside its own evidence.
+    #[test]
+    fn each_duplicate_finding_states_its_own_consequence() {
+        let temporary = tempfile::tempdir().expect("temporary application directory");
+        let mut app = doctor_app(&temporary);
+        while app
+            .selected_finding()
+            .is_some_and(|entry| entry.agent() != AgentKind::OpenCode)
+        {
+            app.update(Action::MoveDoctorSelection(1));
+        }
+        let entry = app.selected_finding().expect("the OpenCode conflict");
+        assert_eq!(
+            (entry.finding().code(), entry.agent()),
+            ("variant.duplicate_for_agent", AgentKind::OpenCode)
+        );
+        app.update(Action::AdvanceDoctorPane);
+
+        let resolution = normalize_inventory(&temporary, render(&app, 120, 40));
+        assert!(
+            unwrapped(&resolution).contains(
+                "The highest-precedence root wins and the other \
+                                             definition is never loaded"
+            ),
+            "{resolution}"
+        );
+
+        // The registry-side finding of the same code, one row up.
+        app.update(Action::Back);
+        app.update(Action::MoveDoctorSelection(-1));
+        app.update(Action::AdvanceDoctorPane);
+        let registry = normalize_inventory(&temporary, render(&app, 120, 40));
+        assert!(
+            unwrapped(&registry).contains(
+                "Which definition the agent would resolve is not something Skilled can state"
+            ),
+            "{registry}"
+        );
+    }
+
+    /// A detail region's text with its line breaks, column padding, and the
+    /// rule dividing it from the pane beside it taken out, so a sentence can be
+    /// matched whole however the region happened to wrap it.
+    fn unwrapped(screen: &str) -> String {
+        screen
+            .replace('│', " ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// Every root absent is a complete account of the roots and no reading of
+    /// any of them, so Doctor may not report a clean bill of health.
+    #[test]
+    fn doctor_with_no_root_to_read_says_so_at_minimum_supported_size() {
+        let temporary = tempfile::tempdir().expect("temporary application directory");
+        let mut app = SkilledApp::open(AppEnvironment::new(
+            temporary.path().join("home"),
+            temporary.path().join("data"),
+            "",
+        ))
+        .expect("open application");
+        for _ in 0..7 {
+            dispatch(&mut app, Action::Continue);
+        }
+        dispatch(&mut app, Action::OpenDoctor);
+
+        let screen = normalize_inventory(&temporary, render(&app, 80, 24));
+
+        assert!(!screen.contains("Nothing to report"), "{screen}");
+        assert!(screen.contains("no root read"), "{screen}");
         insta::assert_snapshot!(screen);
     }
 
@@ -1165,6 +1247,11 @@ mod installed {
         insta::assert_snapshot!(normalize_inventory(&temporary, render(&app, 80, 24)));
     }
 
+    /// One healthy skill installed for two agents, one dangling link, and one
+    /// physical copy, with the OpenCode root absent entirely.
+    ///
+    /// The source checkout lives inside the temporary home so every path the
+    /// screen shows is home-relative and therefore stable across machines.
     fn inventory_app(temporary: &tempfile::TempDir) -> SkilledApp {
         let repository = temporary.path().join("home/library");
         for skill in ["alpha", "beta"] {

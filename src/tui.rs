@@ -15,7 +15,7 @@ use crate::{
         DoctorEntry, Finding, FindingSeverity, InstallationHealth, InstallationObject,
         InstalledSkillObservation, InventoryRow, RootScan, RootStatus, RowProvenance, RowVerdict,
     },
-    resolution::{OpenCodeEntry, OpenCodeResolution},
+    resolution::{OpenCodeEntry, OpenCodeResolution, UnknownCause},
     source::{
         CatalogClassification, CatalogProposal, Compatibility, RegisteredSource, SkillCandidate,
         SkillValidation,
@@ -36,7 +36,7 @@ pub const MINIMUM_HEIGHT: u16 = 24;
 /// filesystem work.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct RenderFeedback {
-    inventory_detail_max_scroll: Option<usize>,
+    detail_max_scroll: Option<usize>,
 }
 
 impl RenderFeedback {
@@ -44,8 +44,8 @@ impl RenderFeedback {
     /// show rows that were not already visible: zero where it holds everything
     /// it has, and `None` where this frame did not draw it at all and so
     /// measured nothing.
-    pub fn inventory_detail_max_scroll(self) -> Option<usize> {
-        self.inventory_detail_max_scroll
+    pub fn detail_max_scroll(self) -> Option<usize> {
+        self.detail_max_scroll
     }
 }
 
@@ -73,12 +73,20 @@ pub fn render(frame: &mut Frame<'_>, app: &SkilledApp) -> RenderFeedback {
     // speaks about the detail region: the window drawn, the key hint, and the
     // help entry then cannot disagree with one another or lag a keystroke
     // behind the terminal they are describing.
-    let detail_extent = inventory_detail_scroll_extent(app, workspace);
+    // Ordered once, for this frame: the findings list, the detail region beside
+    // it, and the extent measured for that region must all rest on the same
+    // order, and building it three times would pay for the sort three times to
+    // prove it. Every other view leaves it empty and pays nothing.
+    let findings = match app.view() {
+        View::Doctor => app.doctor_findings(),
+        _ => Vec::new(),
+    };
+    let detail_extent = detail_scroll_extent(app, workspace, &findings);
     match app.view() {
         View::Setup(step) => render_setup(frame, body, app, step),
         View::Inventory => render_inventory(frame, body, app),
         View::Sources => render_sources(frame, body, app),
-        View::Doctor => render_doctor(frame, body, app),
+        View::Doctor => render_doctor(frame, body, app, &findings),
         View::Settings => {
             render_inventory(frame, body, app);
             render_settings(frame, body);
@@ -94,7 +102,7 @@ pub fn render(frame: &mut Frame<'_>, app: &SkilledApp) -> RenderFeedback {
     }
     render_footer(frame, key_hints, app, detail_extent);
     RenderFeedback {
-        inventory_detail_max_scroll: detail_extent,
+        detail_max_scroll: detail_extent,
     }
 }
 
@@ -1019,15 +1027,20 @@ fn inventory_empty_state(app: &SkilledApp) -> (String, String) {
 }
 
 /// Doctor: every finding the last scan holds, and what one of them is about.
-fn render_doctor(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
+fn render_doctor(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &SkilledApp,
+    findings: &[DoctorEntry<'_>],
+) {
     match viewport::workspace_regions(area) {
         (primary, Some(detail)) => {
-            render_doctor_findings(frame, primary, app);
-            render_doctor_detail(frame, detail, app, true);
+            render_doctor_findings(frame, primary, app, findings);
+            render_doctor_detail(frame, detail, app, findings, true);
         }
         (primary, None) => match app.doctor_pane() {
-            DoctorPane::Findings => render_doctor_findings(frame, primary, app),
-            DoctorPane::Details => render_doctor_detail(frame, primary, app, false),
+            DoctorPane::Findings => render_doctor_findings(frame, primary, app, findings),
+            DoctorPane::Details => render_doctor_detail(frame, primary, app, findings, false),
         },
     }
 }
@@ -1067,8 +1080,12 @@ fn doctor_columns(width: u16) -> DoctorColumns {
     DoctorColumns { code, skill }
 }
 
-fn render_doctor_findings(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
-    let findings = app.doctor_findings();
+fn render_doctor_findings(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &SkilledApp,
+    findings: &[DoctorEntry<'_>],
+) {
     let body = render_pane_scaffold(
         frame,
         area,
@@ -1082,9 +1099,9 @@ fn render_doctor_findings(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
             horizontal: 2,
             vertical: 0,
         });
-        let (headline, explanation) = doctor_empty_state(app);
+        let (glyph, headline, explanation) = doctor_empty_state(app);
         frame.render_widget(
-            components::empty_state("✓", &headline, &explanation, region),
+            components::empty_state(glyph, &headline, &explanation, region),
             region,
         );
         return;
@@ -1119,12 +1136,24 @@ fn doctor_subtitle(app: &SkilledApp, listed: usize) -> String {
     if inventory.no_agent_configured() {
         return "no root read".to_owned();
     }
+    // A withheld count is withheld for one of two reasons, and they are
+    // different answers: part of the requested scope could not be read, or
+    // none of it was read at all. Registry-side findings exist without any
+    // root being read, so the second is reachable with a non-empty list and
+    // must be settled before the list's own size is spoken about.
     match inventory.stated_finding_count() {
         Some(0) => "nothing to report".to_owned(),
         Some(1) => "1 finding".to_owned(),
         Some(findings) => format!("{findings} findings"),
-        None if listed > 0 => format!("{listed} listed · not fully read"),
+        None if inventory.unreadable_roots().next().is_some() && listed > 0 => {
+            format!("{listed} listed · not fully read")
+        }
         None if inventory.unreadable_roots().next().is_some() => "not fully read".to_owned(),
+        None if !inventory.registry_is_complete() && listed > 0 => {
+            format!("{listed} listed · a source could not be read")
+        }
+        None if !inventory.registry_is_complete() => "a source could not be read".to_owned(),
+        None if listed > 0 => format!("{listed} listed · no root read"),
         None => "no root read".to_owned(),
     }
 }
@@ -1168,18 +1197,23 @@ fn severity_tone(severity: FindingSeverity) -> Tone {
 
 /// What an empty findings list can honestly say, given what the scan observed.
 ///
-/// The four cases the Inventory keeps apart are kept apart here for the same
+/// The cases the Inventory keeps apart are kept apart here for the same
 /// reason: a clean bill of health and an unread root are not the same answer.
-fn doctor_empty_state(app: &SkilledApp) -> (String, String) {
+/// Only the first earns the tick — every other empty list is empty because
+/// something was not read, and a tick over one of those would be the whole
+/// mistake this function exists to avoid.
+fn doctor_empty_state(app: &SkilledApp) -> (&'static str, String, String) {
     let inventory = app.inventory();
     if inventory.scan_pending() {
         return (
+            "·",
             "Installation roots have not been scanned".to_owned(),
             "Skilled scans the roots when this view opens.".to_owned(),
         );
     }
     if inventory.no_agent_configured() {
         return (
+            "·",
             "No agent is configured".to_owned(),
             "Skilled reads the skill root of the agents chosen during setup, \
              and none are chosen, so it read nothing. Rerun setup from \
@@ -1189,6 +1223,7 @@ fn doctor_empty_state(app: &SkilledApp) -> (String, String) {
     }
     if inventory.unreadable_roots().next().is_some() {
         return (
+            "·",
             "An agent skill root could not be read".to_owned(),
             "Skilled reports nothing from a root it could not read in full \
              rather than reporting part of it, so this list covers less than \
@@ -1196,7 +1231,37 @@ fn doctor_empty_state(app: &SkilledApp) -> (String, String) {
                 .to_owned(),
         );
     }
+    // Nothing was read, so nothing may be said about what is installed. The
+    // roots were all accounted for — that is why no count was withheld for
+    // them — but accounting for a root that is absent is not reading one.
+    if !inventory
+        .roots()
+        .iter()
+        .any(|root| matches!(root.status(), RootStatus::Scanned { .. }))
+    {
+        return (
+            "·",
+            "No agent skill root exists yet".to_owned(),
+            "Skilled looked for the documented global skill root of each selected \
+             agent and found none of them, so it read nothing to report on. It \
+             did not create one."
+                .to_owned(),
+        );
+    }
+    // The registry is the findings' second source, and a source that could not
+    // be read may hold the very variant that would have made a name ambiguous.
+    if !inventory.registry_is_complete() {
+        return (
+            "·",
+            "A registered source could not be read".to_owned(),
+            "Every root Skilled read is accounted for, but a registered source \
+             is not, so it cannot say whether two variants compete for a name. \
+             Sources names the repository that could not be read."
+                .to_owned(),
+        );
+    }
     (
+        "✓",
         "Nothing to report".to_owned(),
         "Every installation Skilled read resolves to the variant it came from, \
          and no registered variant competes with another."
@@ -1209,14 +1274,15 @@ fn render_doctor_detail(
     frame: &mut Frame<'_>,
     area: Rect,
     app: &SkilledApp,
+    findings: &[DoctorEntry<'_>],
     beside_the_table: bool,
 ) {
-    let selected = app.selected_finding();
+    let selected = findings.get(app.focused_finding());
     let body = render_detail_scaffold(
         frame,
         area,
         "Details",
-        &selected.as_ref().map_or_else(
+        &selected.map_or_else(
             || "no selection".to_owned(),
             |entry| terminal_safe(entry.skill_name()),
         ),
@@ -1240,11 +1306,9 @@ fn render_doctor_detail(
     render_detail_window(
         frame,
         body,
-        doctor_detail_lines(&entry, app.home(), body.width),
-        0,
-        // Doctor's regions do not scroll in this release, so no notice may
-        // name a keystroke that would reach the rows below the window.
-        RowsBelow::NotFromHere,
+        doctor_detail_lines(entry, app.home(), body.width),
+        app.detail_scroll(),
+        rows_below_advice(app),
     );
 }
 
@@ -1269,7 +1333,7 @@ fn doctor_detail_lines(entry: &DoctorEntry<'_>, home: &Path, width: u16) -> Vec<
     ))));
 
     push_detail_section(&mut lines, "CONSEQUENCE", width);
-    lines.push(Line::from(finding_consequence(entry.finding().code())));
+    lines.push(Line::from(finding_consequence(entry)));
 
     if let Some(observation) = entry.observation() {
         push_detail_section(&mut lines, "INSTALLATION", width);
@@ -1317,14 +1381,28 @@ fn doctor_detail_lines(entry: &DoctorEntry<'_>, home: &Path, width: u16) -> Vec<
     lines
 }
 
-/// Why a finding weakens usability, in one sentence per stable code.
+/// Why a finding weakens usability, in one sentence.
 ///
-/// Spelled out per code rather than per severity: `unmanaged` and
-/// `benign_alias` are both informational and mean entirely different things,
-/// and a reader who has just been shown a code deserves to be told what it
-/// costs them.
-fn finding_consequence(code: &str) -> &'static str {
-    match code {
+/// Settled per code rather than per severity: `unmanaged` and `benign_alias`
+/// are both informational and mean entirely different things, and a reader who
+/// has just been shown a code deserves to be told what it costs them.
+///
+/// `variant.duplicate_for_agent` is the one code that carries two findings.
+/// Filed against what is installed, precedence does pick one and the complaint
+/// is that the other is unreachable; filed against the registry, nothing has
+/// picked anything and the complaint is that nothing can. Keying on the code
+/// alone would state one of those beside the evidence for the other.
+///
+/// The competing variants are what tells them apart. Neither finding hangs off
+/// an installation — an effective resolution is a fact about several roots at
+/// once, so it is filed on the row — and only the registry-side one carries the
+/// variants that defeated the selection.
+fn finding_consequence(entry: &DoctorEntry<'_>) -> &'static str {
+    match entry.finding().code() {
+        "variant.duplicate_for_agent" if entry.variants().is_empty() => {
+            "The highest-precedence root wins and the other definition is never \
+             loaded, whichever one was meant."
+        }
         "install.dangling_symlink" => {
             "The agent finds a link with nothing behind it, so the skill does not load."
         }
@@ -1345,7 +1423,8 @@ fn finding_consequence(code: &str) -> &'static str {
              came from one."
         }
         "variant.duplicate_for_agent" => {
-            "Which definition the agent resolves is not something Skilled can state."
+            "Which definition the agent would resolve is not something Skilled can \
+             state, so installing under this name is blocked until a source is chosen."
         }
         "variant.foreign_opencode_exposure" => {
             "OpenCode can see another agent's variant. Skilled does not claim it is \
@@ -1548,12 +1627,12 @@ fn render_inventory_detail(
     // exist, so content that does not fit is reported as missing rather than
     // dropped off the bottom without a trace — and, where the region has the
     // keyboard, reached by scrolling rather than only reported.
-    let lines = inventory_detail_lines(row, app.home(), body.width);
+    let lines = inventory_detail_lines(row, app.inventory().roots(), app.home(), body.width);
     render_detail_window(
         frame,
         body,
         lines,
-        app.inventory_detail_scroll(),
+        app.detail_scroll(),
         rows_below_advice(app),
     );
 }
@@ -1569,9 +1648,14 @@ fn render_inventory_detail(
 /// worse of the two claims, because it is the one about the rows in question.
 /// The way out of both is `Esc`, which is not a scroll and is not named here.
 fn rows_below_advice(app: &SkilledApp) -> RowsBelow {
+    let focused = match app.view() {
+        View::Inventory => app.inventory_pane() == InventoryPane::Details,
+        View::Doctor => app.doctor_pane() == DoctorPane::Details,
+        _ => false,
+    };
     if app.help_context().is_some() || app.inventory_filter_active() {
         RowsBelow::NotFromHere
-    } else if app.inventory_pane() == InventoryPane::Details {
+    } else if focused {
         RowsBelow::UnderTheseKeys
     } else {
         RowsBelow::BehindTheFocus
@@ -1756,26 +1840,46 @@ fn detail_max_scroll(rows_per_line: &[usize], height: u16) -> usize {
 /// table has not discovered that the region behind it holds nothing, and
 /// answering zero would throw away an offset the user scrolled to and will
 /// come back to.
-fn inventory_detail_scroll_extent(app: &SkilledApp, workspace: Rect) -> Option<usize> {
-    if app.view() != View::Inventory {
-        return None;
-    }
+fn detail_scroll_extent(
+    app: &SkilledApp,
+    workspace: Rect,
+    findings: &[DoctorEntry<'_>],
+) -> Option<usize> {
     let (primary, detail) = viewport::workspace_regions(workspace);
-    let body = match (detail, app.inventory_pane()) {
-        (Some(detail), _) => detail_regions(detail, true).body(),
-        (None, InventoryPane::Details) => detail_regions(primary, false).body(),
-        (None, InventoryPane::Skills) => return None,
+    let focused_alone = |drilled_in: bool| match (detail, drilled_in) {
+        (Some(detail), _) => Some(detail_regions(detail, true).body()),
+        (None, true) => Some(detail_regions(primary, false).body()),
+        (None, false) => None,
     };
-    if body.width == 0 {
-        return None;
-    }
-    // A region with no selection draws an empty state rather than a window,
-    // and an empty state has nothing to scroll — that is a measurement, not an
-    // absence of one.
-    let Some(row) = app.selected_installation() else {
-        return Some(0);
+    let (body, lines) = match app.view() {
+        View::Inventory => {
+            let body = focused_alone(app.inventory_pane() == InventoryPane::Details)?;
+            if body.width == 0 {
+                return None;
+            }
+            // A region with no selection draws an empty state rather than a
+            // window, and an empty state has nothing to scroll — that is a
+            // measurement, not an absence of one.
+            let Some(row) = app.selected_installation() else {
+                return Some(0);
+            };
+            (
+                body,
+                inventory_detail_lines(row, app.inventory().roots(), app.home(), body.width),
+            )
+        }
+        View::Doctor => {
+            let body = focused_alone(app.doctor_pane() == DoctorPane::Details)?;
+            if body.width == 0 {
+                return None;
+            }
+            let Some(entry) = findings.get(app.focused_finding()) else {
+                return Some(0);
+            };
+            (body, doctor_detail_lines(entry, app.home(), body.width))
+        }
+        _ => return None,
     };
-    let lines = inventory_detail_lines(row, app.home(), body.width);
     let rows_per_line: Vec<usize> = lines
         .iter()
         .map(|line| wrapped_line_count(line, body.width))
@@ -1873,7 +1977,12 @@ fn hidden_rows_notice(forms: impl IntoIterator<Item = String>, width: u16) -> Li
         .unwrap_or_else(|| Line::from(components::badge(Tone::Warning, "…")))
 }
 
-fn inventory_detail_lines(row: &InventoryRow, home: &Path, width: u16) -> Vec<Line<'static>> {
+fn inventory_detail_lines(
+    row: &InventoryRow,
+    roots: &[RootScan; 3],
+    home: &Path,
+    width: u16,
+) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     // Kicker, then the skill's own name as the title, then its health: the
     // badge words already say what they mean, so no field label repeats the
@@ -1925,7 +2034,19 @@ fn inventory_detail_lines(row: &InventoryRow, home: &Path, width: u16) -> Vec<Li
         )),
     }
 
-    push_opencode_resolution(&mut lines, row, home, width);
+    // Placed by what it says. A conflict and an exposure are findings, and
+    // findings lead in this region for the reason the agent sections' own do:
+    // the thing a reader came for must not be the thing that falls off the
+    // bottom. Everything else — where OpenCode reads the name from, or that a
+    // root was not read — states no finding, and follows the observations it
+    // is about rather than displacing an agent section that carries one.
+    let resolution_leads = matches!(
+        row.opencode_resolution(),
+        Some(OpenCodeResolution::Conflict { .. } | OpenCodeResolution::ForeignExposure { .. })
+    );
+    if resolution_leads {
+        push_opencode_resolution(&mut lines, row, roots, home, width);
+    }
 
     for observation in row.observations() {
         // The row's own health is a rollup across the agents; each section
@@ -1948,6 +2069,10 @@ fn inventory_detail_lines(row: &InventoryRow, home: &Path, width: u16) -> Vec<Li
                 RowProvenance::Divergent | RowProvenance::Mixed
             ),
         ));
+    }
+
+    if !resolution_leads {
+        push_opencode_resolution(&mut lines, row, roots, home, width);
     }
 
     // The agents that carry nothing share one line rather than three empty
@@ -1978,6 +2103,7 @@ fn inventory_detail_lines(row: &InventoryRow, home: &Path, width: u16) -> Vec<Li
 fn push_opencode_resolution(
     lines: &mut Vec<Line<'static>>,
     row: &InventoryRow,
+    roots: &[RootScan; 3],
     home: &Path,
     width: u16,
 ) {
@@ -2044,16 +2170,30 @@ fn push_opencode_resolution(
                 3,
             ));
         }
-        OpenCodeResolution::Incomplete { roots } => {
-            let unread: Vec<&str> = roots
+        OpenCodeResolution::Incomplete { roots: unread } => {
+            // Each root says why it was not read, in the same words the Roots
+            // line uses: a root left alone on the user's own instruction and
+            // one that defeated the scan are not the same answer, and "not
+            // read" alone would flatten them into one.
+            let reasons: Vec<String> = unread
                 .iter()
-                .map(|root| AgentKind::display_name(*root))
+                .map(|unknown| {
+                    let cause = match unknown.cause() {
+                        // A root that was read holds one entry the scan could
+                        // not follow, which is not the root being unread.
+                        UnknownCause::EntryUnresolved => "entry unresolved".to_owned(),
+                        UnknownCause::RootNotRead => {
+                            roots[unknown.root().index()].status().short_summary()
+                        }
+                    };
+                    format!("{} ({cause})", unknown.root().display_name())
+                })
                 .collect();
             lines.push(detail_field_bounded(
-                "Not read",
-                &unread.join(", "),
+                "Not known",
+                &reasons.join(", "),
                 width,
-                2,
+                3,
             ));
         }
     }
@@ -3883,7 +4023,7 @@ fn render_help(
     area: Rect,
     context: View,
     app: &SkilledApp,
-    inventory_detail_extent: Option<usize>,
+    detail_extent: Option<usize>,
 ) {
     let viewport = viewport::classify(area);
     let (width, height) = match viewport {
@@ -3896,7 +4036,7 @@ fn render_help(
     let block = components::dialog_frame("Keyboard reference", &scope);
     let regions = components::dialog_regions(block.inner(popup), 11);
     frame.render_widget(block, popup);
-    let commands = help_commands(context, app, inventory_detail_extent);
+    let commands = help_commands(context, app, detail_extent);
     match viewport {
         viewport::Viewport::Compact => {
             let mut lines = vec![
@@ -3985,7 +4125,7 @@ struct HelpCommand {
 fn help_commands(
     context: View,
     app: &SkilledApp,
-    inventory_detail_extent: Option<usize>,
+    detail_extent: Option<usize>,
 ) -> Vec<HelpCommand> {
     match context {
         View::Setup(step) => {
@@ -4058,7 +4198,7 @@ fn help_commands(
                     description: "move the selected skill",
                 });
             }
-            if inventory_can_scroll_detail(app, inventory_detail_extent) {
+            if can_scroll_detail(app, detail_extent) {
                 commands.push(HelpCommand {
                     key: "Up/Down or j/k",
                     label: "Scroll details",
@@ -4182,6 +4322,13 @@ fn help_commands(
                     description: "move the selected finding",
                 });
             }
+            if can_scroll_detail(app, detail_extent) {
+                commands.push(HelpCommand {
+                    key: "Up/Down or j/k",
+                    label: "Scroll details",
+                    description: "reach the rows the region cannot show at once",
+                });
+            }
             if doctor_can_advance(app) {
                 commands.push(HelpCommand {
                     key: "Enter",
@@ -4252,7 +4399,7 @@ fn render_footer(
     frame: &mut Frame<'_>,
     area: Rect,
     app: &SkilledApp,
-    inventory_detail_extent: Option<usize>,
+    detail_extent: Option<usize>,
 ) {
     // The band reaches the full width, so the row reads as chrome rather than
     // as a smear the length of the hints. The hint line itself only sets
@@ -4260,7 +4407,7 @@ fn render_footer(
     frame.render_widget(Block::new().style(theme::chrome_band()), area);
     frame.render_widget(
         Paragraph::new(components::key_hint_line(
-            &key_hints(app, inventory_detail_extent),
+            &key_hints(app, detail_extent),
             area.width,
         ))
         .style(theme::chrome()),
@@ -4274,7 +4421,13 @@ fn render_footer(
 /// a promise the application cannot keep, so unimplemented commands —
 /// installation, updates, repair, uninstall, and forget — are absent by
 /// construction.
-fn key_hints(app: &SkilledApp, inventory_detail_extent: Option<usize>) -> Vec<KeyHint> {
+///
+/// The row is budgeted, and every context declares its routes before `?` and
+/// `q`: where they do not all fit, the route survives and the two commands the
+/// tab strip above still shows — and the overlay `?` opens still lists — are
+/// the ones shed, with the overflow mark saying so. Sources and a drilled-in
+/// Doctor both reach that point at eighty columns.
+fn key_hints(app: &SkilledApp, detail_extent: Option<usize>) -> Vec<KeyHint> {
     if app.help_context().is_some() {
         return vec![
             KeyHint::essential("Esc", "Close"),
@@ -4336,7 +4489,7 @@ fn key_hints(app: &SkilledApp, inventory_detail_extent: Option<usize>) -> Vec<Ke
             if inventory_can_move_selection(app) {
                 hints.push(KeyHint::new("j/k", "Move"));
             }
-            if inventory_can_scroll_detail(app, inventory_detail_extent) {
+            if can_scroll_detail(app, detail_extent) {
                 hints.push(KeyHint::new("j/k", "Scroll"));
             }
             if inventory_can_advance(app) {
@@ -4383,6 +4536,9 @@ fn key_hints(app: &SkilledApp, inventory_detail_extent: Option<usize>) -> Vec<Ke
             if doctor_can_move_selection(app) {
                 hints.push(KeyHint::new("j/k", "Move"));
             }
+            if can_scroll_detail(app, detail_extent) {
+                hints.push(KeyHint::new("j/k", "Scroll"));
+            }
             if doctor_can_advance(app) {
                 hints.push(KeyHint::essential("Enter", "Open"));
             }
@@ -4420,20 +4576,28 @@ fn inventory_can_move_selection(app: &SkilledApp) -> bool {
 /// The extent is the frame's own measurement rather than the last one noted on
 /// the application, so the hint cannot survive a resize that removed the thing
 /// it advertises.
-fn inventory_can_scroll_detail(app: &SkilledApp, inventory_detail_extent: Option<usize>) -> bool {
-    app.inventory_pane() == InventoryPane::Details
-        && inventory_detail_extent.is_some_and(|extent| extent > 0)
+fn can_scroll_detail(app: &SkilledApp, detail_extent: Option<usize>) -> bool {
+    let focused = match app.view() {
+        View::Inventory => app.inventory_pane() == InventoryPane::Details,
+        View::Doctor => app.doctor_pane() == DoctorPane::Details,
+        _ => false,
+    };
+    focused && detail_extent.is_some_and(|extent| extent > 0)
 }
 
 /// The findings list only moves where it has the keyboard and more than one
 /// place to stand.
 fn doctor_can_move_selection(app: &SkilledApp) -> bool {
-    app.doctor_pane() == DoctorPane::Findings && app.doctor_findings().len() > 1
+    app.doctor_pane() == DoctorPane::Findings && app.finding_count() > 1
 }
 
 /// Enter only drills in, so it advertises itself only where it can.
+///
+/// A selection rests on a finding whenever one exists: the reducer clamps the
+/// focus to the list on every scan, so the count answers this without the sort
+/// that materialising the list would cost on every frame.
 fn doctor_can_advance(app: &SkilledApp) -> bool {
-    app.doctor_pane() == DoctorPane::Findings && app.selected_finding().is_some()
+    app.doctor_pane() == DoctorPane::Findings && app.finding_count() > 0
 }
 
 /// Back unwinds an applied filter, then a drilled-in detail region.

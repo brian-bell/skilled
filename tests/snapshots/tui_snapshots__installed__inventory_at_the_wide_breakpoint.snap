@@ -14,10 +14,6 @@ OpenCode no root                                            │ SKILL
   copied             -       U      -         U unmanaged   │ SOURCE
                                                             │ ─────────────────────────────────────
                                                             │ Source: library
-                                                            │ OPENCODE RESOLUTION  ✓ resolved
-                                                            │ ─────────────────────────────────────
-                                                            │ Loads: ~/.agents/skills/alpha
-                                                            │ Also at: ~/.claude/skills/alpha
                                                             │ CLAUDE CODE  ✓ healthy
                                                             │ ─────────────────────────────────────
                                                             │ Path: ~/.claude/skills/alpha
@@ -26,5 +22,9 @@ OpenCode no root                                            │ SKILL
                                                             │ Target: ~/library/skills/alpha
                                                             │ Validation: ✓ valid as alpha
                                                             │ CODEX  ✓ healthy
+                                                            │ ─────────────────────────────────────
+                                                            │ Path: ~/.agents/skills/alpha
+                                                            │ Object: symbolic link
+                                                            │ Variant: skills · skills/alpha
                                                             │ ! 9 more lines below — Tab, then j/k
  Tab/Shift-Tab Region   j/k Move   Enter Open   / Filter   2 Sources   4 Doctor   q Quit …

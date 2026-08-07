@@ -7,7 +7,10 @@
 //! verdict for a root that was not read: an unread or unresolvable sighting
 //! yields [`OpenCodeResolution::Incomplete`] rather than a guess.
 
-use std::path::{Path, PathBuf};
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+};
 
 use crate::{
     AgentKind,
@@ -70,18 +73,6 @@ impl VariantRef {
         &self.variant_relative_path
     }
 
-    pub fn classification(&self) -> CatalogClassification {
-        self.classification
-    }
-
-    /// The compatibility set recorded for this variant's catalog.
-    ///
-    /// A record, not an observation: it reports what was proposed, confirmed,
-    /// and stored, and no agent was asked.
-    pub fn compatibility(&self) -> Compatibility {
-        self.compatibility
-    }
-
     /// The total order every list of variants is reported in.
     ///
     /// Deterministic and independent of the order the registry hands its
@@ -95,6 +86,37 @@ impl VariantRef {
             &self.catalog_relative_path,
             &self.variant_relative_path,
         )
+    }
+
+    /// Whether this variant is one the agent could actually use.
+    ///
+    /// Two things have to hold, and the stored compatibility set alone is not
+    /// enough for either. It must cover the agent — that part is the user's own
+    /// declaration, made when the catalog was confirmed. And, where the variant
+    /// is an agent-specific edition, it must be *this* agent's edition.
+    ///
+    /// The second condition exists because the compatibility a catalog is
+    /// proposed with is derived from which agents would *find* variants there,
+    /// and OpenCode finds them in Claude Code's and Codex's roots. A catalog
+    /// laid out as `.claude/skills` is therefore proposed as OpenCode-compatible
+    /// while holding the Claude Code edition. Reading that flag as usability
+    /// would have Skilled resolve OpenCode to another agent's edition and call
+    /// it healthy — which is the conflation spec 5.1 exists to separate.
+    ///
+    /// A catalog no agent owns — one the user classified agent-specific whose
+    /// path names no agent — has no path evidence to refine the declaration
+    /// with, so the stored set stands alone.
+    pub(crate) fn usable_by(&self, agent: AgentKind) -> bool {
+        if !self.compatibility.supports(agent) {
+            return false;
+        }
+        if self.classification == CatalogClassification::Common {
+            return true;
+        }
+        let owner = AgentKind::ALL
+            .into_iter()
+            .find(|kind| adapter(*kind).owns_source_catalog(&self.catalog_relative_path));
+        owner.is_none_or(|owner| owner == agent)
     }
 
     /// One phrase naming this variant, for a finding's evidence.
@@ -127,6 +149,13 @@ pub enum CandidateSelection {
 /// agent-specific survivor excludes every common one, so a repository shipping
 /// both a common and an agent-specific edition is not a conflict.
 ///
+/// "Exact" is approximated: a catalog's classification records that it is
+/// agent-specific but not which agent it is specific to — the compatibility set
+/// is what narrows it, and a user may confirm an agent-specific catalog as
+/// compatible with all three. Such a catalog therefore outranks every common
+/// one for every agent. The stored set is what was proposed and confirmed, so
+/// this follows the user's own declaration rather than second-guessing it.
+///
 /// Two exclusions are worth stating because neither is visible in the rule.
 /// A variant that does not validate is not a candidate — an agent could not
 /// load it, so it cannot be what an agent resolves to. And a source or catalog
@@ -138,29 +167,63 @@ pub fn select_candidates(
     agent: AgentKind,
     skill_name: &str,
 ) -> CandidateSelection {
-    let mut candidates: Vec<VariantRef> = Vec::new();
-    for source in sources
+    let variants: Vec<VariantRef> = readable_variants(sources)
+        .filter(|(name, _)| *name == skill_name)
+        .map(|(_, variant)| variant)
+        .collect();
+    narrow(&variants, agent)
+}
+
+/// Every readable, valid registered variant, with the name it installs under.
+///
+/// The exclusions live here rather than in the caller so every path through
+/// selection applies the same ones.
+fn readable_variants(
+    sources: &[RegisteredSource],
+) -> impl Iterator<Item = (&str, VariantRef)> + '_ {
+    sources
         .iter()
         .filter(|source| source.source_error().is_none())
-    {
-        for catalog in source
-            .catalogs()
-            .iter()
-            .filter(|catalog| catalog.included() && catalog.scan_error().is_none())
-        {
-            if !catalog.compatibility().supports(agent) {
-                continue;
-            }
-            for candidate in catalog
-                .candidates()
+        .flat_map(|source| {
+            source
+                .catalogs()
                 .iter()
-                .filter(|candidate| candidate.directory_name() == skill_name)
-                .filter(|candidate| candidate.validation().is_valid())
-            {
-                candidates.push(VariantRef::of(source, catalog, candidate));
-            }
-        }
+                .filter(|catalog| catalog.included() && catalog.scan_error().is_none())
+                .flat_map(move |catalog| {
+                    catalog
+                        .candidates()
+                        .iter()
+                        .filter(|candidate| candidate.validation().is_valid())
+                        .map(move |candidate| {
+                            (
+                                candidate.directory_name(),
+                                VariantRef::of(source, catalog, candidate),
+                            )
+                        })
+                })
+        })
+}
+
+/// Every registered variant of every name, gathered in one pass.
+///
+/// The registry is walked once and narrowed per agent afterwards, because a
+/// scan that asked [`select_candidates`] for each name and agent separately
+/// would re-walk every catalog of every source for each of them.
+pub(crate) fn variants_by_name(sources: &[RegisteredSource]) -> BTreeMap<&str, Vec<VariantRef>> {
+    let mut by_name: BTreeMap<&str, Vec<VariantRef>> = BTreeMap::new();
+    for (name, variant) in readable_variants(sources) {
+        by_name.entry(name).or_default().push(variant);
     }
+    by_name
+}
+
+/// Apply the selection order to the variants of one name for one agent.
+pub(crate) fn narrow(variants: &[VariantRef], agent: AgentKind) -> CandidateSelection {
+    let mut candidates: Vec<VariantRef> = variants
+        .iter()
+        .filter(|variant| variant.usable_by(agent))
+        .cloned()
+        .collect();
     candidates.sort_by(|left, right| left.order_key().cmp(&right.order_key()));
     if candidates
         .iter()
@@ -204,8 +267,9 @@ pub enum RootSighting {
     /// name — nothing is there, or what is there is not a skill directory.
     NothingToLoad,
     /// Something is there whose resolution could not be established, so what
-    /// OpenCode would load through this root is not known.
-    Unknown { path: PathBuf },
+    /// OpenCode would load through this root is not known. The entry itself is
+    /// on the row's own observation, which is where the reader is shown it.
+    Unknown,
     /// The root offers content that resolves to a directory.
     Offers(SightedEntry),
 }
@@ -248,11 +312,6 @@ impl OpenCodeEntry {
         &self.path
     }
 
-    /// The directory the slot resolves to. Sameness is decided on this.
-    pub fn canonical(&self) -> &Path {
-        &self.canonical
-    }
-
     pub fn variant(&self) -> Option<&VariantRef> {
         self.variant.as_ref()
     }
@@ -284,9 +343,40 @@ pub enum OpenCodeResolution {
     /// More than one directory is visible under the name. Precedence still
     /// picks one, but the arrangement is a conflicting duplicate.
     Conflict { entries: Vec<OpenCodeEntry> },
-    /// A root OpenCode consults was not read in full, so no classification is
-    /// stated. The roots that left it unknown are named.
-    Incomplete { roots: Vec<AgentKind> },
+    /// Something OpenCode consults could not be established, so no
+    /// classification is stated. Each root that left it unknown is named, with
+    /// what about it was unknown.
+    Incomplete { roots: Vec<UnknownRoot> },
+}
+
+/// One root whose contribution to a name could not be established.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct UnknownRoot {
+    root: AgentKind,
+    cause: UnknownCause,
+}
+
+impl UnknownRoot {
+    pub fn root(self) -> AgentKind {
+        self.root
+    }
+
+    pub fn cause(self) -> UnknownCause {
+        self.cause
+    }
+}
+
+/// Why a root's contribution is unknown.
+///
+/// The two are not the same answer and are never flattened: a root Skilled
+/// never read might hold anything, while a root it read in full holds one entry
+/// it could not follow. Saying "not read" of the second would be false.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UnknownCause {
+    /// The root was not read: not selected, not scanned, or unreadable.
+    RootNotRead,
+    /// The root was read, but the entry under this name could not be resolved.
+    EntryUnresolved,
 }
 
 /// Decide what OpenCode would load for one name.
@@ -305,7 +395,14 @@ pub fn resolve_opencode(sightings: [RootSighting; 3]) -> OpenCodeResolution {
     let mut entries = Vec::new();
     for root in order {
         match &sightings[root.index()] {
-            RootSighting::Unread | RootSighting::Unknown { .. } => unknown.push(root),
+            RootSighting::Unread => unknown.push(UnknownRoot {
+                root,
+                cause: UnknownCause::RootNotRead,
+            }),
+            RootSighting::Unknown => unknown.push(UnknownRoot {
+                root,
+                cause: UnknownCause::EntryUnresolved,
+            }),
             RootSighting::NothingToLoad => {}
             RootSighting::Offers(entry) => entries.push(OpenCodeEntry {
                 root,
@@ -334,15 +431,22 @@ pub fn resolve_opencode(sightings: [RootSighting; 3]) -> OpenCodeResolution {
         };
     }
     // Exposure is decided over every root the name is visible through, not the
-    // winner alone: content OpenCode installed for itself is never foreign, and
-    // content that resolved to no registered variant cannot have its
-    // compatibility checked at all.
+    // winner alone: content that resolved to no registered variant cannot have
+    // its compatibility checked at all, and one OpenCode-compatible sighting is
+    // enough to make the name usable.
+    //
+    // The root it was reached through is deliberately not part of the test:
+    // the claim Skilled must not make — that OpenCode can use this — is exactly
+    // as false for another agent's variant sitting in OpenCode's own root, and
+    // reporting only the compatibility-root case would put a healthy badge over
+    // the worse arrangement. What OpenCode can use is
+    // [`VariantRef::usable_by`], which is narrower than the stored
+    // compatibility set for the reason recorded there.
     let foreign = std::iter::once(&winner).chain(&aliases).all(|entry| {
-        entry.root != AgentKind::OpenCode
-            && entry.variant.as_ref().is_some_and(|variant| {
-                variant.classification == CatalogClassification::AgentSpecific
-                    && !variant.compatibility.supports(AgentKind::OpenCode)
-            })
+        entry
+            .variant
+            .as_ref()
+            .is_some_and(|variant| !variant.usable_by(AgentKind::OpenCode))
     });
     if foreign {
         OpenCodeResolution::ForeignExposure { winner, aliases }
@@ -698,11 +802,9 @@ mod tests {
     /// classification may be stated over one that was not fully read.
     #[test]
     fn an_unread_or_unresolvable_root_states_no_classification() {
-        for unknown in [
-            RootSighting::Unread,
-            RootSighting::Unknown {
-                path: PathBuf::from("/home/.claude/skills/review"),
-            },
+        for (unknown, cause) in [
+            (RootSighting::Unread, UnknownCause::RootNotRead),
+            (RootSighting::Unknown, UnknownCause::EntryUnresolved),
         ] {
             let mut per_agent = [
                 RootSighting::NothingToLoad,
@@ -719,7 +821,14 @@ mod tests {
             let OpenCodeResolution::Incomplete { roots } = resolve_opencode(per_agent) else {
                 panic!("an unread root cannot be classified over");
             };
-            assert_eq!(roots, [AgentKind::ClaudeCode]);
+            assert_eq!(
+                roots.iter().map(|root| root.root()).collect::<Vec<_>>(),
+                [AgentKind::ClaudeCode]
+            );
+            // The two kinds of unknown are never flattened: a root that was
+            // never read might hold anything, while a root read in full holds
+            // one entry that could not be followed.
+            assert_eq!(roots[0].cause(), cause);
         }
     }
 }

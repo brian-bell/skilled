@@ -14,9 +14,6 @@ expression: "normalize_inventory(&temporary, render(&app, 80, 24))"
  SOURCE
  ──────────────────────────────────────────────────────────────────────────────
  Not resolved to any registered source; Skilled does not manage it.
- OPENCODE RESOLUTION  ✓ resolved
- ──────────────────────────────────────────────────────────────────────────────
- Loads: ~/.agents/skills/copied
  CODEX  U unmanaged
  ──────────────────────────────────────────────────────────────────────────────
  Finding: install.unmanaged · info
@@ -24,5 +21,8 @@ expression: "normalize_inventory(&temporary, render(&app, 80, 24))"
  Path: ~/.agents/skills/copied
  Object: directory
  Validation: ✓ valid as copied
+ OPENCODE RESOLUTION  ✓ resolved
+ ──────────────────────────────────────────────────────────────────────────────
+ Loads: ~/.agents/skills/copied
  ! 3 more lines below — j/k to scroll
  Tab/Shift-Tab Region   j/k Scroll   2 Sources   4 Doctor   q Quit   Esc Back …

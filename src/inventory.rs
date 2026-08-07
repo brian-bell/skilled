@@ -8,7 +8,7 @@
 //! stays explicitly unmanaged rather than being adopted.
 
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::HashMap,
     fs, io,
     path::{Path, PathBuf},
 };
@@ -18,7 +18,7 @@ use crate::{
     agents::{adapter, detection_at},
     resolution::{
         CandidateSelection, OpenCodeEntry, OpenCodeResolution, RootSighting, SightedEntry,
-        VariantRef, resolve_opencode, select_candidates,
+        VariantRef, narrow, resolve_opencode, variants_by_name,
     },
     source::{RegisteredSource, SkillValidation},
     validation::{InspectionBudget, PortableValidationError, validate_portable_skill_with_budget},
@@ -229,9 +229,7 @@ impl InstalledSkillObservation {
                 self.resolution().cloned(),
             )),
             ContentLocation::Nowhere => RootSighting::NothingToLoad,
-            ContentLocation::Unknown => RootSighting::Unknown {
-                path: self.path.clone(),
-            },
+            ContentLocation::Unknown => RootSighting::Unknown,
         }
     }
 
@@ -657,7 +655,12 @@ fn doctor_order(code: &str) -> u8 {
         // 5 and 6 — disabled skills, blocked updates — have no codes yet.
         // 7. Missing or ambiguous provenance.
         "install.provenance_unverified" => 6,
-        // 8. Unmanaged installations and informational benign aliases.
+        // 8. Unmanaged installations and informational benign aliases. Stray
+        // content is listed here too: an agent ignores it, so it is the same
+        // class of observation as an alias that costs nothing.
+        "install.unmanaged" | "install.not_a_skill" | "variant.benign_alias" => 7,
+        // A stable code nobody has placed sorts with the informational group
+        // rather than ahead of findings that were placed deliberately.
         _ => 7,
     }
 }
@@ -668,6 +671,7 @@ pub struct InventorySnapshot {
     rows: Vec<InventoryRow>,
     roots: [RootScan; 3],
     selection_findings: Vec<SelectionFinding>,
+    registry_is_complete: bool,
 }
 
 impl InventorySnapshot {
@@ -677,6 +681,17 @@ impl InventorySnapshot {
 
     pub fn selection_findings(&self) -> &[SelectionFinding] {
         &self.selection_findings
+    }
+
+    /// Whether every registered source and included catalog could be read.
+    ///
+    /// A checkout that has moved away contributes no variants, so no ambiguity
+    /// between it and another can be found. That is the same kind of gap an
+    /// unreadable root leaves in the roots, and it is kept for the same
+    /// reason: a list assembled over part of the registry may not be presented
+    /// as an account of all of it.
+    pub fn registry_is_complete(&self) -> bool {
+        self.registry_is_complete
     }
 
     /// Every finding, in the order Doctor lists them.
@@ -736,14 +751,38 @@ impl InventorySnapshot {
         entries.into_iter()
     }
 
+    /// How many findings the scan holds, whatever may be said about them.
+    ///
+    /// Counted rather than listed: order is what [`Self::doctor_findings`]
+    /// spends a sort on, and a count has no use for it. Every surface that only
+    /// needs to know whether there is one, or how many, asks here.
+    pub fn finding_count(&self) -> usize {
+        self.rows
+            .iter()
+            .map(|row| {
+                row.observations()
+                    .map(|observation| observation.findings().len())
+                    .sum::<usize>()
+                    + row.resolution_findings().len()
+            })
+            .sum::<usize>()
+            + self.selection_findings.len()
+    }
+
     /// The number of findings, when the scan is entitled to state one.
     ///
-    /// Findings are observations, so the same verdict that gates the skill
-    /// count gates this: the Doctor tab, its subtitle, and its empty state
+    /// Findings are observations, so the verdict that gates the skill count
+    /// gates this too: the Doctor tab, its subtitle, and its empty state
     /// cannot disagree because all three ask here.
+    ///
+    /// Findings come from a second place the skill count does not depend on.
+    /// A registry Skilled could not read in full may hold the very variant
+    /// that would have made a name ambiguous, so a number stated over it would
+    /// claim a completeness the scan never had.
     pub fn stated_finding_count(&self) -> Option<usize> {
-        self.stated_skill_count()
-            .map(|_| self.doctor_findings().count())
+        (self.registry_is_complete)
+            .then(|| self.stated_skill_count().map(|_| self.finding_count()))
+            .flatten()
     }
 
     pub fn roots(&self) -> &[RootScan; 3] {
@@ -795,6 +834,9 @@ impl InventorySnapshot {
         Self {
             rows: Vec::new(),
             selection_findings: Vec::new(),
+            // Nothing has been read, so nothing has been found wanting: the
+            // count is withheld by the roots being unread, not by the registry.
+            registry_is_complete: true,
             roots: agents.each_ref().map(|agent| RootScan {
                 agent: agent.kind(),
                 path: agent.root().to_path_buf(),
@@ -970,18 +1012,21 @@ fn scan_with_budget(
     // statuses say which of them were actually read. A deselected OpenCode is
     // asked nothing: the resolution belongs to an agent that was left alone.
     if detection_at(agents, AgentKind::OpenCode).selected() {
+        let rule = opencode_precedence_rule();
         for row in &mut rows {
             let resolution = resolve_opencode(root_sightings(row, &roots));
-            row.resolution_findings = opencode_findings(row.name(), &resolution);
+            row.resolution_findings = opencode_findings(row.name(), &resolution, &rule);
             row.opencode_resolution = Some(resolution);
         }
     }
-    let selection_findings = selection_findings(agents, sources, &rows);
+    let registry_is_complete = whole_registry(sources);
+    let selection_findings = selection_findings(agents, sources, &rows, registry_is_complete);
 
     InventorySnapshot {
         rows,
         roots,
         selection_findings,
+        registry_is_complete,
     }
 }
 
@@ -1009,8 +1054,9 @@ fn root_sightings(row: &InventoryRow, roots: &[RootScan; 3]) -> [RootSighting; 3
 /// cannot drift from the order the code actually applies.
 fn opencode_precedence_rule() -> String {
     let opencode = adapter(AgentKind::OpenCode);
-    let roots: Vec<&str> = std::iter::once(opencode.native_skill_root())
+    let roots: Vec<String> = std::iter::once(opencode.native_skill_root())
         .chain(opencode.compatibility_skill_roots().iter().copied())
+        .map(|root| format!("~/{root}"))
         .collect();
     format!("OpenCode reads {}, in that order", roots.join(", then "))
 }
@@ -1038,8 +1084,7 @@ fn joined_paths<'a>(entries: impl IntoIterator<Item = &'a OpenCodeEntry>, name: 
 ///
 /// One finding per fact: a conflict is one conflict however many roots are
 /// party to it, and its evidence names them all.
-fn opencode_findings(name: &str, resolution: &OpenCodeResolution) -> Vec<Finding> {
-    let rule = opencode_precedence_rule();
+fn opencode_findings(name: &str, resolution: &OpenCodeResolution, rule: &str) -> Vec<Finding> {
     match resolution {
         // An unread root is not a classification, and the Doctor list is a list
         // of findings rather than of gaps; the detail region says so in words.
@@ -1066,9 +1111,8 @@ fn opencode_findings(name: &str, resolution: &OpenCodeResolution) -> Vec<Finding
                 code: "variant.foreign_opencode_exposure",
                 severity: FindingSeverity::Warning,
                 evidence: format!(
-                    "{} is the agent-specific variant {variant}, which is not registered for \
-                     OpenCode; {rule}, so it is exposed to OpenCode with no OpenCode-compatible \
-                     variant behind it",
+                    "{} resolves to {variant}, which is not registered for OpenCode; {rule}, \
+                     so OpenCode sees this name with no OpenCode-compatible variant behind it",
                     joined_paths(std::iter::once(winner).chain(aliases), name)
                 ),
             }]
@@ -1091,6 +1135,19 @@ fn opencode_findings(name: &str, resolution: &OpenCodeResolution) -> Vec<Finding
     }
 }
 
+/// Whether every registered source, and every catalog Skilled was asked to
+/// include, could be read this pass.
+fn whole_registry(sources: &[RegisteredSource]) -> bool {
+    sources.iter().all(|source| {
+        source.source_error().is_none()
+            && source
+                .catalogs()
+                .iter()
+                .filter(|catalog| catalog.included())
+                .all(|catalog| catalog.scan_error().is_none())
+    })
+}
+
 /// Every registry-side ambiguity, for the agents Skilled was asked to manage.
 ///
 /// One finding per agent and name, not one per competing variant: the
@@ -1100,25 +1157,23 @@ fn selection_findings(
     agents: &[AgentDetection; 3],
     sources: &[RegisteredSource],
     rows: &[InventoryRow],
+    // A source or catalog that could not be read contributed no candidates, so
+    // the variants listed below are the ones Skilled could see rather than
+    // every variant there is. The evidence says so rather than presenting a
+    // partial registry as a complete one.
+    whole_registry: bool,
 ) -> Vec<SelectionFinding> {
-    let names: BTreeSet<&str> = sources
-        .iter()
-        .flat_map(RegisteredSource::catalogs)
-        .filter(|catalog| catalog.included())
-        .flat_map(|catalog| catalog.candidates())
-        .map(|candidate| candidate.directory_name())
-        .collect();
+    let by_name = variants_by_name(sources);
     let mut findings = Vec::new();
-    for name in names {
+    for (name, variants) in &by_name {
         for agent in AgentKind::ALL {
             if !detection_at(agents, agent).selected() {
                 continue;
             }
-            let CandidateSelection::Duplicate(variants) = select_candidates(sources, agent, name)
-            else {
+            let CandidateSelection::Duplicate(variants) = narrow(variants, agent) else {
                 continue;
             };
-            let row = rows.iter().find(|row| row.name() == name);
+            let row = rows.iter().find(|row| row.name() == *name);
             // An effective resolution that is already a conflict for this agent
             // has said this, about the same name and the same agent, from the
             // installed side. Filing the registry's version beside it would put
@@ -1142,8 +1197,26 @@ fn selection_findings(
                 .map(VariantRef::evidence_label)
                 .collect::<Vec<_>>()
                 .join(", ");
+            let scope = if whole_registry {
+                ""
+            } else {
+                ", of the sources that could be read"
+            };
+            // The fact that raises this to critical is named, because a row
+            // reading `critical` beside one reading `warning` under the same
+            // code and the same words would leave the difference unaccounted
+            // for.
+            let standing = if installed {
+                format!(
+                    " {} already has an installation under this name, so what it \
+                     resolves to is ambiguous now rather than at the next install.",
+                    agent.display_name()
+                )
+            } else {
+                String::new()
+            };
             findings.push(SelectionFinding {
-                skill_name: name.to_owned(),
+                skill_name: (*name).to_owned(),
                 agent,
                 finding: Finding {
                     code: "variant.duplicate_for_agent",
@@ -1153,9 +1226,9 @@ fn selection_findings(
                         FindingSeverity::Warning
                     },
                     evidence: format!(
-                        "{} has more than one registered variant of {name}: {listed}. The \
-                         selection order — an exact agent-specific variant, then a compatible \
-                         common one — does not narrow it to one.",
+                        "{} has more than one registered variant of {name}{scope}: {listed}. \
+                         The selection order — an exact agent-specific variant, then a \
+                         compatible common one — does not narrow it to one.{standing}",
                         agent.display_name()
                     ),
                 },
@@ -1447,7 +1520,13 @@ fn classify(
                 name,
                 path,
                 object,
-                content,
+                // Content that fails the portable core is not what any agent
+                // resolves this name to, and content Skilled could not read is
+                // not something it can say either way. Keeping the resolved
+                // directory here would let a skill no agent can load answer for
+                // the name in another agent's effective resolution — the same
+                // asymmetry `select_candidates` refuses on the registry side.
+                content: unloadable_content(&error),
                 // A failed validation says nothing about where the content
                 // came from, so whatever the scan established is kept.
                 provenance: provenance_of(&resolution, accountable),
@@ -1499,6 +1578,33 @@ fn broken_object(
         validation: None,
         findings: vec![finding],
         health: InstallationHealth::Broken,
+    }
+}
+
+/// Where content that failed validation leaves an agent looking for the name.
+///
+/// A failure Skilled could read is a failure it can state: the portable core
+/// is what an agent loads a skill by, so the name resolves to nothing. A
+/// failure it could not read through — a directory it was denied, a document
+/// too large to inspect, one whose bytes are not text — is not a verdict about
+/// the content at all. The last of those is conservative: an agent would not
+/// load it either, but the error that carries it also carries the failures
+/// Skilled genuinely could not see through, and withholding a verdict is the
+/// safe side of that ambiguity.
+fn unloadable_content(error: &PortableValidationError) -> ContentLocation {
+    match error {
+        PortableValidationError::ReadDirectory { .. }
+        | PortableValidationError::UnreadableSkillMd(_)
+        | PortableValidationError::SkillMdTooLarge { .. }
+        | PortableValidationError::SkillDirectoryTooLarge { .. }
+        | PortableValidationError::SourceInspectionLimitExceeded => ContentLocation::Unknown,
+        PortableValidationError::MissingSkillMd
+        | PortableValidationError::MissingFrontmatter
+        | PortableValidationError::UnterminatedFrontmatter
+        | PortableValidationError::InvalidFrontmatter(_)
+        | PortableValidationError::InvalidName
+        | PortableValidationError::NameMismatch { .. }
+        | PortableValidationError::InvalidDescription => ContentLocation::Nowhere,
     }
 }
 

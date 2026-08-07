@@ -4090,7 +4090,7 @@ fn feedback(app: &SkilledApp, width: u16, height: u16) -> RenderFeedback {
 /// The scroll extent of a frame that drew the detail region.
 fn measured_extent(app: &SkilledApp, width: u16, height: u16) -> usize {
     feedback(app, width, height)
-        .inventory_detail_max_scroll()
+        .detail_max_scroll()
         .expect("the frame drew the detail region")
 }
 
@@ -4098,10 +4098,10 @@ fn measured_extent(app: &SkilledApp, width: u16, height: u16) -> usize {
 /// — the loop in `runner::run`, so a test scrolls the way a user does.
 fn scroll_detail(app: &mut SkilledApp, width: u16, height: u16, steps: usize) {
     for _ in 0..steps {
-        if let Some(extent) = feedback(app, width, height).inventory_detail_max_scroll() {
-            app.note_inventory_detail_max_scroll(extent);
+        if let Some(extent) = feedback(app, width, height).detail_max_scroll() {
+            app.note_detail_max_scroll(extent);
         }
-        app.update(Action::ScrollInventoryDetail(1));
+        app.update(Action::ScrollDetail(1));
     }
 }
 
@@ -4825,7 +4825,7 @@ mod installed {
         // behind it, which is not the same as measuring nothing to scroll.
         app.update(Action::Back);
         assert_eq!(
-            feedback(&app, 80, 24).inventory_detail_max_scroll(),
+            feedback(&app, 80, 24).detail_max_scroll(),
             None,
             "the region is not on screen"
         );
@@ -4905,16 +4905,16 @@ mod installed {
             let whole = region_rows(&app, width, 80);
             for height in 24..40 {
                 let extent = measured_extent(&app, width, height);
-                app.note_inventory_detail_max_scroll(extent);
+                app.note_detail_max_scroll(extent);
                 for _ in 0..=extent {
-                    app.update(Action::ScrollInventoryDetail(-1));
+                    app.update(Action::ScrollDetail(-1));
                 }
                 let mut previously_above = 0;
                 for offset in 0..=extent {
                     if offset > 0 {
-                        app.update(Action::ScrollInventoryDetail(1));
+                        app.update(Action::ScrollDetail(1));
                     }
-                    assert_eq!(app.inventory_detail_scroll(), offset);
+                    assert_eq!(app.detail_scroll(), offset);
 
                     let rows = region_rows(&app, width, height);
                     let above = rows.first().and_then(|row| stated(row, " line"));
@@ -5032,7 +5032,7 @@ mod installed {
 
         // A taller region reaches the same last row from a smaller offset, so
         // the one the application is holding is now past the end.
-        let stale = app.inventory_detail_scroll();
+        let stale = app.detail_scroll();
         let extent = measured_extent(&app, 80, 30);
         assert!(extent > 0, "the taller region should still be cut");
         assert!(stale > extent, "{stale} should outrun {extent}");
@@ -5041,8 +5041,8 @@ mod installed {
         // back first, and the next one — the runner notes before every key —
         // pulls it back for good.
         let stale_frame = text(&buffer(&app, 80, 30));
-        app.note_inventory_detail_max_scroll(extent);
-        assert_eq!(app.inventory_detail_scroll(), extent);
+        app.note_detail_max_scroll(extent);
+        assert_eq!(app.detail_scroll(), extent);
         assert_eq!(stale_frame, text(&buffer(&app, 80, 30)));
 
         assert!(stale_frame.contains("OPENCODE"), "{stale_frame}");
@@ -5062,18 +5062,18 @@ mod installed {
             let mut app = harness.everywhere_installed_inventory();
             app.update(Action::AdvanceInventoryPane);
             scroll_detail(&mut app, width, height, 2);
-            assert_eq!(app.inventory_detail_scroll(), 2, "at {width}x{height}");
+            assert_eq!(app.detail_scroll(), 2, "at {width}x{height}");
 
             // Drawn between each step, the way the runner does it.
             for _ in 0..2 {
-                if let Some(extent) = feedback(&app, width, height).inventory_detail_max_scroll() {
-                    app.note_inventory_detail_max_scroll(extent);
+                if let Some(extent) = feedback(&app, width, height).detail_max_scroll() {
+                    app.note_detail_max_scroll(extent);
                 }
                 app.update(Action::MoveInventoryPane(1));
             }
 
             assert_eq!(app.inventory_pane(), InventoryPane::Details);
-            assert_eq!(app.inventory_detail_scroll(), 2, "at {width}x{height}");
+            assert_eq!(app.detail_scroll(), 2, "at {width}x{height}");
         }
     }
 

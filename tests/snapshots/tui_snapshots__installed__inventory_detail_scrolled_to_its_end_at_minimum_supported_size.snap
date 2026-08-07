@@ -7,10 +7,6 @@ expression: screen
  ▌ Details  alpha
  ──────────────────────────────────────────────────────────────────────────────
  ! 11 lines above
- Also at: ~/.claude/skills/alpha
- CLAUDE CODE  ✓ healthy
- ──────────────────────────────────────────────────────────────────────────────
- Path: ~/.claude/skills/alpha
  Object: symbolic link
  Variant: skills · skills/alpha
  Target: ~/library/skills/alpha
@@ -22,6 +18,10 @@ expression: screen
  Variant: skills · skills/alpha
  Target: ~/library/skills/alpha
  Validation: ✓ valid as alpha
+ OPENCODE RESOLUTION  ✓ resolved
+ ──────────────────────────────────────────────────────────────────────────────
+ Loads: ~/.agents/skills/alpha
+ Also at: ~/.claude/skills/alpha
  NOT INSTALLED
  ──────────────────────────────────────────────────────────────────────────────
  - OpenCode

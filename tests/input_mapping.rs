@@ -208,10 +208,10 @@ fn the_focused_inventory_region_decides_what_the_movement_keys_move() {
     app.update(Action::AdvanceInventoryPane);
 
     for (code, expected) in [
-        (KeyCode::Char('j'), Action::ScrollInventoryDetail(1)),
-        (KeyCode::Down, Action::ScrollInventoryDetail(1)),
-        (KeyCode::Char('k'), Action::ScrollInventoryDetail(-1)),
-        (KeyCode::Up, Action::ScrollInventoryDetail(-1)),
+        (KeyCode::Char('j'), Action::ScrollDetail(1)),
+        (KeyCode::Down, Action::ScrollDetail(1)),
+        (KeyCode::Char('k'), Action::ScrollDetail(-1)),
+        (KeyCode::Up, Action::ScrollDetail(-1)),
     ] {
         assert_eq!(
             action_for_app_key(&app, key(code)),
@@ -222,7 +222,7 @@ fn the_focused_inventory_region_decides_what_the_movement_keys_move() {
     // Reading a long region is exactly where a key is held down.
     assert_eq!(
         action_for_app_key(&app, repeat(KeyCode::Char('j'))),
-        Some(Action::ScrollInventoryDetail(1))
+        Some(Action::ScrollDetail(1))
     );
     // Everything else the Inventory binds is unchanged by the region in focus.
     assert_eq!(

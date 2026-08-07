@@ -848,16 +848,16 @@ mod installed {
         let temporary = tempfile::tempdir().expect("temporary application directory");
         let mut app = inventory_app(&temporary);
         app.update(Action::AdvanceInventoryPane);
-        app.note_inventory_detail_max_scroll(2);
+        app.note_detail_max_scroll(2);
 
         for expected in [1, 2, 2] {
-            let update = app.update(Action::ScrollInventoryDetail(1));
-            assert_eq!(app.inventory_detail_scroll(), expected);
+            let update = app.update(Action::ScrollDetail(1));
+            assert_eq!(app.detail_scroll(), expected);
             assert!(update.effects().is_empty());
         }
         for expected in [1, 0, 0] {
-            app.update(Action::ScrollInventoryDetail(-1));
-            assert_eq!(app.inventory_detail_scroll(), expected);
+            app.update(Action::ScrollDetail(-1));
+            assert_eq!(app.detail_scroll(), expected);
         }
     }
     /// A terminal that grew has less left to scroll, so the offset the last
@@ -869,17 +869,17 @@ mod installed {
         let temporary = tempfile::tempdir().expect("temporary application directory");
         let mut app = inventory_app(&temporary);
         app.update(Action::AdvanceInventoryPane);
-        app.note_inventory_detail_max_scroll(5);
+        app.note_detail_max_scroll(5);
         for _ in 0..5 {
-            app.update(Action::ScrollInventoryDetail(1));
+            app.update(Action::ScrollDetail(1));
         }
-        assert_eq!(app.inventory_detail_scroll(), 5);
+        assert_eq!(app.detail_scroll(), 5);
 
-        app.note_inventory_detail_max_scroll(2);
-        assert_eq!(app.inventory_detail_scroll(), 2);
+        app.note_detail_max_scroll(2);
+        assert_eq!(app.detail_scroll(), 2);
 
-        app.note_inventory_detail_max_scroll(0);
-        assert_eq!(app.inventory_detail_scroll(), 0);
+        app.note_detail_max_scroll(0);
+        assert_eq!(app.detail_scroll(), 0);
     }
     /// A wide terminal draws the detail region beside a focused table, so the
     /// region being on screen is not the same as the region having the keys.
@@ -887,15 +887,15 @@ mod installed {
     fn the_detail_window_moves_only_where_the_detail_region_has_focus() {
         let temporary = tempfile::tempdir().expect("temporary application directory");
         let mut app = inventory_app(&temporary);
-        app.note_inventory_detail_max_scroll(4);
+        app.note_detail_max_scroll(4);
 
         assert_eq!(app.inventory_pane(), InventoryPane::Skills);
-        app.update(Action::ScrollInventoryDetail(1));
-        assert_eq!(app.inventory_detail_scroll(), 0);
+        app.update(Action::ScrollDetail(1));
+        assert_eq!(app.detail_scroll(), 0);
 
         app.update(Action::OpenSources);
-        app.update(Action::ScrollInventoryDetail(1));
-        assert_eq!(app.inventory_detail_scroll(), 0);
+        app.update(Action::ScrollDetail(1));
+        assert_eq!(app.detail_scroll(), 0);
     }
     /// A window scrolled into one skill's observations describes that skill.
     /// Once the rows behind it are restated, the same offset points into
@@ -905,9 +905,9 @@ mod installed {
     fn the_detail_window_returns_to_the_top_when_the_content_behind_it_changes() {
         fn scroll_into_details(app: &mut SkilledApp) {
             app.update(Action::AdvanceInventoryPane);
-            app.note_inventory_detail_max_scroll(3);
-            app.update(Action::ScrollInventoryDetail(1));
-            assert_eq!(app.inventory_detail_scroll(), 1);
+            app.note_detail_max_scroll(3);
+            app.update(Action::ScrollDetail(1));
+            assert_eq!(app.detail_scroll(), 1);
         }
         let temporary = tempfile::tempdir().expect("temporary application directory");
         let mut app = inventory_app(&temporary);
@@ -916,16 +916,16 @@ mod installed {
         app.update(Action::MoveInventoryPane(1));
         app.update(Action::MoveInventoryPane(1));
         assert_eq!(app.inventory_pane(), InventoryPane::Details);
-        assert_eq!(app.inventory_detail_scroll(), 1);
+        assert_eq!(app.detail_scroll(), 1);
 
         app.update(Action::MoveInventoryPane(1));
         app.update(Action::MoveInventorySelection(1));
-        assert_eq!(app.inventory_detail_scroll(), 0);
+        assert_eq!(app.detail_scroll(), 0);
 
         scroll_into_details(&mut app);
         app.update(Action::MoveInventoryPane(1));
         type_filter(&mut app, "variant");
-        assert_eq!(app.inventory_detail_scroll(), 0);
+        assert_eq!(app.detail_scroll(), 0);
 
         scroll_into_details(&mut app);
         let update = app.update(Action::OpenSources);
@@ -934,10 +934,10 @@ mod installed {
         // Before the scan, not only after it: the transition into the view
         // states that nothing has been scanned for it, and a window scrolled
         // into the last view's rows would outlive the rows it belonged to.
-        assert_eq!(app.inventory_detail_scroll(), 0);
+        assert_eq!(app.detail_scroll(), 0);
         app.perform_effects(update.effects())
             .expect("installation scan");
-        assert_eq!(app.inventory_detail_scroll(), 0);
+        assert_eq!(app.detail_scroll(), 0);
     }
     #[test]
     fn the_filter_narrows_by_name_source_and_health() {
@@ -956,9 +956,7 @@ mod installed {
         type_filter(&mut app, "unmanaged");
         assert_eq!(names(&app), ["foreign"]);
     }
-    /// The Health column gained two words that come from the effective
-    /// resolution rather than from any one installation, and the same box
-    /// narrows by them.
+
     /// Doctor is a destination like the others: it opens on a scan taken for
     /// it, so what it lists was observed for Doctor rather than inherited from
     /// the view the user just left.
@@ -1066,6 +1064,9 @@ mod installed {
         assert_eq!(update.effects(), [Effect::ScanInstallations]);
     }
 
+    /// The Health column gained two words that come from the effective
+    /// resolution rather than from any one installation, and the same box
+    /// narrows by them.
     #[test]
     fn the_filter_narrows_by_the_words_the_effective_resolution_adds() {
         let temporary = tempfile::tempdir().expect("temporary application directory");

@@ -1,6 +1,6 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
-use crate::{Action, AgentKind, InventoryPane, SetupStep, SkilledApp, View};
+use crate::{Action, AgentKind, DoctorPane, InventoryPane, SetupStep, SkilledApp, View};
 
 pub fn action_for_app_key(app: &SkilledApp, key: KeyEvent) -> Option<Action> {
     if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
@@ -64,8 +64,8 @@ pub fn action_for_app_key(app: &SkilledApp, key: KeyEvent) -> Option<Action> {
             _ => action,
         };
     }
-    // The keys that move the Inventory's selection move the detail region's
-    // window once it has focus. The translation happens here rather than in
+    // The keys that move a workspace's selection move its detail region's
+    // window once that region has focus. The translation happens here rather than in
     // `action_for_key` because only this side sees which region is focused —
     // and it happens after that call so the held-key allowance the movement
     // keys already have carries over to scrolling, which is where a user is
@@ -74,7 +74,12 @@ pub fn action_for_app_key(app: &SkilledApp, key: KeyEvent) -> Option<Action> {
         Some(Action::MoveInventorySelection(delta))
             if app.view() == View::Inventory && app.inventory_pane() == InventoryPane::Details =>
         {
-            Some(Action::ScrollInventoryDetail(delta))
+            Some(Action::ScrollDetail(delta))
+        }
+        Some(Action::MoveDoctorSelection(delta))
+            if app.view() == View::Doctor && app.doctor_pane() == DoctorPane::Details =>
+        {
+            Some(Action::ScrollDetail(delta))
         }
         action => action,
     }

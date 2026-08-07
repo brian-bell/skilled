@@ -16,13 +16,13 @@ expression: screen
  Claude Code has more than one registered variant of review: alpha · skills ·
  skills/review, beta · skills · skills/review. The selection order — an exact
  agent-specific variant, then a compatible common one — does not narrow it to
- one.
+ one. Claude Code already has an installation under this name, so what it
+ resolves to is ambiguous now rather than at the next install.
  CONSEQUENCE
  ──────────────────────────────────────────────────────────────────────────────
- Which definition the agent resolves is not something Skilled can state.
+ Which definition the agent would resolve is not something Skilled can state,
+ so installing under this name is blocked until a source is chosen.
  COMPETING VARIANTS
  ──────────────────────────────────────────────────────────────────────────────
- Variant: alpha · skills · skills/review
- Variant: beta · skills · skills/review
- Repair: not offered in this release
- Tab/Shift-Tab Region   1 Inventory   2 Sources   ? Help   q Quit   Esc Back
+ ! 3 more lines below — j/k to scroll
+ Tab/Shift-Tab Region   j/k Scroll   1 Inventory   2 Sources   Esc Back …
