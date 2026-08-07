@@ -4,6 +4,7 @@ mod components;
 pub mod error;
 pub mod input;
 pub mod inventory;
+pub mod operations;
 pub mod paths;
 pub mod resolution;
 pub mod runner;
