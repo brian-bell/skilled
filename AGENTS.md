@@ -117,11 +117,22 @@ signal needs both, because colour alone is not an acceptable cue.
   data behind it supports one. Counts render as `·N` so a bare amber digit
   cannot read as the next tab's route key — the prototype separates the
   two classes by colour alone, which a terminal may not rest on.
-- Nothing is written until a plan the user has seen in full is confirmed. A
-  plan blocks whole: one blocked target and nothing is written anywhere. The
-  preview states every target's absolute path unabbreviated — the `~` spelling
-  the rest of the application uses would soften the thing being agreed to — and
-  scrolls rather than dropping what a small terminal cannot hold.
+- Nothing is written until a plan the user has seen in full is confirmed, and
+  that is enforced rather than assumed: a preview taller than its dialog scrolls
+  rather than dropping what it cannot hold, and neither the reducer nor the
+  footer offers a confirmation until its last row has been on screen. A plan
+  blocks whole: one blocked target and nothing is written anywhere. Every
+  target's absolute path is stated unabbreviated — the `~` spelling the rest of
+  the application uses would soften the thing being agreed to.
+- Skilled writes only inside a root it established. A skill root, or any
+  directory between it and the home directory, that is a symbolic link is
+  refused rather than followed: the path the preview stated has to be the path
+  the write lands on. One pathname window remains between the check and the
+  write; it is recorded on `apply_install` and tracked as `skilled-cb2`.
+- Text from the filesystem — names, paths, link targets, operating-system error
+  messages — is escaped through `components::terminal_safe` before it reaches a
+  terminal, on every surface. The screens and `skilled install` write to the
+  same terminal by different routes and both go through it.
 - Verification has three answers, not two. `VerifyReport::is_verified` means
   nothing disagreed with the plan; `is_complete` means every postcondition was
   also checked. A root the scan could not read leaves its check withheld, which

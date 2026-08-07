@@ -1060,17 +1060,32 @@ impl SkilledApp {
         Ok(())
     }
 
-    /// Only a preview of executable work accepts a confirmation.
+    /// Only a preview of executable work that has been read to its end accepts
+    /// a confirmation.
     ///
     /// A blocked plan and a plan with nothing left to do both stay on screen
     /// rather than turning into a report of an install that never ran.
     fn confirm_install(&mut self) -> Vec<Effect> {
         match &self.pending_install {
-            Some(InstallPrompt::Preview(plan)) if plan.is_executable() => {
+            Some(InstallPrompt::Preview(plan))
+                if plan.is_executable() && self.install_preview_fully_seen() =>
+            {
                 vec![Effect::ApplyInstall]
             }
             _ => Vec::new(),
         }
+    }
+
+    /// Whether every row of the open preview has been on screen.
+    ///
+    /// Nothing is written until a plan the user has *seen* in full is
+    /// confirmed, and a dialog taller than the terminal is not seen in full by
+    /// being opened. The extent is the last frame's own measurement, so this is
+    /// a fact about the terminal the reader is looking at rather than about the
+    /// plan; a preview that always fitted is fully seen at rest, which is why
+    /// the ordinary case costs no keystrokes at all.
+    pub fn install_preview_fully_seen(&self) -> bool {
+        self.detail_scroll >= self.detail_max_scroll
     }
 
     /// Read the machine and decide what installing the focused variant would

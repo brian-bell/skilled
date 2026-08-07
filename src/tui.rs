@@ -104,6 +104,7 @@ pub fn render(frame: &mut Frame<'_>, app: &SkilledApp) -> RenderFeedback {
             app.home(),
             app.detail_scroll(),
             detail_extent,
+            install_preview_fully_seen(app, detail_extent),
         );
     } else if app.source_path_input_active() {
         render_source_path_entry(frame, area, app);
@@ -3699,6 +3700,7 @@ fn render_install_prompt(
     home: &Path,
     scroll: usize,
     extent: Option<usize>,
+    fully_seen: bool,
 ) {
     let popup = install_prompt_popup(area);
     frame.render_widget(Clear, popup);
@@ -3708,7 +3710,7 @@ fn render_install_prompt(
         }
         InstallPrompt::Report(_) => ("Install result", "already applied"),
     };
-    let actions = install_prompt_actions(prompt);
+    let actions = install_prompt_actions(prompt, fully_seen);
     // The footer is divided by the keys actually offered, so the sentence
     // beside them — which is where a reader is told the body holds more than
     // it can show — keeps every column the keys do not need.
@@ -3737,11 +3739,13 @@ fn render_install_prompt(
     frame.render_widget(Paragraph::new(actions.right_aligned()), regions.actions);
 }
 
-/// The keys the dialog offers, which are exactly the ones [`crate::input`]
-/// honours in this state: a plan with no executable work accepts no
-/// confirmation, so it advertises none.
-fn install_prompt_actions(prompt: &InstallPrompt) -> Line<'static> {
-    let confirm = matches!(prompt, InstallPrompt::Preview(plan) if plan.is_executable());
+/// The keys the dialog offers, which are exactly the ones the reducer honours
+/// in this state: a plan with no executable work accepts no confirmation, and
+/// neither does one whose last row has not been on screen, so neither
+/// advertises one.
+fn install_prompt_actions(prompt: &InstallPrompt, fully_seen: bool) -> Line<'static> {
+    let confirm =
+        fully_seen && matches!(prompt, InstallPrompt::Preview(plan) if plan.is_executable());
     let mut spans = Vec::new();
     if confirm {
         spans.extend([
@@ -4946,7 +4950,15 @@ fn key_hints(app: &SkilledApp, detail_extent: Option<usize>) -> Vec<KeyHint> {
         if detail_extent.is_some_and(|extent| extent > 0) {
             hints.push(KeyHint::essential("j/k", "Scroll"));
         }
-        if matches!(prompt, InstallPrompt::Preview(plan) if plan.is_executable()) {
+        // Enter appears only where the reducer would accept it, which is a
+        // plan with work left whose last row has been on screen. Measured from
+        // this frame rather than from the offset the application last noted,
+        // so the hint cannot survive a resize that put content back under the
+        // window; the runner notes the same measurement before reading the key,
+        // so the two agree at the moment one is pressed.
+        if install_preview_fully_seen(app, detail_extent)
+            && matches!(prompt, InstallPrompt::Preview(plan) if plan.is_executable())
+        {
             hints.push(KeyHint::essential("Enter", "Install"));
             hints.push(KeyHint::essential("Esc", "Cancel"));
         } else {
@@ -5081,6 +5093,12 @@ fn key_hints(app: &SkilledApp, detail_extent: Option<usize>) -> Vec<KeyHint> {
             KeyHint::essential("Esc", "Close"),
         ],
     }
+}
+
+/// Whether every row of the open preview has been on screen, as this frame
+/// measures it.
+fn install_preview_fully_seen(app: &SkilledApp, detail_extent: Option<usize>) -> bool {
+    detail_extent.is_none_or(|extent| app.detail_scroll() >= extent)
 }
 
 /// Enter only drills in, so it advertises itself only where it can.
