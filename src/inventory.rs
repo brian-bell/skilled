@@ -1206,11 +1206,22 @@ fn selection_findings(
             // means an agent is loading content Skilled cannot say was chosen.
             // An observation is not an installation: a stray file is ignored by
             // the agent, and an entry the scan could not read is one this
-            // module refuses to claim either way. Escalating on either would
-            // state that the agent already resolves this name.
+            // module refuses to claim either way. OpenCode is the exception to
+            // looking only at its native observation: a settled effective
+            // resolution may load an installation through a compatibility
+            // root, which makes the ambiguity current for OpenCode too.
             let installed = row.is_some_and(|row| {
                 row.observation(agent)
                     .is_some_and(|observation| observation.object().is_installation())
+                    || (agent == AgentKind::OpenCode
+                        && matches!(
+                            row.opencode_resolution(),
+                            Some(
+                                OpenCodeResolution::Selected { .. }
+                                    | OpenCodeResolution::ForeignExposure { .. }
+                                    | OpenCodeResolution::Conflict { .. }
+                            )
+                        ))
             });
             let listed = variants
                 .iter()

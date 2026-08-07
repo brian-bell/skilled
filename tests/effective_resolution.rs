@@ -382,6 +382,37 @@ fn a_selection_conflict_over_an_installed_name_is_critical() {
     assert_eq!(codex.finding().severity(), FindingSeverity::Warning);
 }
 
+/// An installation in a compatibility root is installed for OpenCode too:
+/// OpenCode resolves that root even though its own native slot is empty.
+#[test]
+fn an_opencode_selection_conflict_installed_through_a_compatibility_root_is_critical() {
+    let fixture = Fixture::new();
+    let first = fixture.source("alpha", &[("skills", &["review"])]);
+    let second = fixture.source("beta", &[("skills", &["review"])]);
+    drop(fixture.registered(&[&first, &second]));
+    fixture.install_symlink(AgentKind::Codex, "review", &first.join("skills/review"));
+
+    let app = fixture.app();
+    let row = app.inventory().row("review").expect("review row");
+    assert!(matches!(
+        row.opencode_resolution(),
+        Some(OpenCodeResolution::Selected { .. })
+    ));
+
+    let opencode = app
+        .inventory()
+        .selection_findings()
+        .iter()
+        .find(|finding| finding.agent() == AgentKind::OpenCode)
+        .expect("OpenCode has no unambiguous registered variant");
+    assert_eq!(opencode.finding().severity(), FindingSeverity::Critical);
+    assert!(
+        opencode.finding().evidence().contains("ambiguous now"),
+        "the evidence states that the installed name is affected: {:?}",
+        opencode.finding()
+    );
+}
+
 /// Doctor orders findings by the spec 9.5 groups before severity, so a broken
 /// installation leads an informational alias whatever the codes are called.
 #[test]
