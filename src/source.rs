@@ -134,6 +134,20 @@ impl SkillCandidate {
         }
     }
 
+    /// The same, for a test that needs the candidate to sit in a named catalog.
+    ///
+    /// A scanned candidate's relative path runs from the checkout root, so a
+    /// variant's identity carries its catalog; a fixture built without one
+    /// would let two variants of different catalogs share an identity they
+    /// never share in practice.
+    #[cfg(test)]
+    pub(crate) fn for_test_in(catalog_relative_path: &str, directory_name: &str) -> Self {
+        Self {
+            relative_path: PathBuf::from(catalog_relative_path).join(directory_name),
+            ..Self::for_test(directory_name)
+        }
+    }
+
     pub fn directory_name(&self) -> &str {
         &self.directory_name
     }

@@ -5,6 +5,7 @@ pub mod error;
 pub mod input;
 pub mod inventory;
 pub mod paths;
+pub mod resolution;
 pub mod runner;
 pub mod source;
 mod store;
