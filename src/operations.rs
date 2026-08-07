@@ -182,6 +182,11 @@ enum RootProbe {
         parent_present: bool,
     },
     Unreadable(String),
+    /// The root, or a directory on the way to it under the home directory, is
+    /// a symbolic link, so writing "into the root" would write somewhere else.
+    Redirected {
+        via: PathBuf,
+    },
     /// The root was not looked at: the user asked Skilled to leave this agent
     /// alone, and [`crate::inventory`] keeps the same rule.
     NotRead,
@@ -241,16 +246,21 @@ impl InstallProbe {
 }
 
 /// Read the machine once, for one variant.
+/// `home` is the directory every documented root hangs off, and is what the
+/// walk looking for redirected roots stops at: the home directory itself may
+/// legitimately be reached through a link — a macOS temporary directory is —
+/// and that is not something Skilled put anything inside of.
 pub fn probe_install(
     agents: &[AgentDetection; 3],
     sources: &[RegisteredSource],
     variant: &VariantRef,
+    home: &Path,
 ) -> InstallProbe {
     InstallProbe {
         source_dir: probe_source_dir(sources, variant),
         targets: agents
             .each_ref()
-            .map(|agent| probe_target(agent, variant.skill_name())),
+            .map(|agent| probe_target(agent, variant.skill_name(), home)),
     }
 }
 
@@ -282,6 +292,13 @@ fn probe_source_dir(sources: &[RegisteredSource], variant: &VariantRef) -> Resul
             directory.display()
         ));
     }
+    // A registered path that has since become a file is not a skill directory,
+    // and a preview that offered to link to it would promise work that cannot
+    // happen. The apply guard checks this too; catching it here is what keeps
+    // the preview and the outcome the same statement.
+    if !fs::metadata(&directory).is_ok_and(|metadata| metadata.is_dir()) {
+        return Err(format!("{} is no longer a directory", directory.display()));
+    }
     Ok(directory)
 }
 
@@ -292,7 +309,7 @@ fn probe_source_dir(sources: &[RegisteredSource], variant: &VariantRef) -> Resul
 /// [`crate::inventory::scan_installations`] checks it: a root the user asked
 /// Skilled to leave alone stays unread, so nothing in it can decide anything —
 /// not this agent's own target, and not what the plan says about OpenCode.
-fn probe_target(agent: &AgentDetection, skill_name: &str) -> TargetProbe {
+fn probe_target(agent: &AgentDetection, skill_name: &str, home: &Path) -> TargetProbe {
     let link_path = agent.root().join(skill_name);
     if !agent.selected() {
         return TargetProbe {
@@ -305,7 +322,7 @@ fn probe_target(agent: &AgentDetection, skill_name: &str) -> TargetProbe {
     }
     let entry = probe_entry(&link_path);
     TargetProbe {
-        root: probe_root(agent.root()),
+        root: probe_root(agent.root(), home),
         content: probe_content(&link_path, &entry),
         entry,
         agent: agent.kind(),
@@ -346,7 +363,18 @@ fn probe_content(link_path: &Path, entry: &EntryProbe) -> SlotContent {
     }
 }
 
-fn probe_root(root: &Path) -> RootProbe {
+fn probe_root(root: &Path, home: &Path) -> RootProbe {
+    // Before anything else: the path the preview states has to be the path the
+    // write lands on. `fs::metadata` follows links, so a root — or any
+    // directory on the way to it below the home directory — that is a symbolic
+    // link would present as an ordinary directory while the link Skilled
+    // created went somewhere the user was never shown. Skilled writes only
+    // inside a documented root it established, so a redirected one is refused
+    // rather than followed; adopting a redirected layout is a decision for a
+    // release that can also repair one.
+    if let Some(via) = redirected_component(root, home) {
+        return RootProbe::Redirected { via };
+    }
     match fs::metadata(root) {
         Ok(metadata) if metadata.is_dir() => RootProbe::Present,
         Ok(_) => RootProbe::Unreadable("the skill root is not a directory".to_owned()),
@@ -365,6 +393,27 @@ fn probe_root(root: &Path) -> RootProbe {
         }
         Err(error) => RootProbe::Unreadable(error.to_string()),
     }
+}
+
+/// The first directory between `home` and `root`, inclusive of `root`, that is
+/// a symbolic link.
+///
+/// The walk stops at the home directory rather than canonicalizing the whole
+/// path, because a home directory reached through a link is ordinary — every
+/// macOS temporary directory is one — and only the components Skilled would
+/// write through are its business.
+fn redirected_component(root: &Path, home: &Path) -> Option<PathBuf> {
+    let mut component = Some(root);
+    while let Some(path) = component {
+        if path == home {
+            return None;
+        }
+        if fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+            return Some(path.to_path_buf());
+        }
+        component = path.parent();
+    }
+    None
 }
 
 fn probe_entry(link_path: &Path) -> EntryProbe {
@@ -416,10 +465,12 @@ pub enum TargetDisposition {
     /// one level and no more, then the link.
     CreateRootAndLink,
     /// The slot already resolves to this very directory, so there is nothing
-    /// to write. `managed` says whether Skilled holds a receipt for it: an
-    /// identical link it did not create stays unowned, because adopting one is
-    /// a later slice's decision to make.
-    AlreadyInstalled { managed: bool },
+    /// to write. `receipted` says whether Skilled holds a receipt for this
+    /// path — which is not quite the same as having created the link that is
+    /// there now, and is worded as what it is wherever it is reported. A link
+    /// Skilled has no receipt for stays unowned: adopting one is a later
+    /// slice's decision to make.
+    AlreadyInstalled { receipted: bool },
     /// Not part of the work, for a reason the user chose.
     Excluded { reason: ExcludedReason },
     /// Something occupies the slot, or stands in the way of it. Nothing is
@@ -694,7 +745,10 @@ fn sightings(
         // the same three roots. Both have to apply it, because the prediction
         // made here and the postcondition checked against a later scan are
         // statements about one arrangement.
-        if matches!(slot.root, RootProbe::Unreadable(_) | RootProbe::NotRead) {
+        if matches!(
+            slot.root,
+            RootProbe::Unreadable(_) | RootProbe::NotRead | RootProbe::Redirected { .. }
+        ) {
             return RootSighting::Unread;
         }
         let ours = match &target.disposition {
@@ -831,6 +885,20 @@ fn disposition_for(
     slot_disposition(probe, source_dir, receipts)
 }
 
+/// Whether Skilled holds an ownership receipt for this exact path.
+///
+/// Deliberately not the same claim as "Skilled created the object that is there
+/// now". A receipt outlives the link it describes — that is what makes it
+/// evidence for a later repair — so a link removed and remade by hand at the
+/// same path still matches one. Skilled records no inode or creation time, so
+/// it cannot tell those apart, and every surface that reports this says what it
+/// actually knows: that a receipt exists for the path.
+fn receipted(receipts: &[Receipt], link_path: &Path) -> bool {
+    receipts
+        .iter()
+        .any(|receipt| receipt.link_path() == link_path)
+}
+
 fn excluded(reason: ExcludedReason) -> TargetDisposition {
     TargetDisposition::Excluded { reason }
 }
@@ -881,6 +949,20 @@ fn slot_disposition(
                 ),
             };
         }
+        RootProbe::Redirected { via } => {
+            return TargetDisposition::Blocked {
+                finding: Finding::new(
+                    "install.redirected_root",
+                    FindingSeverity::Critical,
+                    format!(
+                        "{} is a symbolic link, so a link written under this path would land \
+                         somewhere other than the path shown. Skilled writes only inside a root \
+                         it established",
+                        via.display()
+                    ),
+                ),
+            };
+        }
         RootProbe::Present | RootProbe::Missing { .. } => {}
     }
     match &probe.entry {
@@ -902,30 +984,30 @@ fn slot_disposition(
                 ),
             },
             // Settled above.
-            RootProbe::Unreadable(_) | RootProbe::NotRead => {
-                unreachable!("an unread or unreadable root is blocked already")
+            RootProbe::Unreadable(_) | RootProbe::NotRead | RootProbe::Redirected { .. } => {
+                unreachable!("an unread, unreadable, or redirected root is blocked already")
             }
         },
         EntryProbe::Symlink {
             canonical: Some(canonical),
             ..
         } if canonical == source_dir => TargetDisposition::AlreadyInstalled {
-            managed: receipts
-                .iter()
-                .any(|receipt| receipt.link_path() == probe.link_path),
+            receipted: receipted(receipts, &probe.link_path),
         },
         EntryProbe::Symlink { target, canonical } => {
-            let managed = receipts
-                .iter()
-                .any(|receipt| receipt.link_path() == probe.link_path);
-            let (code, what) = match (managed, canonical) {
+            let receipted = receipted(receipts, &probe.link_path);
+            let (code, what) = match (receipted, canonical) {
                 (true, Some(_)) => (
                     "install.wrong_managed_target",
-                    "a link Skilled created points somewhere else".to_owned(),
+                    "Skilled holds a receipt for this path, and what is there now points \
+                     somewhere else"
+                        .to_owned(),
                 ),
                 (true, None) => (
                     "install.dangling_symlink",
-                    "a link Skilled created no longer resolves".to_owned(),
+                    "Skilled holds a receipt for this path, and what is there now no longer \
+                     resolves"
+                        .to_owned(),
                 ),
                 (false, Some(_)) => (
                     "install.unknown_symlink_collision",
@@ -1238,7 +1320,7 @@ pub enum InstallPrompt {
 /// write on top of an operation that already went wrong. Spec 19 permits
 /// same-operation rollback and does not require it; the report says exactly
 /// what exists.
-pub(crate) fn apply_install(plan: &InstallPlan, store: &Store) -> ApplyReport {
+pub(crate) fn apply_install(plan: &InstallPlan, store: &Store, home: &Path) -> ApplyReport {
     let mut steps: Vec<AppliedStep> = Vec::new();
     if plan.is_blocked() {
         // Both callers refuse a blocked plan before reaching this, so arriving
@@ -1257,7 +1339,7 @@ pub(crate) fn apply_install(plan: &InstallPlan, store: &Store) -> ApplyReport {
             });
             continue;
         }
-        let outcome = apply_target(plan, target, store);
+        let outcome = apply_target(plan, target, store, home);
         stopped = !matches!(outcome, StepOutcome::Created);
         steps.push(AppliedStep {
             agent: target.agent,
@@ -1268,7 +1350,12 @@ pub(crate) fn apply_install(plan: &InstallPlan, store: &Store) -> ApplyReport {
     ApplyReport { steps }
 }
 
-fn apply_target(plan: &InstallPlan, target: &InstallTarget, store: &Store) -> StepOutcome {
+fn apply_target(
+    plan: &InstallPlan,
+    target: &InstallTarget,
+    store: &Store,
+    home: &Path,
+) -> StepOutcome {
     let root = match target.link_path.parent() {
         Some(root) => root,
         None => return StepOutcome::Failed("the target has no parent directory".to_owned()),
@@ -1295,7 +1382,7 @@ fn apply_target(plan: &InstallPlan, target: &InstallTarget, store: &Store) -> St
             ));
         }
     }
-    let root_now = probe_root(root);
+    let root_now = probe_root(root, home);
     match (&target.disposition, &root_now) {
         // A root that has appeared since the plan was made is the root the plan
         // was going to create. The step it named is simply already done, and the
@@ -1387,6 +1474,11 @@ fn create_directory_symlink(_target: &Path, _link_path: &Path) -> io::Result<()>
 /// has to be the link that was just written rather than something reached
 /// through a compatibility root.
 ///
+/// OpenCode is checked even when it was not a target. It reads Claude Code's
+/// and Codex's roots, so a link written into either is one it now sees, and an
+/// ambiguity that write created belongs in this report rather than only in
+/// Doctor.
+///
 /// An effective resolution the scan could not establish is not a failed
 /// postcondition. A root the user deselected is one Skilled never read, and
 /// calling the gap a failure would report an install as unverified for doing
@@ -1399,6 +1491,7 @@ pub fn verify_install(
 ) -> VerifyReport {
     let mut failures = Vec::new();
     let mut withheld = Vec::new();
+    let mut opencode_native = false;
     let row = snapshot.row(plan.skill_name());
     for step in applied.steps.iter().filter(|step| step.wrote()) {
         // A root the scan could not read says nothing about the link in it.
@@ -1440,6 +1533,7 @@ pub fn verify_install(
         if step.agent != AgentKind::OpenCode {
             continue;
         }
+        opencode_native = true;
         let Some(resolution) = row.and_then(InventoryRow::opencode_resolution) else {
             continue;
         };
@@ -1466,6 +1560,33 @@ pub fn verify_install(
                 observed_summary(resolution)
             ),
         });
+    }
+
+    // A link written into Claude Code's or Codex's root is one OpenCode reads
+    // too, so what OpenCode now loads is a postcondition of that write even
+    // though OpenCode was not a target. Only an ambiguity is a failure: an
+    // install that leaves OpenCode loading another agent's copy of a common
+    // skill, or seeing an edition it cannot use, is the arrangement the plan
+    // described and warned about, not a broken one.
+    if !opencode_native && applied.steps.iter().any(AppliedStep::wrote) {
+        match row.and_then(InventoryRow::opencode_resolution) {
+            Some(OpenCodeResolution::Conflict { .. }) => failures.push(VerifyFailure {
+                agent: AgentKind::OpenCode,
+                observed: "the roots OpenCode reads now hold more than one directory under that \
+                           name"
+                    .to_owned(),
+            }),
+            Some(OpenCodeResolution::Incomplete { roots }) => withheld.push(VerifyWithheld {
+                agent: AgentKind::OpenCode,
+                reason: format!(
+                    "what OpenCode resolves the name to could not be established: {}",
+                    unknown_roots(roots)
+                ),
+            }),
+            // `None` is OpenCode deselected, which the roll-up above already
+            // accounts for: the scan was not asked about it at all.
+            _ => {}
+        }
     }
     VerifyReport { failures, withheld }
 }

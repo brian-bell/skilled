@@ -10,7 +10,7 @@ use ratatui::{
 use crate::{
     AgentKind, DoctorPane, InventoryPane, SetupStep, SkilledApp, SourcesPane, View,
     app::{MAX_INVENTORY_FILTER, SourceRow, catalog_rows},
-    components::{self, KeyHint},
+    components::{self, KeyHint, terminal_safe},
     inventory::{
         DoctorEntry, Finding, FindingSeverity, InstallationHealth, InstallationObject,
         InstalledSkillObservation, InventoryRow, RootScan, RootStatus, RowProvenance, RowVerdict,
@@ -3899,12 +3899,17 @@ fn install_target_lines(
             format!("{would}create the skill root, then the link"),
             None,
         ),
-        TargetDisposition::AlreadyInstalled { managed: true } => {
-            (work_tone, "already installed by Skilled".to_owned(), None)
-        }
-        TargetDisposition::AlreadyInstalled { managed: false } => (
+        // Already installed is an observation rather than work, so it reads the
+        // same whether or not another target blocked this plan. What it claims
+        // is a receipt for the path, which is what Skilled actually holds.
+        TargetDisposition::AlreadyInstalled { receipted: true } => (
+            Tone::Healthy,
+            "already installed, and Skilled holds a receipt for this path".to_owned(),
+            None,
+        ),
+        TargetDisposition::AlreadyInstalled { receipted: false } => (
             Tone::Unmanaged,
-            "already in place, and not owned by Skilled".to_owned(),
+            "already in place, and Skilled holds no receipt for it".to_owned(),
             None,
         ),
         TargetDisposition::Excluded { reason } => {
@@ -4433,18 +4438,6 @@ fn worktree_badge(dirty: Option<bool>) -> Span<'static> {
         Some(false) => components::badge(Tone::Healthy, "clean"),
         None => components::badge(Tone::Inactive, "status unavailable"),
     }
-}
-
-fn terminal_safe(value: &str) -> String {
-    let mut safe = String::with_capacity(value.len());
-    for character in value.chars() {
-        if character.is_control() {
-            safe.extend(character.escape_default());
-        } else {
-            safe.push(character);
-        }
-    }
-    safe
 }
 
 fn render_settings(frame: &mut Frame<'_>, area: Rect) {

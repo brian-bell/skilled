@@ -143,7 +143,7 @@ fn a_link_already_pointing_at_the_variant_is_no_work_and_is_not_adopted() {
 
     assert_eq!(
         plan.target(AgentKind::Codex).unwrap().disposition(),
-        &TargetDisposition::AlreadyInstalled { managed: false }
+        &TargetDisposition::AlreadyInstalled { receipted: false }
     );
     // The other two are still work, so the plan as a whole remains executable.
     assert!(plan.is_executable());
@@ -485,10 +485,63 @@ fn a_root_that_is_not_a_directory_blocks_its_target() {
     );
 }
 
-/// A link Skilled created that now points somewhere else is told apart from one
-/// it never made — and neither is repaired, because repair does not exist.
+/// The path the preview states has to be the path the write lands on.
+///
+/// A skill root that is a symbolic link — or one reached through a linked
+/// directory below the home — would put the new link somewhere the user was
+/// never shown, so it is refused rather than followed.
 #[test]
-fn a_managed_link_pointing_somewhere_else_is_named_as_skilled_s_own() {
+fn a_root_reached_through_a_symbolic_link_is_refused_rather_than_followed() {
+    for redirected in ["root", "ancestor"] {
+        let fixture = Fixture::new();
+        let repository = fixture.source("library", &["portable"]);
+        let app = fixture.registered(&repository);
+        fixture.create_root_parents();
+        let elsewhere = fixture.path().join(format!("elsewhere-{redirected}"));
+        fs::create_dir_all(&elsewhere).expect("create the directory the link points at");
+        let linked = if redirected == "root" {
+            fixture.root(AgentKind::Codex)
+        } else {
+            // `~/.agents`, the documented root's own parent.
+            fixture
+                .root(AgentKind::Codex)
+                .parent()
+                .expect("every root has a parent")
+                .to_path_buf()
+        };
+        let _ = fs::remove_dir(&linked);
+        symlink(&elsewhere, &linked).expect("redirect the root");
+
+        let plan = fixture.plan(&app, "portable");
+
+        assert_eq!(
+            blocking_code(&plan, AgentKind::Codex),
+            Some("install.redirected_root"),
+            "a redirected {redirected} should refuse the write"
+        );
+        let TargetDisposition::Blocked { finding } =
+            plan.target(AgentKind::Codex).unwrap().disposition()
+        else {
+            unreachable!("just asserted");
+        };
+        assert!(
+            finding.evidence().contains(&linked.display().to_string()),
+            "the evidence names the link: {}",
+            finding.evidence()
+        );
+        // Nothing was written through it.
+        assert!(!elsewhere.join("portable").exists());
+    }
+}
+
+/// A path Skilled holds a receipt for is told apart from one it does not — and
+/// neither is repaired, because repair does not exist.
+///
+/// The claim is a receipt for the path, not authorship of the object at it: a
+/// receipt outlives the link it describes, which is what makes it evidence, and
+/// Skilled records nothing that would tell a remade link from its own.
+#[test]
+fn a_receipted_path_whose_link_points_elsewhere_is_named_as_receipted() {
     let fixture = Fixture::new();
     let repository = fixture.source("library", &["portable"]);
     let mut app = fixture.registered(&repository);
@@ -502,7 +555,7 @@ fn a_managed_link_pointing_somewhere_else_is_named_as_skilled_s_own() {
     symlink(&elsewhere, &link).expect("point it elsewhere");
 
     let variant = fixture.variant(&app, "portable");
-    let probe = probe_install(app.agents(), app.sources(), &variant);
+    let probe = probe_install(app.agents(), app.sources(), &variant, app.home());
     let plan = plan_install(
         app.agents(),
         app.sources(),
@@ -523,7 +576,9 @@ fn a_managed_link_pointing_somewhere_else_is_named_as_skilled_s_own() {
         unreachable!("just asserted");
     };
     assert!(
-        finding.evidence().contains("Skilled created"),
+        finding
+            .evidence()
+            .contains("Skilled holds a receipt for this path"),
         "{}",
         finding.evidence()
     );
@@ -681,7 +736,7 @@ impl Fixture {
         variant: &VariantRef,
         requested: [bool; 3],
     ) -> InstallPlan {
-        let probe = probe_install(app.agents(), app.sources(), variant);
+        let probe = probe_install(app.agents(), app.sources(), variant, app.home());
         plan_install(app.agents(), app.sources(), variant, requested, &probe, &[])
             .expect("a plan for a resolvable variant")
     }
