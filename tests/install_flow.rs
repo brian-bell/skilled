@@ -16,7 +16,8 @@ use skilled::{
     Action, AgentKind, AppEnvironment, SkilledApp,
     inventory::{Finding, FindingSeverity, InstallationHealth},
     operations::{
-        InstallPrompt, InstallStatus, StepOutcome, TargetDisposition, VerifyFailure, verify_install,
+        InstallPrompt, InstallStatus, StepOutcome, TargetDisposition, VerifyFailure,
+        VerifyWithheld, verify_install,
     },
 };
 
@@ -39,8 +40,6 @@ fn a_confirmed_plan_links_every_agent_records_receipts_and_verifies_itself() {
     let repository = fixture.source("library", &["portable"]);
     let mut app = fixture.registered(&repository);
     fixture.create_root_parents();
-    let (search_path, witness) = fixture.trap_agent_executables();
-    let _ = search_path;
     focus_first_variant(&mut app);
 
     dispatch(&mut app, Action::BeginInstall);
@@ -107,7 +106,10 @@ fn a_confirmed_plan_links_every_agent_records_receipts_and_verifies_itself() {
     let row = app.inventory().row("portable").expect("the installed row");
     assert_eq!(row.health(), InstallationHealth::Healthy);
     assert_eq!(row.observations().count(), 3);
-    assert!(!witness.exists(), "no agent executable may be launched");
+    assert!(
+        !fixture.an_agent_was_launched(),
+        "no agent executable may be launched"
+    );
 }
 
 /// A blocked plan is shown and refuses to be confirmed. Nothing is written
@@ -360,6 +362,105 @@ fn verification_reports_a_link_that_stopped_matching_the_plan() {
     );
 }
 
+/// The variant directory is a precondition too. A checkout that moved between
+/// the preview and the confirmation would otherwise leave Skilled owning links
+/// it created that resolve to nothing, in a release with no repair.
+#[test]
+fn a_variant_directory_that_moved_since_the_preview_stops_the_run() {
+    let fixture = Fixture::new();
+    let repository = fixture.source("library", &["portable"]);
+    let mut app = fixture.registered(&repository);
+    fixture.create_root_parents();
+    focus_first_variant(&mut app);
+
+    dispatch(&mut app, Action::BeginInstall);
+    fs::rename(&repository, fixture.path().join("moved")).expect("move the checkout");
+    dispatch(&mut app, Action::ConfirmInstall);
+
+    let Some(InstallPrompt::Report(outcome)) = app.pending_install() else {
+        panic!("a report follows the apply");
+    };
+    assert_eq!(outcome.status(), InstallStatus::NotApplied);
+    assert!(
+        matches!(
+            outcome.step(AgentKind::ClaudeCode).map(|step| step.outcome()),
+            Some(StepOutcome::Failed(reason)) if reason.contains("no longer the directory")
+        ),
+        "{:?}",
+        outcome.step(AgentKind::ClaudeCode)
+    );
+    for (_, root) in ROOTS {
+        assert!(!fixture.home().join(root).join("portable").exists());
+    }
+    assert!(app.receipts().expect("receipts").is_empty());
+}
+
+/// Deselecting an agent is an ordinary configuration, not a broken install.
+///
+/// A root Skilled was told to leave alone is one it never read, so it can say
+/// nothing about what OpenCode would resolve through it. That gap is stated as
+/// a gap — before the write and after it — rather than turning a correct
+/// install into a verification failure.
+#[test]
+fn an_unread_root_leaves_opencode_unstated_rather_than_unverified() {
+    let fixture = Fixture::new();
+    let repository = fixture.source("library", &["portable"]);
+    let mut app = fixture.registered(&repository);
+    fixture.create_root_parents();
+    deselect_codex(&mut app);
+    focus_first_variant(&mut app);
+
+    dispatch(&mut app, Action::BeginInstall);
+    let Some(InstallPrompt::Preview(plan)) = app.pending_install() else {
+        panic!("a preview is shown: {:?}", app.pending_install());
+    };
+    assert!(plan.is_executable(), "{:?}", plan.targets());
+    assert!(!plan.is_blocked());
+    // The gap is said out loud rather than passed over.
+    assert!(
+        plan.warnings()
+            .iter()
+            .any(|warning| warning.contains("Codex")),
+        "{:?}",
+        plan.warnings()
+    );
+
+    dispatch(&mut app, Action::ConfirmInstall);
+
+    let Some(InstallPrompt::Report(outcome)) = app.pending_install() else {
+        panic!("a report follows the apply");
+    };
+    assert_eq!(
+        outcome.status(),
+        InstallStatus::Installed,
+        "{:?}",
+        outcome.verification()
+    );
+    // Nothing disagreed with the plan — and the one postcondition Skilled could
+    // not check is reported as withheld rather than folded into the pass.
+    assert!(outcome.verification().is_verified());
+    assert!(!outcome.verification().is_complete());
+    assert_eq!(
+        outcome
+            .verification()
+            .withheld()
+            .iter()
+            .map(VerifyWithheld::agent)
+            .collect::<Vec<_>>(),
+        [AgentKind::OpenCode]
+    );
+    let reason = outcome.verification().withheld()[0].reason();
+    assert!(reason.contains("Codex"), "{reason}");
+    // The two kinds of unknown are never flattened: this root was never read,
+    // which is not the same as one whose entry could not be followed.
+    assert!(reason.contains("did not read"), "{reason}");
+    assert!(fixture.home().join(OPENCODE_ROOT).join("portable").is_dir());
+    // Codex was left entirely alone: no step, no link, no receipt.
+    assert!(outcome.step(AgentKind::Codex).is_none());
+    assert!(!fixture.home().join(CODEX_ROOT).join("portable").exists());
+    assert_eq!(app.receipts().expect("receipts").len(), 2);
+}
+
 /// Spec 20.5: what an install leaves behind survives the process that made it.
 ///
 /// A fresh application, opened over the same home and the same metadata, sees
@@ -399,6 +500,19 @@ fn an_installation_is_still_managed_and_healthy_after_a_restart() {
     assert_eq!(reopened.receipts().expect("receipts").len(), 3);
 }
 
+/// Rerun setup and leave Codex deselected, through the steps a user would take.
+fn deselect_codex(app: &mut SkilledApp) {
+    dispatch(app, Action::OpenSettings);
+    dispatch(app, Action::RerunSetup);
+    dispatch(app, Action::Continue);
+    dispatch(app, Action::MoveSelection(1));
+    dispatch(app, Action::ToggleSelection);
+    for _ in 0..6 {
+        dispatch(app, Action::Continue);
+    }
+    assert!(!app.agent(AgentKind::Codex).selected());
+}
+
 fn dispatch(app: &mut SkilledApp, action: Action) {
     let update = app.update(action);
     app.perform_effects(update.effects())
@@ -414,13 +528,46 @@ fn focus_first_variant(app: &mut SkilledApp) {
 
 struct Fixture {
     directory: tempfile::TempDir,
+    /// A search path holding an executable named after each agent, which
+    /// records having been run.
+    ///
+    /// Every application in this file is built with it, so acceptance 18 —
+    /// that Skilled never launches a coding agent — is proved by every test
+    /// here rather than by whichever one remembered to ask.
+    executables: PathBuf,
+    witness: PathBuf,
 }
 
 impl Fixture {
     fn new() -> Self {
-        Self {
-            directory: tempfile::tempdir().expect("temporary application directory"),
+        let directory = tempfile::tempdir().expect("temporary application directory");
+        let executables = directory.path().join("trap");
+        let witness = directory.path().join("agent-was-launched");
+        fs::create_dir_all(&executables).expect("create trap directory");
+        for name in ["claude", "codex", "opencode"] {
+            let executable = executables.join(name);
+            fs::write(
+                &executable,
+                format!("#!/bin/sh\ntouch {}\n", witness.display()),
+            )
+            .expect("write trap executable");
+            fs::set_permissions(&executable, fs::Permissions::from_mode(0o755))
+                .expect("mark trap executable");
         }
+        Self {
+            directory,
+            executables,
+            witness,
+        }
+    }
+
+    /// Whether any agent executable on the search path was run.
+    fn an_agent_was_launched(&self) -> bool {
+        self.witness.exists()
+    }
+
+    fn path(&self) -> &Path {
+        self.directory.path()
     }
 
     fn home(&self) -> PathBuf {
@@ -428,7 +575,11 @@ impl Fixture {
     }
 
     fn environment(&self) -> AppEnvironment {
-        AppEnvironment::new(self.home(), self.directory.path().join("data"), "")
+        AppEnvironment::new(
+            self.home(),
+            self.directory.path().join("data"),
+            &self.executables,
+        )
     }
 
     fn app(&self) -> SkilledApp {
@@ -481,25 +632,6 @@ impl Fixture {
     fn install_symlink(&self, agent: AgentKind, name: &str, target: &Path) {
         let root = self.create_root(agent);
         symlink(target, root.join(name)).expect("install symbolic link");
-    }
-
-    /// Put an executable named after each agent on the search path that records
-    /// having been run, and return the search path and the witness file.
-    fn trap_agent_executables(&self) -> (PathBuf, PathBuf) {
-        let directory = self.directory.path().join("trap");
-        fs::create_dir_all(&directory).expect("create trap directory");
-        let witness = self.directory.path().join("agent-was-launched");
-        for name in ["claude", "codex", "opencode"] {
-            let executable = directory.join(name);
-            fs::write(
-                &executable,
-                format!("#!/bin/sh\ntouch {}\n", witness.display()),
-            )
-            .expect("write trap executable");
-            fs::set_permissions(&executable, fs::Permissions::from_mode(0o755))
-                .expect("mark trap executable");
-        }
-        (directory, witness)
     }
 }
 

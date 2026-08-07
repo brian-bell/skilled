@@ -19,8 +19,8 @@ use crate::{
     AgentKind, AppEnvironment, SkilledApp,
     agents::adapter,
     operations::{
-        ExcludedReason, InstallOutcome, InstallPlan, InstallStatus, InstallTarget, StepOutcome,
-        TargetDisposition, locate_variant,
+        ExcludedReason, InstallOutcome, InstallPlan, InstallStatus, InstallTarget, LocateFailure,
+        StepOutcome, TargetDisposition, locate_variant,
     },
 };
 
@@ -101,6 +101,24 @@ pub fn run(
     }
 }
 
+/// The status a finished run reports, as an exit code.
+///
+/// Public and total so the contract can be read and pinned in one place rather
+/// than inferred from whichever runs a test could stage. Exit four is "the
+/// machine is not in the state the plan described" — a run that stopped part
+/// way, one that wrote nothing after being asked to, and one whose links
+/// Skilled could not record owning all mean that, and the printed report is
+/// what distinguishes them.
+pub fn exit_code_for(status: InstallStatus) -> ExitCodeKind {
+    match status {
+        InstallStatus::Installed | InstallStatus::NothingToDo => ExitCodeKind::Success,
+        InstallStatus::PartiallyApplied
+        | InstallStatus::NotApplied
+        | InstallStatus::InstalledUnrecorded => ExitCodeKind::PartialApply,
+        InstallStatus::VerificationFailed => ExitCodeKind::VerificationFailed,
+    }
+}
+
 fn refuse(output: &mut dyn Write, message: &str) -> ExitCodeKind {
     let _ = writeln!(output, "skilled: {message}\n\n{USAGE}");
     ExitCodeKind::InvalidRequest
@@ -133,11 +151,11 @@ fn parse(arguments: &[String]) -> Result<Parsed, String> {
     let mut agents = None;
     let mut assume_yes = false;
     while let Some(flag) = arguments.next() {
-        let mut value = |flag: &str| {
-            arguments
-                .next()
-                .cloned()
-                .ok_or_else(|| format!("{flag} needs a value"))
+        // A value that looks like a flag is a missing value, not a value:
+        // taking `--skill` as the source path would run a request nobody wrote.
+        let mut value = |flag: &str| match arguments.next() {
+            Some(value) if !value.starts_with('-') => Ok(value.clone()),
+            _ => Err(format!("{flag} needs a value")),
         };
         match flag.as_str() {
             "--source" => source = Some(value("--source")?),
@@ -221,8 +239,19 @@ fn execute(
     };
     let variant = match locate_variant(app.sources(), source_id, None, &request.skill) {
         Ok(variant) => variant,
-        // Every way of naming no single variant is the same kind of answer:
-        // the request has to say more before there is anything to plan.
+        // A name several catalogs in one source answer to is one this command
+        // cannot narrow: it takes a source and a name, and nothing finer. The
+        // interactive application stands on an exact row, so it is what the
+        // message points at rather than a flag that does not exist.
+        Err(failure @ LocateFailure::Ambiguous { .. }) => {
+            return Ok(refuse(
+                output,
+                &format!(
+                    "{failure}. Run skilled with no arguments and install the variant you want \
+                     from the Sources screen"
+                ),
+            ));
+        }
         Err(failure) => return Ok(refuse(output, &failure.to_string())),
     };
     // An agent set that was not given is every agent the user configured, which
@@ -236,6 +265,35 @@ fn execute(
         Err(message) => return Ok(refuse(output, &message)),
     };
     write_plan(output, &plan, app.home()).map_err(|error| error.to_string())?;
+
+    // An agent the request named and the plan cannot act on is stated as a
+    // refusal, not passed over. `--agents` is the target set the user agreed
+    // to; installing to fewer of them and reporting success would be the same
+    // gap `--yes` is fail-closed against, on the channel a script reads.
+    if request.agents.is_some() {
+        let unmet: Vec<&InstallTarget> = plan
+            .targets()
+            .iter()
+            .filter(|target| {
+                requested[target.agent().index()]
+                    && matches!(target.disposition(), TargetDisposition::Excluded { .. })
+            })
+            .collect();
+        if !unmet.is_empty() {
+            let _ = writeln!(
+                output,
+                "\nBlocked: nothing was written. {} could not be installed to, and this request \
+                 named {}.",
+                unmet
+                    .iter()
+                    .map(|target| target.agent().display_name())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                if unmet.len() == 1 { "it" } else { "them" }
+            );
+            return Ok(ExitCodeKind::Blocked);
+        }
+    }
 
     if plan.is_blocked() {
         let _ = writeln!(
@@ -256,11 +314,7 @@ fn execute(
 
     let outcome = app.apply_plan(&plan);
     write_report(output, &outcome).map_err(|error| error.to_string())?;
-    Ok(match outcome.status() {
-        InstallStatus::Installed | InstallStatus::NothingToDo => ExitCodeKind::Success,
-        InstallStatus::PartiallyApplied | InstallStatus::NotApplied => ExitCodeKind::PartialApply,
-        InstallStatus::VerificationFailed => ExitCodeKind::VerificationFailed,
-    })
+    Ok(exit_code_for(outcome.status()))
 }
 
 /// A source named by the identifier the registry gave it, or by the path its
@@ -369,10 +423,24 @@ fn write_report(output: &mut dyn Write, outcome: &InstallOutcome) -> std::io::Re
         writeln!(output, "               {}", step.link_path().display())?;
     }
     writeln!(output)?;
-    if outcome.verification().is_verified() {
+    if outcome.verification().is_complete() {
         writeln!(
             output,
             "Verified: every link written was observed again and matches this plan."
+        )?;
+    } else if outcome.verification().is_verified() {
+        writeln!(
+            output,
+            "Verified as far as it could be: every link written was observed again, and nothing \
+             disagreed with this plan."
+        )?;
+    }
+    for withheld in outcome.verification().withheld() {
+        writeln!(
+            output,
+            "Not established: {} — {}",
+            withheld.agent().display_name(),
+            withheld.reason()
         )?;
     }
     for failure in outcome.verification().failures() {
@@ -383,7 +451,16 @@ fn write_report(output: &mut dyn Write, outcome: &InstallOutcome) -> std::io::Re
             failure.observed()
         )?;
     }
-    if outcome.status() != InstallStatus::Installed {
+    // Only where something was written: there is nothing to say about undoing
+    // an operation that wrote nothing.
+    if outcome.status() != InstallStatus::Installed
+        && outcome.applied().steps().iter().any(|step| {
+            !matches!(
+                step.outcome(),
+                StepOutcome::Failed(_) | StepOutcome::Unattempted
+            )
+        })
+    {
         writeln!(
             output,
             "Skilled does not undo what it wrote. Nothing above was removed, and no repair \

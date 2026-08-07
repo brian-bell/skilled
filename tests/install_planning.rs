@@ -7,7 +7,7 @@
 
 use std::{
     fs,
-    os::unix::fs::symlink,
+    os::unix::fs::{PermissionsExt, symlink},
     path::{Path, PathBuf},
     process::Command,
 };
@@ -454,6 +454,132 @@ fn installing_to_every_root_at_once_states_no_opencode_concern() {
 
     assert!(plan.is_executable());
     assert!(plan.warnings().is_empty(), "{:?}", plan.warnings());
+}
+
+/// A skill root that is not a directory is not something to create through or
+/// write into, and the plan says which of the two it is.
+#[test]
+fn a_root_that_is_not_a_directory_blocks_its_target() {
+    let fixture = Fixture::new();
+    let repository = fixture.source("library", &["portable"]);
+    let app = fixture.registered(&repository);
+    fixture.create_root_parents();
+    fs::write(fixture.root(AgentKind::Codex), "not a directory")
+        .expect("write a file where the root belongs");
+
+    let plan = fixture.plan(&app, "portable");
+
+    assert_eq!(
+        blocking_code(&plan, AgentKind::Codex),
+        Some("install.unreadable_root")
+    );
+    let TargetDisposition::Blocked { finding } =
+        plan.target(AgentKind::Codex).unwrap().disposition()
+    else {
+        unreachable!("just asserted");
+    };
+    assert!(
+        finding.evidence().contains("not a directory"),
+        "{}",
+        finding.evidence()
+    );
+}
+
+/// A link Skilled created that now points somewhere else is told apart from one
+/// it never made — and neither is repaired, because repair does not exist.
+#[test]
+fn a_managed_link_pointing_somewhere_else_is_named_as_skilled_s_own() {
+    let fixture = Fixture::new();
+    let repository = fixture.source("library", &["portable"]);
+    let mut app = fixture.registered(&repository);
+    fixture.create_root_parents();
+    install_through_the_application(&mut app);
+    // Something repoints the link Skilled put down.
+    let link = fixture.root(AgentKind::Codex).join("portable");
+    let elsewhere = fixture.path().join("elsewhere/portable");
+    write_skill(&elsewhere, "portable");
+    fs::remove_file(&link).expect("remove the link");
+    symlink(&elsewhere, &link).expect("point it elsewhere");
+
+    let variant = fixture.variant(&app, "portable");
+    let probe = probe_install(app.agents(), app.sources(), &variant);
+    let plan = plan_install(
+        app.agents(),
+        app.sources(),
+        &variant,
+        [true; 3],
+        &probe,
+        &app.receipts().expect("receipts"),
+    )
+    .expect("a plan for a resolvable variant");
+
+    assert_eq!(
+        blocking_code(&plan, AgentKind::Codex),
+        Some("install.wrong_managed_target")
+    );
+    let TargetDisposition::Blocked { finding } =
+        plan.target(AgentKind::Codex).unwrap().disposition()
+    else {
+        unreachable!("just asserted");
+    };
+    assert!(
+        finding.evidence().contains("Skilled created"),
+        "{}",
+        finding.evidence()
+    );
+}
+
+/// An entry Skilled could not read might be anything, so it blocks rather than
+/// being treated as free space.
+#[test]
+fn an_unreadable_entry_blocks_rather_than_being_treated_as_absent() {
+    if running_as_root() {
+        // Permission bits decide nothing for the superuser, so the entry this
+        // case needs to be unreadable would be readable.
+        return;
+    }
+    let fixture = Fixture::new();
+    let repository = fixture.source("library", &["portable"]);
+    let app = fixture.registered(&repository);
+    fixture.create_root_parents();
+    let root = fixture.create_root(AgentKind::Codex);
+    fs::create_dir(root.join("portable")).expect("occupy the slot");
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o600)).expect("seal the root");
+
+    let plan = fixture.plan(&app, "portable");
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).expect("unseal the root");
+
+    assert_eq!(
+        blocking_code(&plan, AgentKind::Codex),
+        Some("install.unreadable_entry")
+    );
+}
+
+/// Whether permission bits will be enforced against this process.
+fn running_as_root() -> bool {
+    let probe = std::env::temp_dir().join(format!("skilled-plan-probe-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&probe);
+    fs::create_dir(&probe).expect("create permission probe");
+    fs::set_permissions(&probe, fs::Permissions::from_mode(0o000)).expect("seal probe");
+    let readable = fs::read_dir(&probe).is_ok();
+    fs::set_permissions(&probe, fs::Permissions::from_mode(0o755)).expect("unseal probe");
+    fs::remove_dir_all(&probe).expect("remove probe");
+    readable
+}
+
+/// Install the focused variant the way a user would, so the receipts that
+/// follow are ones Skilled really wrote.
+fn install_through_the_application(app: &mut SkilledApp) {
+    for action in [
+        skilled::Action::OpenSources,
+        skilled::Action::AdvanceSourcesPane,
+        skilled::Action::BeginInstall,
+        skilled::Action::ConfirmInstall,
+        skilled::Action::DismissInstall,
+    ] {
+        let update = app.update(action);
+        app.perform_effects(update.effects()).expect("install");
+    }
 }
 
 struct Fixture {

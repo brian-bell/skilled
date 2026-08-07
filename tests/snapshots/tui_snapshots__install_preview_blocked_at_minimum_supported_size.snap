@@ -10,19 +10,19 @@ sk│  From: src · skills                                                      
 ▌ │  Links to: [CANONICAL]           /src/skills/portable                    │
   │                                                                          │
   │  Targets                                                                 │
-  │  ✓ Claude Code: create the skill root, then the link                     │
+  │  - Claude Code: would create the skill root, then the link               │
   │      [TEMP]        /home/.claude/skills/portable                         │
+  │      nothing will be written here: this plan is blocked                  │
   │  × Codex: install.physical_path_collision                                │
   │      [TEMP]        /home/.agents/skills/portable                         │
   │      a file is already there. Skilled never overwrites one, whatever it  │
-  │  holds                                                                   │
-  │  ✓ OpenCode: create the skill root, then the link                        │
+  │      holds                                                               │
+  │  - OpenCode: would create the skill root, then the link                  │
   │      [TEMP]        /home/.config/opencode/skills/portable                │
-  │                                                                          │
-  │  Home: [TEMP]        /home                                               │
+  │      nothing will be written here: this plan is blocked                  │
   │                                                                          │
   │  ──────────────────────────────────────────────────────────────────────  │
-  │  Blocked — nothing will be written                            Esc Close  │
+  │  Blocked — nothing will be written · more below               Esc Close  │
   │                                                                          │
   └──────────────────────────────────────────────────────────────────────────┘
- Esc Close   Ctrl-C Quit
+ j/k Scroll   Esc Close   Ctrl-C Quit

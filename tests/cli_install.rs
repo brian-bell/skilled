@@ -17,6 +17,7 @@ use std::{
 use skilled::{
     Action, AgentKind, AppEnvironment, SkilledApp,
     cli::{self, ExitCodeKind},
+    operations::InstallStatus,
 };
 
 const ROOTS: [(AgentKind, &str); 3] = [
@@ -278,11 +279,42 @@ fn malformed_requests_are_refused_with_usage() {
     }
 }
 
-/// An agent the request named but the plan cannot act on is stated, not passed
-/// over: a silent skip would let `--yes` install less than it was asked to
-/// while still reporting success.
+/// A postcondition the command could not check is printed as unestablished,
+/// and the verified line does not claim more than was checked.
 #[test]
-fn a_named_agent_that_cannot_be_installed_to_is_reported() {
+fn a_withheld_postcondition_is_printed_rather_than_claimed_as_verified() {
+    let fixture = Fixture::new();
+    let repository = fixture.register("library", &["portable"]);
+    fixture.deselect_codex();
+
+    let (code, output) = fixture.run(&[
+        "install",
+        "--yes",
+        "--source",
+        &repository.display().to_string(),
+        "--skill",
+        "portable",
+        "--agents",
+        "claude-code,opencode",
+    ]);
+
+    assert_eq!(code, ExitCodeKind::Success, "{output}");
+    assert!(
+        output.contains("Verified as far as it could be"),
+        "{output}"
+    );
+    assert!(!output.contains("Verified: every link written"), "{output}");
+    assert!(output.contains("Not established: OpenCode"), "{output}");
+    // The two kinds of unknown stay apart: this root was never read.
+    assert!(output.contains("did not read Codex"), "{output}");
+}
+
+/// An agent the request named but the plan cannot act on is a blocked request,
+/// not a silent skip: `--agents` is the target set the user agreed to, and
+/// installing to fewer of them while reporting success is the same gap `--yes`
+/// is fail-closed against.
+#[test]
+fn a_named_agent_that_cannot_be_installed_to_blocks_the_request() {
     let fixture = Fixture::new();
     let repository = fixture.directory.path().join("library");
     write_skill(&repository.join(".claude/skills/portable"), "portable");
@@ -300,10 +332,13 @@ fn a_named_agent_that_cannot_be_installed_to_is_reported() {
         "claude-code,codex",
     ]);
 
-    assert_eq!(code, ExitCodeKind::Success, "{output}");
+    assert_eq!(code, ExitCodeKind::Blocked, "{output}");
     assert!(output.contains("Codex"), "{output}");
     assert!(output.contains("cannot use this variant"), "{output}");
+    // Blocked means blocked whole: the agent that could have been installed to
+    // is left alone as well.
     assert!(!fixture.home().join(".agents/skills/portable").exists());
+    assert!(!fixture.home().join(".claude/skills/portable").exists());
 }
 
 /// Spec 19: a run that stopped part way through has its own exit status, says
@@ -351,6 +386,55 @@ fn a_run_that_stops_part_way_through_exits_as_a_partial_apply() {
         "{output}"
     );
     assert_eq!(fixture.app().receipts().expect("receipts").len(), 2);
+}
+
+/// Spec 16 asks for distinguishable statuses, so every status has one and the
+/// whole mapping is stated in one place rather than inferred from whichever
+/// runs a test can stage.
+#[test]
+fn every_outcome_has_its_own_exit_status() {
+    for (status, expected, code) in [
+        (InstallStatus::Installed, ExitCodeKind::Success, 0),
+        (InstallStatus::NothingToDo, ExitCodeKind::Success, 0),
+        (
+            InstallStatus::PartiallyApplied,
+            ExitCodeKind::PartialApply,
+            4,
+        ),
+        (InstallStatus::NotApplied, ExitCodeKind::PartialApply, 4),
+        (
+            InstallStatus::InstalledUnrecorded,
+            ExitCodeKind::PartialApply,
+            4,
+        ),
+        (
+            InstallStatus::VerificationFailed,
+            ExitCodeKind::VerificationFailed,
+            5,
+        ),
+    ] {
+        assert_eq!(cli::exit_code_for(status), expected, "{status:?}");
+        assert_eq!(expected.code(), code, "{status:?}");
+    }
+    // The statuses no outcome carries, pinned beside them: a blocked plan never
+    // reaches an apply, and an internal failure is not an outcome at all.
+    assert_eq!(ExitCodeKind::InvalidRequest.code(), 2);
+    assert_eq!(ExitCodeKind::Blocked.code(), 3);
+    assert_eq!(ExitCodeKind::InternalError.code(), 1);
+}
+
+/// A flag that swallowed the next flag as its value would run a request nobody
+/// wrote.
+#[test]
+fn a_missing_flag_value_is_not_taken_from_the_next_flag() {
+    let fixture = Fixture::new();
+    fixture.register("library", &["portable"]);
+
+    let (code, output) = fixture.run(&["install", "--source", "--skill", "portable"]);
+
+    assert_eq!(code, ExitCodeKind::InvalidRequest, "{output}");
+    assert!(output.contains("--source needs a value"), "{output}");
+    assert!(fixture.nothing_installed());
 }
 
 /// Whether permission bits will be enforced against this process.
@@ -412,6 +496,28 @@ impl Fixture {
             app.perform_effects(update.effects())
                 .expect("perform setup effects");
         }
+    }
+
+    /// Rerun setup and leave Codex deselected, through the steps a user takes.
+    fn deselect_codex(&self) {
+        let mut app = self.app();
+        for action in [
+            Action::OpenSettings,
+            Action::RerunSetup,
+            Action::Continue,
+            Action::MoveSelection(1),
+            Action::ToggleSelection,
+        ] {
+            let update = app.update(action);
+            app.perform_effects(update.effects())
+                .expect("setup effects");
+        }
+        for _ in 0..6 {
+            let update = app.update(Action::Continue);
+            app.perform_effects(update.effects())
+                .expect("setup effects");
+        }
+        assert!(!app.agent(AgentKind::Codex).selected());
     }
 
     fn run(&self, arguments: &[&str]) -> (ExitCodeKind, String) {

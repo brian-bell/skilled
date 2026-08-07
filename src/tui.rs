@@ -85,7 +85,7 @@ pub fn render(frame: &mut Frame<'_>, app: &SkilledApp) -> RenderFeedback {
         View::Doctor => app.doctor_findings(),
         _ => Vec::new(),
     };
-    let detail_extent = detail_scroll_extent(app, workspace, &findings);
+    let detail_extent = detail_scroll_extent(app, area, workspace, &findings);
     match app.view() {
         View::Setup(step) => render_setup(frame, body, app, step),
         View::Inventory => render_inventory(frame, body, app),
@@ -97,7 +97,14 @@ pub fn render(frame: &mut Frame<'_>, app: &SkilledApp) -> RenderFeedback {
         }
     }
     if let Some(prompt) = app.pending_install() {
-        render_install_prompt(frame, area, prompt, app.home());
+        render_install_prompt(
+            frame,
+            area,
+            prompt,
+            app.home(),
+            app.detail_scroll(),
+            detail_extent,
+        );
     } else if app.source_path_input_active() {
         render_source_path_entry(frame, area, app);
     } else if app.pending_source().is_some() && app.view() == View::Sources {
@@ -1861,9 +1868,26 @@ fn detail_max_scroll(rows_per_line: &[usize], height: u16) -> usize {
 /// come back to.
 fn detail_scroll_extent(
     app: &SkilledApp,
+    area: Rect,
     workspace: Rect,
     findings: &[DoctorEntry<'_>],
 ) -> Option<usize> {
+    // The install dialog is drawn over the workspace and owns the window while
+    // it is open, so it is measured instead of whatever is behind it. The
+    // reducer keeps one offset because only one scrollable thing is ever on
+    // screen, and a modal is exactly that.
+    if let Some(prompt) = app.pending_install() {
+        let body = install_prompt_regions(area, 0).body;
+        if body.width == 0 {
+            return None;
+        }
+        let lines = install_prompt_lines(prompt, app.home(), body.width);
+        let rows_per_line: Vec<usize> = lines
+            .iter()
+            .map(|line| wrapped_line_count(line, body.width))
+            .collect();
+        return Some(detail_max_scroll(&rows_per_line, body.height));
+    }
     let (primary, detail) = viewport::workspace_regions(workspace);
     let focused_alone = |drilled_in: bool| match (detail, drilled_in) {
         (Some(detail), _) => Some(detail_regions(detail, true).body()),
@@ -3630,19 +3654,46 @@ fn render_source_path_entry(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp)
     );
 }
 
+/// Where the install dialog sits, and how its interior divides.
+///
+/// The body is measured and drawn through one function so the extent the frame
+/// reports and the window it drew cannot disagree: a body measured against a
+/// different height from the one rendered would clamp the offset to the wrong
+/// end. `action_width` divides the footer alone and leaves the body untouched,
+/// so the measurement pass may pass anything for it.
+fn install_prompt_regions(area: Rect, action_width: u16) -> components::DialogRegions {
+    let popup = install_prompt_popup(area);
+    let block = components::dialog_frame("Install skill", "nothing written yet");
+    components::dialog_regions(block.inner(popup), action_width)
+}
+
+/// The rectangle the dialog occupies, computed once for the frame that draws it
+/// and the pass that measures it.
+fn install_prompt_popup(area: Rect) -> Rect {
+    centered_rect(
+        area.width.saturating_sub(4),
+        area.height.saturating_sub(2),
+        area,
+    )
+}
+
 /// The install dialog: what would happen, or what did.
 ///
 /// Sized to fill the workspace rather than to a fixed shape, because its body
 /// states absolute paths in full. Spec 15 asks the preview to say exactly what
 /// is about to be written, and the `~` abbreviation every other screen uses to
 /// speak about a global root would soften precisely the thing the user is being
-/// asked to agree to. Long paths wrap; none is elided.
-fn render_install_prompt(frame: &mut Frame<'_>, area: Rect, prompt: &InstallPrompt, home: &Path) {
-    let popup = centered_rect(
-        area.width.saturating_sub(4),
-        area.height.saturating_sub(2),
-        area,
-    );
+/// asked to agree to. Long paths wrap and a body taller than the dialog
+/// scrolls; nothing is elided and nothing is dropped.
+fn render_install_prompt(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    prompt: &InstallPrompt,
+    home: &Path,
+    scroll: usize,
+    extent: Option<usize>,
+) {
+    let popup = install_prompt_popup(area);
     frame.render_widget(Clear, popup);
     let (title, scope) = match prompt {
         InstallPrompt::Preview(_) | InstallPrompt::Failed(_) => {
@@ -3651,14 +3702,18 @@ fn render_install_prompt(frame: &mut Frame<'_>, area: Rect, prompt: &InstallProm
         InstallPrompt::Report(_) => ("Install result", "already applied"),
     };
     let actions = install_prompt_actions(prompt);
-    let action_width = u16::try_from(actions.width()).unwrap_or(u16::MAX);
+    // The footer is divided by the keys actually offered, so the sentence
+    // beside them — which is where a reader is told the body holds more than
+    // it can show — keeps every column the keys do not need.
+    let regions = install_prompt_regions(area, u16::try_from(actions.width()).unwrap_or(u16::MAX));
     let block = components::dialog_frame(title, scope);
-    let regions = components::dialog_regions(block.inner(popup), action_width);
     frame.render_widget(block, popup);
 
-    let lines = install_prompt_lines(prompt, home);
+    let lines = install_prompt_lines(prompt, home, regions.body.width);
     frame.render_widget(
-        Paragraph::new(lines).wrap(Wrap { trim: false }),
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .scroll((u16::try_from(scroll).unwrap_or(u16::MAX), 0)),
         regions.body,
     );
     frame.render_widget(
@@ -3667,7 +3722,7 @@ fn render_install_prompt(frame: &mut Frame<'_>, area: Rect, prompt: &InstallProm
     );
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
-            install_prompt_status(prompt),
+            install_prompt_status(prompt, scroll, extent),
             theme::key_label(),
         ))),
         regions.status,
@@ -3697,7 +3752,30 @@ fn install_prompt_actions(prompt: &InstallPrompt) -> Line<'static> {
     Line::from(spans)
 }
 
-fn install_prompt_status(prompt: &InstallPrompt) -> String {
+/// The one sentence under the rule, and — where the body does not hold
+/// everything — where the rest of it is.
+///
+/// A preview a reader has not seen all of is not a preview they can consent to,
+/// so the dialog says which way the rest lies rather than letting the paragraph
+/// end without saying it did.
+fn install_prompt_status(prompt: &InstallPrompt, scroll: usize, extent: Option<usize>) -> String {
+    let verdict = install_prompt_verdict(prompt);
+    match extent {
+        Some(extent) if extent > 0 => {
+            let above = scroll > 0;
+            let below = scroll < extent;
+            let where_to = match (above, below) {
+                (true, true) => "more above and below",
+                (true, false) => "more above",
+                _ => "more below",
+            };
+            format!("{verdict} · {where_to}")
+        }
+        _ => verdict,
+    }
+}
+
+fn install_prompt_verdict(prompt: &InstallPrompt) -> String {
     match prompt {
         InstallPrompt::Preview(plan) if plan.is_blocked() => {
             "Blocked — nothing will be written".to_owned()
@@ -3722,28 +3800,37 @@ fn install_prompt_status(prompt: &InstallPrompt) -> String {
         ),
         InstallPrompt::Preview(_) => "Nothing left to do".to_owned(),
         InstallPrompt::Report(outcome) => match outcome.status() {
-            InstallStatus::Installed => "Installed and verified".to_owned(),
+            InstallStatus::Installed if outcome.verification().is_complete() => {
+                "Installed and verified".to_owned()
+            }
+            // Nothing disagreed, and something was not checked. The one word a
+            // reader scans first must not claim the second of those.
+            InstallStatus::Installed => "Installed · not fully verified".to_owned(),
             InstallStatus::NothingToDo => "Nothing was written".to_owned(),
             InstallStatus::PartiallyApplied => "Partly applied".to_owned(),
             InstallStatus::NotApplied => "Nothing was written".to_owned(),
             InstallStatus::VerificationFailed => "Written, but not verified".to_owned(),
+            InstallStatus::InstalledUnrecorded => {
+                "Written, but not recorded as Skilled's".to_owned()
+            }
         },
         InstallPrompt::Failed(_) => "No plan was made".to_owned(),
     }
 }
 
-fn install_prompt_lines(prompt: &InstallPrompt, home: &Path) -> Vec<Line<'static>> {
+fn install_prompt_lines(prompt: &InstallPrompt, home: &Path, width: u16) -> Vec<Line<'static>> {
     match prompt {
         InstallPrompt::Failed(message) => vec![Line::from(components::badge(
             Tone::Critical,
             &terminal_safe(message),
         ))],
-        InstallPrompt::Preview(plan) => install_plan_lines(plan, home),
+        InstallPrompt::Preview(plan) => install_plan_lines(plan, home, width),
         InstallPrompt::Report(outcome) => install_report_lines(outcome),
     }
 }
 
-fn install_plan_lines(plan: &InstallPlan, home: &Path) -> Vec<Line<'static>> {
+fn install_plan_lines(plan: &InstallPlan, home: &Path, width: u16) -> Vec<Line<'static>> {
+    let blocked = plan.is_blocked();
     let mut lines = vec![
         Line::styled(
             format!("Skill: {}", terminal_safe(plan.skill_name())),
@@ -3762,7 +3849,7 @@ fn install_plan_lines(plan: &InstallPlan, home: &Path) -> Vec<Line<'static>> {
         Line::styled("Targets", theme::section_title()),
     ];
     for target in plan.targets() {
-        lines.extend(install_target_lines(target));
+        lines.extend(install_target_lines(target, blocked, width));
     }
     if !plan.warnings().is_empty() {
         lines.push(Line::default());
@@ -3791,19 +3878,30 @@ fn install_plan_lines(plan: &InstallPlan, home: &Path) -> Vec<Line<'static>> {
 /// that wrapped would show its badge on the first row and continue at the
 /// margin on the next, which reads as a new statement rather than as the rest
 /// of the one above it.
-fn install_target_lines(target: &InstallTarget) -> Vec<Line<'static>> {
+fn install_target_lines(
+    target: &InstallTarget,
+    plan_is_blocked: bool,
+    width: u16,
+) -> Vec<Line<'static>> {
+    // A plan blocks whole, so a target that would have been work is not work.
+    // Reading the rule under the rule and green ticks above it would be the
+    // screen contradicting itself in the channel a reader scans first.
+    let work_tone = if plan_is_blocked {
+        Tone::Inactive
+    } else {
+        Tone::Healthy
+    };
+    let would = if plan_is_blocked { "would " } else { "" };
     let (tone, verdict, detail) = match target.disposition() {
-        TargetDisposition::CreateLink => (Tone::Healthy, "create the link".to_owned(), None),
+        TargetDisposition::CreateLink => (work_tone, format!("{would}create the link"), None),
         TargetDisposition::CreateRootAndLink => (
-            Tone::Healthy,
-            "create the skill root, then the link".to_owned(),
+            work_tone,
+            format!("{would}create the skill root, then the link"),
             None,
         ),
-        TargetDisposition::AlreadyInstalled { managed: true } => (
-            Tone::Healthy,
-            "already installed by Skilled".to_owned(),
-            None,
-        ),
+        TargetDisposition::AlreadyInstalled { managed: true } => {
+            (work_tone, "already installed by Skilled".to_owned(), None)
+        }
         TargetDisposition::AlreadyInstalled { managed: false } => (
             Tone::Unmanaged,
             "already in place, and not owned by Skilled".to_owned(),
@@ -3833,7 +3931,45 @@ fn install_target_lines(target: &InstallTarget) -> Vec<Line<'static>> {
         )),
     ];
     if let Some(detail) = detail {
-        lines.push(Line::styled(format!("    {detail}"), theme::key_label()));
+        lines.extend(indented_detail(&detail, width));
+    }
+    if plan_is_blocked && target.is_work() {
+        lines.extend(indented_detail(
+            "nothing will be written here: this plan is blocked",
+            width,
+        ));
+    }
+    lines
+}
+
+/// A sentence set under its target, wrapped by hand so every row of it keeps
+/// the same indent.
+///
+/// The paragraph's own wrapping restarts at the dialog margin, which reads as a
+/// new statement rather than as the rest of the one above it — the very thing
+/// splitting the target across three lines was meant to avoid. Words longer
+/// than the room left are placed anyway and allowed to wrap: cutting a word out
+/// of an explanation is worse than one ragged row.
+fn indented_detail(detail: &str, width: u16) -> Vec<Line<'static>> {
+    const INDENT: &str = "    ";
+    let room = usize::from(width).saturating_sub(INDENT.len()).max(1);
+    let mut lines = Vec::new();
+    let mut row = String::new();
+    for word in detail.split_whitespace() {
+        let candidate = if row.is_empty() {
+            word.to_owned()
+        } else {
+            format!("{row} {word}")
+        };
+        if Span::raw(&candidate).width() > room && !row.is_empty() {
+            lines.push(Line::styled(format!("{INDENT}{row}"), theme::key_label()));
+            row = word.to_owned();
+        } else {
+            row = candidate;
+        }
+    }
+    if !row.is_empty() {
+        lines.push(Line::styled(format!("{INDENT}{row}"), theme::key_label()));
     }
     lines
 }
@@ -3900,10 +4036,25 @@ fn install_report_lines(outcome: &InstallOutcome) -> Vec<Line<'static>> {
     }
     lines.push(Line::default());
     lines.push(Line::styled("Verification", theme::section_title()));
-    if outcome.verification().is_verified() {
+    if outcome.verification().is_complete() {
         lines.push(Line::from(components::badge(
             Tone::Healthy,
             "every link written was observed again and matches this plan",
+        )));
+    } else if outcome.verification().is_verified() {
+        lines.push(Line::from(components::badge(
+            Tone::Healthy,
+            "every link written was observed again, and nothing disagreed with this plan",
+        )));
+    }
+    for withheld in outcome.verification().withheld() {
+        lines.push(Line::from(components::badge(
+            Tone::Inactive,
+            &format!(
+                "{}: {}",
+                withheld.agent().display_name(),
+                terminal_safe(withheld.reason())
+            ),
         )));
     }
     for failure in outcome.verification().failures() {
@@ -3916,7 +4067,16 @@ fn install_report_lines(outcome: &InstallOutcome) -> Vec<Line<'static>> {
             ),
         )));
     }
-    if outcome.status() != InstallStatus::Installed {
+    // Only where something was written: there is nothing to say about undoing
+    // an operation that wrote nothing.
+    if outcome.status() != InstallStatus::Installed
+        && outcome.applied().steps().iter().any(|step| {
+            !matches!(
+                step.outcome(),
+                StepOutcome::Failed(_) | StepOutcome::Unattempted
+            )
+        })
+    {
         lines.push(Line::default());
         lines.push(Line::from(
             "Skilled does not undo what it wrote. Nothing above was removed, and no repair \
@@ -4774,6 +4934,9 @@ fn key_hints(app: &SkilledApp, detail_extent: Option<usize>) -> Vec<KeyHint> {
     // offers a confirmation where the reducer would accept one.
     if let Some(prompt) = app.pending_install() {
         let mut hints = Vec::new();
+        if detail_extent.is_some_and(|extent| extent > 0) {
+            hints.push(KeyHint::essential("j/k", "Scroll"));
+        }
         if matches!(prompt, InstallPrompt::Preview(plan) if plan.is_executable()) {
             hints.push(KeyHint::essential("Enter", "Install"));
             hints.push(KeyHint::essential("Esc", "Cancel"));

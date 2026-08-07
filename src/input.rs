@@ -50,13 +50,19 @@ pub fn action_for_app_key(app: &SkilledApp, key: KeyEvent) -> Option<Action> {
     // is the only account of writes that have.
     if app.pending_install().is_some() {
         let action = match key.code {
-            KeyCode::Enter | KeyCode::Char('y') => Some(Action::ConfirmInstall),
+            KeyCode::Enter => Some(Action::ConfirmInstall),
             KeyCode::Esc => Some(Action::DismissInstall),
+            KeyCode::Up | KeyCode::Char('k') => Some(Action::ScrollDetail(-1)),
+            KeyCode::Down | KeyCode::Char('j') => Some(Action::ScrollDetail(1)),
             _ => None,
         };
-        return (key.kind == KeyEventKind::Press)
-            .then_some(action)
-            .flatten();
+        // Scrolling is the one thing worth repeating here: a held key must not
+        // confirm twice, and there is nothing else to hold.
+        return match (key.kind, action) {
+            (KeyEventKind::Repeat, Some(Action::ScrollDetail(_))) => action,
+            (KeyEventKind::Repeat, _) => None,
+            _ => action,
+        };
     }
     if app.pending_source().is_some() {
         let action = match key.code {
