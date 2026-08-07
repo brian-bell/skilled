@@ -1148,14 +1148,27 @@ fn doctor_subtitle(app: &SkilledApp, listed: usize) -> String {
         None if inventory.unreadable_roots().next().is_some() && listed > 0 => {
             format!("{listed} listed · not fully read")
         }
+        // The roots are settled before the registry, in the order
+        // `doctor_empty_state` states them, so the pane header and the body
+        // beneath it lead with the same reason.
         None if inventory.unreadable_roots().next().is_some() => "not fully read".to_owned(),
-        None if !inventory.registry_is_complete() && listed > 0 => {
-            format!("{listed} listed · a source could not be read")
-        }
-        None if !inventory.registry_is_complete() => "a source could not be read".to_owned(),
-        None if listed > 0 => format!("{listed} listed · no root read"),
-        None => "no root read".to_owned(),
+        None if !read_a_root(inventory) && listed > 0 => format!("{listed} listed · no root read"),
+        None if !read_a_root(inventory) => "no root read".to_owned(),
+        None if listed > 0 => format!("{listed} listed · a source could not be read"),
+        None => "a source could not be read".to_owned(),
     }
+}
+
+/// Whether any root was actually read, as opposed to accounted for.
+///
+/// Finding every root absent is a complete answer about the roots and no
+/// reading of any of them; the difference is what several of Doctor's
+/// withholding phrases turn on.
+fn read_a_root(inventory: &crate::inventory::InventorySnapshot) -> bool {
+    inventory
+        .roots()
+        .iter()
+        .any(|root| matches!(root.status(), RootStatus::Scanned { .. }))
 }
 
 fn doctor_column_headings(columns: DoctorColumns) -> Line<'static> {
@@ -1234,11 +1247,7 @@ fn doctor_empty_state(app: &SkilledApp) -> (&'static str, String, String) {
     // Nothing was read, so nothing may be said about what is installed. The
     // roots were all accounted for — that is why no count was withheld for
     // them — but accounting for a root that is absent is not reading one.
-    if !inventory
-        .roots()
-        .iter()
-        .any(|root| matches!(root.status(), RootStatus::Scanned { .. }))
-    {
+    if !read_a_root(inventory) {
         return (
             "·",
             "No agent skill root exists yet".to_owned(),
@@ -1393,13 +1402,13 @@ fn doctor_detail_lines(entry: &DoctorEntry<'_>, home: &Path, width: u16) -> Vec<
 /// picked anything and the complaint is that nothing can. Keying on the code
 /// alone would state one of those beside the evidence for the other.
 ///
-/// The competing variants are what tells them apart. Neither finding hangs off
-/// an installation — an effective resolution is a fact about several roots at
-/// once, so it is filed on the row — and only the registry-side one carries the
-/// variants that defeated the selection.
+/// [`DoctorEntry::concerns_the_registry`] is what tells them apart. Neither
+/// finding hangs off an installation — an effective resolution is a fact about
+/// several roots at once, so it is filed on the row — so the observation cannot
+/// be asked; the competing variants can.
 fn finding_consequence(entry: &DoctorEntry<'_>) -> &'static str {
     match entry.finding().code() {
-        "variant.duplicate_for_agent" if entry.variants().is_empty() => {
+        "variant.duplicate_for_agent" if !entry.concerns_the_registry() => {
             "The highest-precedence root wins and the other definition is never \
              loaded, whichever one was meant."
         }
@@ -1427,8 +1436,8 @@ fn finding_consequence(entry: &DoctorEntry<'_>) -> &'static str {
              state, so installing under this name is blocked until a source is chosen."
         }
         "variant.foreign_opencode_exposure" => {
-            "OpenCode can see another agent's variant. Skilled does not claim it is \
-             usable there, because no OpenCode-compatible variant was registered."
+            "OpenCode can see another agent's edition of this skill and no edition of \
+             its own. Skilled does not claim one agent's edition is usable by another."
         }
         "variant.benign_alias" => {
             "Nothing is wrong: every root reaches one directory, so one skill loads."
@@ -2165,7 +2174,7 @@ fn push_opencode_resolution(
             }
             lines.push(detail_field_bounded(
                 "Also at",
-                &joined_entry_paths(&entries[1.min(entries.len())..], home),
+                &joined_entry_paths(entries.get(1..).unwrap_or_default(), home),
                 width,
                 3,
             ));

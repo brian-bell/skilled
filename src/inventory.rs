@@ -632,6 +632,18 @@ impl<'a> DoctorEntry<'a> {
     pub fn variants(&self) -> &'a [VariantRef] {
         self.variants
     }
+
+    /// Whether this finding is about the registry rather than about what is
+    /// installed.
+    ///
+    /// The two findings that share `variant.duplicate_for_agent` are told apart
+    /// by this and nothing else: only a selection conflict carries the variants
+    /// that defeated it, because only the registry has variants to compete.
+    /// Anything that must state which of the two it is asks here rather than
+    /// re-deriving it from the shape of the entry.
+    pub fn concerns_the_registry(&self) -> bool {
+        !self.variants.is_empty()
+    }
 }
 
 /// Which of the spec 9.5 groups a finding belongs to, lowest first.
@@ -1111,8 +1123,9 @@ fn opencode_findings(name: &str, resolution: &OpenCodeResolution, rule: &str) ->
                 code: "variant.foreign_opencode_exposure",
                 severity: FindingSeverity::Warning,
                 evidence: format!(
-                    "{} resolves to {variant}, which is not registered for OpenCode; {rule}, \
-                     so OpenCode sees this name with no OpenCode-compatible variant behind it",
+                    "{} resolves to {variant}, which is another agent's edition: its \
+                     catalog is laid out under that agent's own root. {rule}, so it sees \
+                     this name with no edition of its own behind it.",
                     joined_paths(std::iter::once(winner).chain(aliases), name)
                 ),
             }]
@@ -1191,7 +1204,14 @@ fn selection_findings(
             // An ambiguity nothing has resolved yet leaves a future
             // installation uncertain; one an installation already answers to
             // means an agent is loading content Skilled cannot say was chosen.
-            let installed = row.is_some_and(|row| row.observation(agent).is_some());
+            // An observation is not an installation: a stray file is ignored by
+            // the agent, and an entry the scan could not read is one this
+            // module refuses to claim either way. Escalating on either would
+            // state that the agent already resolves this name.
+            let installed = row.is_some_and(|row| {
+                row.observation(agent)
+                    .is_some_and(|observation| observation.object().is_installation())
+            });
             let listed = variants
                 .iter()
                 .map(VariantRef::evidence_label)

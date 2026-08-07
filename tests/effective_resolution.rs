@@ -289,6 +289,32 @@ fn a_deselected_compatibility_root_leaves_the_resolution_incomplete() {
     );
 }
 
+/// Stray content is not an installation, so a registry ambiguity over a name a
+/// root merely holds a file under stays uncertain rather than becoming
+/// critical: the agent is resolving nothing.
+#[test]
+fn stray_content_does_not_escalate_a_selection_conflict() {
+    let fixture = Fixture::new();
+    let first = fixture.source("alpha", &[("skills", &["review"])]);
+    let second = fixture.source("beta", &[("skills", &["review"])]);
+    drop(fixture.registered(&[&first, &second]));
+    let root = fixture.root(AgentKind::ClaudeCode);
+    fs::create_dir_all(&root).expect("create Claude Code root");
+    fs::write(root.join("review"), "not a directory").expect("write stray content");
+
+    let app = fixture.app();
+    let claude = app
+        .inventory()
+        .selection_findings()
+        .iter()
+        .find(|finding| finding.agent() == AgentKind::ClaudeCode)
+        .expect("Claude Code has no unambiguous variant")
+        .finding()
+        .severity();
+
+    assert_eq!(claude, FindingSeverity::Warning);
+}
+
 /// Two registered repositories offering the same common name leave the agent
 /// with no unambiguous variant. Nothing is installed, so usability is uncertain
 /// rather than broken, and the finding carries the evidence contract: skill,
@@ -660,6 +686,15 @@ fn a_dot_prefixed_claude_catalog_is_still_a_foreign_variant_for_opencode() {
         row.opencode_resolution()
     );
     assert_eq!(row.verdict(), RowVerdict::ForeignVariant);
+    // The evidence says what was observed — that this is another agent's
+    // edition — rather than resting on a stored compatibility set that, for
+    // this layout, records that OpenCode reads the root.
+    let evidence = resolution_finding(row, "variant.foreign_opencode_exposure").evidence();
+    assert!(evidence.contains("another agent's edition"), "{evidence}");
+    assert!(
+        !evidence.contains("not registered for OpenCode"),
+        "the Sources screen registers this catalog for OpenCode: {evidence}"
+    );
     // Claude Code's own selection is unaffected: this is its edition.
     assert!(matches!(
         skilled::resolution::select_candidates(app.sources(), AgentKind::ClaudeCode, "review"),

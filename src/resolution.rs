@@ -149,12 +149,17 @@ pub enum CandidateSelection {
 /// agent-specific survivor excludes every common one, so a repository shipping
 /// both a common and an agent-specific edition is not a conflict.
 ///
-/// "Exact" is approximated: a catalog's classification records that it is
-/// agent-specific but not which agent it is specific to — the compatibility set
-/// is what narrows it, and a user may confirm an agent-specific catalog as
-/// compatible with all three. Such a catalog therefore outranks every common
-/// one for every agent. The stored set is what was proposed and confirmed, so
-/// this follows the user's own declaration rather than second-guessing it.
+/// "Exact" is read from two places, because no single stored field carries it.
+/// A catalog's classification records that it is agent-specific but not which
+/// agent it is specific to, and its compatibility set records which agents were
+/// confirmed for it — a set that, for a catalog laid out under another agent's
+/// root, includes every agent that merely reads that root. Where the catalog's
+/// path names an owner, that owner is what "exact" means and the stored set
+/// narrows no further; see [`VariantRef::usable_by`], which is what this
+/// applies. A user who ticks a second agent on such a catalog will find it
+/// selects nothing for them, and Skilled states no reason for it: telling a
+/// path-derived tick from a hand-set one would need the two recorded apart,
+/// which the store does not do today.
 ///
 /// Two exclusions are worth stating because neither is visible in the rule.
 /// A variant that does not validate is not a candidate — an agent could not
@@ -246,6 +251,11 @@ pub(crate) fn narrow(variants: &[VariantRef], agent: AgentKind) -> CandidateSele
 /// consults is another agent's native root, which is why one scan of the three
 /// native roots is all the evidence this needs.
 pub fn opencode_root_order() -> Vec<AgentKind> {
+    opencode_roots().collect()
+}
+
+/// The same order, without the allocation a per-row walk would pay for.
+fn opencode_roots() -> impl Iterator<Item = AgentKind> {
     let opencode = adapter(AgentKind::OpenCode);
     std::iter::once(opencode.native_skill_root())
         .chain(opencode.compatibility_skill_roots().iter().copied())
@@ -254,7 +264,6 @@ pub fn opencode_root_order() -> Vec<AgentKind> {
                 .into_iter()
                 .find(|kind| adapter(*kind).native_skill_root() == root)
         })
-        .collect()
 }
 
 /// What one root holds under one skill name, as far as the scan established it.
@@ -390,10 +399,9 @@ pub enum UnknownCause {
 /// different directory under the same name, which is exactly the difference
 /// between a selection and a conflict.
 pub fn resolve_opencode(sightings: [RootSighting; 3]) -> OpenCodeResolution {
-    let order = opencode_root_order();
     let mut unknown = Vec::new();
     let mut entries = Vec::new();
-    for root in order {
+    for root in opencode_roots() {
         match &sightings[root.index()] {
             RootSighting::Unread => unknown.push(UnknownRoot {
                 root,
