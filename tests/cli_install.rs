@@ -473,9 +473,14 @@ fn unreadable_metadata_is_an_internal_error_rather_than_an_invalid_request() {
 }
 
 /// OpenCode reads the other agents' roots, so a link written into one of them
-/// is a postcondition of OpenCode's too — even when OpenCode was not a target.
+/// changes what OpenCode loads even when OpenCode was not a target.
+///
+/// The plan says so before it runs, and the check afterwards asks whether the
+/// machine ended up the way the plan described — not whether the arrangement is
+/// one Skilled would have chosen. A user who confirmed a plan that warned about
+/// this has not been surprised by it.
 #[test]
-fn an_install_that_leaves_opencode_ambiguous_is_reported_even_when_it_was_not_a_target() {
+fn an_install_that_leaves_opencode_ambiguous_warns_before_it_runs() {
     let fixture = Fixture::new();
     let repository = fixture.register("library", &["portable"]);
     // A second directory OpenCode would load under the same name, in Codex's
@@ -497,18 +502,90 @@ fn an_install_that_leaves_opencode_ambiguous_is_reported_even_when_it_was_not_a_
         "claude-code",
     ]);
 
-    // The link was written, and the report says what it did to OpenCode rather
-    // than reporting a clean install and leaving it to Doctor.
-    assert_eq!(code, ExitCodeKind::VerificationFailed, "{output}");
+    assert_eq!(code, ExitCodeKind::Success, "{output}");
     assert!(
         fixture.home().join(".claude/skills/portable").is_dir(),
         "{output}"
     );
-    assert!(output.contains("Not verified: OpenCode"), "{output}");
+    // Said in the plan, where it can still change the user's mind.
+    assert!(output.contains("warning:"), "{output}");
     assert!(
-        output.contains("more than one directory under that name"),
+        output.contains("more than one directory to choose between"),
         "{output}"
     );
+    // And what happened is what the plan described, so the check afterwards has
+    // nothing to report about it.
+    assert!(!output.contains("Not verified"), "{output}");
+}
+
+/// A disagreement that was already there is not this install's failure.
+///
+/// The plan predicts it, warns about nothing that changed, and the check
+/// afterwards asks only whether the machine matches that prediction. A standing
+/// ambiguity between two roots this request never touched stays Doctor's.
+#[test]
+fn a_conflict_that_predates_the_install_is_not_reported_as_its_failure() {
+    let fixture = Fixture::new();
+    let repository = fixture.register("library", &["portable"]);
+    // Codex and OpenCode already answer to `portable` with different
+    // directories. Neither is written to by this request.
+    let elsewhere = fixture.directory.path().join("elsewhere/portable");
+    write_skill(&elsewhere, "portable");
+    for (root, target) in [
+        (".agents/skills", repository.join("skills/portable")),
+        (".config/opencode/skills", elsewhere.clone()),
+    ] {
+        let root = fixture.home().join(root);
+        fs::create_dir_all(&root).expect("create the root");
+        std::os::unix::fs::symlink(&target, root.join("portable")).expect("install a link");
+    }
+
+    let (code, output) = fixture.run(&[
+        "install",
+        "--yes",
+        "--source",
+        &repository.display().to_string(),
+        "--skill",
+        "portable",
+        "--agents",
+        "claude-code",
+    ]);
+
+    assert_eq!(code, ExitCodeKind::Success, "{output}");
+    assert!(
+        fixture.home().join(".claude/skills/portable").is_dir(),
+        "{output}"
+    );
+    assert!(!output.contains("Not verified"), "{output}");
+}
+
+/// A blocked plan reads as blocked everywhere in the printed plan, not only in
+/// the line under it.
+#[test]
+fn a_blocked_plan_prints_its_free_targets_as_work_it_would_have_done() {
+    let fixture = Fixture::new();
+    let repository = fixture.register("library", &["portable"]);
+    let root = fixture.home().join(".agents/skills");
+    fs::create_dir_all(&root).expect("create Codex root");
+    fs::write(root.join("portable"), "someone else's file").expect("occupy the slot");
+
+    let (code, output) = fixture.run(&[
+        "install",
+        "--yes",
+        "--source",
+        &repository.display().to_string(),
+        "--skill",
+        "portable",
+        "--agents",
+        "claude-code,codex",
+    ]);
+
+    assert_eq!(code, ExitCodeKind::Blocked, "{output}");
+    assert!(
+        output.contains("would create the skill root, then the link"),
+        "{output}"
+    );
+    assert!(!output.contains("  Claude Code  create"), "{output}");
 }
 
 /// A registered variant path that is no longer a directory is refused while
