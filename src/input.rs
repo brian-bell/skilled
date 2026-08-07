@@ -45,6 +45,19 @@ pub fn action_for_app_key(app: &SkilledApp, key: KeyEvent) -> Option<Action> {
             _ => action,
         };
     }
+    // The install dialog is answered before anything else can be reached: a
+    // preview is a question about writes that have not happened, and a report
+    // is the only account of writes that have.
+    if app.pending_install().is_some() {
+        let action = match key.code {
+            KeyCode::Enter | KeyCode::Char('y') => Some(Action::ConfirmInstall),
+            KeyCode::Esc => Some(Action::DismissInstall),
+            _ => None,
+        };
+        return (key.kind == KeyEventKind::Press)
+            .then_some(action)
+            .flatten();
+    }
     if app.pending_source().is_some() {
         let action = match key.code {
             KeyCode::Enter => Some(Action::ConfirmPendingSource),
@@ -63,6 +76,15 @@ pub fn action_for_app_key(app: &SkilledApp, key: KeyEvent) -> Option<Action> {
             (KeyEventKind::Repeat, _) => None,
             _ => action,
         };
+    }
+    // `i` belongs to the region the user is standing in rather than to the
+    // view, and only this side can see which region that is. A held key is not
+    // a second install: the dialog it opens is what answers it.
+    if app.can_install_selection()
+        && key.kind == KeyEventKind::Press
+        && key.code == KeyCode::Char('i')
+    {
+        return Some(Action::BeginInstall);
     }
     // The keys that move a workspace's selection move its detail region's
     // window once that region has focus. The translation happens here rather than in

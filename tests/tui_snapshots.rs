@@ -1433,6 +1433,107 @@ fn normalize_scan_timestamp(screen: String) -> String {
     normalized
 }
 
+/// An application standing on the first variant of one registered source, in a
+/// temporary tree short enough that the install dialog's absolute paths fit on
+/// one line at eighty columns.
+///
+/// They have to: spec 15 asks the preview to state exactly what is about to be
+/// written, so the dialog never elides a path, and a snapshot of one folded
+/// across two rows would be measuring the fixture rather than the layout.
+#[cfg(unix)]
+fn install_fixture() -> (tempfile::TempDir, SkilledApp) {
+    let temporary = tempfile::Builder::new()
+        .prefix("sk-")
+        .tempdir_in("/tmp")
+        .expect("temporary application directory");
+    let repository = temporary.path().join("src");
+    create_source_fixture(&repository);
+    for root in [".claude", ".agents", ".config/opencode"] {
+        fs::create_dir_all(temporary.path().join("home").join(root))
+            .expect("create the root's parent");
+    }
+    let mut app = SkilledApp::open(AppEnvironment::new(
+        temporary.path().join("home"),
+        temporary.path().join("data"),
+        "",
+    ))
+    .expect("open application");
+    let preview = app.preview_source(&repository).expect("preview source");
+    app.confirm_source(preview).expect("register source");
+    for _ in 0..7 {
+        dispatch(&mut app, Action::Continue);
+    }
+    app.update(Action::OpenSources);
+    app.update(Action::AdvanceSourcesPane);
+    (temporary, app)
+}
+
+/// Replace the temporary tree's own path, keeping every line the width the
+/// application produced.
+///
+/// Both spellings are replaced, and the canonical one first: the dialog states
+/// resolved variant directories and unresolved link paths side by side, and on
+/// a platform where `/tmp` is itself a link the shorter spelling is a substring
+/// of the longer one.
+#[cfg(unix)]
+fn normalize_install_screen(temporary: &tempfile::TempDir, screen: String) -> String {
+    let canonical = temporary
+        .path()
+        .canonicalize()
+        .expect("canonical temporary directory")
+        .to_string_lossy()
+        .into_owned();
+    let path = temporary.path().to_string_lossy().into_owned();
+    screen
+        .replace(&canonical, &padded_placeholder(&canonical, "[CANONICAL]"))
+        .replace(&path, &padded_placeholder(&path, "[TEMP]"))
+}
+
+/// Spec 15: the preview names every target and its exact absolute path before
+/// anything is written.
+#[cfg(unix)]
+#[test]
+fn install_preview_at_minimum_supported_size() {
+    let (temporary, mut app) = install_fixture();
+    dispatch(&mut app, Action::BeginInstall);
+
+    insta::assert_snapshot!(normalize_install_screen(&temporary, render(&app, 80, 24)));
+    insta::assert_snapshot!(
+        "install_preview_at_wide_size",
+        normalize_install_screen(&temporary, render(&app, 120, 40))
+    );
+}
+
+/// A blocked plan states the finding that blocks it and offers no way to
+/// confirm: the footer must not hint a key the reducer would refuse.
+#[cfg(unix)]
+#[test]
+fn install_preview_blocked_at_minimum_supported_size() {
+    let (temporary, mut app) = install_fixture();
+    let root = temporary.path().join("home/.agents/skills");
+    fs::create_dir_all(&root).expect("create Codex root");
+    fs::write(root.join("portable"), "someone else's file").expect("occupy the slot");
+    dispatch(&mut app, Action::BeginInstall);
+
+    insta::assert_snapshot!(normalize_install_screen(&temporary, render(&app, 80, 24)));
+}
+
+/// The report states each step, the receipts behind it, and what the scan taken
+/// afterwards made of the links.
+#[cfg(unix)]
+#[test]
+fn install_report_at_minimum_supported_size() {
+    let (temporary, mut app) = install_fixture();
+    dispatch(&mut app, Action::BeginInstall);
+    dispatch(&mut app, Action::ConfirmInstall);
+
+    insta::assert_snapshot!(normalize_install_screen(&temporary, render(&app, 80, 24)));
+    insta::assert_snapshot!(
+        "install_report_at_wide_size",
+        normalize_install_screen(&temporary, render(&app, 120, 40))
+    );
+}
+
 fn padded_placeholder(value: &str, placeholder: &str) -> String {
     format!(
         "{placeholder}{}",

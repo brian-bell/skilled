@@ -3812,6 +3812,29 @@ impl Harness {
         app
     }
 
+    /// One registered source, standing on its only variant, with every agent
+    /// root's own parent present so the plan has work to state.
+    #[cfg(unix)]
+    fn installable_source(&self) -> SkilledApp {
+        let home = self.directory.path().join("home");
+        let repository = self.directory.path().join("library");
+        create_source_fixture(&repository);
+        for root in [".claude", ".agents", ".config/opencode"] {
+            fs::create_dir_all(home.join(root)).expect("create the root's parent");
+        }
+        let mut app = self.first_run();
+        let preview = app.preview_source(&repository).expect("preview source");
+        app.confirm_source(preview).expect("register source");
+        for _ in 0..7 {
+            let update = app.update(Action::Continue);
+            app.perform_effects(update.effects())
+                .expect("perform setup effects");
+        }
+        app.update(Action::OpenSources);
+        app.update(Action::AdvanceSourcesPane);
+        app
+    }
+
     /// One healthy skill installed for two agents, one dangling link, and one
     /// physical copy, with the OpenCode root absent entirely.
     ///
@@ -4075,6 +4098,124 @@ fn write_skill_fixture(directory: &Path, name: &str) {
         format!("---\nname: {name}\ndescription: {name} fixture\n---\n# {name}\n"),
     )
     .expect("write skill fixture");
+}
+
+/// The install dialog states each target's verdict in words as well as in
+/// colour, and shows the exact absolute path unabbreviated.
+///
+/// Both channels are checked because neither may carry the verdict alone: a
+/// terminal may not render the palette, and a reader may not distinguish it.
+#[cfg(unix)]
+#[test]
+fn the_install_preview_carries_each_verdict_in_words_and_in_tone() {
+    let harness = Harness::new();
+    let mut app = harness.installable_source();
+    let codex = harness.directory.path().join("home/.agents/skills");
+    fs::create_dir_all(&codex).expect("create Codex root");
+    fs::write(codex.join("portable"), "someone else's file").expect("occupy the slot");
+    let update = app.update(Action::BeginInstall);
+    app.perform_effects(update.effects()).expect("plan install");
+
+    let screen = buffer(&app, 100, 30);
+    let rendered = text(&screen);
+
+    assert!(rendered.contains("┌ Install skill"), "{rendered}");
+    assert!(rendered.contains("nothing written yet"), "{rendered}");
+    let creating = row_containing(&screen, "Claude Code: create the skill root");
+    assert!(row_text(&screen, creating).contains('✓'), "{rendered}");
+    assert_eq!(
+        style_in_row(&screen, creating, "✓").fg,
+        Some(Color::Rgb(0x8b, 0xd4, 0x9c))
+    );
+    let blocked = row_containing(&screen, "install.physical_path_collision");
+    assert!(row_text(&screen, blocked).contains('×'), "{rendered}");
+    assert_eq!(
+        style_in_row(&screen, blocked, "×").fg,
+        Some(Color::Rgb(0xee, 0x6b, 0x73))
+    );
+    // The path a user is being asked to agree to is stated in full, and never
+    // abbreviated against the home directory. A long one wraps across rows
+    // rather than being elided, so it is checked with the wrap taken back out.
+    let home = harness.directory.path().join("home");
+    let unwrapped: String = rendered
+        .lines()
+        .filter_map(dialog_interior)
+        .flat_map(|interior| interior.chars().filter(|c| !c.is_whitespace()))
+        .collect();
+    assert!(
+        unwrapped.contains(&home.join(".agents/skills/portable").display().to_string()),
+        "{rendered}"
+    );
+    assert!(!rendered.contains("~/.agents"), "{rendered}");
+    // A blocked plan hints no key the reducer would refuse.
+    let footer = row_text(&screen, screen.area.height - 1);
+    assert!(footer.contains("Esc Close"), "{footer}");
+    assert!(!footer.contains("Enter"), "{footer}");
+}
+
+/// The report states what was written, and says plainly that nothing is undone.
+#[cfg(unix)]
+#[test]
+fn the_install_report_states_each_step_and_the_verification_behind_it() {
+    let harness = Harness::new();
+    let mut app = harness.installable_source();
+    for action in [Action::BeginInstall, Action::ConfirmInstall] {
+        let update = app.update(action);
+        app.perform_effects(update.effects()).expect("install");
+    }
+
+    let screen = buffer(&app, 100, 30);
+    let rendered = text(&screen);
+
+    assert!(rendered.contains("┌ Install result"), "{rendered}");
+    assert!(rendered.contains("already applied"), "{rendered}");
+    for agent in ["Claude Code", "Codex", "OpenCode"] {
+        let row = row_containing(&screen, &format!("{agent}: link created"));
+        assert_eq!(
+            style_in_row(&screen, row, "✓").fg,
+            Some(Color::Rgb(0x8b, 0xd4, 0x9c))
+        );
+    }
+    let verified = row_containing(&screen, "observed again and matches this plan");
+    assert_eq!(
+        style_in_row(&screen, verified, "✓").fg,
+        Some(Color::Rgb(0x8b, 0xd4, 0x9c))
+    );
+    // A successful install does not need the no-undo note; a failed one does,
+    // and it is tested where it appears.
+    assert!(!rendered.contains("does not undo"), "{rendered}");
+    let footer = row_text(&screen, screen.area.height - 1);
+    assert!(footer.contains("Esc Close"), "{footer}");
+    assert!(!footer.contains("Enter"), "{footer}");
+}
+
+/// `i · Install` appears exactly where the reducer would act on it.
+#[cfg(unix)]
+#[test]
+fn the_install_hint_appears_only_where_a_variant_is_focused() {
+    let harness = Harness::new();
+    let mut app = harness.installable_source();
+
+    let footer = |app: &SkilledApp| {
+        let screen = buffer(app, 100, 30);
+        row_text(&screen, screen.area.height - 1)
+    };
+    assert!(footer(&app).contains("i Install"), "{}", footer(&app));
+
+    // Back in the repositories pane there is no variant to stand on.
+    app.update(Action::Back);
+    assert!(!footer(&app).contains("i Install"), "{}", footer(&app));
+}
+
+/// The text between a dialog row's own borders.
+///
+/// The workspace behind a dialog is still drawn either side of it, so a
+/// wrapped line cannot simply be joined to the one below: the columns outside
+/// the border belong to another screen.
+fn dialog_interior(row: &str) -> Option<&str> {
+    let start = row.find('│')? + '│'.len_utf8();
+    let end = row.rfind('│')?;
+    (start <= end).then(|| &row[start..end])
 }
 
 fn buffer(app: &SkilledApp, width: u16, height: u16) -> Buffer {
