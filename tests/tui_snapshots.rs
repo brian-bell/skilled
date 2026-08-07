@@ -1004,7 +1004,7 @@ mod installed {
             .detail_max_scroll()
             .expect("the frame drew the detail region");
         assert!(extent > 0, "the region should have somewhere to scroll");
-        app.note_detail_max_scroll(extent);
+        app.note_detail_max_scroll(Some(extent));
         for _ in 0..extent {
             app.update(Action::ScrollDetail(1));
         }
@@ -1538,6 +1538,10 @@ fn install_preview_blocked_at_minimum_supported_size() {
 fn install_report_at_minimum_supported_size() {
     let (temporary, mut app) = install_fixture();
     dispatch(&mut app, Action::BeginInstall);
+    // The runner draws before every key, and a confirmation waits on what the
+    // frame measured. This preview fits at the size the report is snapshotted
+    // at, so the measurement is that there is nothing left to scroll to.
+    app.note_detail_max_scroll(drawn(&app, 120, 40).1.detail_max_scroll());
     dispatch(&mut app, Action::ConfirmInstall);
 
     insta::assert_snapshot!(normalize_install_screen(&temporary, render(&app, 80, 24)));

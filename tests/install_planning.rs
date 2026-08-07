@@ -632,6 +632,11 @@ fn install_through_the_application(app: &mut SkilledApp) {
         skilled::Action::ConfirmInstall,
         skilled::Action::DismissInstall,
     ] {
+        // Standing in the frame the runner would have drawn; see the note on
+        // `dispatch` in `install_flow.rs`.
+        if app.pending_install().is_some() {
+            app.note_detail_max_scroll(Some(0));
+        }
         let update = app.update(action);
         app.perform_effects(update.effects()).expect("install");
     }

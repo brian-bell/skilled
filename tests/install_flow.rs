@@ -513,7 +513,16 @@ fn deselect_codex(app: &mut SkilledApp) {
     assert!(!app.agent(AgentKind::Codex).selected());
 }
 
+/// Apply one action the way the runner does.
+///
+/// The runner draws a frame before every key and hands the application what it
+/// measured, which is what a confirmation waits on. These tests do not render,
+/// so they stand in the measurement a terminal large enough to hold the dialog
+/// would report: the whole plan on screen, nothing left to scroll to.
 fn dispatch(app: &mut SkilledApp, action: Action) {
+    if app.pending_install().is_some() {
+        app.note_detail_max_scroll(Some(0));
+    }
     let update = app.update(action);
     app.perform_effects(update.effects())
         .expect("perform effects");

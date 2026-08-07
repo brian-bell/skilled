@@ -4209,6 +4209,11 @@ fn the_install_report_states_each_step_and_the_verification_behind_it() {
     let harness = Harness::new();
     let mut app = harness.installable_source();
     for action in [Action::BeginInstall, Action::ConfirmInstall] {
+        // The runner draws before every key; a confirmation waits on what the
+        // frame measured.
+        if app.pending_install().is_some() {
+            app.note_detail_max_scroll(feedback(&app, 100, 30).detail_max_scroll());
+        }
         let update = app.update(action);
         app.perform_effects(update.effects()).expect("install");
     }
@@ -4286,6 +4291,9 @@ fn the_install_report_escapes_filesystem_text_in_a_failed_step() {
     let update = app.update(Action::BeginInstall);
     app.perform_effects(update.effects()).expect("plan install");
     fs::rename(&repository, harness.directory.path().join("moved")).expect("move the checkout");
+    // The runner draws before every key, and a confirmation waits on what the
+    // frame measured.
+    app.note_detail_max_scroll(feedback(&app, 100, 30).detail_max_scroll());
     let update = app.update(Action::ConfirmInstall);
     app.perform_effects(update.effects())
         .expect("apply install");
@@ -4310,6 +4318,11 @@ fn a_withheld_postcondition_is_stated_rather_than_reported_as_verified() {
     app.update(Action::OpenSources);
     app.update(Action::AdvanceSourcesPane);
     for action in [Action::BeginInstall, Action::ConfirmInstall] {
+        // The runner draws before every key; a confirmation waits on what the
+        // frame measured.
+        if app.pending_install().is_some() {
+            app.note_detail_max_scroll(feedback(&app, 100, 30).detail_max_scroll());
+        }
         let update = app.update(action);
         app.perform_effects(update.effects()).expect("install");
     }
@@ -4383,7 +4396,7 @@ fn a_preview_taller_than_its_dialog_says_so_and_can_be_scrolled_to_its_end() {
     assert!(!footer.contains("Enter"), "{footer}");
     // The runner notes what the frame measured before reading the next key, so
     // by the time Enter could arrive the reducer refuses it too.
-    app.note_detail_max_scroll(measured_extent(&app, 80, 24));
+    app.note_detail_max_scroll(Some(measured_extent(&app, 80, 24)));
     assert!(!app.install_preview_fully_seen());
     assert!(app.update(Action::ConfirmInstall).effects().is_empty());
 
@@ -4453,7 +4466,7 @@ fn measured_extent(app: &SkilledApp, width: u16, height: u16) -> usize {
 fn scroll_detail(app: &mut SkilledApp, width: u16, height: u16, steps: usize) {
     for _ in 0..steps {
         if let Some(extent) = feedback(app, width, height).detail_max_scroll() {
-            app.note_detail_max_scroll(extent);
+            app.note_detail_max_scroll(Some(extent));
         }
         app.update(Action::ScrollDetail(1));
     }
@@ -5271,7 +5284,7 @@ mod installed {
             let whole = region_rows(&app, width, 80);
             for height in 24..40 {
                 let extent = measured_extent(&app, width, height);
-                app.note_detail_max_scroll(extent);
+                app.note_detail_max_scroll(Some(extent));
                 for _ in 0..=extent {
                     app.update(Action::ScrollDetail(-1));
                 }
@@ -5407,7 +5420,7 @@ mod installed {
         // back first, and the next one — the runner notes before every key —
         // pulls it back for good.
         let stale_frame = text(&buffer(&app, 80, 30));
-        app.note_detail_max_scroll(extent);
+        app.note_detail_max_scroll(Some(extent));
         assert_eq!(app.detail_scroll(), extent);
         assert_eq!(stale_frame, text(&buffer(&app, 80, 30)));
 
@@ -5433,7 +5446,7 @@ mod installed {
             // Drawn between each step, the way the runner does it.
             for _ in 0..2 {
                 if let Some(extent) = feedback(&app, width, height).detail_max_scroll() {
-                    app.note_detail_max_scroll(extent);
+                    app.note_detail_max_scroll(Some(extent));
                 }
                 app.update(Action::MoveInventoryPane(1));
             }
