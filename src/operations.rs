@@ -520,12 +520,18 @@ impl InstallTarget {
 /// a different question from whether the arrangement is one Skilled would have
 /// chosen: an install that knowingly leaves OpenCode ambiguous says so before
 /// it runs, and a user who confirmed that has not been surprised by it.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// The winner is carried, not only the classification. Two arrangements can
+/// both be "one directory selected" and be different directories: another
+/// root's link appearing after the plan was made would leave OpenCode loading
+/// content the plan never described, and a check that compared only the word
+/// would call that a match.
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum OpenCodeOutlook {
-    /// OpenCode will load one directory.
-    Selected,
-    /// The only definition it can see will be another agent's edition.
-    Exposure,
+    /// OpenCode will load the directory reached through this installation slot.
+    Selected { winner: PathBuf },
+    /// The only definition it can see will be another agent's edition, at this
+    /// slot.
+    Exposure { winner: PathBuf },
     /// More than one directory will answer to the name.
     Conflict,
     /// Nothing will.
@@ -537,8 +543,12 @@ pub enum OpenCodeOutlook {
 impl OpenCodeOutlook {
     fn of(resolution: &OpenCodeResolution) -> Self {
         match resolution {
-            OpenCodeResolution::Selected { .. } => Self::Selected,
-            OpenCodeResolution::ForeignExposure { .. } => Self::Exposure,
+            OpenCodeResolution::Selected { winner, .. } => Self::Selected {
+                winner: winner.path().to_path_buf(),
+            },
+            OpenCodeResolution::ForeignExposure { winner, .. } => Self::Exposure {
+                winner: winner.path().to_path_buf(),
+            },
             OpenCodeResolution::Conflict { .. } => Self::Conflict,
             OpenCodeResolution::NothingVisible => Self::Nothing,
             OpenCodeResolution::Incomplete { .. } => Self::Unknown,
@@ -591,8 +601,8 @@ impl InstallPlan {
 
     /// What this plan expects OpenCode to resolve the name to afterwards, or
     /// `None` where OpenCode is not an agent Skilled was asked to manage.
-    pub fn opencode_outlook(&self) -> Option<OpenCodeOutlook> {
-        self.opencode_outlook
+    pub fn opencode_outlook(&self) -> Option<&OpenCodeOutlook> {
+        self.opencode_outlook.as_ref()
     }
 
     /// Every finding that stops this plan, with the agent it concerns.
@@ -1646,7 +1656,7 @@ pub fn verify_install(
                     ),
                 });
             }
-            (Some(expected), actual) if expected != actual => failures.push(VerifyFailure {
+            (Some(expected), actual) if expected != &actual => failures.push(VerifyFailure {
                 agent: AgentKind::OpenCode,
                 observed: format!(
                     "this was not what the plan described: {}",
