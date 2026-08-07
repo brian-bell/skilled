@@ -15,7 +15,7 @@ use crate::{
     validation::InspectionBudget,
 };
 
-const SCHEMA_VERSION: i64 = 4;
+const SCHEMA_VERSION: i64 = 5;
 
 pub(crate) struct Store {
     connection: Connection,
@@ -371,6 +371,32 @@ fn migrate(connection: &mut Connection) -> Result<()> {
             "ALTER TABLE source_repositories ADD COLUMN
                 dirty_known INTEGER NOT NULL DEFAULT 1 CHECK (dirty_known IN (0, 1));
              PRAGMA user_version = 4;",
+        )?;
+        transaction.commit()?;
+    }
+    if current_version < 5 {
+        let transaction = connection.transaction()?;
+        // `source_id` deliberately carries no foreign key: a receipt is spec 7
+        // ownership evidence for a link Skilled put on disk, and forgetting the
+        // source it came from must not erase the record of what is out there.
+        // The columns beside it are the identity that evidence is *about*, kept
+        // as text for the same reason — they have to remain readable after the
+        // row they were copied from is gone.
+        transaction.execute_batch(
+            "CREATE TABLE operation_receipts (
+                id INTEGER PRIMARY KEY,
+                created_at INTEGER NOT NULL,
+                operation TEXT NOT NULL CHECK (operation IN ('install')),
+                agent TEXT NOT NULL,
+                skill_name TEXT NOT NULL,
+                link_path TEXT NOT NULL,
+                link_target TEXT NOT NULL,
+                source_id INTEGER,
+                catalog_relative_path TEXT,
+                variant_relative_path TEXT,
+                UNIQUE (agent, link_path, created_at)
+             );
+             PRAGMA user_version = 5;",
         )?;
         transaction.commit()?;
     }
