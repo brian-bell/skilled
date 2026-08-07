@@ -4361,6 +4361,14 @@ fn a_preview_taller_than_its_dialog_says_so_and_can_be_scrolled_to_its_end() {
     assert!(rendered.contains("more below"), "{rendered}");
     let footer = row_text(&screen, screen.area.height - 1);
     assert!(footer.contains("j/k Scroll"), "{footer}");
+    // Nothing is written until a plan the reader has seen in full is confirmed,
+    // so Enter is not offered while part of it is still below the window.
+    assert!(!footer.contains("Enter"), "{footer}");
+    // The runner notes what the frame measured before reading the next key, so
+    // by the time Enter could arrive the reducer refuses it too.
+    app.note_detail_max_scroll(measured_extent(&app, 80, 24));
+    assert!(!app.install_preview_fully_seen());
+    assert!(app.update(Action::ConfirmInstall).effects().is_empty());
 
     // The window moves the way it does everywhere else: the frame measures the
     // extent, the runner notes it, and the next keystroke is clamped to it.
@@ -4384,7 +4392,12 @@ fn a_preview_taller_than_its_dialog_says_so_and_can_be_scrolled_to_its_end() {
         .filter(|row| !row.is_empty())
         .collect::<Vec<_>>();
     assert!(below.is_empty(), "{below:?} in\n{rendered}");
-    // The keys the footer offers are still the ones the reducer honours.
+    // And a confirmation is accepted only now.
+    let update = app.update(Action::ConfirmInstall);
+    assert!(!update.effects().is_empty(), "{rendered}");
+    // Once the end has been on screen, the key the reducer would accept is the
+    // key the footer offers.
+    assert!(app.install_preview_fully_seen());
     let footer = row_text(&screen, screen.area.height - 1);
     assert!(footer.contains("Enter Install"), "{footer}");
     assert!(footer.contains("Esc Cancel"), "{footer}");
