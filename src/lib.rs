@@ -1,5 +1,6 @@
 pub mod agents;
 pub mod app;
+pub mod cli;
 mod components;
 pub mod error;
 pub mod input;

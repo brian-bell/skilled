@@ -5,8 +5,8 @@ use crate::{
     agents::{detect_agents, detection_at},
     inventory::{DoctorEntry, InventoryRow, InventorySnapshot, scan_installations},
     operations::{
-        InstallOutcome, InstallPrompt, Receipt, apply_install, plan_install, probe_install,
-        verify_install,
+        InstallOutcome, InstallPlan, InstallPrompt, Receipt, apply_install, plan_install,
+        probe_install, verify_install,
     },
     resolution::VariantRef,
     source::{
@@ -1048,27 +1048,49 @@ impl SkilledApp {
             return InstallPrompt::Failed("no source is selected".to_owned());
         };
         let variant = VariantRef::of(source, catalog, candidate);
-        let receipts = match self.store.receipts() {
-            Ok(receipts) => receipts,
-            Err(error) => {
-                return InstallPrompt::Failed(format!(
-                    "the ownership receipts could not be read, so Skilled cannot tell its own \
-                     links from anyone else's: {error}"
-                ));
-            }
-        };
-        let probe = probe_install(&self.agents, &self.sources, &variant);
-        match plan_install(
+        match self.plan_install_for(&variant, [true; 3]) {
+            Ok(plan) => InstallPrompt::Preview(plan),
+            Err(message) => InstallPrompt::Failed(message),
+        }
+    }
+
+    /// Decide what installing one variant would do, for one set of agents.
+    ///
+    /// The one place planning happens: the Sources flow and `skilled install`
+    /// go through it together, so the command line cannot end up applying a
+    /// different set of checks from the screen.
+    pub(crate) fn plan_install_for(
+        &self,
+        variant: &VariantRef,
+        requested: [bool; 3],
+    ) -> std::result::Result<InstallPlan, String> {
+        let receipts = self.store.receipts().map_err(|error| {
+            format!(
+                "the ownership receipts could not be read, so Skilled cannot tell its own links \
+                 from anyone else\'s: {error}"
+            )
+        })?;
+        let probe = probe_install(&self.agents, &self.sources, variant);
+        plan_install(
             &self.agents,
             &self.sources,
-            &variant,
-            [true; 3],
+            variant,
+            requested,
             &probe,
             &receipts,
-        ) {
-            Ok(plan) => InstallPrompt::Preview(plan),
-            Err(failure) => InstallPrompt::Failed(failure.to_string()),
-        }
+        )
+        .map_err(|failure| failure.to_string())
+    }
+
+    /// Apply a plan, restate the inventory, and check the plan against it.
+    ///
+    /// The same three steps [`Effect::ApplyInstall`] performs, in the same
+    /// order and for the same reason.
+    pub(crate) fn apply_plan(&mut self, plan: &InstallPlan) -> InstallOutcome {
+        let applied = apply_install(plan, &self.store);
+        self.rescan_installations();
+        let verification = verify_install(plan, &applied, &self.inventory);
+        InstallOutcome::new(plan.clone(), applied, verification)
     }
 
     /// Apply the shown preview, then restate the inventory and check the plan
@@ -1081,14 +1103,8 @@ impl SkilledApp {
         let Some(InstallPrompt::Preview(plan)) = self.pending_install.take() else {
             return;
         };
-        let applied = apply_install(&plan, &self.store);
-        self.rescan_installations();
-        let verification = verify_install(&plan, &applied, &self.inventory);
-        self.pending_install = Some(InstallPrompt::Report(InstallOutcome::new(
-            plan,
-            applied,
-            verification,
-        )));
+        let outcome = self.apply_plan(&plan);
+        self.pending_install = Some(InstallPrompt::Report(outcome));
     }
 
     /// Replace the inventory with a fresh read-only pass over the native roots.

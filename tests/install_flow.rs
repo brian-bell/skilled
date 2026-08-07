@@ -14,7 +14,7 @@ use std::{
 
 use skilled::{
     Action, AgentKind, AppEnvironment, SkilledApp,
-    inventory::InstallationHealth,
+    inventory::{Finding, FindingSeverity, InstallationHealth},
     operations::{
         InstallPrompt, InstallStatus, StepOutcome, TargetDisposition, VerifyFailure, verify_install,
     },
@@ -358,6 +358,45 @@ fn verification_reports_a_link_that_stopped_matching_the_plan() {
         "{:?}",
         report.failures()[1]
     );
+}
+
+/// Spec 20.5: what an install leaves behind survives the process that made it.
+///
+/// A fresh application, opened over the same home and the same metadata, sees
+/// the installation as managed and healthy, and still holds the receipts that
+/// say Skilled put it there.
+#[test]
+fn an_installation_is_still_managed_and_healthy_after_a_restart() {
+    let fixture = Fixture::new();
+    let repository = fixture.source("library", &["portable"]);
+    let mut app = fixture.registered(&repository);
+    fixture.create_root_parents();
+    focus_first_variant(&mut app);
+    dispatch(&mut app, Action::BeginInstall);
+    dispatch(&mut app, Action::ConfirmInstall);
+    drop(app);
+
+    let reopened = fixture.app();
+
+    let row = reopened.inventory().row("portable").expect("installed row");
+    assert_eq!(row.health(), InstallationHealth::Healthy);
+    assert_eq!(row.observations().count(), 3);
+    for observation in row.observations() {
+        let resolution = observation.resolution().expect("a resolved variant");
+        assert_eq!(resolution.source_label(), "library");
+        assert_eq!(resolution.skill_name(), "portable");
+    }
+    // Reaching one directory through all three roots is a benign alias, which
+    // the scanner notes and nothing more: nothing about it needs attention.
+    assert_eq!(
+        row.findings().map(Finding::code).collect::<Vec<_>>(),
+        ["variant.benign_alias"]
+    );
+    assert!(
+        row.findings()
+            .all(|finding| finding.severity() == FindingSeverity::Info)
+    );
+    assert_eq!(reopened.receipts().expect("receipts").len(), 3);
 }
 
 fn dispatch(app: &mut SkilledApp, action: Action) {
