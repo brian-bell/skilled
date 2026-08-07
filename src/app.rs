@@ -401,6 +401,13 @@ pub struct SkilledApp {
     /// bound the reducer has: `update` never learns the terminal's size, so
     /// the renderer measures the region and the runner notes what it found.
     detail_max_scroll: usize,
+    /// Whether the last frame measured the scrollable region at all.
+    ///
+    /// A frame that drew nothing — a terminal below the minimum size — measured
+    /// nothing, which is not the same as measuring zero. Kept apart because a
+    /// confirmation waits on a plan having been on screen, and a stale extent
+    /// would answer for a frame the reader never saw.
+    detail_measured: bool,
     doctor_pane: DoctorPane,
     focused_finding: usize,
     /// The install dialog, when one is open.
@@ -460,6 +467,7 @@ impl SkilledApp {
             inventory_filter_active: false,
             detail_scroll: 0,
             detail_max_scroll: 0,
+            detail_measured: false,
             doctor_pane: DoctorPane::Findings,
             focused_finding: 0,
             pending_install: None,
@@ -636,16 +644,25 @@ impl SkilledApp {
     }
 
     /// Record what the frame just drawn measured the detail region's scrollable
-    /// extent to be.
+    /// extent to be, or that it measured nothing.
     ///
     /// The offset is pulled back with it, so a terminal that shrank between
     /// frames cannot leave the state pointing past the end of the content.
     /// This is the one place geometry reaches the application state, and it is
     /// not a reducer transition: `update` stays free of anything the terminal
     /// knows and the renderer measures.
-    pub fn note_detail_max_scroll(&mut self, max_scroll: usize) {
-        self.detail_max_scroll = max_scroll;
-        self.detail_scroll = self.detail_scroll.min(max_scroll);
+    ///
+    /// `None` — a frame that did not draw the thing — is itself recorded. An
+    /// extent kept from an earlier frame is a measurement of content that is
+    /// not on screen now, and a terminal too small to draw the install dialog
+    /// at all would otherwise leave a stale zero standing for "the reader has
+    /// seen the whole plan".
+    pub fn note_detail_max_scroll(&mut self, max_scroll: Option<usize>) {
+        self.detail_measured = max_scroll.is_some();
+        if let Some(max_scroll) = max_scroll {
+            self.detail_max_scroll = max_scroll;
+            self.detail_scroll = self.detail_scroll.min(max_scroll);
+        }
     }
 
     pub fn inventory_filter_active(&self) -> bool {
@@ -1085,7 +1102,7 @@ impl SkilledApp {
     /// plan; a preview that always fitted is fully seen at rest, which is why
     /// the ordinary case costs no keystrokes at all.
     pub fn install_preview_fully_seen(&self) -> bool {
-        self.detail_scroll >= self.detail_max_scroll
+        self.detail_measured && self.detail_scroll >= self.detail_max_scroll
     }
 
     /// Read the machine and decide what installing the focused variant would
@@ -1229,6 +1246,7 @@ impl SkilledApp {
     fn reset_detail_scroll(&mut self) {
         self.detail_scroll = 0;
         self.detail_max_scroll = 0;
+        self.detail_measured = false;
     }
 
     /// Open Doctor on a scan taken for Doctor.

@@ -111,6 +111,15 @@ pub fn run(
 /// way, one that wrote nothing after being asked to, and one whose links
 /// Skilled could not record owning all mean that, and the printed report is
 /// what distinguishes them.
+///
+/// A postcondition Skilled could not establish is *not* one of them. Every
+/// link asked for was written and nothing disagreed with the plan; what is
+/// missing is a check over a root the user asked Skilled to leave alone, which
+/// is the ordinary configuration for anyone running fewer than three agents.
+/// Reporting that as non-zero would make the common path fail and teach a
+/// reader to ignore the status. It is said in words instead — "Verified as far
+/// as it could be", then each unestablished check by name — where it can be
+/// read rather than only branched on.
 pub fn exit_code_for(status: InstallStatus) -> ExitCodeKind {
     match status {
         InstallStatus::Installed | InstallStatus::NothingToDo => ExitCodeKind::Success,
