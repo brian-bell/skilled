@@ -1,11 +1,10 @@
 ---
 source: tests/tui_snapshots.rs
-expression: "render(&app, 80, 24)"
+expression: screen
 ---
  ◆ skilled   global                              ● ready · 0 sources registered
-▌Inventory  2 Sources ·0  Updates (soon)  4 Doctor
-▌ Global inventory  no root read
-Roots: Claude Code no root · Codex no root · OpenCode no root
+ 1 Inventory  2 Sources ·0  Updates (soon) ▌Doctor
+▌ Doctor  no root read
 ────────────────────────────────────────────────────────────────────────────────
 
 
@@ -13,16 +12,17 @@ Roots: Claude Code no root · Codex no root · OpenCode no root
 
 
 
-                                        ⌕
+                                        ·
 
                          No agent skill root exists yet
 
    Skilled looked for the documented global skill root of each selected agent
-                 and found none of them. It did not create one.
+   and found none of them, so it read nothing to report on. It did not create
+                                      one.
 
 
 
 
 
 
- Tab/Shift-Tab Region   2 Sources   4 Doctor   s Settings   ? Help   q Quit
+ Tab/Shift-Tab Region   1 Inventory   2 Sources   ? Help   q Quit   Esc Back

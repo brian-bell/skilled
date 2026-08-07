@@ -8,13 +8,14 @@ use ratatui::{
 };
 
 use crate::{
-    AgentKind, InventoryPane, SetupStep, SkilledApp, SourcesPane, View,
+    AgentKind, DoctorPane, InventoryPane, SetupStep, SkilledApp, SourcesPane, View,
     app::{MAX_INVENTORY_FILTER, SourceRow, catalog_rows},
     components::{self, KeyHint},
     inventory::{
-        Finding, FindingSeverity, InstallationHealth, InstallationObject,
-        InstalledSkillObservation, InventoryRow, RootScan, RootStatus, RowProvenance,
+        DoctorEntry, Finding, FindingSeverity, InstallationHealth, InstallationObject,
+        InstalledSkillObservation, InventoryRow, RootScan, RootStatus, RowProvenance, RowVerdict,
     },
+    resolution::{OpenCodeEntry, OpenCodeResolution, UnknownCause},
     source::{
         CatalogClassification, CatalogProposal, Compatibility, RegisteredSource, SkillCandidate,
         SkillValidation,
@@ -35,7 +36,7 @@ pub const MINIMUM_HEIGHT: u16 = 24;
 /// filesystem work.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct RenderFeedback {
-    inventory_detail_max_scroll: Option<usize>,
+    detail_max_scroll: Option<usize>,
 }
 
 impl RenderFeedback {
@@ -43,8 +44,8 @@ impl RenderFeedback {
     /// show rows that were not already visible: zero where it holds everything
     /// it has, and `None` where this frame did not draw it at all and so
     /// measured nothing.
-    pub fn inventory_detail_max_scroll(self) -> Option<usize> {
-        self.inventory_detail_max_scroll
+    pub fn detail_max_scroll(self) -> Option<usize> {
+        self.detail_max_scroll
     }
 }
 
@@ -72,11 +73,20 @@ pub fn render(frame: &mut Frame<'_>, app: &SkilledApp) -> RenderFeedback {
     // speaks about the detail region: the window drawn, the key hint, and the
     // help entry then cannot disagree with one another or lag a keystroke
     // behind the terminal they are describing.
-    let detail_extent = inventory_detail_scroll_extent(app, workspace);
+    // Ordered once, for this frame: the findings list, the detail region beside
+    // it, and the extent measured for that region must all rest on the same
+    // order, and building it three times would pay for the sort three times to
+    // prove it. Every other view leaves it empty and pays nothing.
+    let findings = match app.view() {
+        View::Doctor => app.doctor_findings(),
+        _ => Vec::new(),
+    };
+    let detail_extent = detail_scroll_extent(app, workspace, &findings);
     match app.view() {
         View::Setup(step) => render_setup(frame, body, app, step),
         View::Inventory => render_inventory(frame, body, app),
         View::Sources => render_sources(frame, body, app),
+        View::Doctor => render_doctor(frame, body, app, &findings),
         View::Settings => {
             render_inventory(frame, body, app);
             render_settings(frame, body);
@@ -92,7 +102,7 @@ pub fn render(frame: &mut Frame<'_>, app: &SkilledApp) -> RenderFeedback {
     }
     render_footer(frame, key_hints, app, detail_extent);
     RenderFeedback {
-        inventory_detail_max_scroll: detail_extent,
+        detail_max_scroll: detail_extent,
     }
 }
 
@@ -283,7 +293,7 @@ fn keyboard_owner(app: &SkilledApp) -> Option<(String, &'static str)> {
     match app.view() {
         View::Setup(step) => Some((format!("Setup · {}", step.title()), note)),
         View::Settings => Some(("Settings".to_owned(), note)),
-        View::Inventory | View::Sources => None,
+        View::Inventory | View::Sources | View::Doctor => None,
     }
 }
 
@@ -322,7 +332,7 @@ impl Destination {
     }
 
     fn is_available(self) -> bool {
-        matches!(self, Self::Inventory | Self::Sources)
+        matches!(self, Self::Inventory | Self::Sources | Self::Doctor)
     }
 
     /// What this destination can honestly say it holds, if anything.
@@ -339,7 +349,10 @@ impl Destination {
         match self {
             Self::Inventory => app.inventory().stated_skill_count(),
             Self::Sources => Some(app.sources().len()),
-            Self::Updates | Self::Doctor => None,
+            // Findings are observations of the same roots the inventory reads,
+            // so the same verdict decides whether either may be stated.
+            Self::Doctor => app.inventory().stated_finding_count(),
+            Self::Updates => None,
         }
     }
 
@@ -347,7 +360,8 @@ impl Destination {
         match self {
             Self::Inventory => matches!(view, View::Inventory | View::Settings),
             Self::Sources => view == View::Sources,
-            Self::Updates | Self::Doctor => false,
+            Self::Doctor => view == View::Doctor,
+            Self::Updates => false,
         }
     }
 }
@@ -915,12 +929,28 @@ fn inventory_row_line(
             theme::tone_style(tone),
         ));
     }
-    let tone = installation_tone(row.health());
-    spans.push(components::badge(tone, row.health().label()));
+    let verdict = row.verdict();
+    spans.push(components::badge(verdict_tone(verdict), verdict.label()));
     // `width` is the whole table region, not the width the capped columns
     // happen to use, so the selection band crosses the slack rather than
     // stopping where the health badge does.
     components::list_row(spans, selected, width)
+}
+
+/// The tone of a row's verdict.
+///
+/// The two verdicts the effective resolution adds take the tones their
+/// severity already carries elsewhere: a conflicting duplicate is critical
+/// because an agent would resolve content nobody chose, and foreign exposure
+/// is a warning because usability is uncertain rather than lost.
+fn verdict_tone(verdict: RowVerdict) -> Tone {
+    match verdict {
+        RowVerdict::NotASkill => Tone::Inactive,
+        RowVerdict::Healthy => Tone::Healthy,
+        RowVerdict::Unverified | RowVerdict::Unmanaged => Tone::Unmanaged,
+        RowVerdict::ForeignVariant => Tone::Warning,
+        RowVerdict::Broken | RowVerdict::Conflict => Tone::Critical,
+    }
 }
 
 fn installation_tone(health: InstallationHealth) -> Tone {
@@ -994,6 +1024,429 @@ fn inventory_empty_state(app: &SkilledApp) -> (String, String) {
          agent and found none of them. It did not create one."
             .to_owned(),
     )
+}
+
+/// Doctor: every finding the last scan holds, and what one of them is about.
+fn render_doctor(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &SkilledApp,
+    findings: &[DoctorEntry<'_>],
+) {
+    match viewport::workspace_regions(area) {
+        (primary, Some(detail)) => {
+            render_doctor_findings(frame, primary, app, findings);
+            render_doctor_detail(frame, detail, app, findings, true);
+        }
+        (primary, None) => match app.doctor_pane() {
+            DoctorPane::Findings => render_doctor_findings(frame, primary, app, findings),
+            DoctorPane::Details => render_doctor_detail(frame, primary, app, findings, false),
+        },
+    }
+}
+
+/// Column widths for the findings table.
+///
+/// The severity badge and the agent are sized by their longest value, which
+/// never changes; the code and the skill divide what is left. The code is the
+/// finding's identity and takes the larger share, capped where a longer field
+/// would only add whitespace.
+#[derive(Clone, Copy)]
+struct DoctorColumns {
+    code: usize,
+    skill: usize,
+}
+
+/// Wide enough for `× critical` and a column of clearance.
+const SEVERITY_COLUMN_WIDTH: usize = 11;
+/// Wide enough for `Claude Code` and a column of clearance.
+const DOCTOR_AGENT_WIDTH: usize = 12;
+/// The longest stable code this release can produce is
+/// `variant.foreign_opencode_exposure`, at thirty-three cells.
+const MAX_FINDING_CODE_WIDTH: usize = 34;
+const MINIMUM_FINDING_CODE_WIDTH: usize = 12;
+
+fn doctor_columns(width: u16) -> DoctorColumns {
+    let fixed = ROW_MARKER_WIDTH + SEVERITY_COLUMN_WIDTH + DOCTOR_AGENT_WIDTH;
+    let remaining = usize::from(width).saturating_sub(fixed);
+    // Seven tenths, not six: the code is the finding's identity, and the cap
+    // is exactly the longest code this release can produce, so at the minimum
+    // supported width every code is shown whole rather than ellipsized down to
+    // a prefix two codes could share.
+    let code = (remaining * 7 / 10).clamp(MINIMUM_FINDING_CODE_WIDTH, MAX_FINDING_CODE_WIDTH);
+    let skill = remaining
+        .saturating_sub(code)
+        .clamp(MINIMUM_SKILL_WIDTH, MAX_SKILL_WIDTH);
+    DoctorColumns { code, skill }
+}
+
+fn render_doctor_findings(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &SkilledApp,
+    findings: &[DoctorEntry<'_>],
+) {
+    let body = render_pane_scaffold(
+        frame,
+        area,
+        "Doctor",
+        &doctor_subtitle(app, findings.len()),
+        app.doctor_pane() == DoctorPane::Findings,
+    );
+
+    if findings.is_empty() {
+        let region = body.inner(Margin {
+            horizontal: 2,
+            vertical: 0,
+        });
+        let (glyph, headline, explanation) = doctor_empty_state(app);
+        frame.render_widget(
+            components::empty_state(glyph, &headline, &explanation, region),
+            region,
+        );
+        return;
+    }
+
+    let columns = doctor_columns(body.width);
+    let mut lines = vec![doctor_column_headings(columns)];
+    let capacity = usize::from(body.height.max(1)).saturating_sub(1);
+    let start = visible_window_start(app.focused_finding(), capacity);
+    lines.extend(
+        findings
+            .iter()
+            .enumerate()
+            .skip(start)
+            .take(capacity)
+            .map(|(index, entry)| {
+                doctor_row_line(entry, columns, index == app.focused_finding(), body.width)
+            }),
+    );
+    frame.render_widget(Paragraph::new(lines), body);
+}
+
+/// What the findings pane can honestly say it holds.
+///
+/// The count is the snapshot's to give, exactly as the Inventory's is, so the
+/// tab and this subtitle cannot disagree about whether a number may be stated.
+fn doctor_subtitle(app: &SkilledApp, listed: usize) -> String {
+    let inventory = app.inventory();
+    if inventory.scan_pending() {
+        return "not scanned".to_owned();
+    }
+    if inventory.no_agent_configured() {
+        return "no root read".to_owned();
+    }
+    // A withheld count is withheld for one of two reasons, and they are
+    // different answers: part of the requested scope could not be read, or
+    // none of it was read at all. Registry-side findings exist without any
+    // root being read, so the second is reachable with a non-empty list and
+    // must be settled before the list's own size is spoken about.
+    match inventory.stated_finding_count() {
+        Some(0) => "nothing to report".to_owned(),
+        Some(1) => "1 finding".to_owned(),
+        Some(findings) => format!("{findings} findings"),
+        None if inventory.unreadable_roots().next().is_some() && listed > 0 => {
+            format!("{listed} listed · not fully read")
+        }
+        // The roots are settled before the registry, in the order
+        // `doctor_empty_state` states them, so the pane header and the body
+        // beneath it lead with the same reason.
+        None if inventory.unreadable_roots().next().is_some() => "not fully read".to_owned(),
+        None if !read_a_root(inventory) && listed > 0 => format!("{listed} listed · no root read"),
+        None if !read_a_root(inventory) => "no root read".to_owned(),
+        None if listed > 0 => format!("{listed} listed · a source could not be read"),
+        None => "a source could not be read".to_owned(),
+    }
+}
+
+/// Whether any root was actually read, as opposed to accounted for.
+///
+/// Finding every root absent is a complete answer about the roots and no
+/// reading of any of them; the difference is what several of Doctor's
+/// withholding phrases turn on.
+fn read_a_root(inventory: &crate::inventory::InventorySnapshot) -> bool {
+    inventory
+        .roots()
+        .iter()
+        .any(|root| matches!(root.status(), RootStatus::Scanned { .. }))
+}
+
+fn doctor_column_headings(columns: DoctorColumns) -> Line<'static> {
+    let mut heading = " ".repeat(ROW_MARKER_WIDTH);
+    heading.push_str(&padded("SEVERITY", SEVERITY_COLUMN_WIDTH));
+    heading.push_str(&padded("FINDING", columns.code));
+    heading.push_str(&padded("SKILL", columns.skill));
+    heading.push_str("AGENT");
+    Line::from(Span::styled(heading, theme::pane_subtitle()))
+}
+
+fn doctor_row_line(
+    entry: &DoctorEntry<'_>,
+    columns: DoctorColumns,
+    selected: bool,
+    width: u16,
+) -> Line<'static> {
+    let severity = entry.finding().severity();
+    let tone = severity_tone(severity);
+    let badge = components::badge(tone, severity.label());
+    let padding = SEVERITY_COLUMN_WIDTH.saturating_sub(badge.width());
+    let spans = vec![
+        badge,
+        Span::raw(" ".repeat(padding)),
+        Span::raw(padded(entry.finding().code(), columns.code)),
+        Span::raw(padded(&terminal_safe(entry.skill_name()), columns.skill)),
+        Span::raw(entry.agent().display_name()),
+    ];
+    components::list_row(spans, selected, width)
+}
+
+fn severity_tone(severity: FindingSeverity) -> Tone {
+    match severity {
+        FindingSeverity::Info => Tone::Inactive,
+        FindingSeverity::Warning => Tone::Warning,
+        FindingSeverity::Critical => Tone::Critical,
+    }
+}
+
+/// What an empty findings list can honestly say, given what the scan observed.
+///
+/// The cases the Inventory keeps apart are kept apart here for the same
+/// reason: a clean bill of health and an unread root are not the same answer.
+/// Only the first earns the tick — every other empty list is empty because
+/// something was not read, and a tick over one of those would be the whole
+/// mistake this function exists to avoid.
+fn doctor_empty_state(app: &SkilledApp) -> (&'static str, String, String) {
+    let inventory = app.inventory();
+    if inventory.scan_pending() {
+        return (
+            "·",
+            "Installation roots have not been scanned".to_owned(),
+            "Skilled scans the roots when this view opens.".to_owned(),
+        );
+    }
+    if inventory.no_agent_configured() {
+        return (
+            "·",
+            "No agent is configured".to_owned(),
+            "Skilled reads the skill root of the agents chosen during setup, \
+             and none are chosen, so it read nothing. Rerun setup from \
+             Settings to choose an agent."
+                .to_owned(),
+        );
+    }
+    if inventory.unreadable_roots().next().is_some() {
+        return (
+            "·",
+            "An agent skill root could not be read".to_owned(),
+            "Skilled reports nothing from a root it could not read in full \
+             rather than reporting part of it, so this list covers less than \
+             the roots it was asked to look at."
+                .to_owned(),
+        );
+    }
+    // Nothing was read, so nothing may be said about what is installed. The
+    // roots were all accounted for — that is why no count was withheld for
+    // them — but accounting for a root that is absent is not reading one.
+    if !read_a_root(inventory) {
+        return (
+            "·",
+            "No agent skill root exists yet".to_owned(),
+            "Skilled looked for the documented global skill root of each selected \
+             agent and found none of them, so it read nothing to report on. It \
+             did not create one."
+                .to_owned(),
+        );
+    }
+    // The registry is the findings' second source, and a source that could not
+    // be read may hold the very variant that would have made a name ambiguous.
+    if !inventory.registry_is_complete() {
+        return (
+            "·",
+            "A registered source could not be read".to_owned(),
+            "Every root Skilled read is accounted for, but a registered source \
+             is not, so it cannot say whether two variants compete for a name. \
+             Sources names the repository that could not be read."
+                .to_owned(),
+        );
+    }
+    (
+        "✓",
+        "Nothing to report".to_owned(),
+        "Every installation Skilled read resolves to the variant it came from, \
+         and no registered variant competes with another."
+            .to_owned(),
+    )
+}
+
+/// The detail region: everything observed about the selected finding.
+fn render_doctor_detail(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &SkilledApp,
+    findings: &[DoctorEntry<'_>],
+    beside_the_table: bool,
+) {
+    let selected = findings.get(app.focused_finding());
+    let body = render_detail_scaffold(
+        frame,
+        area,
+        "Details",
+        &selected.map_or_else(
+            || "no selection".to_owned(),
+            |entry| terminal_safe(entry.skill_name()),
+        ),
+        app.doctor_pane() == DoctorPane::Details,
+        beside_the_table,
+    );
+
+    let Some(entry) = selected else {
+        frame.render_widget(
+            components::empty_state(
+                "·",
+                "Nothing to show",
+                "What was observed, why it weakens usability, and every path \
+                 involved appear here once a finding is selected.",
+                body,
+            ),
+            body,
+        );
+        return;
+    };
+    render_detail_window(
+        frame,
+        body,
+        doctor_detail_lines(entry, app.home(), body.width),
+        app.detail_scroll(),
+        rows_below_advice(app),
+    );
+}
+
+fn doctor_detail_lines(entry: &DoctorEntry<'_>, home: &Path, width: u16) -> Vec<Line<'static>> {
+    let severity = entry.finding().severity();
+    let mut lines = Vec::new();
+    push_detail_section(&mut lines, "FINDING", width);
+    lines.push(Line::styled(entry.finding().code(), theme::pane_heading()));
+    lines.push(Line::from(components::badge(
+        severity_tone(severity),
+        severity.label(),
+    )));
+    // The pane header above already names the skill; the agent is named
+    // nowhere else in the region and a finding that did not say which agent it
+    // concerns would be half a finding.
+    lines.push(detail_field("Agent", entry.agent().display_name()));
+
+    push_detail_section(&mut lines, "OBSERVED", width);
+    lines.push(Line::from(Span::raw(terminal_safe_bounded_start(
+        entry.finding().evidence(),
+        usize::from(width).saturating_mul(6),
+    ))));
+
+    push_detail_section(&mut lines, "CONSEQUENCE", width);
+    lines.push(Line::from(finding_consequence(entry)));
+
+    if let Some(observation) = entry.observation() {
+        push_detail_section(&mut lines, "INSTALLATION", width);
+        lines.push(detail_field_bounded(
+            "Path",
+            &home_relative(observation.path(), home),
+            width,
+            2,
+        ));
+        lines.push(detail_field("Object", observation.object().description()));
+        if let InstallationObject::Symlink { target } = observation.object()
+            && !target.as_os_str().is_empty()
+        {
+            lines.push(detail_field_bounded(
+                "Target",
+                &home_relative(target, home),
+                width,
+                2,
+            ));
+        }
+        if let Some(resolution) = observation.resolution() {
+            lines.push(detail_field_bounded(
+                "Variant",
+                &resolution.evidence_label(),
+                width,
+                3,
+            ));
+        }
+    }
+    if !entry.variants().is_empty() {
+        push_detail_section(&mut lines, "COMPETING VARIANTS", width);
+        lines.extend(
+            entry.variants().iter().map(|variant| {
+                detail_field_bounded("Variant", &variant.evidence_label(), width, 3)
+            }),
+        );
+    }
+
+    // Spec 9.5 asks every finding to say whether the application can repair it.
+    // None of them can here, and saying so plainly is what keeps the absence of
+    // a repair key from reading as an oversight. One field rather than a
+    // section: the answer is the same for every finding, and a region this
+    // narrow cannot spend four rows on a constant.
+    lines.push(detail_field("Repair", "not offered in this release"));
+    lines
+}
+
+/// Why a finding weakens usability, in one sentence.
+///
+/// Settled per code rather than per severity: `unmanaged` and `benign_alias`
+/// are both informational and mean entirely different things, and a reader who
+/// has just been shown a code deserves to be told what it costs them.
+///
+/// `variant.duplicate_for_agent` is the one code that carries two findings.
+/// Filed against what is installed, precedence does pick one and the complaint
+/// is that the other is unreachable; filed against the registry, nothing has
+/// picked anything and the complaint is that nothing can. Keying on the code
+/// alone would state one of those beside the evidence for the other.
+///
+/// [`DoctorEntry::concerns_the_registry`] is what tells them apart. Neither
+/// finding hangs off an installation — an effective resolution is a fact about
+/// several roots at once, so it is filed on the row — so the observation cannot
+/// be asked; the competing variants can.
+fn finding_consequence(entry: &DoctorEntry<'_>) -> &'static str {
+    match entry.finding().code() {
+        "variant.duplicate_for_agent" if !entry.concerns_the_registry() => {
+            "The highest-precedence root wins and the other definition is never \
+             loaded, whichever one was meant."
+        }
+        "install.dangling_symlink" => {
+            "The agent finds a link with nothing behind it, so the skill does not load."
+        }
+        "install.unresolvable_symlink" | "install.unreadable_entry" => {
+            "Skilled could not follow what is installed here, so what the agent loads \
+             is not known."
+        }
+        "install.unmanaged" => {
+            "The skill loads. Skilled did not place it, so it cannot say where it came \
+             from or keep it current."
+        }
+        "install.not_a_skill" => {
+            "An agent ignores this entry. It is listed so it is not mistaken for a skill \
+             that failed to install."
+        }
+        "install.provenance_unverified" => {
+            "A registered source could not be read, so Skilled cannot say whether this \
+             came from one."
+        }
+        "variant.duplicate_for_agent" => {
+            "Which definition the agent would resolve is not something Skilled can \
+             state, so installing under this name is blocked until a source is chosen."
+        }
+        "variant.foreign_opencode_exposure" => {
+            "OpenCode can see another agent's edition of this skill and no edition of \
+             its own. Skilled does not claim one agent's edition is usable by another."
+        }
+        "variant.benign_alias" => {
+            "Nothing is wrong: every root reaches one directory, so one skill loads."
+        }
+        code if code.starts_with("skill.") => {
+            "An agent cannot load a skill whose SKILL.md fails the portable core."
+        }
+        _ => "Skilled has no account of what this costs.",
+    }
 }
 
 /// The column of vertical rule that divides one workspace region from the
@@ -1183,12 +1636,12 @@ fn render_inventory_detail(
     // exist, so content that does not fit is reported as missing rather than
     // dropped off the bottom without a trace — and, where the region has the
     // keyboard, reached by scrolling rather than only reported.
-    let lines = inventory_detail_lines(row, app.home(), body.width);
+    let lines = inventory_detail_lines(row, app.inventory().roots(), app.home(), body.width);
     render_detail_window(
         frame,
         body,
         lines,
-        app.inventory_detail_scroll(),
+        app.detail_scroll(),
         rows_below_advice(app),
     );
 }
@@ -1204,9 +1657,14 @@ fn render_inventory_detail(
 /// worse of the two claims, because it is the one about the rows in question.
 /// The way out of both is `Esc`, which is not a scroll and is not named here.
 fn rows_below_advice(app: &SkilledApp) -> RowsBelow {
+    let focused = match app.view() {
+        View::Inventory => app.inventory_pane() == InventoryPane::Details,
+        View::Doctor => app.doctor_pane() == DoctorPane::Details,
+        _ => false,
+    };
     if app.help_context().is_some() || app.inventory_filter_active() {
         RowsBelow::NotFromHere
-    } else if app.inventory_pane() == InventoryPane::Details {
+    } else if focused {
         RowsBelow::UnderTheseKeys
     } else {
         RowsBelow::BehindTheFocus
@@ -1391,26 +1849,46 @@ fn detail_max_scroll(rows_per_line: &[usize], height: u16) -> usize {
 /// table has not discovered that the region behind it holds nothing, and
 /// answering zero would throw away an offset the user scrolled to and will
 /// come back to.
-fn inventory_detail_scroll_extent(app: &SkilledApp, workspace: Rect) -> Option<usize> {
-    if app.view() != View::Inventory {
-        return None;
-    }
+fn detail_scroll_extent(
+    app: &SkilledApp,
+    workspace: Rect,
+    findings: &[DoctorEntry<'_>],
+) -> Option<usize> {
     let (primary, detail) = viewport::workspace_regions(workspace);
-    let body = match (detail, app.inventory_pane()) {
-        (Some(detail), _) => detail_regions(detail, true).body(),
-        (None, InventoryPane::Details) => detail_regions(primary, false).body(),
-        (None, InventoryPane::Skills) => return None,
+    let focused_alone = |drilled_in: bool| match (detail, drilled_in) {
+        (Some(detail), _) => Some(detail_regions(detail, true).body()),
+        (None, true) => Some(detail_regions(primary, false).body()),
+        (None, false) => None,
     };
-    if body.width == 0 {
-        return None;
-    }
-    // A region with no selection draws an empty state rather than a window,
-    // and an empty state has nothing to scroll — that is a measurement, not an
-    // absence of one.
-    let Some(row) = app.selected_installation() else {
-        return Some(0);
+    let (body, lines) = match app.view() {
+        View::Inventory => {
+            let body = focused_alone(app.inventory_pane() == InventoryPane::Details)?;
+            if body.width == 0 {
+                return None;
+            }
+            // A region with no selection draws an empty state rather than a
+            // window, and an empty state has nothing to scroll — that is a
+            // measurement, not an absence of one.
+            let Some(row) = app.selected_installation() else {
+                return Some(0);
+            };
+            (
+                body,
+                inventory_detail_lines(row, app.inventory().roots(), app.home(), body.width),
+            )
+        }
+        View::Doctor => {
+            let body = focused_alone(app.doctor_pane() == DoctorPane::Details)?;
+            if body.width == 0 {
+                return None;
+            }
+            let Some(entry) = findings.get(app.focused_finding()) else {
+                return Some(0);
+            };
+            (body, doctor_detail_lines(entry, app.home(), body.width))
+        }
+        _ => return None,
     };
-    let lines = inventory_detail_lines(row, app.home(), body.width);
     let rows_per_line: Vec<usize> = lines
         .iter()
         .map(|line| wrapped_line_count(line, body.width))
@@ -1508,7 +1986,12 @@ fn hidden_rows_notice(forms: impl IntoIterator<Item = String>, width: u16) -> Li
         .unwrap_or_else(|| Line::from(components::badge(Tone::Warning, "…")))
 }
 
-fn inventory_detail_lines(row: &InventoryRow, home: &Path, width: u16) -> Vec<Line<'static>> {
+fn inventory_detail_lines(
+    row: &InventoryRow,
+    roots: &[RootScan; 3],
+    home: &Path,
+    width: u16,
+) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     // Kicker, then the skill's own name as the title, then its health: the
     // badge words already say what they mean, so no field label repeats the
@@ -1521,8 +2004,8 @@ fn inventory_detail_lines(row: &InventoryRow, home: &Path, width: u16) -> Vec<Li
         theme::pane_heading(),
     ));
     lines.push(Line::from(components::badge(
-        installation_tone(row.health()),
-        row.health().label(),
+        verdict_tone(row.verdict()),
+        row.verdict().label(),
     )));
     if let Some(SkillValidation::Valid { description, .. }) = row
         .observations()
@@ -1560,6 +2043,20 @@ fn inventory_detail_lines(row: &InventoryRow, home: &Path, width: u16) -> Vec<Li
         )),
     }
 
+    // Placed by what it says. A conflict and an exposure are findings, and
+    // findings lead in this region for the reason the agent sections' own do:
+    // the thing a reader came for must not be the thing that falls off the
+    // bottom. Everything else — where OpenCode reads the name from, or that a
+    // root was not read — states no finding, and follows the observations it
+    // is about rather than displacing an agent section that carries one.
+    let resolution_leads = matches!(
+        row.opencode_resolution(),
+        Some(OpenCodeResolution::Conflict { .. } | OpenCodeResolution::ForeignExposure { .. })
+    );
+    if resolution_leads {
+        push_opencode_resolution(&mut lines, row, roots, home, width);
+    }
+
     for observation in row.observations() {
         // The row's own health is a rollup across the agents; each section
         // states the one installation it describes.
@@ -1583,6 +2080,10 @@ fn inventory_detail_lines(row: &InventoryRow, home: &Path, width: u16) -> Vec<Li
         ));
     }
 
+    if !resolution_leads {
+        push_opencode_resolution(&mut lines, row, roots, home, width);
+    }
+
     // The agents that carry nothing share one line rather than three empty
     // sections, so the observations that exist keep the room.
     let absent: Vec<&str> = AgentKind::ALL
@@ -1598,6 +2099,125 @@ fn inventory_detail_lines(row: &InventoryRow, home: &Path, width: u16) -> Vec<Li
         )));
     }
     lines
+}
+
+/// What OpenCode would load for this name, where that is not already implied
+/// by the agent sections below.
+///
+/// A row OpenCode holds itself, aliased nowhere, is fully described by its own
+/// OPENCODE section; saying so twice would spend the region's scarcest resource
+/// on a restatement. Everything else — an alias, a conflict, an exposure, a
+/// root that was not read, or content OpenCode reaches only through another
+/// agent's root — is a fact no single section carries.
+fn push_opencode_resolution(
+    lines: &mut Vec<Line<'static>>,
+    row: &InventoryRow,
+    roots: &[RootScan; 3],
+    home: &Path,
+    width: u16,
+) {
+    let Some(resolution) = row.opencode_resolution() else {
+        return;
+    };
+    let badge = match resolution {
+        OpenCodeResolution::NothingVisible => return,
+        OpenCodeResolution::Selected { winner, aliases }
+            if aliases.is_empty() && winner.root() == AgentKind::OpenCode =>
+        {
+            return;
+        }
+        OpenCodeResolution::Selected { .. } => components::badge(Tone::Healthy, "resolved"),
+        OpenCodeResolution::ForeignExposure { .. } => {
+            components::badge(Tone::Warning, "foreign variant")
+        }
+        OpenCodeResolution::Conflict { .. } => components::badge(Tone::Critical, "conflict"),
+        // The same "could not tell" the scanner keeps everywhere else: a root
+        // Skilled was asked to leave alone was not read, and a lower root can
+        // hold the very directory that would make this a conflict.
+        OpenCodeResolution::Incomplete { .. } => {
+            components::badge(Tone::Inactive, "could not tell")
+        }
+    };
+    push_detail_section_badge(lines, "OPENCODE RESOLUTION", badge, width);
+    // Findings first, as in every agent section: the reason a resolution is
+    // weakened is what this region exists to report.
+    //
+    // Informational ones are left to the fields below, which state the same
+    // paths in the reader's own notation: a benign alias is exactly what
+    // `Loads` and `Also at` already say, and repeating it as a paragraph would
+    // spend four rows of the region's scarcest space on the arrangement a user
+    // who installed one skill for three agents has deliberately made. Doctor
+    // still lists it under its code, with its evidence whole.
+    lines.extend(
+        row.resolution_findings()
+            .iter()
+            .filter(|finding| finding.severity() > FindingSeverity::Info)
+            .flat_map(|finding| finding_lines(finding, width)),
+    );
+    match resolution {
+        OpenCodeResolution::NothingVisible => {}
+        OpenCodeResolution::Selected { winner, aliases }
+        | OpenCodeResolution::ForeignExposure { winner, aliases } => {
+            lines.push(loaded_field("Loads", winner, home, width));
+            if !aliases.is_empty() {
+                lines.push(detail_field_bounded(
+                    "Also at",
+                    &joined_entry_paths(aliases, home),
+                    width,
+                    3,
+                ));
+            }
+        }
+        OpenCodeResolution::Conflict { entries } => {
+            if let Some(winner) = entries.first() {
+                lines.push(loaded_field("Would load", winner, home, width));
+            }
+            lines.push(detail_field_bounded(
+                "Also at",
+                &joined_entry_paths(entries.get(1..).unwrap_or_default(), home),
+                width,
+                3,
+            ));
+        }
+        OpenCodeResolution::Incomplete { roots: unread } => {
+            // Each root says why it was not read, in the same words the Roots
+            // line uses: a root left alone on the user's own instruction and
+            // one that defeated the scan are not the same answer, and "not
+            // read" alone would flatten them into one.
+            let reasons: Vec<String> = unread
+                .iter()
+                .map(|unknown| {
+                    let cause = match unknown.cause() {
+                        // A root that was read holds one entry the scan could
+                        // not follow, which is not the root being unread.
+                        UnknownCause::EntryUnresolved => "entry unresolved".to_owned(),
+                        UnknownCause::RootNotRead => {
+                            roots[unknown.root().index()].status().short_summary()
+                        }
+                    };
+                    format!("{} ({cause})", unknown.root().display_name())
+                })
+                .collect();
+            lines.push(detail_field_bounded(
+                "Not known",
+                &reasons.join(", "),
+                width,
+                3,
+            ));
+        }
+    }
+}
+
+fn loaded_field(label: &str, entry: &OpenCodeEntry, home: &Path, width: u16) -> Line<'static> {
+    detail_field_bounded(label, &home_relative(entry.path(), home), width, 2)
+}
+
+fn joined_entry_paths(entries: &[OpenCodeEntry], home: &Path) -> String {
+    entries
+        .iter()
+        .map(|entry| home_relative(entry.path(), home))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn observation_lines(
@@ -3412,7 +4032,7 @@ fn render_help(
     area: Rect,
     context: View,
     app: &SkilledApp,
-    inventory_detail_extent: Option<usize>,
+    detail_extent: Option<usize>,
 ) {
     let viewport = viewport::classify(area);
     let (width, height) = match viewport {
@@ -3425,7 +4045,7 @@ fn render_help(
     let block = components::dialog_frame("Keyboard reference", &scope);
     let regions = components::dialog_regions(block.inner(popup), 11);
     frame.render_widget(block, popup);
-    let commands = help_commands(context, app, inventory_detail_extent);
+    let commands = help_commands(context, app, detail_extent);
     match viewport {
         viewport::Viewport::Compact => {
             let mut lines = vec![
@@ -3514,7 +4134,7 @@ struct HelpCommand {
 fn help_commands(
     context: View,
     app: &SkilledApp,
-    inventory_detail_extent: Option<usize>,
+    detail_extent: Option<usize>,
 ) -> Vec<HelpCommand> {
     match context {
         View::Setup(step) => {
@@ -3587,7 +4207,7 @@ fn help_commands(
                     description: "move the selected skill",
                 });
             }
-            if inventory_can_scroll_detail(app, inventory_detail_extent) {
+            if can_scroll_detail(app, detail_extent) {
                 commands.push(HelpCommand {
                     key: "Up/Down or j/k",
                     label: "Scroll details",
@@ -3613,6 +4233,11 @@ fn help_commands(
                     key: "2",
                     label: "Sources",
                     description: "open registered sources",
+                },
+                HelpCommand {
+                    key: "4",
+                    label: "Doctor",
+                    description: "open the findings list",
                 },
                 HelpCommand {
                     key: "s",
@@ -3671,9 +4296,70 @@ fn help_commands(
                     description: "return to Inventory",
                 },
                 HelpCommand {
+                    key: "4",
+                    label: "Doctor",
+                    description: "open the findings list",
+                },
+                HelpCommand {
                     key: "Esc",
                     label: "Back one region",
                     description: "return toward Repositories, then Inventory",
+                },
+                HelpCommand {
+                    key: "?",
+                    label: "Help",
+                    description: "open this keyboard reference",
+                },
+                HelpCommand {
+                    key: "q",
+                    label: "Quit",
+                    description: "quit when no dialog is open",
+                },
+            ]);
+            commands
+        }
+        View::Doctor => {
+            let mut commands = vec![HelpCommand {
+                key: "Tab / Shift-Tab",
+                label: "Region",
+                description: "move region focus forward or backward",
+            }];
+            if doctor_can_move_selection(app) {
+                commands.push(HelpCommand {
+                    key: "Up/Down or j/k",
+                    label: "Move",
+                    description: "move the selected finding",
+                });
+            }
+            if can_scroll_detail(app, detail_extent) {
+                commands.push(HelpCommand {
+                    key: "Up/Down or j/k",
+                    label: "Scroll details",
+                    description: "reach the rows the region cannot show at once",
+                });
+            }
+            if doctor_can_advance(app) {
+                commands.push(HelpCommand {
+                    key: "Enter",
+                    label: "Open details",
+                    description: "show everything observed about the finding",
+                });
+            }
+            commands.extend([
+                HelpCommand {
+                    key: "1",
+                    label: "Inventory",
+                    description: "return to Inventory",
+                },
+                HelpCommand {
+                    key: "2",
+                    label: "Sources",
+                    description: "open registered sources",
+                },
+                HelpCommand {
+                    key: "Esc",
+                    label: "Back",
+                    description: "leave the detail region, then Doctor",
                 },
                 HelpCommand {
                     key: "?",
@@ -3713,6 +4399,7 @@ fn help_scope(context: View) -> String {
         View::Setup(step) => format!("Setup · {}", step.title()),
         View::Inventory => "Inventory".to_owned(),
         View::Sources => "Sources".to_owned(),
+        View::Doctor => "Doctor".to_owned(),
         View::Settings => "Settings".to_owned(),
     }
 }
@@ -3721,7 +4408,7 @@ fn render_footer(
     frame: &mut Frame<'_>,
     area: Rect,
     app: &SkilledApp,
-    inventory_detail_extent: Option<usize>,
+    detail_extent: Option<usize>,
 ) {
     // The band reaches the full width, so the row reads as chrome rather than
     // as a smear the length of the hints. The hint line itself only sets
@@ -3729,7 +4416,7 @@ fn render_footer(
     frame.render_widget(Block::new().style(theme::chrome_band()), area);
     frame.render_widget(
         Paragraph::new(components::key_hint_line(
-            &key_hints(app, inventory_detail_extent),
+            &key_hints(app, detail_extent),
             area.width,
         ))
         .style(theme::chrome()),
@@ -3743,7 +4430,13 @@ fn render_footer(
 /// a promise the application cannot keep, so unimplemented commands —
 /// installation, updates, repair, uninstall, and forget — are absent by
 /// construction.
-fn key_hints(app: &SkilledApp, inventory_detail_extent: Option<usize>) -> Vec<KeyHint> {
+///
+/// The row is budgeted, and every context declares its routes before `?` and
+/// `q`: where they do not all fit, the route survives and the two commands the
+/// tab strip above still shows — and the overlay `?` opens still lists — are
+/// the ones shed, with the overflow mark saying so. Sources and a drilled-in
+/// Doctor both reach that point at eighty columns.
+fn key_hints(app: &SkilledApp, detail_extent: Option<usize>) -> Vec<KeyHint> {
     if app.help_context().is_some() {
         return vec![
             KeyHint::essential("Esc", "Close"),
@@ -3805,7 +4498,7 @@ fn key_hints(app: &SkilledApp, inventory_detail_extent: Option<usize>) -> Vec<Ke
             if inventory_can_move_selection(app) {
                 hints.push(KeyHint::new("j/k", "Move"));
             }
-            if inventory_can_scroll_detail(app, inventory_detail_extent) {
+            if can_scroll_detail(app, detail_extent) {
                 hints.push(KeyHint::new("j/k", "Scroll"));
             }
             if inventory_can_advance(app) {
@@ -3816,6 +4509,7 @@ fn key_hints(app: &SkilledApp, inventory_detail_extent: Option<usize>) -> Vec<Ke
             }
             hints.extend([
                 KeyHint::new("2", "Sources"),
+                KeyHint::new("4", "Doctor"),
                 KeyHint::new("s", "Settings"),
                 KeyHint::new("?", "Help"),
                 // The Inventory is where the application opens, so it is the
@@ -3839,6 +4533,27 @@ fn key_hints(app: &SkilledApp, inventory_detail_extent: Option<usize>) -> Vec<Ke
             hints.extend([
                 KeyHint::new("a", "Add source"),
                 KeyHint::new("1", "Inventory"),
+                KeyHint::new("4", "Doctor"),
+                KeyHint::new("?", "Help"),
+                KeyHint::new("q", "Quit"),
+                KeyHint::essential("Esc", "Back"),
+            ]);
+            hints
+        }
+        View::Doctor => {
+            let mut hints = vec![KeyHint::new("Tab/Shift-Tab", "Region")];
+            if doctor_can_move_selection(app) {
+                hints.push(KeyHint::new("j/k", "Move"));
+            }
+            if can_scroll_detail(app, detail_extent) {
+                hints.push(KeyHint::new("j/k", "Scroll"));
+            }
+            if doctor_can_advance(app) {
+                hints.push(KeyHint::essential("Enter", "Open"));
+            }
+            hints.extend([
+                KeyHint::new("1", "Inventory"),
+                KeyHint::new("2", "Sources"),
                 KeyHint::new("?", "Help"),
                 KeyHint::new("q", "Quit"),
                 KeyHint::essential("Esc", "Back"),
@@ -3870,9 +4585,28 @@ fn inventory_can_move_selection(app: &SkilledApp) -> bool {
 /// The extent is the frame's own measurement rather than the last one noted on
 /// the application, so the hint cannot survive a resize that removed the thing
 /// it advertises.
-fn inventory_can_scroll_detail(app: &SkilledApp, inventory_detail_extent: Option<usize>) -> bool {
-    app.inventory_pane() == InventoryPane::Details
-        && inventory_detail_extent.is_some_and(|extent| extent > 0)
+fn can_scroll_detail(app: &SkilledApp, detail_extent: Option<usize>) -> bool {
+    let focused = match app.view() {
+        View::Inventory => app.inventory_pane() == InventoryPane::Details,
+        View::Doctor => app.doctor_pane() == DoctorPane::Details,
+        _ => false,
+    };
+    focused && detail_extent.is_some_and(|extent| extent > 0)
+}
+
+/// The findings list only moves where it has the keyboard and more than one
+/// place to stand.
+fn doctor_can_move_selection(app: &SkilledApp) -> bool {
+    app.doctor_pane() == DoctorPane::Findings && app.finding_count() > 1
+}
+
+/// Enter only drills in, so it advertises itself only where it can.
+///
+/// A selection rests on a finding whenever one exists: the reducer clamps the
+/// focus to the list on every scan, so the count answers this without the sort
+/// that materialising the list would cost on every frame.
+fn doctor_can_advance(app: &SkilledApp) -> bool {
+    app.doctor_pane() == DoctorPane::Findings && app.finding_count() > 0
 }
 
 /// Back unwinds an applied filter, then a drilled-in detail region.

@@ -3,7 +3,7 @@ source: tests/tui_snapshots.rs
 expression: "normalize_sources_screen(&app, &temporary, render(&app, 80, 24))"
 ---
  ◆ skilled   global                               ● ready · 1 source registered
- 1 Inventory ▌Sources ·1  Updates (soon)  Doctor (soon)
+ 1 Inventory ▌Sources ·1  Updates (soon)  4 Doctor
  ▌ Details  broken
  ──────────────────────────────────────────────────────────────────────────────
  REPOSITORY
@@ -25,4 +25,4 @@ expression: "normalize_sources_screen(&app, &temporary, render(&app, 80, 24))"
  Validation error: skill does not contain a readable file named exactly
  SKILL.md
 
- Tab/Shift-Tab Region   a Add source   1 Inventory   ? Help   q Quit   Esc Back
+ Tab/Shift-Tab Region   a Add source   1 Inventory   4 Doctor   Esc Back …

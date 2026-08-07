@@ -8,12 +8,14 @@ commands, the sync model, and the session-close protocol.
 
 Skilled is an early Rust 2024 / Ratatui terminal application for inspecting
 and eventually managing global coding-agent skills. First-run setup, local Git
-source registration, Sources browsing, and a read-only installation inventory
-are implemented. Doctor findings, Updates, and every filesystem or network
-mutation beyond the private metadata database are not: do not turn the current
-placeholders into behavior unless the active Beads issue places that work in
-scope, and do not display a count, finding, status, or key hint the code
-cannot currently produce.
+source registration, Sources browsing, a read-only installation inventory,
+OpenCode effective resolution across its documented roots, and a read-only
+Doctor findings view are implemented. Updates, repair, and every filesystem or
+network mutation beyond the private metadata database are not: do not turn the
+current placeholders into behavior unless the active Beads issue places that
+work in scope, and do not display a count, finding, status, or key hint the
+code cannot currently produce. Doctor lists what was observed and states that
+no repair exists; it offers no key that would perform one.
 
 [GitHub issue #3](https://github.com/brian-bell/skilled/issues/3) is the
 product and technical source of truth. The tracked `spec/tui-prototype.html`
@@ -50,6 +52,10 @@ signal needs both, because colour alone is not an acceptable cue.
   candidate validation.
 - `src/inventory.rs`: read-only scan of the native agent skill roots; owns the
   finding codes, the state vocabulary, and the count-or-phrase verdict.
+- `src/resolution.rs`: pure per-agent variant selection and OpenCode effective
+  resolution; decides which registered variant an agent resolves a name to and
+  what OpenCode would load, over data the caller already holds. It states no
+  findings — `inventory.rs` maps its verdicts to codes and severities.
 - `src/validation.rs`: portable `SKILL.md` front-matter validation.
 - `src/store.rs`: private versioned SQLite metadata and migrations; newer
   unknown schemas fail closed.
@@ -83,6 +89,12 @@ signal needs both, because colour alone is not an acceptable cue.
   4.5:1 against its surface.
 - Build screens from `components` primitives and `theme` tokens; keep agent
   conventions behind the `agents.rs` adapters.
+- A variant's stored compatibility set records which agents *discover* a
+  catalog root, not which can use the edition in it: OpenCode reads Claude
+  Code's and Codex's roots, so a `.claude/skills` catalog is registered for
+  OpenCode while holding another agent's edition. Anything deciding usability
+  asks `VariantRef::usable_by`, which reads the catalog's own path through
+  `AgentAdapter::owns_source_catalog`.
 - Key hints and navigation destinations are contracts: show one only when
   `src/input.rs` handles it in that context, and show a count only when the
   data behind it supports one. Counts render as `·N` so a bare amber digit

@@ -1,8 +1,8 @@
 use std::{fs, path::Path, process::Command};
 
 use skilled::{
-    Action, AgentKind, AppEnvironment, Effect, InventoryPane, SetupStep, SkilledApp, SourcesPane,
-    UpdateOutcome, View,
+    Action, AgentKind, AppEnvironment, DoctorPane, Effect, InventoryPane, SetupStep, SkilledApp,
+    SourcesPane, UpdateOutcome, View,
     app::{SourceRow, variant_rows},
     inventory::InstallationHealth,
 };
@@ -848,16 +848,16 @@ mod installed {
         let temporary = tempfile::tempdir().expect("temporary application directory");
         let mut app = inventory_app(&temporary);
         app.update(Action::AdvanceInventoryPane);
-        app.note_inventory_detail_max_scroll(2);
+        app.note_detail_max_scroll(2);
 
         for expected in [1, 2, 2] {
-            let update = app.update(Action::ScrollInventoryDetail(1));
-            assert_eq!(app.inventory_detail_scroll(), expected);
+            let update = app.update(Action::ScrollDetail(1));
+            assert_eq!(app.detail_scroll(), expected);
             assert!(update.effects().is_empty());
         }
         for expected in [1, 0, 0] {
-            app.update(Action::ScrollInventoryDetail(-1));
-            assert_eq!(app.inventory_detail_scroll(), expected);
+            app.update(Action::ScrollDetail(-1));
+            assert_eq!(app.detail_scroll(), expected);
         }
     }
     /// A terminal that grew has less left to scroll, so the offset the last
@@ -869,17 +869,17 @@ mod installed {
         let temporary = tempfile::tempdir().expect("temporary application directory");
         let mut app = inventory_app(&temporary);
         app.update(Action::AdvanceInventoryPane);
-        app.note_inventory_detail_max_scroll(5);
+        app.note_detail_max_scroll(5);
         for _ in 0..5 {
-            app.update(Action::ScrollInventoryDetail(1));
+            app.update(Action::ScrollDetail(1));
         }
-        assert_eq!(app.inventory_detail_scroll(), 5);
+        assert_eq!(app.detail_scroll(), 5);
 
-        app.note_inventory_detail_max_scroll(2);
-        assert_eq!(app.inventory_detail_scroll(), 2);
+        app.note_detail_max_scroll(2);
+        assert_eq!(app.detail_scroll(), 2);
 
-        app.note_inventory_detail_max_scroll(0);
-        assert_eq!(app.inventory_detail_scroll(), 0);
+        app.note_detail_max_scroll(0);
+        assert_eq!(app.detail_scroll(), 0);
     }
     /// A wide terminal draws the detail region beside a focused table, so the
     /// region being on screen is not the same as the region having the keys.
@@ -887,15 +887,15 @@ mod installed {
     fn the_detail_window_moves_only_where_the_detail_region_has_focus() {
         let temporary = tempfile::tempdir().expect("temporary application directory");
         let mut app = inventory_app(&temporary);
-        app.note_inventory_detail_max_scroll(4);
+        app.note_detail_max_scroll(4);
 
         assert_eq!(app.inventory_pane(), InventoryPane::Skills);
-        app.update(Action::ScrollInventoryDetail(1));
-        assert_eq!(app.inventory_detail_scroll(), 0);
+        app.update(Action::ScrollDetail(1));
+        assert_eq!(app.detail_scroll(), 0);
 
         app.update(Action::OpenSources);
-        app.update(Action::ScrollInventoryDetail(1));
-        assert_eq!(app.inventory_detail_scroll(), 0);
+        app.update(Action::ScrollDetail(1));
+        assert_eq!(app.detail_scroll(), 0);
     }
     /// A window scrolled into one skill's observations describes that skill.
     /// Once the rows behind it are restated, the same offset points into
@@ -905,9 +905,9 @@ mod installed {
     fn the_detail_window_returns_to_the_top_when_the_content_behind_it_changes() {
         fn scroll_into_details(app: &mut SkilledApp) {
             app.update(Action::AdvanceInventoryPane);
-            app.note_inventory_detail_max_scroll(3);
-            app.update(Action::ScrollInventoryDetail(1));
-            assert_eq!(app.inventory_detail_scroll(), 1);
+            app.note_detail_max_scroll(3);
+            app.update(Action::ScrollDetail(1));
+            assert_eq!(app.detail_scroll(), 1);
         }
         let temporary = tempfile::tempdir().expect("temporary application directory");
         let mut app = inventory_app(&temporary);
@@ -916,16 +916,16 @@ mod installed {
         app.update(Action::MoveInventoryPane(1));
         app.update(Action::MoveInventoryPane(1));
         assert_eq!(app.inventory_pane(), InventoryPane::Details);
-        assert_eq!(app.inventory_detail_scroll(), 1);
+        assert_eq!(app.detail_scroll(), 1);
 
         app.update(Action::MoveInventoryPane(1));
         app.update(Action::MoveInventorySelection(1));
-        assert_eq!(app.inventory_detail_scroll(), 0);
+        assert_eq!(app.detail_scroll(), 0);
 
         scroll_into_details(&mut app);
         app.update(Action::MoveInventoryPane(1));
         type_filter(&mut app, "variant");
-        assert_eq!(app.inventory_detail_scroll(), 0);
+        assert_eq!(app.detail_scroll(), 0);
 
         scroll_into_details(&mut app);
         let update = app.update(Action::OpenSources);
@@ -934,10 +934,10 @@ mod installed {
         // Before the scan, not only after it: the transition into the view
         // states that nothing has been scanned for it, and a window scrolled
         // into the last view's rows would outlive the rows it belonged to.
-        assert_eq!(app.inventory_detail_scroll(), 0);
+        assert_eq!(app.detail_scroll(), 0);
         app.perform_effects(update.effects())
             .expect("installation scan");
-        assert_eq!(app.inventory_detail_scroll(), 0);
+        assert_eq!(app.detail_scroll(), 0);
     }
     #[test]
     fn the_filter_narrows_by_name_source_and_health() {
@@ -955,6 +955,149 @@ mod installed {
         clear_filter(&mut app);
         type_filter(&mut app, "unmanaged");
         assert_eq!(names(&app), ["foreign"]);
+    }
+
+    /// Doctor is a destination like the others: it opens on a scan taken for
+    /// it, so what it lists was observed for Doctor rather than inherited from
+    /// the view the user just left.
+    #[test]
+    fn doctor_opens_on_a_scan_taken_for_it() {
+        let temporary = tempfile::tempdir().expect("temporary application directory");
+        let mut app = inventory_app(&temporary);
+        // A link with nothing behind it, so the list has a critical finding to
+        // lead with and an informational one to rank below it.
+        install_link(
+            &temporary,
+            AgentKind::ClaudeCode,
+            "dangling",
+            &temporary.path().join("nowhere"),
+        );
+
+        let update = app.update(Action::OpenDoctor);
+
+        assert_eq!(app.view(), View::Doctor);
+        assert_eq!(update.effects(), [Effect::ScanInstallations]);
+        // Between the transition and the effect there is no scan for this view.
+        assert!(app.inventory().scan_pending());
+        assert!(app.doctor_findings().is_empty());
+
+        app.perform_effects(update.effects())
+            .expect("installation scan");
+        assert!(!app.doctor_findings().is_empty());
+        assert_eq!(
+            app.selected_finding().map(|entry| entry.finding().code()),
+            Some("install.dangling_symlink")
+        );
+    }
+
+    /// The regions behave like every other workspace: Tab cycles, Enter drills
+    /// in, Esc unwinds one region and then leaves for the Inventory.
+    #[test]
+    fn doctor_regions_cycle_drill_in_and_unwind() {
+        let temporary = tempfile::tempdir().expect("temporary application directory");
+        let mut app = inventory_app(&temporary);
+        let update = app.update(Action::OpenDoctor);
+        app.perform_effects(update.effects())
+            .expect("installation scan");
+
+        assert_eq!(app.doctor_pane(), DoctorPane::Findings);
+        app.update(Action::MoveDoctorPane(1));
+        assert_eq!(app.doctor_pane(), DoctorPane::Details);
+        app.update(Action::MoveDoctorPane(1));
+        assert_eq!(app.doctor_pane(), DoctorPane::Findings);
+
+        app.update(Action::AdvanceDoctorPane);
+        assert_eq!(app.doctor_pane(), DoctorPane::Details);
+        app.update(Action::Back);
+        assert_eq!(app.doctor_pane(), DoctorPane::Findings);
+
+        let leaving = app.update(Action::Back);
+        assert_eq!(app.view(), View::Inventory);
+        assert_eq!(leaving.effects(), [Effect::ScanInstallations]);
+    }
+
+    /// The selection wraps within the findings that exist, and moves nothing
+    /// from the detail region, which has no list to move.
+    #[test]
+    fn the_doctor_selection_wraps_within_the_findings_it_lists() {
+        let temporary = tempfile::tempdir().expect("temporary application directory");
+        let mut app = inventory_app(&temporary);
+        install_link(
+            &temporary,
+            AgentKind::ClaudeCode,
+            "dangling",
+            &temporary.path().join("nowhere"),
+        );
+        let update = app.update(Action::OpenDoctor);
+        app.perform_effects(update.effects())
+            .expect("installation scan");
+        let total = app.doctor_findings().len();
+        assert!(total > 1, "the fixture needs more than one finding");
+
+        for expected in 1..=total {
+            app.update(Action::MoveDoctorSelection(1));
+            assert_eq!(app.focused_finding(), expected % total);
+        }
+
+        app.update(Action::AdvanceDoctorPane);
+        app.update(Action::MoveDoctorSelection(1));
+        assert_eq!(app.focused_finding(), 0);
+    }
+
+    /// Doctor answers to the destination digits the navigation row shows.
+    #[test]
+    fn doctor_leaves_by_the_routes_it_advertises() {
+        let temporary = tempfile::tempdir().expect("temporary application directory");
+        let mut app = inventory_app(&temporary);
+
+        let update = app.update(Action::OpenDoctor);
+        app.perform_effects(update.effects()).expect("scan");
+        app.update(Action::OpenSources);
+        assert_eq!(app.view(), View::Sources);
+
+        let update = app.update(Action::OpenDoctor);
+        assert_eq!(app.view(), View::Doctor);
+        app.perform_effects(update.effects()).expect("scan");
+
+        let update = app.update(Action::OpenInventory);
+        assert_eq!(app.view(), View::Inventory);
+        assert_eq!(update.effects(), [Effect::ScanInstallations]);
+    }
+
+    /// The Health column gained two words that come from the effective
+    /// resolution rather than from any one installation, and the same box
+    /// narrows by them.
+    #[test]
+    fn the_filter_narrows_by_the_words_the_effective_resolution_adds() {
+        let temporary = tempfile::tempdir().expect("temporary application directory");
+        let mut app = app_in(&temporary);
+        finish_setup(&mut app);
+        let first = temporary.path().join("alpha");
+        let second = temporary.path().join("beta");
+        register_source(&mut app, &first, 1);
+        register_source(&mut app, &second, 1);
+        // One name, two different directories, in two roots OpenCode reads.
+        install_link(
+            &temporary,
+            AgentKind::OpenCode,
+            "variant-0",
+            &first.join("skills/variant-0"),
+        );
+        install_link(
+            &temporary,
+            AgentKind::ClaudeCode,
+            "variant-0",
+            &second.join("skills/variant-0"),
+        );
+        let update = app.update(Action::OpenSources);
+        app.perform_effects(update.effects()).expect("effects");
+        let update = app.update(Action::OpenInventory);
+        app.perform_effects(update.effects())
+            .expect("installation scan");
+
+        type_filter(&mut app, "conflict");
+
+        assert_eq!(names(&app), ["variant-0"]);
     }
     /// A row that mixes a managed installation with an unmanaged one still
     /// holds an installation that resolved to no registered source, so the

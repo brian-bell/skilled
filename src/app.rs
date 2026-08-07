@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use crate::{
     AgentDetection, AgentKind, AppEnvironment, Result,
     agents::{detect_agents, detection_at},
-    inventory::{InventoryRow, InventorySnapshot, scan_installations},
+    inventory::{DoctorEntry, InventoryRow, InventorySnapshot, scan_installations},
     source::{
         CatalogProposal, RegisteredSource, SkillCandidate, SourcePreview, preview_local_source,
         revalidate_source_preview,
@@ -77,6 +77,7 @@ pub enum View {
     Setup(SetupStep),
     Inventory,
     Sources,
+    Doctor,
     Settings,
 }
 
@@ -97,6 +98,16 @@ pub enum InventoryPane {
     Details,
 }
 
+/// The regions of the Doctor workspace, in reading order.
+///
+/// The same shape as [`InventoryPane`]: a wide terminal shows both and this is
+/// only focus; a compact one shows the focused region alone.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DoctorPane {
+    Findings,
+    Details,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Action {
     Continue,
@@ -108,6 +119,10 @@ pub enum Action {
     OpenSettings,
     OpenInventory,
     OpenSources,
+    OpenDoctor,
+    MoveDoctorPane(i8),
+    AdvanceDoctorPane,
+    MoveDoctorSelection(i8),
     BeginAddSource,
     AppendSourcePath(char),
     DeleteSourcePathCharacter,
@@ -124,13 +139,14 @@ pub enum Action {
     MoveInventoryPane(i8),
     AdvanceInventoryPane,
     MoveInventorySelection(i8),
-    /// Move the Inventory detail region's window by lines.
+    /// Move the focused detail region's window by lines.
     ///
-    /// Named apart from `MoveInventorySelection` because it moves a viewport
+    /// Named apart from the selection movements because it moves a viewport
     /// rather than a selection: the same keys do both, in different regions,
     /// and a reducer test that could not tell them apart would be reading the
-    /// key rather than the behaviour.
-    ScrollInventoryDetail(i8),
+    /// key rather than the behaviour. One action serves every screen that has
+    /// a detail region, because only one is ever on screen.
+    ScrollDetail(i8),
     BeginInventoryFilter,
     AppendInventoryFilter(char),
     DeleteInventoryFilterCharacter,
@@ -330,11 +346,13 @@ pub struct SkilledApp {
     /// opened or closed inside a wrapped one would show a path without its
     /// label or a label without its path. What the region *reports* is still
     /// counted in rows, which is what a reader loses.
-    inventory_detail_scroll: usize,
+    detail_scroll: usize,
     /// The furthest offset the last drawn frame found useful, and the only
     /// bound the reducer has: `update` never learns the terminal's size, so
     /// the renderer measures the region and the runner notes what it found.
-    inventory_detail_max_scroll: usize,
+    detail_max_scroll: usize,
+    doctor_pane: DoctorPane,
+    focused_finding: usize,
     help_context: Option<View>,
 }
 
@@ -384,8 +402,10 @@ impl SkilledApp {
             focused_installation: 0,
             inventory_filter: String::new(),
             inventory_filter_active: false,
-            inventory_detail_scroll: 0,
-            inventory_detail_max_scroll: 0,
+            detail_scroll: 0,
+            detail_max_scroll: 0,
+            doctor_pane: DoctorPane::Findings,
+            focused_finding: 0,
             help_context: None,
         };
         app.refilter_installations();
@@ -478,6 +498,35 @@ impl SkilledApp {
         &self.environment.home_dir
     }
 
+    pub fn doctor_pane(&self) -> DoctorPane {
+        self.doctor_pane
+    }
+
+    pub fn focused_finding(&self) -> usize {
+        self.focused_finding
+    }
+
+    /// Every finding the last scan holds, in the order Doctor lists them.
+    ///
+    /// Materialised on demand rather than cached: the snapshot is the only
+    /// state behind it, so a list held beside the snapshot could disagree with
+    /// it after a rescan.
+    pub fn doctor_findings(&self) -> Vec<DoctorEntry<'_>> {
+        self.inventory.doctor_findings().collect()
+    }
+
+    pub fn selected_finding(&self) -> Option<DoctorEntry<'_>> {
+        self.doctor_findings().into_iter().nth(self.focused_finding)
+    }
+
+    /// How many findings the last scan holds, without ordering them.
+    ///
+    /// The key-hint bar and the navigation row ask this on every frame of every
+    /// view, so neither may pay for the sort that presenting them costs.
+    pub fn finding_count(&self) -> usize {
+        self.inventory.finding_count()
+    }
+
     pub fn inventory_pane(&self) -> InventoryPane {
         self.inventory_pane
     }
@@ -491,8 +540,8 @@ impl SkilledApp {
     }
 
     /// How far the detail region's window has been scrolled, in lines.
-    pub fn inventory_detail_scroll(&self) -> usize {
-        self.inventory_detail_scroll
+    pub fn detail_scroll(&self) -> usize {
+        self.detail_scroll
     }
 
     /// Record what the frame just drawn measured the detail region's scrollable
@@ -503,9 +552,9 @@ impl SkilledApp {
     /// This is the one place geometry reaches the application state, and it is
     /// not a reducer transition: `update` stays free of anything the terminal
     /// knows and the renderer measures.
-    pub fn note_inventory_detail_max_scroll(&mut self, max_scroll: usize) {
-        self.inventory_detail_max_scroll = max_scroll;
-        self.inventory_detail_scroll = self.inventory_detail_scroll.min(max_scroll);
+    pub fn note_detail_max_scroll(&mut self, max_scroll: usize) {
+        self.detail_max_scroll = max_scroll;
+        self.detail_scroll = self.detail_scroll.min(max_scroll);
     }
 
     pub fn inventory_filter_active(&self) -> bool {
@@ -616,16 +665,51 @@ impl SkilledApp {
                 Vec::new()
             }
             Action::OpenInventory => {
-                if self.view == View::Sources {
+                if matches!(self.view, View::Sources | View::Doctor) {
                     self.enter_inventory()
                 } else {
                     Vec::new()
                 }
             }
             Action::OpenSources => {
-                if self.view == View::Inventory {
+                if matches!(self.view, View::Inventory | View::Doctor) {
                     self.view = View::Sources;
                     self.sources_pane = SourcesPane::Repositories;
+                }
+                Vec::new()
+            }
+            Action::OpenDoctor => {
+                if matches!(self.view, View::Inventory | View::Sources) {
+                    self.enter_doctor()
+                } else {
+                    Vec::new()
+                }
+            }
+            Action::MoveDoctorPane(delta) => {
+                if self.view == View::Doctor {
+                    let index = match self.doctor_pane {
+                        DoctorPane::Findings => 0,
+                        DoctorPane::Details => 1,
+                    };
+                    self.doctor_pane = match wrapped_index(index, delta, 2) {
+                        0 => DoctorPane::Findings,
+                        _ => DoctorPane::Details,
+                    };
+                }
+                Vec::new()
+            }
+            Action::AdvanceDoctorPane => {
+                if self.view == View::Doctor && self.selected_finding().is_some() {
+                    self.doctor_pane = DoctorPane::Details;
+                }
+                Vec::new()
+            }
+            Action::MoveDoctorSelection(delta) => {
+                if self.view == View::Doctor && self.doctor_pane == DoctorPane::Findings {
+                    self.focused_finding =
+                        wrapped_index(self.focused_finding, delta, self.finding_count());
+                    // The window belonged to the finding that was selected.
+                    self.reset_detail_scroll();
                 }
                 Vec::new()
             }
@@ -754,8 +838,8 @@ impl SkilledApp {
                 self.move_installation_selection(delta);
                 Vec::new()
             }
-            Action::ScrollInventoryDetail(delta) => {
-                self.scroll_inventory_detail(delta);
+            Action::ScrollDetail(delta) => {
+                self.scroll_detail(delta);
                 Vec::new()
             }
             Action::BeginInventoryFilter => {
@@ -853,13 +937,19 @@ impl SkilledApp {
     fn rescan_installations(&mut self) {
         self.inventory = scan_installations(&self.agents, &self.sources);
         self.refilter_installations();
+        // The findings behind the selection are gone with the snapshot, so the
+        // selection is pulled back onto the list that replaced them.
+        let last = self.finding_count().saturating_sub(1);
+        self.focused_finding = self.focused_finding.min(last);
     }
 
     /// Recompute which rows the query admits, and keep the selection on one.
     ///
     /// A row matches when the query appears in its name, the label of its
-    /// provenance or of any installation's own provenance, or the word naming
-    /// its health, so the same box narrows by identity, provenance, or state.
+    /// provenance or of any installation's own provenance, or the word the
+    /// Health column states for it, so the same box narrows by identity,
+    /// provenance, or state — including the states that come from OpenCode's
+    /// effective resolution rather than from any one installation.
     /// Matching each installation keeps a mixed row findable by the source it
     /// partly came from and by "not registered" alike; stray content is not an
     /// installation and answers for no provenance.
@@ -882,13 +972,13 @@ impl SkilledApp {
                                 .to_lowercase()
                                 .contains(&needle)
                     })
-                    || row.health().label().contains(needle.as_str())
+                    || row.verdict().label().contains(needle.as_str())
             })
             .map(|(index, _)| index)
             .collect();
         let last = self.filtered_installations.len().saturating_sub(1);
         self.focused_installation = self.focused_installation.min(last);
-        self.reset_inventory_detail_scroll();
+        self.reset_detail_scroll();
     }
 
     /// Return the detail region's window to the top, and forget the extent
@@ -898,9 +988,23 @@ impl SkilledApp {
     /// skill the user never scrolled through, and an extent kept across one
     /// would let the next keystroke scroll past the end of shorter content
     /// before a frame has had the chance to measure it.
-    fn reset_inventory_detail_scroll(&mut self) {
-        self.inventory_detail_scroll = 0;
-        self.inventory_detail_max_scroll = 0;
+    fn reset_detail_scroll(&mut self) {
+        self.detail_scroll = 0;
+        self.detail_max_scroll = 0;
+    }
+
+    /// Open Doctor on a scan taken for Doctor.
+    ///
+    /// The same contract [`Self::enter_inventory`] keeps, for the same reason:
+    /// the findings this view lists must have been observed for this view, not
+    /// inherited from whichever one the user was standing in.
+    fn enter_doctor(&mut self) -> Vec<Effect> {
+        self.view = View::Doctor;
+        self.doctor_pane = DoctorPane::Findings;
+        self.inventory = InventorySnapshot::not_scanned(&self.agents);
+        self.filtered_installations.clear();
+        self.reset_detail_scroll();
+        vec![Effect::ScanInstallations]
     }
 
     fn enter_inventory(&mut self) -> Vec<Effect> {
@@ -923,7 +1027,7 @@ impl SkilledApp {
         self.filtered_installations.clear();
         // The rows this window was scrolled through are gone with the
         // snapshot, and the scan that lands refilters, which resets it again.
-        self.reset_inventory_detail_scroll();
+        self.reset_detail_scroll();
         vec![Effect::ScanInstallations]
     }
 
@@ -961,7 +1065,7 @@ impl SkilledApp {
             delta,
             self.filtered_installations.len(),
         );
-        self.reset_inventory_detail_scroll();
+        self.reset_detail_scroll();
     }
 
     /// Move the detail region's window, clamped rather than wrapped.
@@ -969,14 +1073,25 @@ impl SkilledApp {
     /// A list wraps because every row is a place to stand; a window does not,
     /// because the top and the bottom of a document are ends rather than
     /// neighbours.
-    fn scroll_inventory_detail(&mut self, delta: i8) {
-        if self.view != View::Inventory || self.inventory_pane != InventoryPane::Details {
+    fn scroll_detail(&mut self, delta: i8) {
+        if !self.detail_region_has_the_keyboard() {
             return;
         }
-        let offset = self
-            .inventory_detail_scroll
-            .saturating_add_signed(isize::from(delta));
-        self.inventory_detail_scroll = offset.min(self.inventory_detail_max_scroll);
+        let offset = self.detail_scroll.saturating_add_signed(isize::from(delta));
+        self.detail_scroll = offset.min(self.detail_max_scroll);
+    }
+
+    /// Whether the focused region is a detail region, whichever screen it is on.
+    ///
+    /// The offset is one piece of state because only one detail region is ever
+    /// drawn: a window belongs to the content under it, and moving between
+    /// screens replaces that content.
+    fn detail_region_has_the_keyboard(&self) -> bool {
+        match self.view {
+            View::Inventory => self.inventory_pane == InventoryPane::Details,
+            View::Doctor => self.doctor_pane == DoctorPane::Details,
+            _ => false,
+        }
     }
 
     pub fn open_settings(&mut self) {
@@ -1013,6 +1128,13 @@ impl SkilledApp {
                 }
             }
             View::Settings => return UpdateResult::continuing(self.enter_inventory()),
+            // Back unwinds the drilled-in region first, then the view.
+            View::Doctor => match self.doctor_pane {
+                DoctorPane::Details => self.doctor_pane = DoctorPane::Findings,
+                DoctorPane::Findings => {
+                    return UpdateResult::continuing(self.enter_inventory());
+                }
+            },
             View::Sources => match self.sources_pane {
                 SourcesPane::Details => self.sources_pane = SourcesPane::Variants,
                 SourcesPane::Variants => self.sources_pane = SourcesPane::Repositories,

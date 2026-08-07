@@ -3,7 +3,7 @@ source: tests/tui_snapshots.rs
 expression: screen
 ---
  ◆ skilled   global                                                                       ● ready · 1 source registered
- 1 Inventory ▌Sources ·1  Updates (soon)  Doctor (soon)
+ 1 Inventory ▌Sources ·1  Updates (soon)  4 Doctor
 ▌ Repositories  1 registered     │ Available variants  1 found                  │ Details  verbose
 ─────────────────────────────────│ ─────────────────────────────────────────────│ ─────────────────────────────────────
 ▌ source                         │ skills                    Common · all agents│ REPOSITORY
@@ -25,4 +25,4 @@ expression: screen
                                  │                                              │ Status: ✓ valid
                                  │                                              │ Description: A description long
                                  │                                              │ ! 5 more lines
- Tab/Shift-Tab Region   Enter Open   a Add source   1 Inventory   ? Help   q Quit   Esc Back
+ Tab/Shift-Tab Region   Enter Open   a Add source   1 Inventory   4 Doctor   ? Help   q Quit   Esc Back

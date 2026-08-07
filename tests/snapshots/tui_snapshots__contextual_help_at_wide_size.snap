@@ -20,7 +20,7 @@ expression: "render(&app, 120, 40)"
             │  forward or backward                           Repositories, then Inventory                  │
             │  a Add source — inspect a local checkout       ? Help — open this keyboard reference         │
             │  1 Inventory — return to Inventory             q Quit — quit when no dialog is open          │
-            │                                                                                              │
+            │  4 Doctor — open the findings list                                                           │
             │                                                                                              │
     No sourc│                                                                                              │d
             │                                                                                              │

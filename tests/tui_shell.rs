@@ -649,12 +649,13 @@ fn navigation_separates_active_reachable_and_unavailable_destinations() {
     assert_eq!(reachable.fg, Some(Color::Rgb(0x84, 0x91, 0xa1)));
     assert!(!reachable.add_modifier.contains(Modifier::BOLD));
 
-    // Views without an implementation are visibly unavailable rather than
-    // absent, and offer no shortcut, because 3 and 4 are unmapped everywhere.
+    // A view without an implementation is visibly unavailable rather than
+    // absent, and offers no shortcut, because 3 is unmapped everywhere.
     assert!(navigation.contains("Updates (soon)"), "{navigation}");
-    assert!(navigation.contains("Doctor (soon)"), "{navigation}");
     assert!(!navigation.contains("3 Updates"), "{navigation}");
-    assert!(!navigation.contains("4 Doctor"), "{navigation}");
+    // Doctor is implemented, so it carries its route like any other.
+    assert!(navigation.contains(" 4 Doctor"), "{navigation}");
+    assert!(!navigation.contains("Doctor (soon)"), "{navigation}");
 
     // One de-emphasis mechanism, plus the word "(soon)" for anyone who cannot
     // perceive it.
@@ -793,7 +794,6 @@ fn inventory_help_lists_only_implemented_inventory_commands() {
         "Uninstall",
         "Forget",
         "Filter",
-        "Doctor",
     ] {
         assert!(
             !rendered.contains(unavailable),
@@ -952,7 +952,7 @@ fn complete_key_hints_render_at_compact_and_wide_sizes() {
         ),
         (
             &inventory,
-            " Tab/Shift-Tab Region   2 Sources   s Settings   ? Help   q Quit",
+            " Tab/Shift-Tab Region   2 Sources   4 Doctor   s Settings   ? Help   q Quit",
         ),
         (&settings, " Enter Rerun setup   ? Help   Esc Close"),
     ];
@@ -965,13 +965,16 @@ fn complete_key_hints_render_at_compact_and_wide_sizes() {
         }
     }
 
+    // Sources advertises one route more than its row holds at eighty columns,
+    // so the two hints that matter least give way and the overflow mark says
+    // they did. The way out survives, which is what the budget is for.
     assert_eq!(
         row_text(&buffer(&sources, 80, 24), 23),
-        " Tab/Shift-Tab Region   a Add source   1 Inventory   ? Help   q Quit   Esc Back"
+        " Tab/Shift-Tab Region   a Add source   1 Inventory   4 Doctor   Esc Back …"
     );
     assert_eq!(
         row_text(&buffer(&sources, 120, 40), 39),
-        " Tab/Shift-Tab Region   a Add source   1 Inventory   ? Help   q Quit   Esc Back"
+        " Tab/Shift-Tab Region   a Add source   1 Inventory   4 Doctor   ? Help   q Quit   Esc Back"
     );
 }
 
@@ -990,7 +993,6 @@ fn every_help_context_omits_unavailable_commands_and_owns_the_footer() {
             "Forget",
             "Filter",
             "Updates",
-            "Doctor",
         ] {
             assert!(
                 !rendered.contains(unavailable),
@@ -1268,9 +1270,8 @@ fn navigation_withholds_a_count_it_could_not_observe() {
         // by rendering nothing rather than by a placeholder that reads as an
         // empty measurement. The '·' lead-in is reserved for real counts, so
         // an unavailable tab may not borrow it either.
-        for unavailable in ["Updates (soon)", "Doctor (soon)"] {
+        for unavailable in ["Updates (soon)"] {
             match after(&navigation, unavailable) {
-                // Doctor is the last entry, so the row ends after its title.
                 None => assert!(navigation.ends_with(unavailable), "{navigation}"),
                 Some(next) => {
                     assert!(!next.is_ascii_digit(), "{unavailable}: {navigation}");
@@ -1279,6 +1280,14 @@ fn navigation_withholds_a_count_it_could_not_observe() {
                 }
             }
         }
+        // Doctor lists findings observed from the same roots, so it withholds
+        // its count in exactly the states the Inventory withholds its own.
+        // It is the last entry, so nothing follows its title.
+        assert_eq!(
+            after(&navigation, "4 Doctor"),
+            None,
+            "{subtitle:?} may not state a finding total: {navigation}"
+        );
         assert!(!navigation.contains('—'), "{navigation}");
     }
 }
@@ -1601,7 +1610,11 @@ fn navigation_count_digit_cannot_read_as_a_route_key() {
             .strip_prefix(|character: char| character.is_ascii_digit())
             .unwrap_or(&navigation[start..])
             .strip_prefix(' ')
-            .is_some_and(|rest| rest.starts_with("Inventory") || rest.starts_with("Sources"));
+            .is_some_and(|rest| {
+                rest.starts_with("Inventory")
+                    || rest.starts_with("Sources")
+                    || rest.starts_with("Doctor")
+            });
         // `start` is the byte index of the run's first digit; after the
         // walk above the run's first digit is still at `start` and the run
         // ends at the byte index of the next non-digit char.
@@ -1620,16 +1633,16 @@ fn navigation_count_digit_cannot_read_as_a_route_key() {
     assert_eq!(dot_style.fg, Some(AMBER));
     assert!(!dot_style.add_modifier.contains(Modifier::BOLD));
 
-    // No count may leak onto an unavailable tab; with three sources the gap
-    // between 'Updates (soon)' and 'Doctor (soon)' must not start with '·'.
+    // No count may leak onto an unavailable tab: the gap between
+    // 'Updates (soon)' and the entry after it must not start with '·'.
     if let Some(after_updates) = navigation
         .find("Updates (soon)")
         .map(|position| position + "Updates (soon)".len())
     {
         let tail = &navigation[after_updates..];
-        let before_doctor = tail.find("Doctor (soon)").unwrap_or(tail.len());
+        let before_next = tail.find("4 Doctor").unwrap_or(tail.len());
         assert!(
-            !tail[..before_doctor].contains('·'),
+            !tail[..before_next].contains('·'),
             "'·' leaked onto an unavailable tab: {navigation}"
         );
     }
@@ -3833,6 +3846,42 @@ impl Harness {
         app
     }
 
+    /// Two rows whose verdict comes from OpenCode's effective resolution
+    /// rather than from any one installation: one name resolving to two
+    /// different directories, and one Claude Code edition reaching OpenCode
+    /// through a compatibility root with nothing OpenCode-compatible behind it.
+    #[cfg(unix)]
+    fn resolution_inventory(&self) -> SkilledApp {
+        let home = self.directory.path().join("home");
+        let first = home.join("alpha");
+        write_skill_fixture(&first.join("skills/review"), "review");
+        write_skill_fixture(&first.join("claude/skills/exposed"), "exposed");
+        create_repository(&first);
+        let second = home.join("beta");
+        write_skill_fixture(&second.join("skills/review"), "review");
+        create_repository(&second);
+
+        let mut app = self.completed_setup();
+        for repository in [&first, &second] {
+            let preview = app.preview_source(repository).expect("preview source");
+            app.confirm_source(preview).expect("register source");
+        }
+        let claude = home.join(".claude/skills");
+        let opencode = home.join(".config/opencode/skills");
+        fs::create_dir_all(&claude).expect("create Claude Code root");
+        fs::create_dir_all(&opencode).expect("create OpenCode root");
+        fs::create_dir_all(home.join(".agents/skills")).expect("create Codex root");
+        symlink(first.join("skills/review"), opencode.join("review"));
+        symlink(second.join("skills/review"), claude.join("review"));
+        symlink(first.join("claude/skills/exposed"), claude.join("exposed"));
+
+        app.update(Action::OpenSources);
+        let update = app.update(Action::OpenInventory);
+        app.perform_effects(update.effects())
+            .expect("installation scan");
+        app
+    }
+
     /// One `alpha` skill linked into all three agent roots from the
     /// registered checkout.
     ///
@@ -4041,7 +4090,7 @@ fn feedback(app: &SkilledApp, width: u16, height: u16) -> RenderFeedback {
 /// The scroll extent of a frame that drew the detail region.
 fn measured_extent(app: &SkilledApp, width: u16, height: u16) -> usize {
     feedback(app, width, height)
-        .inventory_detail_max_scroll()
+        .detail_max_scroll()
         .expect("the frame drew the detail region")
 }
 
@@ -4049,10 +4098,10 @@ fn measured_extent(app: &SkilledApp, width: u16, height: u16) -> usize {
 /// — the loop in `runner::run`, so a test scrolls the way a user does.
 fn scroll_detail(app: &mut SkilledApp, width: u16, height: u16, steps: usize) {
     for _ in 0..steps {
-        if let Some(extent) = feedback(app, width, height).inventory_detail_max_scroll() {
-            app.note_inventory_detail_max_scroll(extent);
+        if let Some(extent) = feedback(app, width, height).detail_max_scroll() {
+            app.note_detail_max_scroll(extent);
         }
-        app.update(Action::ScrollInventoryDetail(1));
+        app.update(Action::ScrollDetail(1));
     }
 }
 
@@ -4224,6 +4273,85 @@ mod installed {
         assert!(rendered.contains("SKILL "), "{rendered}");
         for heading in ["CLAUDE", "CODEX", "OPENCODE", "HEALTH", "SOURCE"] {
             assert!(rendered.contains(heading), "{heading} in\n{rendered}");
+        }
+    }
+
+    /// Doctor's severity column is a badge like every other: a glyph and a
+    /// word carry the meaning, and the tone only reinforces it. The list is
+    /// issue-first, so the order is checked beside the styling.
+    #[test]
+    fn doctor_severities_pair_their_colour_with_a_glyph_and_a_word() {
+        let harness = Harness::new();
+        let mut app = harness.resolution_inventory();
+        let update = app.update(Action::OpenDoctor);
+        app.perform_effects(update.effects())
+            .expect("installation scan");
+
+        // Wide enough that the primary region shows every code whole: a cell
+        // test that matched a truncated prefix would not be testing the cell.
+        let screen = buffer(&app, 120, 24);
+
+        for (code, glyph, word, colour) in [
+            (
+                "variant.duplicate_for_agent",
+                "×",
+                "critical",
+                Color::Rgb(0xee, 0x6b, 0x73),
+            ),
+            (
+                "variant.foreign_opencode_exposure",
+                "!",
+                "warning",
+                Color::Rgb(0xe6, 0xbd, 0x6a),
+            ),
+        ] {
+            let row = row_containing(&screen, code);
+            let line = row_text(&screen, row);
+            assert!(
+                line.contains(&format!("{glyph} {word}")),
+                "{glyph} {word} missing from {line:?}"
+            );
+            assert_eq!(
+                style_in_row(&screen, row, word).fg,
+                Some(colour),
+                "wrong tone for {code}"
+            );
+        }
+
+        // Critical before warning: the list is read down.
+        assert!(
+            row_containing(&screen, "variant.duplicate_for_agent")
+                < row_containing(&screen, "variant.foreign_opencode_exposure"),
+            "{}",
+            text(&screen)
+        );
+    }
+
+    /// The two verdicts the effective resolution adds are cells like any
+    /// other: a glyph and a word carry the meaning, and the tone only
+    /// reinforces it.
+    #[test]
+    fn an_effective_resolution_verdict_pairs_its_colour_with_a_glyph_and_a_word() {
+        let harness = Harness::new();
+        let app = harness.resolution_inventory();
+
+        let screen = buffer(&app, 80, 24);
+
+        for (name, glyph, word, colour) in [
+            ("review", "×", "conflict", Color::Rgb(0xee, 0x6b, 0x73)),
+            ("exposed", "!", "foreign", Color::Rgb(0xe6, 0xbd, 0x6a)),
+        ] {
+            let row = row_containing(&screen, name);
+            let line = row_text(&screen, row);
+            assert!(
+                line.contains(&format!("{glyph} {word}")),
+                "{glyph} {word} missing from {line:?}"
+            );
+            assert_eq!(
+                style_in_row(&screen, row, word).fg,
+                Some(colour),
+                "wrong tone for {name}"
+            );
         }
     }
 
@@ -4697,7 +4825,7 @@ mod installed {
         // behind it, which is not the same as measuring nothing to scroll.
         app.update(Action::Back);
         assert_eq!(
-            feedback(&app, 80, 24).inventory_detail_max_scroll(),
+            feedback(&app, 80, 24).detail_max_scroll(),
             None,
             "the region is not on screen"
         );
@@ -4706,11 +4834,15 @@ mod installed {
         // Scrolling as far as the frame reported reaches the last agent's
         // section, which is what makes the extent an extent rather than a
         // number: unreachable rows are the whole complaint behind the region.
+        // The OpenCode agent's own section, not the row's resolution section:
+        // the latter states what OpenCode would load and stands above the fold.
         let cut = text(&buffer(&app, 80, 24));
-        assert!(!cut.contains("OPENCODE"), "{cut}");
+        assert!(
+            !cut.contains("Path: ~/.config/opencode/skills/alpha"),
+            "{cut}"
+        );
         scroll_detail(&mut app, 80, 24, cramped);
         let scrolled = text(&buffer(&app, 80, 24));
-        assert!(scrolled.contains("OPENCODE"), "{scrolled}");
         assert!(
             scrolled.contains("Path: ~/.config/opencode/skills/alpha"),
             "{scrolled}"
@@ -4773,16 +4905,16 @@ mod installed {
             let whole = region_rows(&app, width, 80);
             for height in 24..40 {
                 let extent = measured_extent(&app, width, height);
-                app.note_inventory_detail_max_scroll(extent);
+                app.note_detail_max_scroll(extent);
                 for _ in 0..=extent {
-                    app.update(Action::ScrollInventoryDetail(-1));
+                    app.update(Action::ScrollDetail(-1));
                 }
                 let mut previously_above = 0;
                 for offset in 0..=extent {
                     if offset > 0 {
-                        app.update(Action::ScrollInventoryDetail(1));
+                        app.update(Action::ScrollDetail(1));
                     }
-                    assert_eq!(app.inventory_detail_scroll(), offset);
+                    assert_eq!(app.detail_scroll(), offset);
 
                     let rows = region_rows(&app, width, height);
                     let above = rows.first().and_then(|row| stated(row, " line"));
@@ -4900,7 +5032,7 @@ mod installed {
 
         // A taller region reaches the same last row from a smaller offset, so
         // the one the application is holding is now past the end.
-        let stale = app.inventory_detail_scroll();
+        let stale = app.detail_scroll();
         let extent = measured_extent(&app, 80, 30);
         assert!(extent > 0, "the taller region should still be cut");
         assert!(stale > extent, "{stale} should outrun {extent}");
@@ -4909,8 +5041,8 @@ mod installed {
         // back first, and the next one — the runner notes before every key —
         // pulls it back for good.
         let stale_frame = text(&buffer(&app, 80, 30));
-        app.note_inventory_detail_max_scroll(extent);
-        assert_eq!(app.inventory_detail_scroll(), extent);
+        app.note_detail_max_scroll(extent);
+        assert_eq!(app.detail_scroll(), extent);
         assert_eq!(stale_frame, text(&buffer(&app, 80, 30)));
 
         assert!(stale_frame.contains("OPENCODE"), "{stale_frame}");
@@ -4930,18 +5062,18 @@ mod installed {
             let mut app = harness.everywhere_installed_inventory();
             app.update(Action::AdvanceInventoryPane);
             scroll_detail(&mut app, width, height, 2);
-            assert_eq!(app.inventory_detail_scroll(), 2, "at {width}x{height}");
+            assert_eq!(app.detail_scroll(), 2, "at {width}x{height}");
 
             // Drawn between each step, the way the runner does it.
             for _ in 0..2 {
-                if let Some(extent) = feedback(&app, width, height).inventory_detail_max_scroll() {
-                    app.note_inventory_detail_max_scroll(extent);
+                if let Some(extent) = feedback(&app, width, height).detail_max_scroll() {
+                    app.note_detail_max_scroll(extent);
                 }
                 app.update(Action::MoveInventoryPane(1));
             }
 
             assert_eq!(app.inventory_pane(), InventoryPane::Details);
-            assert_eq!(app.inventory_detail_scroll(), 2, "at {width}x{height}");
+            assert_eq!(app.detail_scroll(), 2, "at {width}x{height}");
         }
     }
 
@@ -5141,12 +5273,12 @@ mod installed {
 
         let table = text(&buffer(&app, 80, 24));
         assert!(table.contains("▌ Global inventory"), "{table}");
-        assert!(!table.contains("Object: symbolic link"), "{table}");
+        assert!(!table.contains("Description: alpha fixture"), "{table}");
 
         app.update(Action::AdvanceInventoryPane);
         let detail = text(&buffer(&app, 80, 24));
         assert!(detail.contains("▌ Details  alpha"), "{detail}");
-        assert!(detail.contains("Object: symbolic link"), "{detail}");
+        assert!(detail.contains("Description: alpha fixture"), "{detail}");
         assert!(!detail.contains("Global inventory"), "{detail}");
         // Neither selection nor filtering acts in the detail region — the
         // query box is drawn above the table, which is not on screen — so the
@@ -5156,7 +5288,7 @@ mod installed {
         // last non-essential hints, which is what the bar's own budget is for.
         assert_eq!(
             row_text(&buffer(&app, 80, 24), 23),
-            " Tab/Shift-Tab Region   j/k Scroll   2 Sources   q Quit   Esc Back …"
+            " Tab/Shift-Tab Region   j/k Scroll   2 Sources   4 Doctor   q Quit   Esc Back …"
         );
 
         app.update(Action::Back);

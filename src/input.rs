@@ -1,6 +1,6 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
-use crate::{Action, AgentKind, InventoryPane, SetupStep, SkilledApp, View};
+use crate::{Action, AgentKind, DoctorPane, InventoryPane, SetupStep, SkilledApp, View};
 
 pub fn action_for_app_key(app: &SkilledApp, key: KeyEvent) -> Option<Action> {
     if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
@@ -64,8 +64,8 @@ pub fn action_for_app_key(app: &SkilledApp, key: KeyEvent) -> Option<Action> {
             _ => action,
         };
     }
-    // The keys that move the Inventory's selection move the detail region's
-    // window once it has focus. The translation happens here rather than in
+    // The keys that move a workspace's selection move its detail region's
+    // window once that region has focus. The translation happens here rather than in
     // `action_for_key` because only this side sees which region is focused —
     // and it happens after that call so the held-key allowance the movement
     // keys already have carries over to scrolling, which is where a user is
@@ -74,7 +74,12 @@ pub fn action_for_app_key(app: &SkilledApp, key: KeyEvent) -> Option<Action> {
         Some(Action::MoveInventorySelection(delta))
             if app.view() == View::Inventory && app.inventory_pane() == InventoryPane::Details =>
         {
-            Some(Action::ScrollInventoryDetail(delta))
+            Some(Action::ScrollDetail(delta))
+        }
+        Some(Action::MoveDoctorSelection(delta))
+            if app.view() == View::Doctor && app.doctor_pane() == DoctorPane::Details =>
+        {
+            Some(Action::ScrollDetail(delta))
         }
         action => action,
     }
@@ -97,6 +102,7 @@ pub fn action_for_key(view: View, key: KeyEvent) -> Option<Action> {
             View::Inventory => match key.code {
                 KeyCode::Char('s') => Some(Action::OpenSettings),
                 KeyCode::Char('2') => Some(Action::OpenSources),
+                KeyCode::Char('4') => Some(Action::OpenDoctor),
                 KeyCode::Tab => Some(Action::MoveInventoryPane(1)),
                 KeyCode::BackTab => Some(Action::MoveInventoryPane(-1)),
                 KeyCode::Enter => Some(Action::AdvanceInventoryPane),
@@ -108,12 +114,24 @@ pub fn action_for_key(view: View, key: KeyEvent) -> Option<Action> {
             },
             View::Sources => match key.code {
                 KeyCode::Char('1') => Some(Action::OpenInventory),
+                KeyCode::Char('4') => Some(Action::OpenDoctor),
                 KeyCode::Char('a') => Some(Action::BeginAddSource),
                 KeyCode::Tab => Some(Action::MoveSourcesPane(1)),
                 KeyCode::BackTab => Some(Action::MoveSourcesPane(-1)),
                 KeyCode::Enter => Some(Action::AdvanceSourcesPane),
                 KeyCode::Up | KeyCode::Char('k') => Some(Action::MoveSourcesSelection(-1)),
                 KeyCode::Down | KeyCode::Char('j') => Some(Action::MoveSourcesSelection(1)),
+                KeyCode::Esc => Some(Action::Back),
+                _ => None,
+            },
+            View::Doctor => match key.code {
+                KeyCode::Char('1') => Some(Action::OpenInventory),
+                KeyCode::Char('2') => Some(Action::OpenSources),
+                KeyCode::Tab => Some(Action::MoveDoctorPane(1)),
+                KeyCode::BackTab => Some(Action::MoveDoctorPane(-1)),
+                KeyCode::Enter => Some(Action::AdvanceDoctorPane),
+                KeyCode::Up | KeyCode::Char('k') => Some(Action::MoveDoctorSelection(-1)),
+                KeyCode::Down | KeyCode::Char('j') => Some(Action::MoveDoctorSelection(1)),
                 KeyCode::Esc => Some(Action::Back),
                 _ => None,
             },
@@ -128,6 +146,7 @@ pub fn action_for_key(view: View, key: KeyEvent) -> Option<Action> {
     match (key.kind, action) {
         (KeyEventKind::Repeat, Some(Action::MoveSelection(_))) => action,
         (KeyEventKind::Repeat, Some(Action::MoveInventorySelection(_))) => action,
+        (KeyEventKind::Repeat, Some(Action::MoveDoctorSelection(_))) => action,
         (KeyEventKind::Repeat, _) => None,
         _ => action,
     }

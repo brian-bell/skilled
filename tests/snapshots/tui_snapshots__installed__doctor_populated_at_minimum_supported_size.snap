@@ -1,0 +1,28 @@
+---
+source: tests/tui_snapshots.rs
+expression: screen
+---
+ ◆ skilled   global                              ● ready · 2 sources registered
+ 1 Inventory ·4  2 Sources ·2  Updates (soon) ▌Doctor ·6
+▌ Doctor  6 findings
+────────────────────────────────────────────────────────────────────────────────
+  SEVERITY   FINDING                           SKILL                AGENT
+▌ × critical install.dangling_symlink          dangling             Claude Code
+  × critical variant.duplicate_for_agent       review               Claude Code
+  × critical variant.duplicate_for_agent       review               OpenCode
+  ! warning  variant.duplicate_for_agent       review               Codex
+  ! warning  variant.foreign_opencode_exposure exposed              OpenCode
+  - info     variant.benign_alias              shared               OpenCode
+
+
+
+
+
+
+
+
+
+
+
+
+ Tab/Shift-Tab Region   j/k Move   Enter Open   1 Inventory   Esc Back …
