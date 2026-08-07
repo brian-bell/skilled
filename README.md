@@ -5,8 +5,9 @@ coding agents and keep skills in local Git repositories. It is being built in
 Rust with Ratatui and Crossterm.
 
 The project is early in version-one development. The current build establishes
-the setup, terminal, source-registration, and read-only inspection foundation;
-it does not yet install, repair, update, or uninstall skills.
+the setup, terminal, source-registration, and read-only inspection foundation,
+and installs a registered skill across the agents that can use it. It does not
+yet repair, update, or uninstall.
 
 ## Design references
 
@@ -76,6 +77,31 @@ it does not yet install, repair, update, or uninstall skills.
   documented issue groups and then by severity. Each finding states what was
   observed, what it costs, the paths involved, and that no repair exists in this
   release — Skilled offers no key that would perform one.
+- Installation of a registered skill variant as one individual directory
+  symbolic link per agent, at that agent's own documented global root. Press `i`
+  on a variant in Sources to see exactly what would happen: the source it comes
+  from, the directory every link would point at, and each agent's absolute
+  target path in full, with the reason for any agent left out. Nothing is
+  written until that preview is confirmed.
+- A plan that blocks, blocks whole. A file, a physical directory, a symbolic
+  link Skilled does not own, a link that no longer resolves, an entry it could
+  not read, an agent whose own directory does not exist, and a name more than
+  one registered variant answers to each stop the install — and nothing is
+  written to the targets that were free either. Skilled never overwrites,
+  replaces, or removes anything, so an occupied path is always a refusal.
+- Refusal to write a link OpenCode would not then resolve. Because OpenCode
+  reads Claude Code's and Codex's roots as well as its own, a link into its root
+  that another root already answers for is a postcondition Skilled can see
+  failing, and it stops before writing rather than writing and reporting it.
+- An ownership receipt for every link Skilled creates, recorded the moment the
+  link exists and outliving the source it came from. A link Skilled did not
+  create is never claimed: an identical one already in place is left alone and
+  unowned.
+- A rescan and a postcondition check after every install. Each link written is
+  observed again and compared with the plan — the object, the variant it
+  resolves to, its validation, its health, and for OpenCode the name it
+  effectively loads. A check Skilled could not make over a root it never read is
+  reported as unestablished rather than counted as a pass.
 - Filtering the inventory by skill name, source, health, or the words the
   effective resolution adds.
 - A scrollable inventory detail region. A skill installed for several agents
@@ -109,10 +135,11 @@ it does not yet install, repair, update, or uninstall skills.
 - Terminal restoration on normal exit, startup failure, panic unwinding, and
   the Ctrl-C key path used in raw mode.
 
-Planning, installation, repair, update, remote fetching, and uninstall
-behavior are still future work. Registration, inventory, and Doctor are
-deliberately read-only: they catalog local checkouts and observe agent roots,
-but never copy, link, or modify anything in them.
+Repair, update, remote fetching, and uninstall are still future work.
+Registration, inventory, and Doctor remain read-only: they catalog local
+checkouts and observe agent roots without changing anything in them. Installing
+is the one thing Skilled writes, and it only ever creates — a link, and the
+documented skill root above it when that root's own parent already exists.
 
 ## Requirements
 
@@ -166,6 +193,14 @@ toward Details; and Esc returns through the region hierarchy before leaving the
 screen. In a selectable list, `j` / `k` or arrow keys move the selection. Press
 `a` to add another source or `1` to return to Inventory.
 
+In Sources, press `i` on a skill variant to preview installing it. The dialog
+names every agent, what would happen to it, and the exact absolute path
+involved; `j` / `k` scroll it when it holds more than the terminal can show,
+Enter installs, and Esc cancels. A blocked plan offers no Enter, because there
+is nothing it could do. The report that follows states each step, what the
+rescan afterwards made of it, and — where a postcondition could not be checked —
+says so rather than reporting a verification it did not make.
+
 From either screen, press `4` to open Doctor. It lists each finding with its
 severity, stable code, skill, and agent, and its regions behave as the
 Inventory's do: Tab and Shift-Tab move between the list and the details, Enter
@@ -177,6 +212,26 @@ Sources.
 Private metadata is stored in the platform application-data directory. On
 macOS, the database is normally
 `~/Library/Application Support/skilled/skilled.sqlite3`.
+
+## Install from the command line
+
+```bash
+skilled install --source <id-or-path> --skill <name> \
+                --agents claude-code,codex,opencode [--yes]
+```
+
+`--source` takes the identifier Skilled gave a registered source or the path its
+checkout sits at. `--agents` defaults to every configured agent. Without
+`--yes`, the plan is printed and `Proceed? [y/N]` is asked; anything but a yes
+cancels and writes nothing.
+
+`--yes` removes the confirmation and nothing else. It requires `--source`,
+`--skill`, and `--agents` to be given explicitly — a target set Skilled chose is
+not one anybody agreed to — and every collision check, apply guard, rescan, and
+verification still runs.
+
+Exit statuses: `0` success, `1` internal error, `2` invalid request, `3` blocked
+plan, `4` the apply did not complete as planned, `5` verification failed.
 
 ## Build and verify
 
@@ -210,6 +265,12 @@ under `tests/snapshots/` and cell-level style assertions in
   inspection.
 - `src/inventory.rs` performs the bounded, read-only scan of the native agent
   skill roots and owns the finding codes it reports.
+- `src/resolution.rs` decides, purely, which registered variant an agent
+  resolves a name to and what OpenCode would load across the roots it reads.
+- `src/operations.rs` plans installations and executes them under guard: one
+  read of the machine, one pure decision over it, one re-read immediately before
+  each write, and one check of a fresh scan against the plan.
+- `src/cli.rs` implements `skilled install` over that same path.
 - `src/validation.rs` validates the portable `SKILL.md` subset used during
   source browsing.
 - `src/terminal.rs` guards raw mode and alternate-screen restoration.
