@@ -9,6 +9,7 @@
 use std::{
     fs,
     io::Cursor,
+    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     process::Command,
 };
@@ -303,6 +304,65 @@ fn a_named_agent_that_cannot_be_installed_to_is_reported() {
     assert!(output.contains("Codex"), "{output}");
     assert!(output.contains("cannot use this variant"), "{output}");
     assert!(!fixture.home().join(".agents/skills/portable").exists());
+}
+
+/// Spec 19: a run that stopped part way through has its own exit status, says
+/// which step failed, and states plainly that nothing was undone.
+#[test]
+fn a_run_that_stops_part_way_through_exits_as_a_partial_apply() {
+    if running_as_root() {
+        // Permission bits decide nothing for the superuser, so the step this
+        // case needs to fail would succeed.
+        return;
+    }
+    let fixture = Fixture::new();
+    let repository = fixture.register("library", &["portable"]);
+    // OpenCode is the last target, so the two before it are written before the
+    // step that cannot be.
+    let sealed = fixture.home().join(".config/opencode");
+    fs::set_permissions(&sealed, fs::Permissions::from_mode(0o555)).expect("seal the parent");
+
+    let (code, output) = fixture.run(&[
+        "install",
+        "--yes",
+        "--source",
+        &repository.display().to_string(),
+        "--skill",
+        "portable",
+        "--agents",
+        "claude-code,codex,opencode",
+    ]);
+    fs::set_permissions(&sealed, fs::Permissions::from_mode(0o755)).expect("unseal the parent");
+
+    assert_eq!(code, ExitCodeKind::PartialApply, "{output}");
+    assert!(output.contains("not written"), "{output}");
+    assert!(output.contains("does not undo"), "{output}");
+    // The links written before the failure are real, and are left alone.
+    assert!(
+        fixture.home().join(".claude/skills/portable").is_dir(),
+        "{output}"
+    );
+    assert!(
+        fixture.home().join(".agents/skills/portable").is_dir(),
+        "{output}"
+    );
+    assert!(
+        !fixture.home().join(".config/opencode/skills").exists(),
+        "{output}"
+    );
+    assert_eq!(fixture.app().receipts().expect("receipts").len(), 2);
+}
+
+/// Whether permission bits will be enforced against this process.
+fn running_as_root() -> bool {
+    let probe = std::env::temp_dir().join(format!("skilled-cli-probe-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&probe);
+    fs::create_dir(&probe).expect("create permission probe");
+    fs::set_permissions(&probe, fs::Permissions::from_mode(0o000)).expect("seal probe");
+    let readable = fs::read_dir(&probe).is_ok();
+    fs::set_permissions(&probe, fs::Permissions::from_mode(0o755)).expect("unseal probe");
+    fs::remove_dir_all(&probe).expect("remove probe");
+    readable
 }
 
 struct Fixture {
