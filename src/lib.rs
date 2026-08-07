@@ -17,8 +17,8 @@ mod viewport;
 
 pub use agents::{AgentDetection, AgentKind};
 pub use app::{
-    Action, Effect, InventoryPane, SetupStep, SkilledApp, SourcesPane, UpdateOutcome, UpdateResult,
-    View,
+    Action, DoctorPane, Effect, InventoryPane, SetupStep, SkilledApp, SourcesPane, UpdateOutcome,
+    UpdateResult, View,
 };
 pub use error::{Error, Result};
 pub use paths::AppEnvironment;

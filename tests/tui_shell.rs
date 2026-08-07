@@ -649,12 +649,13 @@ fn navigation_separates_active_reachable_and_unavailable_destinations() {
     assert_eq!(reachable.fg, Some(Color::Rgb(0x84, 0x91, 0xa1)));
     assert!(!reachable.add_modifier.contains(Modifier::BOLD));
 
-    // Views without an implementation are visibly unavailable rather than
-    // absent, and offer no shortcut, because 3 and 4 are unmapped everywhere.
+    // A view without an implementation is visibly unavailable rather than
+    // absent, and offers no shortcut, because 3 is unmapped everywhere.
     assert!(navigation.contains("Updates (soon)"), "{navigation}");
-    assert!(navigation.contains("Doctor (soon)"), "{navigation}");
     assert!(!navigation.contains("3 Updates"), "{navigation}");
-    assert!(!navigation.contains("4 Doctor"), "{navigation}");
+    // Doctor is implemented, so it carries its route like any other.
+    assert!(navigation.contains(" 4 Doctor"), "{navigation}");
+    assert!(!navigation.contains("Doctor (soon)"), "{navigation}");
 
     // One de-emphasis mechanism, plus the word "(soon)" for anyone who cannot
     // perceive it.
@@ -793,7 +794,6 @@ fn inventory_help_lists_only_implemented_inventory_commands() {
         "Uninstall",
         "Forget",
         "Filter",
-        "Doctor",
     ] {
         assert!(
             !rendered.contains(unavailable),
@@ -952,7 +952,7 @@ fn complete_key_hints_render_at_compact_and_wide_sizes() {
         ),
         (
             &inventory,
-            " Tab/Shift-Tab Region   2 Sources   s Settings   ? Help   q Quit",
+            " Tab/Shift-Tab Region   2 Sources   4 Doctor   s Settings   ? Help   q Quit",
         ),
         (&settings, " Enter Rerun setup   ? Help   Esc Close"),
     ];
@@ -965,13 +965,16 @@ fn complete_key_hints_render_at_compact_and_wide_sizes() {
         }
     }
 
+    // Sources advertises one route more than its row holds at eighty columns,
+    // so the two hints that matter least give way and the overflow mark says
+    // they did. The way out survives, which is what the budget is for.
     assert_eq!(
         row_text(&buffer(&sources, 80, 24), 23),
-        " Tab/Shift-Tab Region   a Add source   1 Inventory   ? Help   q Quit   Esc Back"
+        " Tab/Shift-Tab Region   a Add source   1 Inventory   4 Doctor   Esc Back …"
     );
     assert_eq!(
         row_text(&buffer(&sources, 120, 40), 39),
-        " Tab/Shift-Tab Region   a Add source   1 Inventory   ? Help   q Quit   Esc Back"
+        " Tab/Shift-Tab Region   a Add source   1 Inventory   4 Doctor   ? Help   q Quit   Esc Back"
     );
 }
 
@@ -990,7 +993,6 @@ fn every_help_context_omits_unavailable_commands_and_owns_the_footer() {
             "Forget",
             "Filter",
             "Updates",
-            "Doctor",
         ] {
             assert!(
                 !rendered.contains(unavailable),
@@ -1268,9 +1270,8 @@ fn navigation_withholds_a_count_it_could_not_observe() {
         // by rendering nothing rather than by a placeholder that reads as an
         // empty measurement. The '·' lead-in is reserved for real counts, so
         // an unavailable tab may not borrow it either.
-        for unavailable in ["Updates (soon)", "Doctor (soon)"] {
+        for unavailable in ["Updates (soon)"] {
             match after(&navigation, unavailable) {
-                // Doctor is the last entry, so the row ends after its title.
                 None => assert!(navigation.ends_with(unavailable), "{navigation}"),
                 Some(next) => {
                     assert!(!next.is_ascii_digit(), "{unavailable}: {navigation}");
@@ -1279,6 +1280,14 @@ fn navigation_withholds_a_count_it_could_not_observe() {
                 }
             }
         }
+        // Doctor lists findings observed from the same roots, so it withholds
+        // its count in exactly the states the Inventory withholds its own.
+        // It is the last entry, so nothing follows its title.
+        assert_eq!(
+            after(&navigation, "4 Doctor"),
+            None,
+            "{subtitle:?} may not state a finding total: {navigation}"
+        );
         assert!(!navigation.contains('—'), "{navigation}");
     }
 }
@@ -1601,7 +1610,11 @@ fn navigation_count_digit_cannot_read_as_a_route_key() {
             .strip_prefix(|character: char| character.is_ascii_digit())
             .unwrap_or(&navigation[start..])
             .strip_prefix(' ')
-            .is_some_and(|rest| rest.starts_with("Inventory") || rest.starts_with("Sources"));
+            .is_some_and(|rest| {
+                rest.starts_with("Inventory")
+                    || rest.starts_with("Sources")
+                    || rest.starts_with("Doctor")
+            });
         // `start` is the byte index of the run's first digit; after the
         // walk above the run's first digit is still at `start` and the run
         // ends at the byte index of the next non-digit char.
@@ -1620,16 +1633,16 @@ fn navigation_count_digit_cannot_read_as_a_route_key() {
     assert_eq!(dot_style.fg, Some(AMBER));
     assert!(!dot_style.add_modifier.contains(Modifier::BOLD));
 
-    // No count may leak onto an unavailable tab; with three sources the gap
-    // between 'Updates (soon)' and 'Doctor (soon)' must not start with '·'.
+    // No count may leak onto an unavailable tab: the gap between
+    // 'Updates (soon)' and the entry after it must not start with '·'.
     if let Some(after_updates) = navigation
         .find("Updates (soon)")
         .map(|position| position + "Updates (soon)".len())
     {
         let tail = &navigation[after_updates..];
-        let before_doctor = tail.find("Doctor (soon)").unwrap_or(tail.len());
+        let before_next = tail.find("4 Doctor").unwrap_or(tail.len());
         assert!(
-            !tail[..before_doctor].contains('·'),
+            !tail[..before_next].contains('·'),
             "'·' leaked onto an unavailable tab: {navigation}"
         );
     }
@@ -4263,6 +4276,57 @@ mod installed {
         }
     }
 
+    /// Doctor's severity column is a badge like every other: a glyph and a
+    /// word carry the meaning, and the tone only reinforces it. The list is
+    /// issue-first, so the order is checked beside the styling.
+    #[test]
+    fn doctor_severities_pair_their_colour_with_a_glyph_and_a_word() {
+        let harness = Harness::new();
+        let mut app = harness.resolution_inventory();
+        let update = app.update(Action::OpenDoctor);
+        app.perform_effects(update.effects())
+            .expect("installation scan");
+
+        // Wide enough that the primary region shows every code whole: a cell
+        // test that matched a truncated prefix would not be testing the cell.
+        let screen = buffer(&app, 120, 24);
+
+        for (code, glyph, word, colour) in [
+            (
+                "variant.duplicate_for_agent",
+                "×",
+                "critical",
+                Color::Rgb(0xee, 0x6b, 0x73),
+            ),
+            (
+                "variant.foreign_opencode_exposure",
+                "!",
+                "warning",
+                Color::Rgb(0xe6, 0xbd, 0x6a),
+            ),
+        ] {
+            let row = row_containing(&screen, code);
+            let line = row_text(&screen, row);
+            assert!(
+                line.contains(&format!("{glyph} {word}")),
+                "{glyph} {word} missing from {line:?}"
+            );
+            assert_eq!(
+                style_in_row(&screen, row, word).fg,
+                Some(colour),
+                "wrong tone for {code}"
+            );
+        }
+
+        // Critical before warning: the list is read down.
+        assert!(
+            row_containing(&screen, "variant.duplicate_for_agent")
+                < row_containing(&screen, "variant.foreign_opencode_exposure"),
+            "{}",
+            text(&screen)
+        );
+    }
+
     /// The two verdicts the effective resolution adds are cells like any
     /// other: a glyph and a word carry the meaning, and the tone only
     /// reinforces it.
@@ -5224,7 +5288,7 @@ mod installed {
         // last non-essential hints, which is what the bar's own budget is for.
         assert_eq!(
             row_text(&buffer(&app, 80, 24), 23),
-            " Tab/Shift-Tab Region   j/k Scroll   2 Sources   q Quit   Esc Back …"
+            " Tab/Shift-Tab Region   j/k Scroll   2 Sources   4 Doctor   q Quit   Esc Back …"
         );
 
         app.update(Action::Back);

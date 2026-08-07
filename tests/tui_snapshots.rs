@@ -1041,6 +1041,130 @@ mod installed {
     ///
     /// The source checkout lives inside the temporary home so every path the
     /// screen shows is home-relative and therefore stable across machines.
+    /// Every classification the effective resolution can reach, plus a broken
+    /// installation, so the Doctor list shows its whole ordering at once.
+    fn doctor_app(temporary: &tempfile::TempDir) -> SkilledApp {
+        let home = temporary.path().join("home");
+        let first = home.join("alpha");
+        write_skill(&first.join("skills/review"), "review");
+        write_skill(&first.join("skills/shared"), "shared");
+        write_skill(&first.join("claude/skills/exposed"), "exposed");
+        create_repository(&first);
+        let second = home.join("beta");
+        write_skill(&second.join("skills/review"), "review");
+        create_repository(&second);
+
+        let mut app = SkilledApp::open(AppEnvironment::new(
+            &home,
+            temporary.path().join("data"),
+            "",
+        ))
+        .expect("open application");
+        for _ in 0..7 {
+            dispatch(&mut app, Action::Continue);
+        }
+        for repository in [&first, &second] {
+            let preview = app.preview_source(repository).expect("preview source");
+            app.confirm_source(preview).expect("register source");
+        }
+
+        let claude = home.join(".claude/skills");
+        let codex = home.join(".agents/skills");
+        let opencode = home.join(".config/opencode/skills");
+        for root in [&claude, &codex, &opencode] {
+            fs::create_dir_all(root).expect("create agent skill root");
+        }
+        // One name, two directories: a conflicting duplicate for OpenCode.
+        link(&first.join("skills/review"), &opencode.join("review"));
+        link(&second.join("skills/review"), &claude.join("review"));
+        // One directory through two roots: a benign alias.
+        link(&first.join("skills/shared"), &claude.join("shared"));
+        link(&first.join("skills/shared"), &codex.join("shared"));
+        // A Claude Code edition OpenCode can see but Skilled cannot claim.
+        link(
+            &first.join("claude/skills/exposed"),
+            &claude.join("exposed"),
+        );
+        // And a link with nothing behind it.
+        link(&home.join("gone"), &claude.join("dangling"));
+
+        app.update(Action::OpenSources);
+        dispatch(&mut app, Action::OpenDoctor);
+        app
+    }
+
+    #[test]
+    fn doctor_populated_at_minimum_supported_size() {
+        let temporary = tempfile::tempdir().expect("temporary application directory");
+        let app = doctor_app(&temporary);
+
+        let screen = normalize_inventory(&temporary, render(&app, 80, 24));
+
+        // Issue-first: the broken installation leads, and the informational
+        // alias is ranked below everything that weakens usability.
+        let codes: Vec<&str> = screen
+            .lines()
+            .filter_map(|line| line.split_whitespace().find(|word| word.contains('.')))
+            .collect();
+        assert_eq!(codes.first(), Some(&"install.dangling_symlink"), "{screen}");
+        assert_eq!(codes.last(), Some(&"variant.benign_alias"), "{screen}");
+        insta::assert_snapshot!(screen);
+    }
+
+    #[test]
+    fn doctor_populated_at_wide_size() {
+        let temporary = tempfile::tempdir().expect("temporary application directory");
+        let app = doctor_app(&temporary);
+
+        insta::assert_snapshot!(normalize_inventory(&temporary, render(&app, 120, 40)));
+    }
+
+    /// The detail region states what was observed, what it costs, the paths
+    /// involved, and — because no repair exists in this release — says so
+    /// rather than offering one.
+    #[test]
+    fn doctor_detail_drill_in_at_minimum_supported_size() {
+        let temporary = tempfile::tempdir().expect("temporary application directory");
+        let mut app = doctor_app(&temporary);
+        // The conflicting duplicate, which is the finding with the most to say.
+        while app
+            .selected_finding()
+            .is_some_and(|entry| entry.finding().code() != "variant.duplicate_for_agent")
+        {
+            app.update(Action::MoveDoctorSelection(1));
+        }
+        app.update(Action::AdvanceDoctorPane);
+
+        let screen = normalize_inventory(&temporary, render(&app, 80, 24));
+
+        // No repair exists in this release, so the region says so and the key
+        // hints offer nothing that would perform one.
+        assert!(screen.contains("Repair: not offered"), "{screen}");
+        assert!(!screen.contains("r Repair"), "{screen}");
+        insta::assert_snapshot!(screen);
+    }
+
+    /// Nothing installed and nothing registered is a clean bill of health,
+    /// which is not the same answer as a root that could not be read.
+    #[test]
+    fn doctor_empty_at_minimum_supported_size() {
+        let temporary = tempfile::tempdir().expect("temporary application directory");
+        let home = temporary.path().join("home");
+        fs::create_dir_all(home.join(".claude/skills")).expect("create an empty root");
+        let mut app = SkilledApp::open(AppEnvironment::new(
+            &home,
+            temporary.path().join("data"),
+            "",
+        ))
+        .expect("open application");
+        for _ in 0..7 {
+            dispatch(&mut app, Action::Continue);
+        }
+        dispatch(&mut app, Action::OpenDoctor);
+
+        insta::assert_snapshot!(normalize_inventory(&temporary, render(&app, 80, 24)));
+    }
+
     fn inventory_app(temporary: &tempfile::TempDir) -> SkilledApp {
         let repository = temporary.path().join("home/library");
         for skill in ["alpha", "beta"] {

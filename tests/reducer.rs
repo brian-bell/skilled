@@ -1,8 +1,8 @@
 use std::{fs, path::Path, process::Command};
 
 use skilled::{
-    Action, AgentKind, AppEnvironment, Effect, InventoryPane, SetupStep, SkilledApp, SourcesPane,
-    UpdateOutcome, View,
+    Action, AgentKind, AppEnvironment, DoctorPane, Effect, InventoryPane, SetupStep, SkilledApp,
+    SourcesPane, UpdateOutcome, View,
     app::{SourceRow, variant_rows},
     inventory::InstallationHealth,
 };
@@ -959,6 +959,113 @@ mod installed {
     /// The Health column gained two words that come from the effective
     /// resolution rather than from any one installation, and the same box
     /// narrows by them.
+    /// Doctor is a destination like the others: it opens on a scan taken for
+    /// it, so what it lists was observed for Doctor rather than inherited from
+    /// the view the user just left.
+    #[test]
+    fn doctor_opens_on_a_scan_taken_for_it() {
+        let temporary = tempfile::tempdir().expect("temporary application directory");
+        let mut app = inventory_app(&temporary);
+        // A link with nothing behind it, so the list has a critical finding to
+        // lead with and an informational one to rank below it.
+        install_link(
+            &temporary,
+            AgentKind::ClaudeCode,
+            "dangling",
+            &temporary.path().join("nowhere"),
+        );
+
+        let update = app.update(Action::OpenDoctor);
+
+        assert_eq!(app.view(), View::Doctor);
+        assert_eq!(update.effects(), [Effect::ScanInstallations]);
+        // Between the transition and the effect there is no scan for this view.
+        assert!(app.inventory().scan_pending());
+        assert!(app.doctor_findings().is_empty());
+
+        app.perform_effects(update.effects())
+            .expect("installation scan");
+        assert!(!app.doctor_findings().is_empty());
+        assert_eq!(
+            app.selected_finding().map(|entry| entry.finding().code()),
+            Some("install.dangling_symlink")
+        );
+    }
+
+    /// The regions behave like every other workspace: Tab cycles, Enter drills
+    /// in, Esc unwinds one region and then leaves for the Inventory.
+    #[test]
+    fn doctor_regions_cycle_drill_in_and_unwind() {
+        let temporary = tempfile::tempdir().expect("temporary application directory");
+        let mut app = inventory_app(&temporary);
+        let update = app.update(Action::OpenDoctor);
+        app.perform_effects(update.effects())
+            .expect("installation scan");
+
+        assert_eq!(app.doctor_pane(), DoctorPane::Findings);
+        app.update(Action::MoveDoctorPane(1));
+        assert_eq!(app.doctor_pane(), DoctorPane::Details);
+        app.update(Action::MoveDoctorPane(1));
+        assert_eq!(app.doctor_pane(), DoctorPane::Findings);
+
+        app.update(Action::AdvanceDoctorPane);
+        assert_eq!(app.doctor_pane(), DoctorPane::Details);
+        app.update(Action::Back);
+        assert_eq!(app.doctor_pane(), DoctorPane::Findings);
+
+        let leaving = app.update(Action::Back);
+        assert_eq!(app.view(), View::Inventory);
+        assert_eq!(leaving.effects(), [Effect::ScanInstallations]);
+    }
+
+    /// The selection wraps within the findings that exist, and moves nothing
+    /// from the detail region, which has no list to move.
+    #[test]
+    fn the_doctor_selection_wraps_within_the_findings_it_lists() {
+        let temporary = tempfile::tempdir().expect("temporary application directory");
+        let mut app = inventory_app(&temporary);
+        install_link(
+            &temporary,
+            AgentKind::ClaudeCode,
+            "dangling",
+            &temporary.path().join("nowhere"),
+        );
+        let update = app.update(Action::OpenDoctor);
+        app.perform_effects(update.effects())
+            .expect("installation scan");
+        let total = app.doctor_findings().len();
+        assert!(total > 1, "the fixture needs more than one finding");
+
+        for expected in 1..=total {
+            app.update(Action::MoveDoctorSelection(1));
+            assert_eq!(app.focused_finding(), expected % total);
+        }
+
+        app.update(Action::AdvanceDoctorPane);
+        app.update(Action::MoveDoctorSelection(1));
+        assert_eq!(app.focused_finding(), 0);
+    }
+
+    /// Doctor answers to the destination digits the navigation row shows.
+    #[test]
+    fn doctor_leaves_by_the_routes_it_advertises() {
+        let temporary = tempfile::tempdir().expect("temporary application directory");
+        let mut app = inventory_app(&temporary);
+
+        let update = app.update(Action::OpenDoctor);
+        app.perform_effects(update.effects()).expect("scan");
+        app.update(Action::OpenSources);
+        assert_eq!(app.view(), View::Sources);
+
+        let update = app.update(Action::OpenDoctor);
+        assert_eq!(app.view(), View::Doctor);
+        app.perform_effects(update.effects()).expect("scan");
+
+        let update = app.update(Action::OpenInventory);
+        assert_eq!(app.view(), View::Inventory);
+        assert_eq!(update.effects(), [Effect::ScanInstallations]);
+    }
+
     #[test]
     fn the_filter_narrows_by_the_words_the_effective_resolution_adds() {
         let temporary = tempfile::tempdir().expect("temporary application directory");

@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use crate::{
     AgentDetection, AgentKind, AppEnvironment, Result,
     agents::{detect_agents, detection_at},
-    inventory::{InventoryRow, InventorySnapshot, scan_installations},
+    inventory::{DoctorEntry, InventoryRow, InventorySnapshot, scan_installations},
     source::{
         CatalogProposal, RegisteredSource, SkillCandidate, SourcePreview, preview_local_source,
         revalidate_source_preview,
@@ -77,6 +77,7 @@ pub enum View {
     Setup(SetupStep),
     Inventory,
     Sources,
+    Doctor,
     Settings,
 }
 
@@ -97,6 +98,16 @@ pub enum InventoryPane {
     Details,
 }
 
+/// The regions of the Doctor workspace, in reading order.
+///
+/// The same shape as [`InventoryPane`]: a wide terminal shows both and this is
+/// only focus; a compact one shows the focused region alone.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DoctorPane {
+    Findings,
+    Details,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Action {
     Continue,
@@ -108,6 +119,10 @@ pub enum Action {
     OpenSettings,
     OpenInventory,
     OpenSources,
+    OpenDoctor,
+    MoveDoctorPane(i8),
+    AdvanceDoctorPane,
+    MoveDoctorSelection(i8),
     BeginAddSource,
     AppendSourcePath(char),
     DeleteSourcePathCharacter,
@@ -335,6 +350,8 @@ pub struct SkilledApp {
     /// bound the reducer has: `update` never learns the terminal's size, so
     /// the renderer measures the region and the runner notes what it found.
     inventory_detail_max_scroll: usize,
+    doctor_pane: DoctorPane,
+    focused_finding: usize,
     help_context: Option<View>,
 }
 
@@ -386,6 +403,8 @@ impl SkilledApp {
             inventory_filter_active: false,
             inventory_detail_scroll: 0,
             inventory_detail_max_scroll: 0,
+            doctor_pane: DoctorPane::Findings,
+            focused_finding: 0,
             help_context: None,
         };
         app.refilter_installations();
@@ -476,6 +495,27 @@ impl SkilledApp {
     /// skill root is only ever spoken about as `~/.claude/skills`.
     pub fn home(&self) -> &Path {
         &self.environment.home_dir
+    }
+
+    pub fn doctor_pane(&self) -> DoctorPane {
+        self.doctor_pane
+    }
+
+    pub fn focused_finding(&self) -> usize {
+        self.focused_finding
+    }
+
+    /// Every finding the last scan holds, in the order Doctor lists them.
+    ///
+    /// Materialised on demand rather than cached: the snapshot is the only
+    /// state behind it, so a list held beside the snapshot could disagree with
+    /// it after a rescan.
+    pub fn doctor_findings(&self) -> Vec<DoctorEntry<'_>> {
+        self.inventory.doctor_findings().collect()
+    }
+
+    pub fn selected_finding(&self) -> Option<DoctorEntry<'_>> {
+        self.doctor_findings().into_iter().nth(self.focused_finding)
     }
 
     pub fn inventory_pane(&self) -> InventoryPane {
@@ -616,16 +656,49 @@ impl SkilledApp {
                 Vec::new()
             }
             Action::OpenInventory => {
-                if self.view == View::Sources {
+                if matches!(self.view, View::Sources | View::Doctor) {
                     self.enter_inventory()
                 } else {
                     Vec::new()
                 }
             }
             Action::OpenSources => {
-                if self.view == View::Inventory {
+                if matches!(self.view, View::Inventory | View::Doctor) {
                     self.view = View::Sources;
                     self.sources_pane = SourcesPane::Repositories;
+                }
+                Vec::new()
+            }
+            Action::OpenDoctor => {
+                if matches!(self.view, View::Inventory | View::Sources) {
+                    self.enter_doctor()
+                } else {
+                    Vec::new()
+                }
+            }
+            Action::MoveDoctorPane(delta) => {
+                if self.view == View::Doctor {
+                    let index = match self.doctor_pane {
+                        DoctorPane::Findings => 0,
+                        DoctorPane::Details => 1,
+                    };
+                    self.doctor_pane = match wrapped_index(index, delta, 2) {
+                        0 => DoctorPane::Findings,
+                        _ => DoctorPane::Details,
+                    };
+                }
+                Vec::new()
+            }
+            Action::AdvanceDoctorPane => {
+                if self.view == View::Doctor && self.selected_finding().is_some() {
+                    self.doctor_pane = DoctorPane::Details;
+                }
+                Vec::new()
+            }
+            Action::MoveDoctorSelection(delta) => {
+                if self.view == View::Doctor && self.doctor_pane == DoctorPane::Findings {
+                    self.focused_finding =
+                        wrapped_index(self.focused_finding, delta, self.doctor_findings().len());
                 }
                 Vec::new()
             }
@@ -853,6 +926,10 @@ impl SkilledApp {
     fn rescan_installations(&mut self) {
         self.inventory = scan_installations(&self.agents, &self.sources);
         self.refilter_installations();
+        // The findings behind the selection are gone with the snapshot, so the
+        // selection is pulled back onto the list that replaced them.
+        let last = self.doctor_findings().len().saturating_sub(1);
+        self.focused_finding = self.focused_finding.min(last);
     }
 
     /// Recompute which rows the query admits, and keep the selection on one.
@@ -903,6 +980,20 @@ impl SkilledApp {
     fn reset_inventory_detail_scroll(&mut self) {
         self.inventory_detail_scroll = 0;
         self.inventory_detail_max_scroll = 0;
+    }
+
+    /// Open Doctor on a scan taken for Doctor.
+    ///
+    /// The same contract [`Self::enter_inventory`] keeps, for the same reason:
+    /// the findings this view lists must have been observed for this view, not
+    /// inherited from whichever one the user was standing in.
+    fn enter_doctor(&mut self) -> Vec<Effect> {
+        self.view = View::Doctor;
+        self.doctor_pane = DoctorPane::Findings;
+        self.inventory = InventorySnapshot::not_scanned(&self.agents);
+        self.filtered_installations.clear();
+        self.reset_inventory_detail_scroll();
+        vec![Effect::ScanInstallations]
     }
 
     fn enter_inventory(&mut self) -> Vec<Effect> {
@@ -1015,6 +1106,13 @@ impl SkilledApp {
                 }
             }
             View::Settings => return UpdateResult::continuing(self.enter_inventory()),
+            // Back unwinds the drilled-in region first, then the view.
+            View::Doctor => match self.doctor_pane {
+                DoctorPane::Details => self.doctor_pane = DoctorPane::Findings,
+                DoctorPane::Findings => {
+                    return UpdateResult::continuing(self.enter_inventory());
+                }
+            },
             View::Sources => match self.sources_pane {
                 SourcesPane::Details => self.sources_pane = SourcesPane::Variants,
                 SourcesPane::Variants => self.sources_pane = SourcesPane::Repositories,

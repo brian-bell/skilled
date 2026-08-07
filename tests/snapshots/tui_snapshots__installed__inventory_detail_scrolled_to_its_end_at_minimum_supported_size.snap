@@ -3,7 +3,7 @@ source: tests/tui_snapshots.rs
 expression: screen
 ---
  ◆ skilled   global                               ● ready · 1 source registered
-▌Inventory ·3  2 Sources ·1  Updates (soon)  Doctor (soon)
+▌Inventory ·3  2 Sources ·1  Updates (soon)  4 Doctor ·3
  ▌ Details  alpha
  ──────────────────────────────────────────────────────────────────────────────
  ! 11 lines above
@@ -25,4 +25,4 @@ expression: screen
  NOT INSTALLED
  ──────────────────────────────────────────────────────────────────────────────
  - OpenCode
- Tab/Shift-Tab Region   j/k Scroll   2 Sources   q Quit   Esc Back …
+ Tab/Shift-Tab Region   j/k Scroll   2 Sources   4 Doctor   q Quit   Esc Back …

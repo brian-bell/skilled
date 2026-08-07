@@ -99,6 +99,57 @@ fn inventory_navigates_its_rows_and_regions() {
     }
 }
 
+/// Doctor handles exactly the keys its hints and its help entry advertise: a
+/// hint that no mapping backs is a promise the application cannot keep.
+#[test]
+fn doctor_navigates_its_findings_regions_and_routes() {
+    use skilled::input::action_for_key;
+
+    for (code, expected) in [
+        (KeyCode::Tab, Action::MoveDoctorPane(1)),
+        (KeyCode::BackTab, Action::MoveDoctorPane(-1)),
+        (KeyCode::Enter, Action::AdvanceDoctorPane),
+        (KeyCode::Up, Action::MoveDoctorSelection(-1)),
+        (KeyCode::Char('k'), Action::MoveDoctorSelection(-1)),
+        (KeyCode::Down, Action::MoveDoctorSelection(1)),
+        (KeyCode::Char('j'), Action::MoveDoctorSelection(1)),
+        (KeyCode::Esc, Action::Back),
+        (KeyCode::Char('1'), Action::OpenInventory),
+        (KeyCode::Char('2'), Action::OpenSources),
+        (KeyCode::Char('q'), Action::Quit),
+    ] {
+        assert_eq!(
+            action_for_key(View::Doctor, key(code)),
+            Some(expected),
+            "{code:?}"
+        );
+    }
+
+    // Doctor is already on screen, and Updates has no implementation, so
+    // neither digit is bound here.
+    for code in [KeyCode::Char('3'), KeyCode::Char('4')] {
+        assert_eq!(action_for_key(View::Doctor, key(code)), None, "{code:?}");
+    }
+
+    // The route the other two workspaces offer into Doctor.
+    for view in [View::Inventory, View::Sources] {
+        assert_eq!(
+            action_for_key(view, key(KeyCode::Char('4'))),
+            Some(Action::OpenDoctor),
+            "view {view:?}"
+        );
+    }
+
+    // Held keys move the selection and nothing else.
+    assert_eq!(
+        action_for_key(View::Doctor, repeat(KeyCode::Char('j'))),
+        Some(Action::MoveDoctorSelection(1))
+    );
+    for code in [KeyCode::Tab, KeyCode::Enter, KeyCode::Esc] {
+        assert_eq!(action_for_key(View::Doctor, repeat(code)), None, "{code:?}");
+    }
+}
+
 #[test]
 fn a_held_inventory_key_repeats_movement_but_not_navigation() {
     use skilled::input::action_for_key;
@@ -199,6 +250,7 @@ fn question_mark_opens_help_in_every_implemented_top_level_view() {
         View::Setup(SetupStep::Welcome),
         View::Inventory,
         View::Sources,
+        View::Doctor,
         View::Settings,
     ] {
         assert_eq!(

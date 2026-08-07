@@ -1,0 +1,28 @@
+---
+source: tests/tui_snapshots.rs
+expression: screen
+---
+ ◆ skilled   global                              ● ready · 2 sources registered
+ 1 Inventory ·4  2 Sources ·2  Updates (soon) ▌Doctor ·6
+ ▌ Details  review
+ ──────────────────────────────────────────────────────────────────────────────
+ FINDING
+ ──────────────────────────────────────────────────────────────────────────────
+ variant.duplicate_for_agent
+ × critical
+ Agent: Claude Code
+ OBSERVED
+ ──────────────────────────────────────────────────────────────────────────────
+ Claude Code has more than one registered variant of review: alpha · skills ·
+ skills/review, beta · skills · skills/review. The selection order — an exact
+ agent-specific variant, then a compatible common one — does not narrow it to
+ one.
+ CONSEQUENCE
+ ──────────────────────────────────────────────────────────────────────────────
+ Which definition the agent resolves is not something Skilled can state.
+ COMPETING VARIANTS
+ ──────────────────────────────────────────────────────────────────────────────
+ Variant: alpha · skills · skills/review
+ Variant: beta · skills · skills/review
+ Repair: not offered in this release
+ Tab/Shift-Tab Region   1 Inventory   2 Sources   ? Help   q Quit   Esc Back

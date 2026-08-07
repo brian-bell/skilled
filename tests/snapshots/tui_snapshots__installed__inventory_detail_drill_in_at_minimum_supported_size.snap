@@ -3,7 +3,7 @@ source: tests/tui_snapshots.rs
 expression: "normalize_inventory(&temporary, render(&app, 80, 24))"
 ---
  ◆ skilled   global                               ● ready · 1 source registered
-▌Inventory ·3  2 Sources ·1  Updates (soon)  Doctor (soon)
+▌Inventory ·3  2 Sources ·1  Updates (soon)  4 Doctor ·3
  ▌ Details  copied
  ──────────────────────────────────────────────────────────────────────────────
  SKILL
@@ -25,4 +25,4 @@ expression: "normalize_inventory(&temporary, render(&app, 80, 24))"
  Object: directory
  Validation: ✓ valid as copied
  ! 3 more lines below — j/k to scroll
- Tab/Shift-Tab Region   j/k Scroll   2 Sources   q Quit   Esc Back …
+ Tab/Shift-Tab Region   j/k Scroll   2 Sources   4 Doctor   q Quit   Esc Back …

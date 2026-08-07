@@ -1118,13 +1118,25 @@ fn selection_findings(
             else {
                 continue;
             };
+            let row = rows.iter().find(|row| row.name() == name);
+            // An effective resolution that is already a conflict for this agent
+            // has said this, about the same name and the same agent, from the
+            // installed side. Filing the registry's version beside it would put
+            // two rows carrying one code, one skill, and one agent in a list
+            // whose whole purpose is to be read down.
+            if row.is_some_and(|row| {
+                agent == AgentKind::OpenCode
+                    && matches!(
+                        row.opencode_resolution(),
+                        Some(OpenCodeResolution::Conflict { .. })
+                    )
+            }) {
+                continue;
+            }
             // An ambiguity nothing has resolved yet leaves a future
             // installation uncertain; one an installation already answers to
             // means an agent is loading content Skilled cannot say was chosen.
-            let installed = rows
-                .iter()
-                .find(|row| row.name() == name)
-                .is_some_and(|row| row.observation(agent).is_some());
+            let installed = row.is_some_and(|row| row.observation(agent).is_some());
             let listed = variants
                 .iter()
                 .map(VariantRef::evidence_label)

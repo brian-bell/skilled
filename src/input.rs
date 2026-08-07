@@ -97,6 +97,7 @@ pub fn action_for_key(view: View, key: KeyEvent) -> Option<Action> {
             View::Inventory => match key.code {
                 KeyCode::Char('s') => Some(Action::OpenSettings),
                 KeyCode::Char('2') => Some(Action::OpenSources),
+                KeyCode::Char('4') => Some(Action::OpenDoctor),
                 KeyCode::Tab => Some(Action::MoveInventoryPane(1)),
                 KeyCode::BackTab => Some(Action::MoveInventoryPane(-1)),
                 KeyCode::Enter => Some(Action::AdvanceInventoryPane),
@@ -108,12 +109,24 @@ pub fn action_for_key(view: View, key: KeyEvent) -> Option<Action> {
             },
             View::Sources => match key.code {
                 KeyCode::Char('1') => Some(Action::OpenInventory),
+                KeyCode::Char('4') => Some(Action::OpenDoctor),
                 KeyCode::Char('a') => Some(Action::BeginAddSource),
                 KeyCode::Tab => Some(Action::MoveSourcesPane(1)),
                 KeyCode::BackTab => Some(Action::MoveSourcesPane(-1)),
                 KeyCode::Enter => Some(Action::AdvanceSourcesPane),
                 KeyCode::Up | KeyCode::Char('k') => Some(Action::MoveSourcesSelection(-1)),
                 KeyCode::Down | KeyCode::Char('j') => Some(Action::MoveSourcesSelection(1)),
+                KeyCode::Esc => Some(Action::Back),
+                _ => None,
+            },
+            View::Doctor => match key.code {
+                KeyCode::Char('1') => Some(Action::OpenInventory),
+                KeyCode::Char('2') => Some(Action::OpenSources),
+                KeyCode::Tab => Some(Action::MoveDoctorPane(1)),
+                KeyCode::BackTab => Some(Action::MoveDoctorPane(-1)),
+                KeyCode::Enter => Some(Action::AdvanceDoctorPane),
+                KeyCode::Up | KeyCode::Char('k') => Some(Action::MoveDoctorSelection(-1)),
+                KeyCode::Down | KeyCode::Char('j') => Some(Action::MoveDoctorSelection(1)),
                 KeyCode::Esc => Some(Action::Back),
                 _ => None,
             },
@@ -128,6 +141,7 @@ pub fn action_for_key(view: View, key: KeyEvent) -> Option<Action> {
     match (key.kind, action) {
         (KeyEventKind::Repeat, Some(Action::MoveSelection(_))) => action,
         (KeyEventKind::Repeat, Some(Action::MoveInventorySelection(_))) => action,
+        (KeyEventKind::Repeat, Some(Action::MoveDoctorSelection(_))) => action,
         (KeyEventKind::Repeat, _) => None,
         _ => action,
     }
