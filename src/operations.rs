@@ -1315,6 +1315,15 @@ pub enum InstallPrompt {
 /// A plan that blocks blocks whole, and this refuses one rather than trusting
 /// its callers to: a plan is either executable or it is not written at all.
 ///
+/// One window is left open and is recorded rather than papered over. Every
+/// guard here resolves a path by name, so a process that replaced the checked
+/// root — or a directory above it — between the check and the `symlink` call
+/// would have the link created somewhere other than the path the plan stated.
+/// Closing it needs directory handles and `O_NOFOLLOW`, which the standard
+/// library does not offer portably, so it is a deliberate follow-up rather than
+/// a new production dependency taken without review. An attacker able to use it
+/// already has write access to the user's home directory.
+///
 /// There is no rollback. The links written before a failure are real, healthy,
 /// receipted installations, and deleting them would be a second unrequested
 /// write on top of an operation that already went wrong. Spec 19 permits

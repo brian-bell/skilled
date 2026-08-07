@@ -1881,12 +1881,19 @@ fn detail_scroll_extent(
         if body.width == 0 {
             return None;
         }
-        let lines = install_prompt_lines(prompt, app.home(), body.width);
-        let rows_per_line: Vec<usize> = lines
+        // Counted in wrapped rows, not in lines. A detail region moves its
+        // window a whole field at a time so a wrapped value never opens with
+        // its label above the edge; this is one paragraph the reader is asked
+        // to agree to, and `Paragraph::scroll` counts rows, so the last row of
+        // it has to be reachable even when a path wraps. The offset state is
+        // shared with the detail regions because only one scrollable thing is
+        // ever on screen — the renderer measures the unit, and the reducer
+        // only ever clamps to what it was told.
+        let rows: usize = install_prompt_lines(prompt, app.home(), body.width)
             .iter()
             .map(|line| wrapped_line_count(line, body.width))
-            .collect();
-        return Some(detail_max_scroll(&rows_per_line, body.height));
+            .sum();
+        return Some(rows.saturating_sub(usize::from(body.height)));
     }
     let (primary, detail) = viewport::workspace_regions(workspace);
     let focused_alone = |drilled_in: bool| match (detail, drilled_in) {
@@ -4020,11 +4027,20 @@ fn install_report_lines(outcome: &InstallOutcome) -> Vec<Line<'static>> {
     for step in outcome.applied().steps() {
         let (tone, verdict) = match step.outcome() {
             StepOutcome::Created => (Tone::Healthy, "link created".to_owned()),
+            // A step's reason carries paths and operating-system error text,
+            // which is outside Skilled's control and escaped like everything
+            // else that comes from there.
             StepOutcome::CreatedUnrecorded(error) => (
                 Tone::Warning,
-                format!("link created, but Skilled could not record owning it: {error}"),
+                format!(
+                    "link created, but Skilled could not record owning it: {}",
+                    terminal_safe(error)
+                ),
             ),
-            StepOutcome::Failed(reason) => (Tone::Critical, format!("not written — {reason}")),
+            StepOutcome::Failed(reason) => (
+                Tone::Critical,
+                format!("not written — {}", terminal_safe(reason)),
+            ),
             StepOutcome::Unattempted => (
                 Tone::Unmanaged,
                 "not attempted, because an earlier step stopped the run".to_owned(),

@@ -4256,6 +4256,49 @@ fn the_install_hint_appears_only_where_a_variant_is_focused() {
     assert!(!footer(&app).contains("i Install"), "{}", footer(&app));
 }
 
+/// The report escapes what it prints, as every other surface does.
+///
+/// A step's failure reason carries paths and operating-system error text, both
+/// of which come from outside Skilled; a terminal would execute a control
+/// sequence in one rather than show it.
+#[cfg(unix)]
+#[test]
+fn the_install_report_escapes_filesystem_text_in_a_failed_step() {
+    let harness = Harness::new();
+    let home = harness.directory.path().join("home");
+    // A checkout directory whose name carries an escape sequence, moved out
+    // from under the plan so the failure names the path it resolved.
+    let repository = harness.directory.path().join("lib\u{1b}[31mrary");
+    create_source_fixture(&repository);
+    for root in [".claude", ".agents", ".config/opencode"] {
+        fs::create_dir_all(home.join(root)).expect("create the root's parent");
+    }
+    let mut app = harness.first_run();
+    let preview = app.preview_source(&repository).expect("preview source");
+    app.confirm_source(preview).expect("register source");
+    for _ in 0..7 {
+        let update = app.update(Action::Continue);
+        app.perform_effects(update.effects())
+            .expect("perform setup effects");
+    }
+    app.update(Action::OpenSources);
+    app.update(Action::AdvanceSourcesPane);
+    let update = app.update(Action::BeginInstall);
+    app.perform_effects(update.effects()).expect("plan install");
+    fs::rename(&repository, harness.directory.path().join("moved")).expect("move the checkout");
+    let update = app.update(Action::ConfirmInstall);
+    app.perform_effects(update.effects())
+        .expect("apply install");
+
+    let rendered = text(&buffer(&app, 100, 30));
+
+    assert!(rendered.contains("not written"), "{rendered:?}");
+    assert!(
+        !rendered.contains('\u{1b}'),
+        "an escape sequence reached the terminal: {rendered:?}"
+    );
+}
+
 /// A postcondition Skilled could not check is stated as withheld, and the
 /// one-line verdict does not claim a verification it did not make.
 #[cfg(unix)]
@@ -4338,12 +4381,26 @@ fn a_preview_taller_than_its_dialog_says_so_and_can_be_scrolled_to_its_end() {
 
     // The window moves the way it does everywhere else: the frame measures the
     // extent, the runner notes it, and the next keystroke is clamped to it.
-    scroll_detail(&mut app, 80, 24, 12);
+    // Far more steps than the content needs, so the clamp is what stops it —
+    // the last row of a wrapped preview has to be reachable, which it is only
+    // if the extent is counted in the rows the paragraph actually draws.
+    scroll_detail(&mut app, 80, 24, 60);
     let screen = buffer(&app, 80, 24);
     let rendered = text(&screen);
 
     assert!(rendered.contains("Home:"), "{rendered}");
     assert!(rendered.contains("more above"), "{rendered}");
+    assert!(!rendered.contains("more below"), "{rendered}");
+    // The last line of the plan is the last thing in the body: between it and
+    // the rule that closes the body there is nothing left unread.
+    let last = row_containing(&screen, "Home:");
+    let rule = row_containing(&screen, "  ──────");
+    let below = ((last + 1)..rule)
+        .map(|y| row_text(&screen, y))
+        .filter_map(|row| dialog_interior(&row).map(str::trim).map(str::to_owned))
+        .filter(|row| !row.is_empty())
+        .collect::<Vec<_>>();
+    assert!(below.is_empty(), "{below:?} in\n{rendered}");
     // The keys the footer offers are still the ones the reducer honours.
     let footer = row_text(&screen, screen.area.height - 1);
     assert!(footer.contains("Enter Install"), "{footer}");
