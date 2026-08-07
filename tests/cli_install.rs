@@ -437,6 +437,105 @@ fn a_missing_flag_value_is_not_taken_from_the_next_flag() {
     assert!(fixture.nothing_installed());
 }
 
+/// OpenCode reads the other agents' roots, so a link written into one of them
+/// is a postcondition of OpenCode's too — even when OpenCode was not a target.
+#[test]
+fn an_install_that_leaves_opencode_ambiguous_is_reported_even_when_it_was_not_a_target() {
+    let fixture = Fixture::new();
+    let repository = fixture.register("library", &["portable"]);
+    // A second directory OpenCode would load under the same name, in Codex's
+    // root, which this request does not touch.
+    let elsewhere = fixture.directory.path().join("elsewhere/portable");
+    write_skill(&elsewhere, "portable");
+    let codex = fixture.home().join(".agents/skills");
+    fs::create_dir_all(&codex).expect("create Codex root");
+    std::os::unix::fs::symlink(&elsewhere, codex.join("portable")).expect("install a link");
+
+    let (code, output) = fixture.run(&[
+        "install",
+        "--yes",
+        "--source",
+        &repository.display().to_string(),
+        "--skill",
+        "portable",
+        "--agents",
+        "claude-code",
+    ]);
+
+    // The link was written, and the report says what it did to OpenCode rather
+    // than reporting a clean install and leaving it to Doctor.
+    assert_eq!(code, ExitCodeKind::VerificationFailed, "{output}");
+    assert!(
+        fixture.home().join(".claude/skills/portable").is_dir(),
+        "{output}"
+    );
+    assert!(output.contains("Not verified: OpenCode"), "{output}");
+    assert!(
+        output.contains("more than one directory under that name"),
+        "{output}"
+    );
+}
+
+/// A registered variant path that is no longer a directory is refused while
+/// there is still a plan to refuse, not part way through applying one.
+#[test]
+fn a_variant_path_that_is_no_longer_a_directory_is_refused_before_any_plan() {
+    let fixture = Fixture::new();
+    let repository = fixture.register("library", &["portable"]);
+    fs::remove_dir_all(repository.join("skills/portable")).expect("remove the variant");
+    fs::write(repository.join("skills/portable"), "no longer a directory")
+        .expect("replace it with a file");
+
+    let (code, output) = fixture.run(&[
+        "install",
+        "--yes",
+        "--source",
+        &repository.display().to_string(),
+        "--skill",
+        "portable",
+        "--agents",
+        "claude-code",
+    ]);
+
+    assert_eq!(code, ExitCodeKind::InvalidRequest, "{output}");
+    assert!(fixture.nothing_installed(), "{output}");
+}
+
+/// Text from the filesystem is escaped before it reaches the terminal.
+///
+/// A checkout directory, a catalog path, or a link target is outside Skilled's
+/// control, and a terminal would execute a control sequence in one rather than
+/// show it. The screens escape for the same reason; the command writes to the
+/// same terminal by a different route.
+#[test]
+fn filesystem_text_is_escaped_before_it_is_printed() {
+    let fixture = Fixture::new();
+    // A checkout directory whose name carries an escape sequence. The name
+    // becomes the source label, which the plan prints.
+    let repository = fixture.directory.path().join("lib\u{1b}[31mrary");
+    write_skill(&repository.join("skills/portable"), "portable");
+    initialize_repository(&repository);
+    fixture.register_path(&repository);
+
+    let (code, output) = fixture.run(&[
+        "install",
+        "--yes",
+        "--source",
+        &repository.display().to_string(),
+        "--skill",
+        "portable",
+        "--agents",
+        "claude-code",
+    ]);
+
+    assert_eq!(code, ExitCodeKind::Success, "{output:?}");
+    assert!(
+        !output.contains('\u{1b}'),
+        "an escape sequence reached the terminal: {output:?}"
+    );
+    assert!(output.contains("\\u{1b}"), "{output:?}");
+}
+
 /// Whether permission bits will be enforced against this process.
 fn running_as_root() -> bool {
     let probe = std::env::temp_dir().join(format!("skilled-cli-probe-{}", std::process::id()));

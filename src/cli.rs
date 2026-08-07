@@ -18,6 +18,7 @@ use std::{
 use crate::{
     AgentKind, AppEnvironment, SkilledApp,
     agents::adapter,
+    components::terminal_safe,
     operations::{
         ExcludedReason, InstallOutcome, InstallPlan, InstallStatus, InstallTarget, LocateFailure,
         StepOutcome, TargetDisposition, locate_variant,
@@ -95,7 +96,7 @@ pub fn run(
     match execute(&request, environment, input, output) {
         Ok(code) => code,
         Err(message) => {
-            let _ = writeln!(output, "skilled: {message}");
+            let _ = writeln!(output, "skilled: {}", safe(&message));
             ExitCodeKind::InternalError
         }
     }
@@ -120,7 +121,7 @@ pub fn exit_code_for(status: InstallStatus) -> ExitCodeKind {
 }
 
 fn refuse(output: &mut dyn Write, message: &str) -> ExitCodeKind {
-    let _ = writeln!(output, "skilled: {message}\n\n{USAGE}");
+    let _ = writeln!(output, "skilled: {}\n\n{USAGE}", safe(message));
     ExitCodeKind::InvalidRequest
 }
 
@@ -351,16 +352,27 @@ fn confirmed(input: &mut dyn BufRead, output: &mut dyn Write) -> Result<bool, St
     Ok(answer == "y" || answer == "yes")
 }
 
+/// Everything a command prints that came from the filesystem goes through here.
+///
+/// A checkout directory, a catalog path, a link target, and the text of an
+/// operating-system error are all outside Skilled's control, and a terminal
+/// would execute a control sequence in any of them rather than show it. The
+/// screens escape for the same reason; this is the same escaper, reached from
+/// the other surface.
+fn safe(value: &(impl std::fmt::Display + ?Sized)) -> String {
+    terminal_safe(&value.to_string())
+}
+
 fn write_plan(output: &mut dyn Write, plan: &InstallPlan, home: &Path) -> std::io::Result<()> {
-    writeln!(output, "Install {}", plan.skill_name())?;
+    writeln!(output, "Install {}", safe(plan.skill_name()))?;
     writeln!(
         output,
         "  from {} · {}",
-        plan.variant().source_label(),
-        plan.variant().catalog_relative_path().display()
+        safe(plan.variant().source_label()),
+        safe(&plan.variant().catalog_relative_path().display())
     )?;
-    writeln!(output, "  links to {}", plan.source_dir().display())?;
-    writeln!(output, "  home {}", home.display())?;
+    writeln!(output, "  links to {}", safe(&plan.source_dir().display()))?;
+    writeln!(output, "  home {}", safe(&home.display()))?;
     writeln!(output)?;
     for target in plan.targets() {
         writeln!(
@@ -369,10 +381,14 @@ fn write_plan(output: &mut dyn Write, plan: &InstallPlan, home: &Path) -> std::i
             target.agent().display_name(),
             target_verdict(target)
         )?;
-        writeln!(output, "               {}", target.link_path().display())?;
+        writeln!(
+            output,
+            "               {}",
+            safe(&target.link_path().display())
+        )?;
     }
     for warning in plan.warnings() {
-        writeln!(output, "\n  warning: {warning}")?;
+        writeln!(output, "\n  warning: {}", safe(warning))?;
     }
     Ok(())
 }
@@ -381,11 +397,11 @@ fn target_verdict(target: &InstallTarget) -> String {
     match target.disposition() {
         TargetDisposition::CreateLink => "create the link".to_owned(),
         TargetDisposition::CreateRootAndLink => "create the skill root, then the link".to_owned(),
-        TargetDisposition::AlreadyInstalled { managed: true } => {
-            "already installed by Skilled".to_owned()
+        TargetDisposition::AlreadyInstalled { receipted: true } => {
+            "already installed, and Skilled holds a receipt for this path".to_owned()
         }
-        TargetDisposition::AlreadyInstalled { managed: false } => {
-            "already in place, and not owned by Skilled".to_owned()
+        TargetDisposition::AlreadyInstalled { receipted: false } => {
+            "already in place, and Skilled holds no receipt for it".to_owned()
         }
         TargetDisposition::Excluded { reason } => match reason {
             ExcludedReason::NotConfigured => {
@@ -397,11 +413,11 @@ fn target_verdict(target: &InstallTarget) -> String {
             }
             ExcludedReason::AgentSpecificOverride { selected } => format!(
                 "excluded: prefers its own edition, {}",
-                selected.evidence_label()
+                safe(&selected.evidence_label())
             ),
         },
         TargetDisposition::Blocked { finding } => {
-            format!("blocked: {} — {}", finding.code(), finding.evidence())
+            format!("blocked: {} — {}", finding.code(), safe(finding.evidence()))
         }
     }
 }
@@ -412,15 +428,22 @@ fn write_report(output: &mut dyn Write, outcome: &InstallOutcome) -> std::io::Re
         let verdict = match step.outcome() {
             StepOutcome::Created => "link created".to_owned(),
             StepOutcome::CreatedUnrecorded(error) => {
-                format!("link created, but Skilled could not record owning it: {error}")
+                format!(
+                    "link created, but Skilled could not record owning it: {}",
+                    safe(error)
+                )
             }
-            StepOutcome::Failed(reason) => format!("not written — {reason}"),
+            StepOutcome::Failed(reason) => format!("not written — {}", safe(reason)),
             StepOutcome::Unattempted => {
                 "not attempted, because an earlier step stopped the run".to_owned()
             }
         };
         writeln!(output, "  {:<12} {verdict}", step.agent().display_name())?;
-        writeln!(output, "               {}", step.link_path().display())?;
+        writeln!(
+            output,
+            "               {}",
+            safe(&step.link_path().display())
+        )?;
     }
     writeln!(output)?;
     if outcome.verification().is_complete() {
@@ -440,7 +463,7 @@ fn write_report(output: &mut dyn Write, outcome: &InstallOutcome) -> std::io::Re
             output,
             "Not established: {} — {}",
             withheld.agent().display_name(),
-            withheld.reason()
+            safe(withheld.reason())
         )?;
     }
     for failure in outcome.verification().failures() {
@@ -448,7 +471,7 @@ fn write_report(output: &mut dyn Write, outcome: &InstallOutcome) -> std::io::Re
             output,
             "Not verified: {} — {}",
             failure.agent().display_name(),
-            failure.observed()
+            safe(failure.observed())
         )?;
     }
     // Only where something was written: there is nothing to say about undoing

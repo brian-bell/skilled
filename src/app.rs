@@ -1090,7 +1090,7 @@ impl SkilledApp {
                  from anyone else\'s: {error}"
             )
         })?;
-        let probe = probe_install(&self.agents, &self.sources, variant);
+        let probe = probe_install(&self.agents, &self.sources, variant, self.home());
         plan_install(
             &self.agents,
             &self.sources,
@@ -1107,7 +1107,7 @@ impl SkilledApp {
     /// The same three steps [`Effect::ApplyInstall`] performs, in the same
     /// order and for the same reason.
     pub(crate) fn apply_plan(&mut self, plan: &InstallPlan) -> InstallOutcome {
-        let applied = apply_install(plan, &self.store);
+        let applied = apply_install(plan, &self.store, &self.environment.home_dir);
         self.rescan_installations();
         let verification = verify_install(plan, &applied, &self.inventory);
         InstallOutcome::new(plan.clone(), applied, verification)
