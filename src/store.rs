@@ -7,7 +7,8 @@ use std::{
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::{
-    Error, Result,
+    AgentKind, Error, Result,
+    operations::Receipt,
     source::{
         CatalogClassification, CatalogProposal, Compatibility, InspectedSource, RegisteredSource,
         SourcePreview, contains_revision, inspect_local_source,
@@ -89,6 +90,86 @@ impl Store {
         )?;
         transaction.commit()?;
         Ok(())
+    }
+
+    /// Record that Skilled created one particular link.
+    ///
+    /// One statement, and therefore its own transaction: the receipt is written
+    /// the moment the link exists, so a crash between two targets still leaves
+    /// the store describing exactly what is on disk.
+    pub(crate) fn record_receipt(&self, receipt: &Receipt) -> Result<()> {
+        self.connection.execute(
+            "INSERT INTO operation_receipts
+                (created_at, operation, agent, skill_name, link_path, link_target,
+                 source_id, catalog_relative_path, variant_relative_path)
+             VALUES (?1, 'install', ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                current_timestamp(),
+                agent_identifier(receipt.agent()),
+                receipt.skill_name(),
+                stored_path(receipt.link_path())?,
+                stored_path(receipt.link_target())?,
+                receipt.source_id(),
+                receipt
+                    .catalog_relative_path()
+                    .map(stored_path)
+                    .transpose()?,
+                receipt
+                    .variant_relative_path()
+                    .map(stored_path)
+                    .transpose()?,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Every ownership receipt, oldest first.
+    ///
+    /// A row naming an agent this build does not know is an error rather than a
+    /// row to skip: a receipt Skilled cannot read is ownership it would go on to
+    /// deny, and denying it would let the next plan treat its own link as a
+    /// stranger's.
+    pub(crate) fn receipts(&self) -> Result<Vec<Receipt>> {
+        let mut statement = self.connection.prepare(
+            "SELECT agent, skill_name, link_path, link_target, source_id,
+                    catalog_relative_path, variant_relative_path
+             FROM operation_receipts ORDER BY created_at, id",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, Option<i64>>(4)?,
+                row.get::<_, Option<String>>(5)?,
+                row.get::<_, Option<String>>(6)?,
+            ))
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()?
+            .into_iter()
+            .map(
+                |(
+                    agent,
+                    skill_name,
+                    link_path,
+                    link_target,
+                    source_id,
+                    catalog_relative_path,
+                    variant_relative_path,
+                )| {
+                    Ok(Receipt::new(
+                        agent_kind(&agent)?,
+                        skill_name,
+                        PathBuf::from(link_path),
+                        PathBuf::from(link_target),
+                        source_id,
+                        catalog_relative_path.map(PathBuf::from),
+                        variant_relative_path.map(PathBuf::from),
+                    ))
+                },
+            )
+            .collect()
     }
 
     pub(crate) fn register_source(&mut self, preview: &SourcePreview) -> Result<()> {
@@ -298,6 +379,28 @@ fn path_text(path: &Path) -> Result<String> {
     path.to_str()
         .map(str::to_owned)
         .ok_or_else(|| Error::InvalidSourcePath(path.to_path_buf()))
+}
+
+/// A path stored outside the source tables, where "not a portable catalog path"
+/// would be the wrong thing to say about it.
+fn stored_path(path: &Path) -> Result<String> {
+    path.to_str()
+        .map(str::to_owned)
+        .ok_or_else(|| Error::UnrepresentablePath(path.to_path_buf()))
+}
+
+/// The stored spelling of an agent, shared by every table that names one.
+const AGENT_IDENTIFIERS: [&str; 3] = ["claude-code", "codex", "opencode"];
+
+fn agent_identifier(agent: AgentKind) -> &'static str {
+    AGENT_IDENTIFIERS[agent.index()]
+}
+
+fn agent_kind(identifier: &str) -> Result<AgentKind> {
+    AgentKind::ALL
+        .into_iter()
+        .find(|agent| agent_identifier(*agent) == identifier)
+        .ok_or_else(|| Error::InvalidStoredAgent(identifier.to_owned()))
 }
 
 fn current_timestamp() -> i64 {
