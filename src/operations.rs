@@ -23,11 +23,11 @@ use crate::{
     agents::detection_at,
     inventory::{
         Finding, FindingSeverity, InstallationHealth, InstallationObject,
-        InstalledSkillObservation, InventoryRow, InventorySnapshot,
+        InstalledSkillObservation, InventoryRow, InventorySnapshot, Provenance, RootStatus,
     },
     resolution::{
-        CandidateSelection, OpenCodeResolution, RootSighting, SightedEntry, VariantRef, narrow,
-        resolve_opencode, variants_by_name,
+        CandidateSelection, OpenCodeResolution, RootSighting, SightedEntry, UnknownCause,
+        UnknownRoot, VariantRef, narrow, resolve_opencode, variants_by_name,
     },
     source::{RegisteredSource, SkillValidation},
     store::Store,
@@ -163,6 +163,9 @@ enum EntryProbe {
     NotADirectory,
     /// The slot exists but could not be read.
     Unreadable(String),
+    /// The slot was not looked at, because the user asked Skilled to leave this
+    /// agent alone. Not the same as absent: nothing was observed either way.
+    NotRead,
 }
 
 /// What the agent's own global skill root holds.
@@ -171,11 +174,17 @@ enum RootProbe {
     Present,
     /// The root does not exist. Whether the plan may create it turns on its
     /// parent: spec 15 has Skilled create the documented root and nothing
-    /// above it, so an agent whose own directory is absent is left alone.
+    /// above it, so an agent whose own directory is absent is left alone. The
+    /// parent is carried rather than re-derived, so the finding that names it
+    /// is not doing path arithmetic on an agent convention.
     Missing {
+        parent: PathBuf,
         parent_present: bool,
     },
     Unreadable(String),
+    /// The root was not looked at: the user asked Skilled to leave this agent
+    /// alone, and [`crate::inventory`] keeps the same rule.
+    NotRead,
 }
 
 /// What an agent would load through a slot, as distinct from what occupies it.
@@ -214,8 +223,11 @@ impl TargetProbe {
 /// Everything about the machine one install request depends on.
 ///
 /// Taken in a single pass so the plan a user confirms describes one moment
-/// rather than a sequence of reads that drifted apart. It is read again
-/// immediately before each write; see [`apply_install`].
+/// rather than a sequence of reads that drifted apart. That moment is earlier
+/// than the write, so the target, its root, and the variant directory are each
+/// read once more before the link is created; see [`apply_install`]. Nothing
+/// else is — the narrowing and the OpenCode prediction stand as the plan the
+/// user agreed to, and the scan taken afterwards is what checks them.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InstallProbe {
     source_dir: Result<PathBuf, String>,
@@ -273,8 +285,24 @@ fn probe_source_dir(sources: &[RegisteredSource], variant: &VariantRef) -> Resul
     Ok(directory)
 }
 
+/// One agent's slot, read only if that agent is one Skilled was asked to
+/// manage.
+///
+/// Selection is checked before anything is touched, exactly as
+/// [`crate::inventory::scan_installations`] checks it: a root the user asked
+/// Skilled to leave alone stays unread, so nothing in it can decide anything —
+/// not this agent's own target, and not what the plan says about OpenCode.
 fn probe_target(agent: &AgentDetection, skill_name: &str) -> TargetProbe {
     let link_path = agent.root().join(skill_name);
+    if !agent.selected() {
+        return TargetProbe {
+            agent: agent.kind(),
+            link_path,
+            root: RootProbe::NotRead,
+            entry: EntryProbe::NotRead,
+            content: SlotContent::Unknown,
+        };
+    }
     let entry = probe_entry(&link_path);
     TargetProbe {
         root: probe_root(agent.root()),
@@ -293,7 +321,7 @@ fn probe_target(agent: &AgentDetection, skill_name: &str) -> TargetProbe {
 fn probe_content(link_path: &Path, entry: &EntryProbe) -> SlotContent {
     let canonical = match entry {
         EntryProbe::Absent | EntryProbe::NotADirectory => return SlotContent::Nowhere,
-        EntryProbe::Unreadable(_) => return SlotContent::Unknown,
+        EntryProbe::Unreadable(_) | EntryProbe::NotRead => return SlotContent::Unknown,
         EntryProbe::Symlink { canonical, .. } | EntryProbe::Directory { canonical } => canonical,
     };
     let Some(canonical) = canonical else {
@@ -329,10 +357,10 @@ fn probe_root(root: &Path) -> RootProbe {
             if fs::symlink_metadata(root).is_ok() {
                 return RootProbe::Unreadable("the skill root does not resolve".to_owned());
             }
+            let parent = root.parent().unwrap_or(root).to_path_buf();
             RootProbe::Missing {
-                parent_present: root
-                    .parent()
-                    .is_some_and(|parent| fs::metadata(parent).is_ok_and(|meta| meta.is_dir())),
+                parent_present: fs::metadata(&parent).is_ok_and(|meta| meta.is_dir()),
+                parent,
             }
         }
         Err(error) => RootProbe::Unreadable(error.to_string()),
@@ -520,10 +548,12 @@ pub fn plan_install(
     let competing = variants_by_name(sources)
         .remove(variant.skill_name())
         .unwrap_or_default();
-    // The registry is re-read here rather than trusted from when the row was
-    // focused: a variant that stopped validating, or whose catalog became
-    // unreadable, is no longer something an agent would resolve to, and
-    // installing it would be installing content Skilled cannot vouch for.
+    // The variant has to still be one the registry offers under this name. A
+    // caller can hold a `VariantRef` from a row it focused some time ago, and a
+    // variant whose source became unreadable, or that stopped validating, is
+    // no longer something an agent would resolve to. This is checked against
+    // the registry as the caller holds it, which is what every other decision
+    // in this module is made over; the filesystem is read once, in the probe.
     if !competing.contains(variant) {
         return Err(PlanFailure::VariantUnavailable {
             skill_name: variant.skill_name().to_owned(),
@@ -584,8 +614,15 @@ pub fn plan_install(
 /// design this slice was planned against refused those too; refusing them would
 /// make an ordinary Claude Code install fail because OpenCode happens to read
 /// that directory, which is not a decision Skilled should be making for anyone.
-/// A conflict that already exists is likewise only restated: it is not this
-/// plan's doing, and the user has Doctor for it.
+///
+/// A resolution that could not be established is never a refusal either. A root
+/// Skilled was told to leave alone might hold anything, and a plan that blocked
+/// on that would punish the user for a choice they made deliberately; the
+/// prediction says so and the postcondition check afterwards withholds a verdict
+/// over the very same gap, so the two rest on one account of what was read.
+///
+/// A conflict that already exists is left to Doctor, which is where a standing
+/// arrangement belongs: only a change this plan would make is worth saying here.
 fn apply_opencode_prediction(
     targets: &mut [InstallTarget],
     probe: &InstallProbe,
@@ -603,22 +640,26 @@ fn apply_opencode_prediction(
     }
     let predicted = resolve_opencode(sightings(targets, probe, variant, source_dir, true));
     if targets[index].is_work() {
-        let settled = matches!(
-            &predicted,
-            OpenCodeResolution::Selected { winner, .. } if winner.root() == AgentKind::OpenCode
-        );
-        if !settled {
+        if matches!(predicted, OpenCodeResolution::Conflict { .. }) {
             targets[index].disposition = TargetDisposition::Blocked {
                 finding: Finding::new(
                     "install.opencode_conflict",
                     FindingSeverity::Critical,
                     format!(
-                        "OpenCode would not resolve {} to this link: {}",
-                        variant.skill_name(),
-                        predicted_summary(&predicted)
+                        "OpenCode would not resolve {} to this link: the roots it reads would \
+                         hold more than one directory under that name",
+                        variant.skill_name()
                     ),
                 ),
             };
+            return;
+        }
+        if let OpenCodeResolution::Incomplete { roots } = &predicted {
+            warnings.push(format!(
+                "what OpenCode would resolve {} to cannot be established: {}",
+                variant.skill_name(),
+                unknown_roots(roots)
+            ));
         }
         return;
     }
@@ -648,7 +689,12 @@ fn sightings(
     AgentKind::ALL.map(|agent| {
         let target = &targets[agent.index()];
         let slot = probe.target(agent);
-        if matches!(slot.root, RootProbe::Unreadable(_)) {
+        // A root that was not read in full contributes no sighting at all — not
+        // an absence — which is the rule `inventory::root_sightings` applies to
+        // the same three roots. Both have to apply it, because the prediction
+        // made here and the postcondition checked against a later scan are
+        // statements about one arrangement.
+        if matches!(slot.root, RootProbe::Unreadable(_) | RootProbe::NotRead) {
             return RootSighting::Unread;
         }
         let ours = match &target.disposition {
@@ -702,24 +748,22 @@ fn opencode_concern(resolution: &OpenCodeResolution) -> Option<&'static str> {
     }
 }
 
-fn predicted_summary(resolution: &OpenCodeResolution) -> String {
+/// What a resolution taken after the apply has to say, for a verification
+/// failure's evidence.
+fn observed_summary(resolution: &OpenCodeResolution) -> String {
     match resolution {
-        OpenCodeResolution::Conflict { entries } => format!(
-            "{} of the roots it reads would hold different directories under that name",
-            entries.len()
-        ),
+        OpenCodeResolution::Conflict { .. } => {
+            "the roots it reads hold more than one directory under that name".to_owned()
+        }
         OpenCodeResolution::Selected { winner, .. } => format!(
-            "it would load the copy in {}'s root instead",
+            "it loads the copy in {}'s root instead",
             winner.root().display_name()
         ),
         OpenCodeResolution::ForeignExposure { .. } => {
             "the only definition it can see is another agent's edition".to_owned()
         }
-        OpenCodeResolution::Incomplete { roots } => format!(
-            "{} of the roots it reads could not be established",
-            roots.len()
-        ),
-        OpenCodeResolution::NothingVisible => "it would find nothing under that name".to_owned(),
+        OpenCodeResolution::Incomplete { roots } => unknown_roots(roots),
+        OpenCodeResolution::NothingVisible => "it finds nothing under that name".to_owned(),
     }
 }
 
@@ -813,39 +857,54 @@ fn slot_disposition(
     source_dir: &Path,
     receipts: &[Receipt],
 ) -> TargetDisposition {
-    if let RootProbe::Unreadable(reason) = &probe.root {
-        return TargetDisposition::Blocked {
-            finding: Finding::new(
-                "install.unreadable_root",
-                FindingSeverity::Critical,
-                format!("the agent's skill root could not be read: {reason}"),
-            ),
-        };
+    match &probe.root {
+        RootProbe::Unreadable(reason) => {
+            return TargetDisposition::Blocked {
+                finding: Finding::new(
+                    "install.unreadable_root",
+                    FindingSeverity::Critical,
+                    format!("the agent's skill root could not be read: {reason}"),
+                ),
+            };
+        }
+        // Every caller settles a deselected agent as an exclusion before
+        // reaching this, so an unread root here would be a plan built from
+        // nothing. Refusing is the only honest answer to it.
+        RootProbe::NotRead => {
+            return TargetDisposition::Blocked {
+                finding: Finding::new(
+                    "install.unreadable_root",
+                    FindingSeverity::Critical,
+                    "Skilled did not read this agent's skill root, so it can say nothing about \
+                     what is in it"
+                        .to_owned(),
+                ),
+            };
+        }
+        RootProbe::Present | RootProbe::Missing { .. } => {}
     }
     match &probe.entry {
         EntryProbe::Absent => match &probe.root {
             RootProbe::Present => TargetDisposition::CreateLink,
             RootProbe::Missing {
                 parent_present: true,
+                ..
             } => TargetDisposition::CreateRootAndLink,
-            RootProbe::Missing { .. } => TargetDisposition::Blocked {
+            RootProbe::Missing { parent, .. } => TargetDisposition::Blocked {
                 finding: Finding::new(
                     "install.missing_root_parent",
                     FindingSeverity::Critical,
                     format!(
                         "{} does not exist, and Skilled creates only the documented skill root \
                          itself",
-                        probe
-                            .link_path
-                            .parent()
-                            .and_then(Path::parent)
-                            .unwrap_or(&probe.link_path)
-                            .display()
+                        parent.display()
                     ),
                 ),
             },
             // Settled above.
-            RootProbe::Unreadable(_) => unreachable!("an unreadable root is blocked already"),
+            RootProbe::Unreadable(_) | RootProbe::NotRead => {
+                unreachable!("an unread or unreadable root is blocked already")
+            }
         },
         EntryProbe::Symlink {
             canonical: Some(canonical),
@@ -910,6 +969,8 @@ fn slot_disposition(
                 format!("something is there that could not be read: {reason}"),
             ),
         },
+        // Settled above, with the root it belongs to.
+        EntryProbe::NotRead => unreachable!("an unread root is blocked already"),
     }
 }
 
@@ -991,22 +1052,61 @@ impl VerifyFailure {
     }
 }
 
+/// One postcondition the fresh scan could not settle either way.
+///
+/// Kept apart from a failure for the reason [`crate::inventory`] keeps the same
+/// two apart: a check that found the wrong thing and a check that could not run
+/// are different answers, and calling the second of them a pass would let
+/// Skilled report a postcondition it never observed.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VerifyWithheld {
+    agent: AgentKind,
+    reason: String,
+}
+
+impl VerifyWithheld {
+    pub fn agent(&self) -> AgentKind {
+        self.agent
+    }
+
+    /// What stopped the check, in words.
+    pub fn reason(&self) -> &str {
+        &self.reason
+    }
+}
+
 /// What a scan taken after the apply made of the links it wrote.
 ///
 /// Spec 11.4: exit status zero is not sufficient by itself, so every created
 /// link is re-observed and checked against what the plan said it would be.
+///
+/// Three answers, never two. [`Self::is_verified`] means nothing failed, which
+/// is not the same as everything holding: a check Skilled could not run is
+/// carried separately so the surfaces can say so rather than reporting a pass
+/// they did not earn.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct VerifyReport {
     failures: Vec<VerifyFailure>,
+    withheld: Vec<VerifyWithheld>,
 }
 
 impl VerifyReport {
+    /// Whether anything the scan could check disagreed with the plan.
     pub fn is_verified(&self) -> bool {
         self.failures.is_empty()
     }
 
+    /// Whether every postcondition was both checked and held.
+    pub fn is_complete(&self) -> bool {
+        self.failures.is_empty() && self.withheld.is_empty()
+    }
+
     pub fn failures(&self) -> &[VerifyFailure] {
         &self.failures
+    }
+
+    pub fn withheld(&self) -> &[VerifyWithheld] {
+        &self.withheld
     }
 }
 
@@ -1015,7 +1115,10 @@ impl VerifyReport {
 pub enum InstallStatus {
     /// The plan held no work, so nothing was written and nothing failed.
     NothingToDo,
-    /// Every planned link was created and every postcondition held.
+    /// Every planned link was created and nothing the scan afterwards could
+    /// check disagreed with the plan. Whether every postcondition was actually
+    /// checked is [`VerifyReport::is_complete`]; a status is one word, and this
+    /// is not the place to flatten the two answers into it.
     Installed,
     /// Some links were created and the run stopped before the rest.
     PartiallyApplied,
@@ -1023,6 +1126,14 @@ pub enum InstallStatus {
     NotApplied,
     /// Everything was written, and the scan afterwards did not bear it out.
     VerificationFailed,
+    /// Every link was created, and at least one receipt could not be written.
+    /// Skilled has put something on disk that it does not own, which a later
+    /// repair or uninstall will not recognise as its own.
+    ///
+    /// Only the last work target can reach this: a receipt that cannot be
+    /// written means the metadata store is failing, so the run stops there and
+    /// anything behind it is reported as unattempted.
+    InstalledUnrecorded,
 }
 
 /// One completed install run: what was planned, what was done, and what the
@@ -1076,6 +1187,17 @@ impl InstallOutcome {
                 InstallStatus::NotApplied
             };
         }
+        // Ownership is settled before the postcondition. A link Skilled cannot
+        // record owning is the more consequential of the two: verification can
+        // be run again, and a receipt that was never written is gone.
+        if self
+            .applied
+            .steps
+            .iter()
+            .any(|step| matches!(step.outcome, StepOutcome::CreatedUnrecorded(_)))
+        {
+            return InstallStatus::InstalledUnrecorded;
+        }
         if !self.verification.is_verified() {
             return InstallStatus::VerificationFailed;
         }
@@ -1100,12 +1222,16 @@ pub enum InstallPrompt {
 
 /// Create every link the plan calls work, in [`AgentKind::ALL`] order.
 ///
-/// Spec 15 is applied literally. Each target is read again immediately before
-/// it is written, because the preview the user confirmed described an earlier
-/// moment; a target that changed is not written to, and the run stops there
-/// rather than carrying on into the targets behind it. Nothing is ever
-/// replaced, so a link that appeared in the meantime is a failed precondition
-/// and never an unlink-and-retry.
+/// Spec 15 is applied literally. The target, its root, and the variant
+/// directory the link would point at are all read again immediately before the
+/// write, because the preview the user confirmed described an earlier moment;
+/// anything that changed stops that target, and the run stops there rather than
+/// carrying on into the targets behind it. Nothing is ever replaced, so a link
+/// that appeared in the meantime is a failed precondition and never an
+/// unlink-and-retry.
+///
+/// A plan that blocks blocks whole, and this refuses one rather than trusting
+/// its callers to: a plan is either executable or it is not written at all.
 ///
 /// There is no rollback. The links written before a failure are real, healthy,
 /// receipted installations, and deleting them would be a second unrequested
@@ -1114,6 +1240,13 @@ pub enum InstallPrompt {
 /// what exists.
 pub(crate) fn apply_install(plan: &InstallPlan, store: &Store) -> ApplyReport {
     let mut steps: Vec<AppliedStep> = Vec::new();
+    if plan.is_blocked() {
+        // Both callers refuse a blocked plan before reaching this, so arriving
+        // here is a bug rather than a state to report. A debug build says so;
+        // a release build still writes nothing.
+        debug_assert!(false, "a blocked plan reached apply_install");
+        return ApplyReport { steps };
+    }
     let mut stopped = false;
     for target in plan.targets().iter().filter(|target| target.is_work()) {
         if stopped {
@@ -1140,7 +1273,7 @@ fn apply_target(plan: &InstallPlan, target: &InstallTarget, store: &Store) -> St
         Some(root) => root,
         None => return StepOutcome::Failed("the target has no parent directory".to_owned()),
     };
-    // The guard, not a convenience: what the plan described and what is there
+    // The guards, not conveniences: what the plan described and what is there
     // now must still agree, or this target is left exactly as it is.
     if probe_entry(&target.link_path) != EntryProbe::Absent {
         return StepOutcome::Failed(
@@ -1148,13 +1281,34 @@ fn apply_target(plan: &InstallPlan, target: &InstallTarget, store: &Store) -> St
                 .to_owned(),
         );
     }
+    // The variant directory is checked too. A checkout moved or removed between
+    // the preview and the confirmation would otherwise leave Skilled owning a
+    // link it created that resolves to nothing, in a release with no repair.
+    match plan.source_dir().canonicalize() {
+        Ok(resolved)
+            if resolved == plan.source_dir()
+                && fs::metadata(&resolved).is_ok_and(|metadata| metadata.is_dir()) => {}
+        _ => {
+            return StepOutcome::Failed(format!(
+                "{} is no longer the directory the plan resolved, so nothing was written",
+                plan.source_dir().display()
+            ));
+        }
+    }
     let root_now = probe_root(root);
     match (&target.disposition, &root_now) {
-        (TargetDisposition::CreateLink, RootProbe::Present) => {}
+        // A root that has appeared since the plan was made is the root the plan
+        // was going to create. The step it named is simply already done, and the
+        // entry guard above still decides whether the link may be written.
+        (
+            TargetDisposition::CreateLink | TargetDisposition::CreateRootAndLink,
+            RootProbe::Present,
+        ) => {}
         (
             TargetDisposition::CreateRootAndLink,
             RootProbe::Missing {
                 parent_present: true,
+                ..
             },
         ) => {
             // One level, never recursive: the plan named this directory and
@@ -1174,7 +1328,17 @@ fn apply_target(plan: &InstallPlan, target: &InstallTarget, store: &Store) -> St
         }
     }
     if let Err(error) = create_directory_symlink(plan.source_dir(), &target.link_path) {
-        return StepOutcome::Failed(format!("the link could not be created: {error}"));
+        // A root created a moment ago is left where it is. It is an empty
+        // directory at a documented path, which is what an agent with no global
+        // skills has anyway, and removing it would be an unrequested write on
+        // top of one that already failed.
+        let root_note = match target.disposition {
+            TargetDisposition::CreateRootAndLink => {
+                " (the skill root was created and is left in place)"
+            }
+            _ => "",
+        };
+        return StepOutcome::Failed(format!("the link could not be created: {error}{root_note}"));
     }
     let receipt = Receipt {
         agent: target.agent,
@@ -1196,9 +1360,23 @@ fn create_directory_symlink(target: &Path, link_path: &Path) -> io::Result<()> {
     std::os::unix::fs::symlink(target, link_path)
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
 fn create_directory_symlink(target: &Path, link_path: &Path) -> io::Result<()> {
     std::os::windows::fs::symlink_dir(target, link_path)
+}
+
+/// A platform whose directory symbolic links Skilled has no adapter for.
+///
+/// Refusing to write is the only honest answer: the whole installation shape is
+/// a directory link, and there is nothing else this release would put in its
+/// place. The plan still builds and still previews, so a reader is told what
+/// would happen rather than met with a build that does not exist.
+#[cfg(not(any(unix, windows)))]
+fn create_directory_symlink(_target: &Path, _link_path: &Path) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "Skilled installs skills as directory symbolic links, which this platform does not offer",
+    ))
 }
 
 /// Check every link the apply wrote against the plan that called for it.
@@ -1208,14 +1386,33 @@ fn create_directory_symlink(target: &Path, link_path: &Path) -> io::Result<()> {
 /// and healthy — and where OpenCode was written to, its effective resolution
 /// has to be the link that was just written rather than something reached
 /// through a compatibility root.
+///
+/// An effective resolution the scan could not establish is not a failed
+/// postcondition. A root the user deselected is one Skilled never read, and
+/// calling the gap a failure would report an install as unverified for doing
+/// exactly what the user configured. The planner withholds its refusal over the
+/// same gap, so the two agree about what was and was not observed.
 pub fn verify_install(
     plan: &InstallPlan,
     applied: &ApplyReport,
     snapshot: &InventorySnapshot,
 ) -> VerifyReport {
     let mut failures = Vec::new();
+    let mut withheld = Vec::new();
     let row = snapshot.row(plan.skill_name());
     for step in applied.steps.iter().filter(|step| step.wrote()) {
+        // A root the scan could not read says nothing about the link in it.
+        // The scan is bounded and can exhaust its budget over a large registry,
+        // and a root can become unreadable between the write and the rescan;
+        // reporting either as a failed postcondition would call a correct
+        // install broken for a reason that has nothing to do with it.
+        if let Some(reason) = unscanned(snapshot.root(step.agent).status()) {
+            withheld.push(VerifyWithheld {
+                agent: step.agent,
+                reason,
+            });
+            continue;
+        }
         let Some(observed) = row.and_then(|row| row.observation(step.agent)) else {
             failures.push(VerifyFailure {
                 agent: step.agent,
@@ -1223,37 +1420,109 @@ pub fn verify_install(
             });
             continue;
         };
-        if let Some(observed) = mismatch(plan, observed) {
-            failures.push(VerifyFailure {
+        match mismatch(plan, observed) {
+            Checked::Held => {}
+            Checked::Failed(observed) => {
+                failures.push(VerifyFailure {
+                    agent: step.agent,
+                    observed,
+                });
+                continue;
+            }
+            Checked::Withheld(reason) => {
+                withheld.push(VerifyWithheld {
+                    agent: step.agent,
+                    reason,
+                });
+                continue;
+            }
+        }
+        if step.agent != AgentKind::OpenCode {
+            continue;
+        }
+        let Some(resolution) = row.and_then(InventoryRow::opencode_resolution) else {
+            continue;
+        };
+        if matches!(
+            resolution,
+            OpenCodeResolution::Selected { winner, .. } if winner.path() == step.link_path
+        ) {
+            continue;
+        }
+        if let OpenCodeResolution::Incomplete { roots } = resolution {
+            withheld.push(VerifyWithheld {
                 agent: step.agent,
-                observed,
+                reason: format!(
+                    "what OpenCode resolves the name to could not be established: {}",
+                    unknown_roots(roots)
+                ),
             });
             continue;
         }
-        if step.agent == AgentKind::OpenCode
-            && let Some(resolution) = row.and_then(InventoryRow::opencode_resolution)
-            && !matches!(
-                resolution,
-                OpenCodeResolution::Selected { winner, .. } if winner.path() == step.link_path
-            )
-        {
-            failures.push(VerifyFailure {
-                agent: step.agent,
-                observed: format!(
-                    "OpenCode does not resolve the name to this link: {}",
-                    predicted_summary(resolution)
-                ),
-            });
-        }
+        failures.push(VerifyFailure {
+            agent: step.agent,
+            observed: format!(
+                "OpenCode does not resolve the name to this link: {}",
+                observed_summary(resolution)
+            ),
+        });
     }
-    VerifyReport { failures }
+    VerifyReport { failures, withheld }
 }
 
-/// What the fresh observation says that the plan did not, or `None` where the
-/// two agree.
-fn mismatch(plan: &InstallPlan, observed: &InstalledSkillObservation) -> Option<String> {
+/// Name each root whose contribution is unknown, and say which kind of unknown
+/// it is.
+///
+/// [`crate::resolution`] keeps a root it never read apart from one it read in
+/// full whose entry it could not follow, and refuses to flatten them. Anything
+/// that reports them has to keep them apart too: "Skilled did not read this"
+/// is simply false of the second.
+fn unknown_roots(roots: &[UnknownRoot]) -> String {
+    roots
+        .iter()
+        .map(|root| {
+            let name = root.root().display_name();
+            match root.cause() {
+                UnknownCause::RootNotRead => format!("Skilled did not read {name}'s skill root"),
+                UnknownCause::EntryUnresolved => {
+                    format!("what {name}'s skill root holds under that name could not be followed")
+                }
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+/// Why a root contributed nothing to the scan, where that is not the scan
+/// having read it and found nothing.
+fn unscanned(status: &RootStatus) -> Option<String> {
+    match status {
+        RootStatus::Scanned { .. } | RootStatus::Missing => None,
+        RootStatus::NotSelected => {
+            Some("the scan taken afterwards was not asked to read this root".to_owned())
+        }
+        RootStatus::NotScanned => Some("this root has not been read since".to_owned()),
+        RootStatus::Unreadable { message } => Some(format!(
+            "the scan taken afterwards could not read this root: {message}"
+        )),
+    }
+}
+
+/// What one postcondition came to.
+///
+/// Three answers, because a check that found the wrong thing and a check that
+/// could not be made are not the same answer, and treating the second as a pass
+/// would report a postcondition Skilled never observed.
+enum Checked {
+    Held,
+    Failed(String),
+    Withheld(String),
+}
+
+/// Compare the fresh observation against the plan that called for it.
+fn mismatch(plan: &InstallPlan, observed: &InstalledSkillObservation) -> Checked {
     let InstallationObject::Symlink { .. } = observed.object() else {
-        return Some(format!(
+        return Checked::Failed(format!(
             "what is there is {}, not a symbolic link",
             observed.object().description()
         ));
@@ -1261,20 +1530,30 @@ fn mismatch(plan: &InstallPlan, observed: &InstalledSkillObservation) -> Option<
     match observed.resolution() {
         Some(resolution) if resolution == plan.variant() => {}
         Some(resolution) => {
-            return Some(format!(
+            return Checked::Failed(format!(
                 "it resolves to {} instead",
                 resolution.evidence_label()
             ));
         }
+        // A source that could not be read leaves provenance unestablished, not
+        // established as "from nowhere". The scan says which of the two it is,
+        // and this keeps them apart.
+        None if matches!(observed.provenance(), Provenance::Unverified) => {
+            return Checked::Withheld(
+                "a registered source could not be read, so where this came from is not \
+                 established"
+                    .to_owned(),
+            );
+        }
         None => {
-            return Some(format!(
+            return Checked::Failed(format!(
                 "it does not resolve to a registered variant: {}",
                 observed.provenance().label()
             ));
         }
     }
     if !observed.validation().is_some_and(SkillValidation::is_valid) {
-        return Some(
+        return Checked::Failed(
             observed
                 .validation()
                 .and_then(SkillValidation::message)
@@ -1284,12 +1563,19 @@ fn mismatch(plan: &InstallPlan, observed: &InstalledSkillObservation) -> Option<
                 ),
         );
     }
-    (observed.health() != InstallationHealth::Healthy).then(|| {
-        format!(
+    match observed.health() {
+        InstallationHealth::Healthy => Checked::Held,
+        // Structurally sound content whose provenance could not be established
+        // is the same gap as above, reached by the roll-up rather than by the
+        // resolution.
+        InstallationHealth::Unverified => Checked::Withheld(
+            "a registered source could not be read, so this installation is unverified".to_owned(),
+        ),
+        health => Checked::Failed(format!(
             "the scan taken afterwards calls it {}",
-            observed.health().label()
-        )
-    })
+            health.label()
+        )),
+    }
 }
 
 /// Evidence that Skilled created one particular link.

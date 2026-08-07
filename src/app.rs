@@ -531,13 +531,21 @@ impl SkilledApp {
     /// The variants pane and the detail region beside it both stand on a row;
     /// the repositories pane stands on a source, and its variant selection is
     /// whatever it was left at, which is not something the user is looking at.
+    ///
+    /// A candidate that does not validate is not one any agent would resolve to
+    /// — `resolution::select_candidates` drops it — so there is nothing to
+    /// install from it, and offering the key would promise an answer whose only
+    /// content is that the row was never installable.
     pub fn can_install_selection(&self) -> bool {
         self.view == View::Sources
             && matches!(
                 self.sources_pane,
                 SourcesPane::Variants | SourcesPane::Details
             )
-            && matches!(self.selected_variant_row(), Some(SourceRow::Variant { .. }))
+            && matches!(
+                self.selected_variant_row(),
+                Some(SourceRow::Variant { candidate, .. }) if candidate.validation().is_valid()
+            )
     }
 
     /// Every ownership receipt Skilled holds.
@@ -694,6 +702,13 @@ impl SkilledApp {
                 Action::ConfirmInstall => UpdateResult::continuing(self.confirm_install()),
                 Action::DismissInstall => {
                     self.pending_install = None;
+                    self.reset_detail_scroll();
+                    UpdateResult::continuing(Vec::new())
+                }
+                // A dialog taller than the terminal is still one the reader has
+                // to be able to read all of before agreeing to it.
+                Action::ScrollDetail(delta) => {
+                    self.scroll_detail(delta);
                     UpdateResult::continuing(Vec::new())
                 }
                 _ => UpdateResult::continuing(Vec::new()),
@@ -1012,7 +1027,12 @@ impl SkilledApp {
                     self.rescan_installations();
                 }
                 Effect::ScanInstallations => self.rescan_installations(),
-                Effect::PlanInstall => self.pending_install = Some(self.build_install_preview()),
+                Effect::PlanInstall => {
+                    self.pending_install = Some(self.build_install_preview());
+                    // The window belongs to the content under it, and this is
+                    // new content.
+                    self.reset_detail_scroll();
+                }
                 Effect::ApplyInstall => self.apply_pending_install(),
             }
         }
@@ -1105,6 +1125,8 @@ impl SkilledApp {
         };
         let outcome = self.apply_plan(&plan);
         self.pending_install = Some(InstallPrompt::Report(outcome));
+        // The report is different content from the preview it replaced.
+        self.reset_detail_scroll();
     }
 
     /// Replace the inventory with a fresh read-only pass over the native roots.
@@ -1264,6 +1286,12 @@ impl SkilledApp {
     /// drawn: a window belongs to the content under it, and moving between
     /// screens replaces that content.
     fn detail_region_has_the_keyboard(&self) -> bool {
+        // A modal dialog is drawn over whatever screen is behind it and takes
+        // the keyboard with it, so while one is open it is the window the
+        // movement keys move.
+        if self.pending_install.is_some() {
+            return true;
+        }
         match self.view {
             View::Inventory => self.inventory_pane == InventoryPane::Details,
             View::Doctor => self.doctor_pane == DoctorPane::Details,

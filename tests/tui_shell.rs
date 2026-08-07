@@ -3835,6 +3835,31 @@ impl Harness {
         app
     }
 
+    /// Rerun setup and leave Codex deselected, through the steps a user takes.
+    #[cfg(unix)]
+    fn deselect_codex(&self, app: &mut SkilledApp) {
+        for action in [
+            // Settings opens from the Inventory, which is where a user reaching
+            // for it would be standing.
+            Action::OpenInventory,
+            Action::OpenSettings,
+            Action::RerunSetup,
+            Action::Continue,
+            Action::MoveSelection(1),
+            Action::ToggleSelection,
+        ] {
+            let update = app.update(action);
+            app.perform_effects(update.effects())
+                .expect("setup effects");
+        }
+        for _ in 0..6 {
+            let update = app.update(Action::Continue);
+            app.perform_effects(update.effects())
+                .expect("setup effects");
+        }
+        assert!(!app.agent(AgentKind::Codex).selected());
+    }
+
     /// One healthy skill installed for two agents, one dangling link, and one
     /// physical copy, with the OpenCode root absent entirely.
     ///
@@ -4121,11 +4146,18 @@ fn the_install_preview_carries_each_verdict_in_words_and_in_tone() {
 
     assert!(rendered.contains("┌ Install skill"), "{rendered}");
     assert!(rendered.contains("nothing written yet"), "{rendered}");
-    let creating = row_containing(&screen, "Claude Code: create the skill root");
-    assert!(row_text(&screen, creating).contains('✓'), "{rendered}");
+    // A plan blocks whole, so the targets that would have been work say
+    // "would" and are drawn inactive: a green tick above "Blocked — nothing
+    // will be written" would be the screen contradicting itself.
+    let creating = row_containing(&screen, "Claude Code: would create the skill root");
+    assert!(row_text(&screen, creating).contains('-'), "{rendered}");
     assert_eq!(
-        style_in_row(&screen, creating, "✓").fg,
-        Some(Color::Rgb(0x8b, 0xd4, 0x9c))
+        style_in_row(&screen, creating, "-").fg,
+        Some(Color::Rgb(0x84, 0x91, 0xa1))
+    );
+    assert!(
+        rendered.contains("nothing will be written here: this plan is blocked"),
+        "{rendered}"
     );
     let blocked = row_containing(&screen, "install.physical_path_collision");
     assert!(row_text(&screen, blocked).contains('×'), "{rendered}");
@@ -4205,6 +4237,100 @@ fn the_install_hint_appears_only_where_a_variant_is_focused() {
     // Back in the repositories pane there is no variant to stand on.
     app.update(Action::Back);
     assert!(!footer(&app).contains("i Install"), "{}", footer(&app));
+}
+
+/// A postcondition Skilled could not check is stated as withheld, and the
+/// one-line verdict does not claim a verification it did not make.
+#[cfg(unix)]
+#[test]
+fn a_withheld_postcondition_is_stated_rather_than_reported_as_verified() {
+    let harness = Harness::new();
+    let mut app = harness.installable_source();
+    harness.deselect_codex(&mut app);
+    app.update(Action::OpenSources);
+    app.update(Action::AdvanceSourcesPane);
+    for action in [Action::BeginInstall, Action::ConfirmInstall] {
+        let update = app.update(action);
+        app.perform_effects(update.effects()).expect("install");
+    }
+
+    let screen = buffer(&app, 100, 30);
+    let rendered = text(&screen);
+
+    // Nothing disagreed, and something was not checked. Both are said, and the
+    // verdict beside the keys says the second of them too.
+    assert!(
+        rendered.contains("nothing disagreed with this plan"),
+        "{rendered}"
+    );
+    assert!(!rendered.contains("matches this plan"), "{rendered}");
+    let withheld = row_containing(&screen, "could not be established");
+    assert!(
+        row_text(&screen, withheld).contains("OpenCode"),
+        "{rendered}"
+    );
+    // The two kinds of unknown stay apart, and the root that was never read is
+    // named. The sentence wraps, so it is looked for on the screen rather than
+    // on the row the badge sits on.
+    let unwrapped: String = rendered
+        .lines()
+        .filter_map(dialog_interior)
+        .map(str::trim)
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        unwrapped.contains("did not read Codex's skill root"),
+        "{rendered}"
+    );
+    assert!(row_text(&screen, withheld).contains('-'), "{rendered}");
+    assert_eq!(
+        style_in_row(&screen, withheld, "-").fg,
+        Some(Color::Rgb(0x84, 0x91, 0xa1))
+    );
+    assert!(
+        rendered.contains("Installed · not fully verified"),
+        "{rendered}"
+    );
+}
+
+/// A preview taller than the terminal says so and can be read to its end.
+///
+/// A user cannot consent to writes the screen never showed them, so content
+/// past the body is reachable rather than silently dropped: the dialog says
+/// which way the rest lies, the footer offers the keys that move it, and the
+/// last target is on screen once it has been scrolled to.
+#[cfg(unix)]
+#[test]
+fn a_preview_taller_than_its_dialog_says_so_and_can_be_scrolled_to_its_end() {
+    let harness = Harness::new();
+    let mut app = harness.installable_source();
+    let update = app.update(Action::BeginInstall);
+    app.perform_effects(update.effects()).expect("plan install");
+
+    // Eighty by twenty-four is the smallest terminal Skilled supports, and the
+    // dialog's body does not hold three targets and their absolute paths there.
+    let screen = buffer(&app, 80, 24);
+    let rendered = text(&screen);
+    assert!(
+        !rendered.contains("Home:"),
+        "the fixture no longer overflows, so this measures nothing: {rendered}"
+    );
+    assert!(rendered.contains("more below"), "{rendered}");
+    let footer = row_text(&screen, screen.area.height - 1);
+    assert!(footer.contains("j/k Scroll"), "{footer}");
+
+    // The window moves the way it does everywhere else: the frame measures the
+    // extent, the runner notes it, and the next keystroke is clamped to it.
+    scroll_detail(&mut app, 80, 24, 12);
+    let screen = buffer(&app, 80, 24);
+    let rendered = text(&screen);
+
+    assert!(rendered.contains("Home:"), "{rendered}");
+    assert!(rendered.contains("more above"), "{rendered}");
+    // The keys the footer offers are still the ones the reducer honours.
+    let footer = row_text(&screen, screen.area.height - 1);
+    assert!(footer.contains("Enter Install"), "{footer}");
+    assert!(footer.contains("Esc Cancel"), "{footer}");
 }
 
 /// The text between a dialog row's own borders.

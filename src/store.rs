@@ -54,7 +54,7 @@ impl Store {
 
     pub(crate) fn agent_selections(&self) -> Result<Option<[bool; 3]>> {
         let mut selections = [false; 3];
-        for (index, agent) in ["claude-code", "codex", "opencode"].iter().enumerate() {
+        for (index, agent) in AGENT_IDENTIFIERS.iter().enumerate() {
             let selected = self
                 .connection
                 .query_row(
@@ -73,10 +73,7 @@ impl Store {
 
     pub(crate) fn complete_setup(&mut self, selections: [bool; 3]) -> Result<()> {
         let transaction = self.connection.transaction()?;
-        for (agent, selected) in ["claude-code", "codex", "opencode"]
-            .into_iter()
-            .zip(selections)
-        {
+        for (agent, selected) in AGENT_IDENTIFIERS.into_iter().zip(selections) {
             transaction.execute(
                 "INSERT INTO configured_agents (agent, selected) VALUES (?1, ?2)
                  ON CONFLICT(agent) DO UPDATE SET selected = excluded.selected",
@@ -97,12 +94,19 @@ impl Store {
     /// One statement, and therefore its own transaction: the receipt is written
     /// the moment the link exists, so a crash between two targets still leaves
     /// the store describing exactly what is on disk.
+    ///
+    /// A receipt identical to one already recorded is left alone rather than
+    /// refused. Timestamps are whole seconds, so a link removed and put back
+    /// inside one second would otherwise fail its insert and leave Skilled
+    /// reporting that it does not own something it just created — when the
+    /// receipt it needs is already there.
     pub(crate) fn record_receipt(&self, receipt: &Receipt) -> Result<()> {
         self.connection.execute(
             "INSERT INTO operation_receipts
                 (created_at, operation, agent, skill_name, link_path, link_target,
                  source_id, catalog_relative_path, variant_relative_path)
-             VALUES (?1, 'install', ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+             VALUES (?1, 'install', ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT DO NOTHING",
             params![
                 current_timestamp(),
                 agent_identifier(receipt.agent()),
@@ -497,7 +501,11 @@ fn migrate(connection: &mut Connection) -> Result<()> {
                 source_id INTEGER,
                 catalog_relative_path TEXT,
                 variant_relative_path TEXT,
-                UNIQUE (agent, link_path, created_at)
+                -- Receipts accumulate: a link removed and put back is two
+                -- facts, not one. The constraint only rules out recording the
+                -- identical fact twice, and the second of those is refused
+                -- rather than failing the write it belongs to.
+                UNIQUE (agent, link_path, link_target, created_at)
              );
              PRAGMA user_version = 5;",
         )?;
