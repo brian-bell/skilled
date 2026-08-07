@@ -1,0 +1,28 @@
+---
+source: tests/tui_snapshots.rs
+expression: "normalize_install_screen(&temporary, render(&app, 80, 24))"
+---
+ ◆ skilled   global                               ● ready · 1 source registered
+ 1┌ Install skill ────────────────────────────────────── nothing written yet ┐
+▌ │                                                                          │
+──│  Skill: portable                                                         │──
+sk│  From: src · skills                                                      │ts
+▌ │  Links to: [CANONICAL]           /src/skills/portable                    │
+  │                                                                          │
+  │  Targets                                                                 │
+  │  ✓ Claude Code: create the skill root, then the link                     │
+  │      [TEMP]        /home/.claude/skills/portable                         │
+  │  × Codex: install.physical_path_collision                                │
+  │      [TEMP]        /home/.agents/skills/portable                         │
+  │      a file is already there. Skilled never overwrites one, whatever it  │
+  │  holds                                                                   │
+  │  ✓ OpenCode: create the skill root, then the link                        │
+  │      [TEMP]        /home/.config/opencode/skills/portable                │
+  │                                                                          │
+  │  Home: [TEMP]        /home                                               │
+  │                                                                          │
+  │  ──────────────────────────────────────────────────────────────────────  │
+  │  Blocked — nothing will be written                            Esc Close  │
+  │                                                                          │
+  └──────────────────────────────────────────────────────────────────────────┘
+ Esc Close   Ctrl-C Quit
