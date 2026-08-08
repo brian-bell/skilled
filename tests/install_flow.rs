@@ -12,6 +12,9 @@ use std::{
     process::Command,
 };
 
+#[cfg(target_os = "linux")]
+use std::{ffi::OsString, os::unix::ffi::OsStringExt};
+
 use skilled::{
     Action, AgentKind, AppEnvironment, SkilledApp,
     inventory::{Finding, FindingSeverity, InstallationHealth},
@@ -419,6 +422,45 @@ fn verification_reports_a_link_that_stopped_matching_the_plan() {
     );
 }
 
+/// A written target has to be observed again before the operation can report
+/// success. This is different from an ancillary OpenCode-resolution gap: the
+/// missing check is for the very root Skilled just changed.
+#[test]
+fn verification_withheld_for_a_written_target_is_not_verified() {
+    let fixture = Fixture::new();
+    let repository = fixture.source("library", &["portable"]);
+    let mut app = fixture.registered(&repository);
+    fixture.create_root_parents();
+    focus_first_variant(&mut app);
+    dispatch(&mut app, Action::BeginInstall);
+    dispatch(&mut app, Action::ConfirmInstall);
+    let Some(InstallPrompt::Report(outcome)) = app.pending_install() else {
+        panic!("a report follows the apply");
+    };
+    let plan = outcome.plan().clone();
+    let applied = outcome.applied().clone();
+    let unscanned = SkilledApp::open(AppEnvironment::new(
+        fixture.path().join("unscanned-home"),
+        fixture.path().join("unscanned-data"),
+        &fixture.executables,
+    ))
+    .expect("open an application whose roots have not been scanned");
+
+    let report = verify_install(&plan, &applied, unscanned.inventory());
+
+    assert!(!report.is_verified(), "{report:?}");
+    assert!(!report.is_complete());
+    assert!(report.failures().is_empty());
+    assert_eq!(
+        report
+            .withheld()
+            .iter()
+            .map(VerifyWithheld::agent)
+            .collect::<Vec<_>>(),
+        AgentKind::ALL
+    );
+}
+
 /// The variant directory is a precondition too. A checkout that moved between
 /// the preview and the confirmation would otherwise leave Skilled owning links
 /// it created that resolve to nothing, in a release with no repair.
@@ -448,6 +490,114 @@ fn a_variant_directory_that_moved_since_the_preview_stops_the_run() {
     );
     for (_, root) in ROOTS {
         assert!(!fixture.home().join(root).join("portable").exists());
+    }
+    assert!(app.receipts().expect("receipts").is_empty());
+}
+
+/// A cached source row is not permission to install content that no longer
+/// passes the portable skill contract. The preview re-reads the selected
+/// directory, so invalid content is refused before the user can confirm it.
+#[test]
+fn a_variant_that_stopped_validating_before_the_preview_is_unavailable() {
+    let fixture = Fixture::new();
+    let repository = fixture.source("library", &["portable"]);
+    let mut app = fixture.registered(&repository);
+    fixture.create_root_parents();
+    focus_first_variant(&mut app);
+    fs::remove_file(repository.join("skills/portable/SKILL.md"))
+        .expect("invalidate the selected skill");
+
+    dispatch(&mut app, Action::BeginInstall);
+
+    let Some(InstallPrompt::Failed(reason)) = app.pending_install() else {
+        panic!(
+            "an unavailable variant is refused: {:?}",
+            app.pending_install()
+        );
+    };
+    assert!(reason.contains("SKILL.md"), "{reason}");
+    for (_, root) in ROOTS {
+        assert!(!fixture.home().join(root).join("portable").exists());
+    }
+}
+
+/// Confirmation repeats content validation immediately before the first
+/// write. A preview cannot authorize linking content that became invalid while
+/// the user was reading it.
+#[test]
+fn a_variant_that_stopped_validating_since_the_preview_is_not_written() {
+    let fixture = Fixture::new();
+    let repository = fixture.source("library", &["portable"]);
+    let mut app = fixture.registered(&repository);
+    fixture.create_root_parents();
+    focus_first_variant(&mut app);
+
+    dispatch(&mut app, Action::BeginInstall);
+    fs::remove_file(repository.join("skills/portable/SKILL.md"))
+        .expect("invalidate the previewed skill");
+    dispatch(&mut app, Action::ConfirmInstall);
+
+    let Some(InstallPrompt::Report(outcome)) = app.pending_install() else {
+        panic!("a report follows the refused apply");
+    };
+    assert_eq!(outcome.status(), InstallStatus::NotApplied);
+    assert!(matches!(
+        outcome
+            .step(AgentKind::ClaudeCode)
+            .map(|step| step.outcome()),
+        Some(StepOutcome::Failed(reason)) if reason.contains("no longer validates")
+    ));
+    for (_, root) in ROOTS {
+        assert!(!fixture.home().join(root).join("portable").exists());
+    }
+    assert!(app.receipts().expect("receipts").is_empty());
+}
+
+/// A link without a representable ownership receipt is not written. Skilled
+/// has no adoption or repair in this release, so creating the link first would
+/// leave an installation it could never safely claim as its own.
+#[test]
+#[cfg(target_os = "linux")]
+fn an_unrecordable_link_path_is_refused_before_any_write() {
+    let fixture = Fixture::new();
+    let repository = fixture.source("library", &["portable"]);
+    let home = fixture
+        .path()
+        .join(OsString::from_vec(b"home-\xff".to_vec()));
+    let environment = AppEnvironment::new(
+        &home,
+        fixture.path().join("non-utf8-home-data"),
+        &fixture.executables,
+    );
+    let mut app = SkilledApp::open(environment).expect("open application");
+    let preview = app.preview_source(&repository).expect("preview source");
+    app.confirm_source(preview).expect("register source");
+    for _ in 0..7 {
+        let update = app.update(Action::Continue);
+        app.perform_effects(update.effects())
+            .expect("perform setup effects");
+    }
+    for (_, root) in ROOTS {
+        fs::create_dir_all(home.join(root).parent().expect("root parent"))
+            .expect("create root parent");
+    }
+    focus_first_variant(&mut app);
+
+    dispatch(&mut app, Action::BeginInstall);
+    dispatch(&mut app, Action::ConfirmInstall);
+
+    let Some(InstallPrompt::Report(outcome)) = app.pending_install() else {
+        panic!("a report follows the refused apply");
+    };
+    assert_eq!(outcome.status(), InstallStatus::NotApplied);
+    assert!(matches!(
+        outcome
+            .step(AgentKind::ClaudeCode)
+            .map(|step| step.outcome()),
+        Some(StepOutcome::Failed(reason)) if reason.contains("ownership receipt")
+    ));
+    for (_, root) in ROOTS {
+        assert!(!home.join(root).exists(), "no skill root was created");
     }
     assert!(app.receipts().expect("receipts").is_empty());
 }

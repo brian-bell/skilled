@@ -89,6 +89,25 @@ impl Store {
         Ok(())
     }
 
+    /// Check every path against the representation the receipt table stores.
+    ///
+    /// The install guard calls this before creating anything, then
+    /// [`Self::record_receipt`] repeats it so no caller can bypass the table's
+    /// contract and turn a path conversion into a post-write surprise.
+    pub(crate) fn ensure_receipt_recordable(&self, receipt: &Receipt) -> Result<()> {
+        stored_path(receipt.link_path())?;
+        stored_path(receipt.link_target())?;
+        receipt
+            .catalog_relative_path()
+            .map(stored_path)
+            .transpose()?;
+        receipt
+            .variant_relative_path()
+            .map(stored_path)
+            .transpose()?;
+        Ok(())
+    }
+
     /// Record that Skilled created one particular link.
     ///
     /// One statement, and therefore its own transaction: the receipt is written
@@ -101,6 +120,7 @@ impl Store {
     /// reporting that it does not own something it just created — when the
     /// receipt it needs is already there.
     pub(crate) fn record_receipt(&self, receipt: &Receipt) -> Result<()> {
+        self.ensure_receipt_recordable(receipt)?;
         self.connection.execute(
             "INSERT INTO operation_receipts
                 (created_at, operation, agent, skill_name, link_path, link_target,
@@ -412,6 +432,36 @@ fn current_timestamp() -> i64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::{ffi::OsString, os::unix::ffi::OsStringExt};
+
+    use super::*;
+
+    #[test]
+    fn an_ownership_receipt_requires_representable_paths_before_it_can_be_written() {
+        let temporary = tempfile::tempdir().expect("temporary data directory");
+        let store = Store::open(temporary.path()).expect("open store");
+        let link_path = PathBuf::from(OsString::from_vec(b"link-\xff".to_vec()));
+        let receipt = Receipt::new(
+            AgentKind::ClaudeCode,
+            "portable".to_owned(),
+            link_path.clone(),
+            PathBuf::from("/source/portable"),
+            None,
+            None,
+            None,
+        );
+
+        let result = store.ensure_receipt_recordable(&receipt);
+
+        assert!(matches!(
+            result,
+            Err(Error::UnrepresentablePath(path)) if path == link_path
+        ));
+    }
 }
 
 fn migrate(connection: &mut Connection) -> Result<()> {

@@ -116,6 +116,37 @@ fn yes_requires_every_part_of_the_request_to_be_explicit() {
     }
 }
 
+/// Detection defaults are not configuration. If setup has not persisted the
+/// user's agent selections yet, an omitted `--agents` has no truthful implicit
+/// target set and is refused before the confirmation prompt.
+#[test]
+fn omitted_agents_are_refused_until_setup_is_complete() {
+    let fixture = Fixture::new();
+    let repository = fixture.directory.path().join("library");
+    write_skill(&repository.join("skills/portable"), "portable");
+    initialize_repository(&repository);
+    let mut app = fixture.app();
+    let preview = app.preview_source(&repository).expect("preview source");
+    app.confirm_source(preview).expect("register source");
+    drop(app);
+
+    let (code, output) = fixture.answer(
+        &[
+            "install",
+            "--source",
+            &repository.display().to_string(),
+            "--skill",
+            "portable",
+        ],
+        "y\n",
+    );
+
+    assert_eq!(code, ExitCodeKind::InvalidRequest, "{output}");
+    assert!(output.contains("--agents"), "{output}");
+    assert!(output.contains("setup"), "{output}");
+    assert!(fixture.nothing_installed(), "{output}");
+}
+
 /// A request that names no single variant is refused before any plan is made,
 /// and every candidate is named so the user can choose.
 #[test]

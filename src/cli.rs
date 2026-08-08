@@ -16,7 +16,7 @@ use std::{
 };
 
 use crate::{
-    AgentKind, AppEnvironment, SkilledApp,
+    AgentKind, AppEnvironment, SkilledApp, View,
     agents::adapter,
     app::PlanRequestFailure,
     components::terminal_safe,
@@ -112,14 +112,15 @@ pub fn run(
 /// Skilled could not record owning all mean that, and the printed report is
 /// what distinguishes them.
 ///
-/// A postcondition Skilled could not establish is *not* one of them. Every
-/// link asked for was written and nothing disagreed with the plan; what is
-/// missing is a check over a root the user asked Skilled to leave alone, which
-/// is the ordinary configuration for anyone running fewer than three agents.
-/// Reporting that as non-zero would make the common path fail and teach a
-/// reader to ignore the status. It is said in words instead — "Verified as far
-/// as it could be", then each unestablished check by name — where it can be
-/// read rather than only branched on.
+/// An ancillary OpenCode postcondition Skilled could not establish is *not*
+/// one of them. Every link asked for was still observed; what is missing is an
+/// effective-resolution check over a root the user asked Skilled to leave
+/// alone, which is the ordinary configuration for anyone running fewer than
+/// three agents. Reporting that as non-zero would make the common path fail and
+/// teach a reader to ignore the status. It is said in words instead —
+/// "Verified as far as it could be", then each unestablished check by name —
+/// where it can be read rather than only branched on. A written target that was
+/// not re-observed is different and exits as a verification failure.
 pub fn exit_code_for(status: InstallStatus) -> ExitCodeKind {
     match status {
         InstallStatus::Installed | InstallStatus::NothingToDo => ExitCodeKind::Success,
@@ -242,6 +243,12 @@ fn execute(
     output: &mut dyn Write,
 ) -> Result<ExitCodeKind, String> {
     let mut app = SkilledApp::open(environment).map_err(|error| error.to_string())?;
+    if request.agents.is_none() && matches!(app.view(), View::Setup(_)) {
+        return Ok(refuse(
+            output,
+            "--agents is required until setup is complete",
+        ));
+    }
     let Some(source_id) = resolve_source(&app, &request.source) else {
         return Ok(refuse(
             output,

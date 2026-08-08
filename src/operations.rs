@@ -299,6 +299,9 @@ fn probe_source_dir(sources: &[RegisteredSource], variant: &VariantRef) -> Resul
     if !fs::metadata(&directory).is_ok_and(|metadata| metadata.is_dir()) {
         return Err(format!("{} is no longer a directory", directory.display()));
     }
+    let mut budget = InspectionBudget::source_scan();
+    validate_portable_skill_with_budget(&directory, &mut budget)
+        .map_err(|error| format!("it no longer validates as a portable skill: {error}"))?;
     Ok(directory)
 }
 
@@ -1210,6 +1213,9 @@ impl VerifyFailure {
 pub struct VerifyWithheld {
     agent: AgentKind,
     reason: String,
+    /// Whether this is a postcondition on a target Skilled wrote, as opposed
+    /// to an ancillary OpenCode resolution affected through another root.
+    required: bool,
 }
 
 impl VerifyWithheld {
@@ -1221,6 +1227,10 @@ impl VerifyWithheld {
     pub fn reason(&self) -> &str {
         &self.reason
     }
+
+    fn blocks_success(&self) -> bool {
+        self.required
+    }
 }
 
 /// What a scan taken after the apply made of the links it wrote.
@@ -1228,10 +1238,11 @@ impl VerifyWithheld {
 /// Spec 11.4: exit status zero is not sufficient by itself, so every created
 /// link is re-observed and checked against what the plan said it would be.
 ///
-/// Three answers, never two. [`Self::is_verified`] means nothing failed, which
-/// is not the same as everything holding: a check Skilled could not run is
-/// carried separately so the surfaces can say so rather than reporting a pass
-/// they did not earn.
+/// Three answers, never two. [`Self::is_verified`] means every written target
+/// was re-observed and nothing failed, which is not the same as every ancillary
+/// postcondition holding: an effective-resolution check Skilled could not run
+/// is carried separately so the surfaces can say so without turning a root the
+/// user deselected into a failed install.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct VerifyReport {
     failures: Vec<VerifyFailure>,
@@ -1239,9 +1250,11 @@ pub struct VerifyReport {
 }
 
 impl VerifyReport {
-    /// Whether anything the scan could check disagreed with the plan.
+    /// Whether every written target was checked and nothing disagreed with the
+    /// plan. Ancillary OpenCode resolution may remain withheld without turning
+    /// an otherwise observed install into a failure.
     pub fn is_verified(&self) -> bool {
-        self.failures.is_empty()
+        self.failures.is_empty() && !self.withheld.iter().any(VerifyWithheld::blocks_success)
     }
 
     /// Whether every postcondition was both checked and held.
@@ -1263,16 +1276,17 @@ impl VerifyReport {
 pub enum InstallStatus {
     /// The plan held no work, so nothing was written and nothing failed.
     NothingToDo,
-    /// Every planned link was created and nothing the scan afterwards could
-    /// check disagreed with the plan. Whether every postcondition was actually
-    /// checked is [`VerifyReport::is_complete`]; a status is one word, and this
-    /// is not the place to flatten the two answers into it.
+    /// Every planned link was created, every written target was observed again,
+    /// and nothing disagreed with the plan. Whether every ancillary
+    /// postcondition was checked is [`VerifyReport::is_complete`]; a status is
+    /// one word, and this is not the place to flatten the two answers into it.
     Installed,
     /// Some links were created and the run stopped before the rest.
     PartiallyApplied,
     /// The run stopped before writing anything at all.
     NotApplied,
-    /// Everything was written, and the scan afterwards did not bear it out.
+    /// Everything was written, and the scan afterwards either did not bear it
+    /// out or could not re-observe a written target.
     VerificationFailed,
     /// Every link was created, and at least one receipt could not be written.
     /// Skilled has put something on disk that it does not own, which a later
@@ -1464,6 +1478,27 @@ fn apply_target(
             ));
         }
     }
+    let mut budget = InspectionBudget::source_scan();
+    if let Err(error) = validate_portable_skill_with_budget(plan.source_dir(), &mut budget) {
+        return StepOutcome::Failed(format!(
+            "{} no longer validates as a portable skill, so nothing was written: {error}",
+            plan.source_dir().display()
+        ));
+    }
+    let receipt = Receipt {
+        agent: target.agent,
+        skill_name: plan.skill_name().to_owned(),
+        link_path: target.link_path.clone(),
+        link_target: plan.source_dir().to_path_buf(),
+        source_id: Some(plan.variant.source_id()),
+        catalog_relative_path: Some(plan.variant.catalog_relative_path().to_path_buf()),
+        variant_relative_path: Some(plan.variant.variant_relative_path().to_path_buf()),
+    };
+    if let Err(error) = store.ensure_receipt_recordable(&receipt) {
+        return StepOutcome::Failed(format!(
+            "the ownership receipt cannot record this target, so nothing was written: {error}"
+        ));
+    }
     let root_now = probe_root(root, home);
     match (&target.disposition, &root_now) {
         // A root that has appeared since the plan was made is the root the plan
@@ -1509,15 +1544,6 @@ fn apply_target(
         };
         return StepOutcome::Failed(format!("the link could not be created: {error}{root_note}"));
     }
-    let receipt = Receipt {
-        agent: target.agent,
-        skill_name: plan.skill_name().to_owned(),
-        link_path: target.link_path.clone(),
-        link_target: plan.source_dir().to_path_buf(),
-        source_id: Some(plan.variant.source_id()),
-        catalog_relative_path: Some(plan.variant.catalog_relative_path().to_path_buf()),
-        variant_relative_path: Some(plan.variant.variant_relative_path().to_path_buf()),
-    };
     match store.record_receipt(&receipt) {
         Ok(()) => StepOutcome::Created,
         Err(error) => StepOutcome::CreatedUnrecorded(error.to_string()),
@@ -1585,6 +1611,7 @@ pub fn verify_install(
             withheld.push(VerifyWithheld {
                 agent: step.agent,
                 reason,
+                required: true,
             });
             continue;
         }
@@ -1608,6 +1635,7 @@ pub fn verify_install(
                 withheld.push(VerifyWithheld {
                     agent: step.agent,
                     reason,
+                    required: true,
                 });
                 continue;
             }
@@ -1632,6 +1660,7 @@ pub fn verify_install(
                     "what OpenCode resolves the name to could not be established: {}",
                     unknown_roots(roots)
                 ),
+                required: false,
             });
             continue;
         }
@@ -1671,6 +1700,7 @@ pub fn verify_install(
                         "what OpenCode resolves the name to could not be established: {}",
                         unknown_roots(roots)
                     ),
+                    required: false,
                 });
             }
             (Some(expected), actual) if expected != &actual => failures.push(VerifyFailure {
