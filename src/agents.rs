@@ -73,6 +73,27 @@ impl AgentAdapter {
         self.compatibility_skill_roots
     }
 
+    /// Whether a source catalog root is this agent's own edition, rather than
+    /// one it merely reads.
+    ///
+    /// [`Self::supports_source_catalog`] answers a wider question — whether the
+    /// agent would find variants placed there at all — and OpenCode answers it
+    /// for `.claude/skills` and `.agents/skills` because it reads them. That is
+    /// a fact about discovery, not about authorship: a catalog laid out as
+    /// `.claude/skills` holds the Claude Code edition whoever else can see it.
+    /// Anything deciding which agent a variant was written for asks this.
+    pub fn owns_source_catalog(self, relative_path: &Path) -> bool {
+        if relative_path.file_name() != Some(OsStr::new("skills")) {
+            return false;
+        }
+        relative_path.ends_with(self.native_skill_root)
+            || relative_path
+                .parent()
+                .and_then(Path::file_name)
+                .and_then(OsStr::to_str)
+                .is_some_and(|parent| self.source_catalog_parent_aliases.contains(&parent))
+    }
+
     pub fn supports_source_catalog(self, relative_path: &Path) -> bool {
         if relative_path.file_name() != Some(OsStr::new("skills")) {
             return false;

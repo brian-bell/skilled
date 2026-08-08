@@ -1,0 +1,28 @@
+---
+source: tests/tui_snapshots.rs
+expression: screen
+---
+ ◆ skilled   global                              ● ready · 3 sources registered
+ 1 Inventory ·5  2 Sources ·3  Updates (soon) ▌Doctor ·8
+ ▌ Details  review
+ ──────────────────────────────────────────────────────────────────────────────
+ FINDING
+ ──────────────────────────────────────────────────────────────────────────────
+ variant.duplicate_for_agent
+ × critical
+ Agent: Claude Code
+ OBSERVED
+ ──────────────────────────────────────────────────────────────────────────────
+ Claude Code has more than one registered variant of review: alpha · skills ·
+ skills/review, beta · skills · skills/review. The selection order — an exact
+ agent-specific variant, then a compatible common one — does not narrow it to
+ one. Claude Code already has an installation under this name, so what it
+ resolves to is ambiguous now rather than at the next install.
+ CONSEQUENCE
+ ──────────────────────────────────────────────────────────────────────────────
+ Which definition the agent would resolve is not something Skilled can state,
+ so installing under this name is blocked until a source is chosen.
+ COMPETING VARIANTS
+ ──────────────────────────────────────────────────────────────────────────────
+ ! 3 more lines below — j/k to scroll
+ Tab/Shift-Tab Region   j/k Scroll   1 Inventory   2 Sources   Esc Back …

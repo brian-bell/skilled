@@ -952,7 +952,7 @@ mod installed {
 
         let screen = normalize_inventory(&temporary, render(&app, 80, 24));
         assert!(
-            screen.contains("! 7 more lines below — j/k to scroll"),
+            screen.contains("! 11 more lines below — j/k to scroll"),
             "{screen}"
         );
         insta::assert_snapshot!(screen);
@@ -963,7 +963,7 @@ mod installed {
         app.update(Action::MoveInventoryPane(1));
         let beside = normalize_inventory(&temporary, render(&app, 100, 26));
         assert!(
-            beside.contains("! 5 more lines below — Tab, then j/k"),
+            beside.contains("! 9 more lines below — Tab, then j/k"),
             "{beside}"
         );
 
@@ -975,7 +975,7 @@ mod installed {
         app.update(Action::BeginInventoryFilter);
         assert!(app.inventory_filter_active());
         let narrow = normalize_inventory(&temporary, render(&app, 100, 26));
-        assert!(narrow.contains("! 5 more lines"), "{narrow}");
+        assert!(narrow.contains("! 9 more lines"), "{narrow}");
         assert!(!narrow.contains("widen or lengthen"), "{narrow}");
         assert!(!narrow.contains("more lines below"), "{narrow}");
     }
@@ -991,7 +991,7 @@ mod installed {
         scroll_detail_to_the_end(&mut app, 80, 24);
 
         let screen = normalize_inventory(&temporary, render(&app, 80, 24));
-        assert!(screen.contains("! 7 lines above"), "{screen}");
+        assert!(screen.contains("! 11 lines above"), "{screen}");
         assert!(!screen.contains("more lines below"), "{screen}");
         insta::assert_snapshot!(screen);
     }
@@ -1001,12 +1001,12 @@ mod installed {
     fn scroll_detail_to_the_end(app: &mut SkilledApp, width: u16, height: u16) {
         let extent = drawn(app, width, height)
             .1
-            .inventory_detail_max_scroll()
+            .detail_max_scroll()
             .expect("the frame drew the detail region");
         assert!(extent > 0, "the region should have somewhere to scroll");
-        app.note_inventory_detail_max_scroll(extent);
+        app.note_detail_max_scroll(extent);
         for _ in 0..extent {
-            app.update(Action::ScrollInventoryDetail(1));
+            app.update(Action::ScrollDetail(1));
         }
     }
 
@@ -1033,6 +1033,230 @@ mod installed {
         app.update(Action::SubmitInventoryFilter);
 
         assert!(app.filtered_rows().is_empty());
+        insta::assert_snapshot!(normalize_inventory(&temporary, render(&app, 80, 24)));
+    }
+
+    /// Every classification the effective resolution can reach, plus a broken
+    /// installation, so the Doctor list shows its whole ordering at once.
+    ///
+    /// The source checkouts live inside the temporary home so every path the
+    /// screen shows is home-relative and therefore stable across machines.
+    fn doctor_app(temporary: &tempfile::TempDir) -> SkilledApp {
+        let home = temporary.path().join("home");
+        let first = home.join("alpha");
+        write_skill(&first.join("skills/review"), "review");
+        write_skill(&first.join("skills/shared"), "shared");
+        write_skill(&first.join("claude/skills/exposed"), "exposed");
+        create_repository(&first);
+        let second = home.join("beta");
+        write_skill(&second.join("skills/review"), "review");
+        create_repository(&second);
+        let third = home.join("gamma");
+        write_skill(&third.join("skills/excluded"), "excluded");
+        create_repository(&third);
+
+        let mut app = SkilledApp::open(AppEnvironment::new(
+            &home,
+            temporary.path().join("data"),
+            "",
+        ))
+        .expect("open application");
+        for _ in 0..7 {
+            dispatch(&mut app, Action::Continue);
+        }
+        for repository in [&first, &second] {
+            let preview = app.preview_source(repository).expect("preview source");
+            app.confirm_source(preview).expect("register source");
+        }
+        app.update(Action::OpenSources);
+        app.update(Action::BeginAddSource);
+        for character in third.to_string_lossy().chars() {
+            app.update(Action::AppendSourcePath(character));
+        }
+        dispatch(&mut app, Action::SubmitSourcePath);
+        app.update(Action::ToggleCatalogCompatibility(AgentKind::OpenCode));
+        dispatch(&mut app, Action::ConfirmPendingSource);
+
+        let claude = home.join(".claude/skills");
+        let codex = home.join(".agents/skills");
+        let opencode = home.join(".config/opencode/skills");
+        for root in [&claude, &codex, &opencode] {
+            fs::create_dir_all(root).expect("create agent skill root");
+        }
+        // One name, two directories: a conflicting duplicate for OpenCode.
+        link(&first.join("skills/review"), &opencode.join("review"));
+        link(&second.join("skills/review"), &claude.join("review"));
+        // One directory through two roots: a benign alias.
+        link(&first.join("skills/shared"), &claude.join("shared"));
+        link(&first.join("skills/shared"), &codex.join("shared"));
+        // A Claude Code edition OpenCode can see but Skilled cannot claim.
+        link(
+            &first.join("claude/skills/exposed"),
+            &claude.join("exposed"),
+        );
+        // A common variant OpenCode can reach whose catalog excludes it.
+        link(&third.join("skills/excluded"), &claude.join("excluded"));
+        // And a link with nothing behind it.
+        link(&home.join("gone"), &claude.join("dangling"));
+
+        app.update(Action::OpenSources);
+        dispatch(&mut app, Action::OpenDoctor);
+        app
+    }
+
+    #[test]
+    fn doctor_populated_at_minimum_supported_size() {
+        let temporary = tempfile::tempdir().expect("temporary application directory");
+        let app = doctor_app(&temporary);
+
+        let screen = normalize_inventory(&temporary, render(&app, 80, 24));
+
+        // Issue-first: the broken installation leads, and the informational
+        // alias is ranked below everything that weakens usability.
+        let codes: Vec<&str> = screen
+            .lines()
+            .filter_map(|line| line.split_whitespace().find(|word| word.contains('.')))
+            .collect();
+        assert_eq!(codes.first(), Some(&"install.dangling_symlink"), "{screen}");
+        assert_eq!(codes.last(), Some(&"variant.benign_alias"), "{screen}");
+        insta::assert_snapshot!(screen);
+    }
+
+    #[test]
+    fn doctor_populated_at_wide_size() {
+        let temporary = tempfile::tempdir().expect("temporary application directory");
+        let app = doctor_app(&temporary);
+
+        insta::assert_snapshot!(normalize_inventory(&temporary, render(&app, 120, 40)));
+    }
+
+    /// The detail region states what was observed, what it costs, the paths
+    /// involved, and — because no repair exists in this release — says so
+    /// rather than offering one.
+    #[test]
+    fn doctor_detail_drill_in_at_minimum_supported_size() {
+        let temporary = tempfile::tempdir().expect("temporary application directory");
+        let mut app = doctor_app(&temporary);
+        // The conflicting duplicate, which is the finding with the most to say.
+        while app
+            .selected_finding()
+            .is_some_and(|entry| entry.finding().code() != "variant.duplicate_for_agent")
+        {
+            app.update(Action::MoveDoctorSelection(1));
+        }
+        app.update(Action::AdvanceDoctorPane);
+
+        let screen = normalize_inventory(&temporary, render(&app, 80, 24));
+        insta::assert_snapshot!(screen);
+
+        // The rows a finding this long leaves below the window are reachable
+        // rather than merely counted, and the last of them says what no key
+        // offers: no repair exists in this release.
+        scroll_detail_to_the_end(&mut app, 80, 24);
+        let end = normalize_inventory(&temporary, render(&app, 80, 24));
+        assert!(
+            end.contains("Variant: alpha · skills · skills/review"),
+            "{end}"
+        );
+        assert!(end.contains("Repair: not offered"), "{end}");
+        assert!(!end.contains("r Repair"), "{end}");
+    }
+
+    /// The two findings that share `variant.duplicate_for_agent` state
+    /// different consequences, because they are different complaints: an
+    /// effective resolution does pick one definition, and a registry ambiguity
+    /// picks nothing. Each must be shown beside its own evidence.
+    #[test]
+    fn each_duplicate_finding_states_its_own_consequence() {
+        let temporary = tempfile::tempdir().expect("temporary application directory");
+        let mut app = doctor_app(&temporary);
+        while app
+            .selected_finding()
+            .is_some_and(|entry| entry.agent() != AgentKind::OpenCode)
+        {
+            app.update(Action::MoveDoctorSelection(1));
+        }
+        let entry = app.selected_finding().expect("the OpenCode conflict");
+        assert_eq!(
+            (entry.finding().code(), entry.agent()),
+            ("variant.duplicate_for_agent", AgentKind::OpenCode)
+        );
+        app.update(Action::AdvanceDoctorPane);
+
+        let resolution = normalize_inventory(&temporary, render(&app, 120, 40));
+        assert!(
+            unwrapped(&resolution).contains(
+                "The highest-precedence root wins and the other \
+                                             definition is never loaded"
+            ),
+            "{resolution}"
+        );
+
+        // The registry-side finding of the same code, one row up.
+        app.update(Action::Back);
+        app.update(Action::MoveDoctorSelection(-1));
+        app.update(Action::AdvanceDoctorPane);
+        let registry = normalize_inventory(&temporary, render(&app, 120, 40));
+        assert!(
+            unwrapped(&registry).contains(
+                "Which definition the agent would resolve is not something Skilled can state"
+            ),
+            "{registry}"
+        );
+    }
+
+    /// A detail region's text with its line breaks, column padding, and the
+    /// rule dividing it from the pane beside it taken out, so a sentence can be
+    /// matched whole however the region happened to wrap it.
+    fn unwrapped(screen: &str) -> String {
+        screen
+            .replace('│', " ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// Every root absent is a complete account of the roots and no reading of
+    /// any of them, so Doctor may not report a clean bill of health.
+    #[test]
+    fn doctor_with_no_root_to_read_says_so_at_minimum_supported_size() {
+        let temporary = tempfile::tempdir().expect("temporary application directory");
+        let mut app = SkilledApp::open(AppEnvironment::new(
+            temporary.path().join("home"),
+            temporary.path().join("data"),
+            "",
+        ))
+        .expect("open application");
+        for _ in 0..7 {
+            dispatch(&mut app, Action::Continue);
+        }
+        dispatch(&mut app, Action::OpenDoctor);
+
+        let screen = normalize_inventory(&temporary, render(&app, 80, 24));
+
+        assert!(!screen.contains("Nothing to report"), "{screen}");
+        assert!(screen.contains("no root read"), "{screen}");
+        insta::assert_snapshot!(screen);
+    }
+
+    /// Nothing installed and nothing registered is a clean bill of health,
+    /// which is not the same answer as a root that could not be read.
+    #[test]
+    fn doctor_empty_at_minimum_supported_size() {
+        let temporary = tempfile::tempdir().expect("temporary application directory");
+        let home = temporary.path().join("home");
+        fs::create_dir_all(home.join(".claude/skills")).expect("create an empty root");
+        let mut app = SkilledApp::open(AppEnvironment::new(
+            &home,
+            temporary.path().join("data"),
+            "",
+        ))
+        .expect("open application");
+        for _ in 0..7 {
+            dispatch(&mut app, Action::Continue);
+        }
+        dispatch(&mut app, Action::OpenDoctor);
+
         insta::assert_snapshot!(normalize_inventory(&temporary, render(&app, 80, 24)));
     }
 

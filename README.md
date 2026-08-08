@@ -60,7 +60,24 @@ it does not yet install, repair, update, or uninstall skills.
   stated only when every root in scope was read or found absent and at least one
   of them was actually read; otherwise Skilled says why it is withholding the
   count instead of reporting a zero.
-- Filtering the inventory by skill name, source, or health.
+- Deterministic per-agent variant selection: an exact agent-specific edition,
+  then a compatible common one, and nothing an agent cannot use. Where more than
+  one registered variant survives for an agent and a name, Skilled reports the
+  ambiguity and names every competing variant rather than picking one.
+- OpenCode effective resolution across the three roots it reads —
+  `~/.config/opencode/skills` first, then `~/.agents/skills`, then
+  `~/.claude/skills`. One directory reached through several roots is a benign
+  alias; different directories behind one name are a conflicting duplicate; and
+  another agent's edition, visible to OpenCode with no edition of its own behind
+  it, is reported as exposure rather than claimed as usable. A root Skilled was
+  asked to leave alone, or could not read, leaves the answer unstated instead of
+  guessed at.
+- A read-only Doctor view listing every finding the scan holds, ordered by the
+  documented issue groups and then by severity. Each finding states what was
+  observed, what it costs, the paths involved, and that no repair exists in this
+  release — Skilled offers no key that would perform one.
+- Filtering the inventory by skill name, source, health, or the words the
+  effective resolution adds.
 - A scrollable inventory detail region. A skill installed for several agents
   outgrows the minimum terminal, so `j` / `k` move the region's window once it
   has focus, by whole lines, so a wrapped field passes the window's edge whole
@@ -69,6 +86,8 @@ it does not yet install, repair, update, or uninstall skills.
   would actually reach those rows from where the reader is standing: the
   movement keys, a region focus before them, or a larger terminal when no
   keystroke would do.
+- A scrollable Doctor detail region, sharing the Inventory's window behaviour
+  and its accounting for the rows it cannot show at once.
 - Direct startup into Inventory after setup is complete.
 - A shared-dialog Settings action for rerunning setup. Rerunning refreshes agent
   root and executable detection while retaining current agent selections and
@@ -77,11 +96,12 @@ it does not yet install, repair, update, or uninstall skills.
   session status, workspace, and contextual key hints — drawn from the tracked
   visual prototype. Destinations without an implementation are shown as
   explicitly unavailable rather than offered, and key hints advertise only
-  commands the active context handles. Sources and Inventory carry a count
-  beside their name in the navigation row — Sources always, Inventory whenever
-  the scan is entitled to state one — while an unavailable destination carries
-  no count at all.
-- Contextual keyboard help from Setup, Inventory, Sources, and Settings. Help is
+  commands the active context handles. Inventory, Sources, and Doctor carry a
+  count beside their name in the navigation row — Sources always, the other two
+  whenever the scan is entitled to state one — while an unavailable destination
+  carries no count at all.
+- Contextual keyboard help from Setup, Inventory, Sources, Doctor, and
+  Settings. Help is
   modal, lists only commands implemented in the underlying context, and closes
   before Esc changes that context.
 - Ratatui layouts at 80×24 and wider, with a second detail region at 100
@@ -89,10 +109,10 @@ it does not yet install, repair, update, or uninstall skills.
 - Terminal restoration on normal exit, startup failure, panic unwinding, and
   the Ctrl-C key path used in raw mode.
 
-Doctor, planning, installation, repair, update, remote fetching, and uninstall
-behavior are still future work. Registration and inventory are deliberately
-read-only: they catalog local checkouts and observe agent roots, but never
-copy, link, or modify anything in them.
+Planning, installation, repair, update, remote fetching, and uninstall
+behavior are still future work. Registration, inventory, and Doctor are
+deliberately read-only: they catalog local checkouts and observe agent roots,
+but never copy, link, or modify anything in them.
 
 ## Requirements
 
@@ -145,6 +165,14 @@ forward and backward through Repositories, Variants, and Details; Enter advances
 toward Details; and Esc returns through the region hierarchy before leaving the
 screen. In a selectable list, `j` / `k` or arrow keys move the selection. Press
 `a` to add another source or `1` to return to Inventory.
+
+From either screen, press `4` to open Doctor. It lists each finding with its
+severity, stable code, skill, and agent, and its regions behave as the
+Inventory's do: Tab and Shift-Tab move between the list and the details, Enter
+opens the details of the selected finding on a compact terminal, `j` / `k` move
+the selection and scroll the details once they have focus, and Esc leaves the
+detail region and then the screen. Press `1` or `2` to return to Inventory or
+Sources.
 
 Private metadata is stored in the platform application-data directory. On
 macOS, the database is normally

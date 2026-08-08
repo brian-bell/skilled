@@ -5,6 +5,7 @@ pub mod error;
 pub mod input;
 pub mod inventory;
 pub mod paths;
+pub mod resolution;
 pub mod runner;
 pub mod source;
 mod store;
@@ -16,8 +17,8 @@ mod viewport;
 
 pub use agents::{AgentDetection, AgentKind};
 pub use app::{
-    Action, Effect, InventoryPane, SetupStep, SkilledApp, SourcesPane, UpdateOutcome, UpdateResult,
-    View,
+    Action, DoctorPane, Effect, InventoryPane, SetupStep, SkilledApp, SourcesPane, UpdateOutcome,
+    UpdateResult, View,
 };
 pub use error::{Error, Result};
 pub use paths::AppEnvironment;

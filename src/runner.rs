@@ -27,8 +27,8 @@ pub fn run(environment: AppEnvironment) -> Result<()> {
         // A frame that did not draw the region measured nothing, and nothing
         // is not zero: the offset it was last scrolled to survives the frames
         // where the region is off screen.
-        if let Some(max_scroll) = feedback.inventory_detail_max_scroll() {
-            app.note_inventory_detail_max_scroll(max_scroll);
+        if let Some(max_scroll) = feedback.detail_max_scroll() {
+            app.note_detail_max_scroll(max_scroll);
         }
         let Event::Key(key) = event::read()? else {
             continue;
