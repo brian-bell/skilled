@@ -51,11 +51,50 @@ pub(crate) const DETAIL_REGION_WIDTH_WIDE: u16 = 50;
 /// of the workspace the chrome exists to frame.
 pub(crate) const PADDED_CHROME_MINIMUM_HEIGHT: u16 = 38;
 
-/// The rows one chrome bar takes at this terminal height: the prototype's two
-/// at or above [`PADDED_CHROME_MINIMUM_HEIGHT`], one below it.
+/// The rows the key bar takes at this terminal height: the prototype's two
+/// at or above [`PADDED_CHROME_MINIMUM_HEIGHT`], one below it. The title bar
+/// takes [`title_bar_height`] and the navigation strip [`nav_bar_height`]
+/// instead.
 pub(crate) fn chrome_bar_height(terminal_height: u16) -> u16 {
     if terminal_height >= PADDED_CHROME_MINIMUM_HEIGHT {
         2
+    } else {
+        1
+    }
+}
+
+/// The rows the navigation strip takes at this terminal height: three at or
+/// above [`PADDED_CHROME_MINIMUM_HEIGHT`], one below it.
+///
+/// The prototype pads a tab's label vertically (`.tab`,
+/// `padding: 11px 16px 10px`) inside a box whose side borders and raised
+/// active surface span the tab's whole height, and whose bottom edge is the
+/// strip's border. Two rows can hold the label and the border but leave the
+/// label flush under the titlebar's rule with borders that stop beside it;
+/// the third row is what lets the label sit padded while every cell's
+/// surface and separators run the strip's full height.
+pub(crate) fn nav_bar_height(terminal_height: u16) -> u16 {
+    if terminal_height >= PADDED_CHROME_MINIMUM_HEIGHT {
+        3
+    } else {
+        1
+    }
+}
+
+/// The rows the title bar takes at this terminal height: the prototype's
+/// pad–text–pad band at or above [`PADDED_CHROME_MINIMUM_HEIGHT`], one row
+/// below it.
+///
+/// The prototype's titlebar centres its one line of text vertically —
+/// `.terminal-titlebar` is a 40px flex row with `align-items: center` — and
+/// a two-row band cannot say that: the spare row falls on one side of the
+/// text, and whichever side it falls on reads as the text crowding the
+/// other. Only the title bar pays for the third row; the navigation strip's
+/// second row is the active tab's border and the key bar's is padding, so
+/// each of those already spends its rows on something the prototype draws.
+pub(crate) fn title_bar_height(terminal_height: u16) -> u16 {
+    if terminal_height >= PADDED_CHROME_MINIMUM_HEIGHT {
+        3
     } else {
         1
     }

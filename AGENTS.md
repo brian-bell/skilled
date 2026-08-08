@@ -114,11 +114,14 @@ signal needs both, because colour alone is not an acceptable cue.
   OpenCode while holding another agent's edition. Anything deciding usability
   asks `VariantRef::usable_by`, which reads the catalog's own path through
   `AgentAdapter::owns_source_catalog`.
-- Key hints and navigation destinations are contracts: show one only when
-  `src/input.rs` handles it in that context, and show a count only when the
-  data behind it supports one. Counts render as `·N` so a bare amber digit
-  cannot read as the next tab's route key — the prototype separates the
-  two classes by colour alone, which a terminal may not rest on.
+- Key hints and counts stay truthful: a key-bar hint appears only when
+  `src/input.rs` handles it in that context, and a count only when the data
+  behind it supports one. A tab's route digit is caption rather than hint —
+  every available destination shows its number, the active view's included,
+  where pressing it is simply inert; a destination this release cannot open
+  still shows none. Counts render as `·N` so a bare amber digit cannot read
+  as the next tab's route key — the prototype separates the two classes by
+  colour alone, which a terminal may not rest on.
 - Nothing is written until a plan the user has seen in full is confirmed, and
   that is enforced rather than assumed: a preview taller than its dialog scrolls
   rather than dropping what it cannot hold, and neither the reducer nor the

@@ -529,8 +529,10 @@ fn surfaces_are_painted_where_the_design_calls_for_them() {
     const SURFACE_3: Color = Color::Rgb(0x17, 0x21, 0x2c);
 
     // The canvas shows through the workspace, while the two chrome rows sit on
-    // their own band.
-    assert_eq!(style_in_row(&screen, 0, "skilled").bg, Some(BAND));
+    // their own band. The window frame holds the outermost ring, so content
+    // rows start one cell in and the title text sits on the third row of the
+    // framed, padded chrome.
+    assert_eq!(style_in_row(&screen, 2, "skilled").bg, Some(BAND));
     assert_eq!(
         style_in_row(
             &screen,
@@ -542,31 +544,32 @@ fn surfaces_are_painted_where_the_design_calls_for_them() {
     );
     // At this width the session status sits on the navigation row, so the
     // title row is one rectangle whose band is only right if it reaches past
-    // the context path to the terminal's edge.
-    let title = row_text(&screen, 0);
+    // the context path to the frame's edge.
+    let title = row_text(&screen, 2);
     assert!(!title.contains('●'), "{title}");
-    let last = screen.area.x + screen.area.width - 1;
-    let past_title = u16::try_from(title.chars().count() + 2).expect("column");
+    let last = screen.area.x + screen.area.width - 2;
+    let past_title =
+        u16::try_from(title.trim_end_matches('▏').trim_end().chars().count() + 2).expect("column");
     assert_eq!(
-        screen[(screen.area.x + past_title, 0)].style().bg,
+        screen[(screen.area.x + past_title, 2)].style().bg,
         Some(BAND),
         "the band should cover the row past the product and context"
     );
     assert_eq!(
-        screen[(last, 0)].style().bg,
+        screen[(last, 2)].style().bg,
         Some(BAND),
-        "the band should reach the end of the row, not stop with the text"
+        "the band should reach the frame, not stop with the text"
     );
 
     // The navigation strip is its own band, with the active tab lifted; the
-    // padded chrome at forty rows puts its text on the third row. Sources is
-    // the active tab here, so Inventory is the inactive probe.
-    assert_eq!(style_in_row(&screen, 2, "1 Inventory").bg, Some(SURFACE));
-    assert_eq!(style_in_row(&screen, 2, "▌Sources").bg, Some(SURFACE_2));
+    // framed, padded chrome at forty rows puts its labels on the sixth row.
+    // Sources is the active tab here, so Inventory is the inactive probe.
+    assert_eq!(style_in_row(&screen, 5, "1 Inventory").bg, Some(SURFACE));
+    assert_eq!(style_in_row(&screen, 5, " Sources").bg, Some(SURFACE_2));
     // This row is laid out as two rectangles — the tab strip and the session
     // status — so its surface is only right if it covers the gap between
     // them as well as the text in each.
-    let navigation = row_text(&screen, 2);
+    let navigation = row_text(&screen, 5);
     let status = u16::try_from(
         navigation[..navigation.find('●').expect("session status glyph")]
             .chars()
@@ -574,19 +577,19 @@ fn surfaces_are_painted_where_the_design_calls_for_them() {
     )
     .expect("column");
     assert_eq!(
-        screen[(screen.area.x + status - 2, 2)].style().bg,
+        screen[(screen.area.x + status - 2, 5)].style().bg,
         Some(SURFACE),
         "the gap between the tab strip and the session status is on the surface"
     );
 
-    // The key-hint row shares the title bar's band, and it reaches the edge of
-    // the terminal rather than stopping where the last hint does.
-    let key_hints = screen.area.y + screen.area.height - 1;
+    // The key-hint row shares the title bar's band, and it reaches the frame
+    // rather than stopping where the last hint does.
+    let key_hints = screen.area.y + screen.area.height - 2;
     assert_eq!(style_in_row(&screen, key_hints, "Quit").bg, Some(BAND));
     assert_eq!(
         screen[(last, key_hints)].style().bg,
         Some(BAND),
-        "the band should reach the end of the row, not stop at the last hint"
+        "the band should reach the frame, not stop at the last hint"
     );
     // A key cap keeps its own emphasis on top of that band.
     assert_eq!(style_in_row(&screen, key_hints, "q ").bg, Some(SURFACE_2));
@@ -596,15 +599,18 @@ fn surfaces_are_painted_where_the_design_calls_for_them() {
     assert_eq!(style_in_row(&screen, focused, "source").bg, Some(SURFACE_3));
     // The band must reach the end of the pane, which is what distinguishes it
     // from a label-length smear. The pane is unboxed, so it ends at the rule
-    // column dividing it from the variants beside it.
-    let row = row_text(&screen, focused);
+    // column dividing it from the variants beside it — read inside the frame,
+    // whose own column would otherwise be the first rule found. An inner
+    // index maps one column right on screen, so the cell before the divider
+    // sits at the divider's own inner index.
+    let row = inner_row_text(&screen, focused);
     let divider = row
         .char_indices()
         .find(|(_, character)| *character == '│')
         .map(|(index, _)| u16::try_from(row[..index].chars().count()).expect("column"))
         .expect("Repositories region divider");
     assert_eq!(
-        screen[(divider - 1, focused)].style().bg,
+        screen[(divider, focused)].style().bg,
         Some(SURFACE_3),
         "the tint should reach the end of the pane, not stop at the label"
     );
@@ -694,12 +700,14 @@ fn navigation_separates_active_reachable_and_unavailable_destinations() {
     let screen = buffer(&app, 80, 24);
     let navigation = row_text(&screen, 1);
 
-    // Focus is carried by a marker and emphasis, not by colour alone.
-    assert!(navigation.contains("▌Inventory"), "{navigation}");
+    // The active entry is said without the list-focus marker or colour: its
+    // emphasis is asserted below. Every available tab keeps its `.tab-key`
+    // digit as caption, the active one included — pressing the number of
+    // the tab already on screen is inert, and the digit does not pretend
+    // otherwise by disappearing.
+    assert!(!navigation.contains('▌'), "{navigation}");
+    assert!(navigation.contains("1 Inventory"), "{navigation}");
     assert!(navigation.contains(" 2 Sources"), "{navigation}");
-    assert!(!navigation.contains("▌2 Sources"), "{navigation}");
-    // Pressing 1 on Inventory does nothing, so no shortcut is offered for it.
-    assert!(!navigation.contains("1 Inventory"), "{navigation}");
 
     let active = style_at(&screen, "Inventory");
     assert_eq!(active.fg, Some(Color::Rgb(0xf2, 0xf6, 0xfa)));
@@ -757,51 +765,148 @@ fn the_tab_strip_boxes_padded_cells_behind_line_separators() {
 }
 
 /// From thirty-eight rows the chrome takes the prototype's bar heights: a
-/// two-row title bar and key bar, and a tab strip whose second row draws the
-/// active tab's bottom border (prototype `.tab[aria-selected]`
-/// `border-bottom-color`) instead of underlining its label.
+/// pad–text–pad title bar closed by the titlebar's hairline, a two-row key
+/// bar, and a tab strip whose second row draws the strip's bottom border
+/// with the active tab's stretch in the accent colour (prototype
+/// `.tab[aria-selected]` `border-bottom-color`) instead of underlining its
+/// label.
 #[test]
 fn a_tall_terminal_pads_the_chrome_to_the_prototype_bar_heights() {
     const BAND: Color = Color::Rgb(0x0d, 0x12, 0x18);
     const SURFACE: Color = Color::Rgb(0x0f, 0x15, 0x1d);
     const SURFACE_2: Color = Color::Rgb(0x12, 0x1a, 0x24);
     const CYAN: Color = Color::Rgb(0x73, 0xd7, 0xee);
+    const LINE: Color = Color::Rgb(0x29, 0x34, 0x40);
 
     let harness = Harness::new();
     let screen = buffer(&harness.completed_setup(), 120, 40);
 
-    // The title bar's second row is blank band: the padding falls between
-    // the title and the tabs, where the prototype's own padding sits.
-    assert_eq!(row_text(&screen, 1), "", "{}", row_text(&screen, 1));
-    assert_eq!(screen[(0, 1)].style().bg, Some(BAND));
+    // Inside the frame the title bar takes three rows with its text on the
+    // middle one, centred the way the prototype's flex row centres it: blank
+    // band above, and below it the pad row whose bottom edge carries the
+    // titlebar's border as a hairline flush against the tab strip.
+    assert!(row_text(&screen, 2).contains("◆ skilled"));
+    assert_eq!(inner_row_text(&screen, 1), "", "{}", row_text(&screen, 1));
+    assert_eq!(screen[(1, 1)].style().bg, Some(BAND));
+    assert_eq!(screen[(1, 3)].symbol(), "▁");
+    assert_eq!(screen[(1, 3)].style().fg, Some(LINE));
+    assert_eq!(screen[(1, 3)].style().bg, Some(BAND));
 
-    // The label row carries no underline — the border is the row below.
-    let active = style_in_row(&screen, 2, "▌Inventory");
+    // The strip takes three rows: padding, the labels centred in the strip
+    // the way the prototype's `.tab` padding centres them, and the bottom
+    // border. The label row carries no underline — the border is the row
+    // below.
+    let active = style_in_row(&screen, 5, " Inventory");
     assert_eq!(active.bg, Some(SURFACE_2));
     assert!(!active.add_modifier.contains(Modifier::UNDERLINED));
 
-    // The accent row: the active tab's border, in the accent colour on the
-    // tab's own raised surface, ending exactly at the tab's separator; the
-    // separators carry on so every box keeps its full height.
-    assert_eq!(screen[(0, 3)].symbol(), "▁");
-    assert_eq!(screen[(15, 3)].symbol(), "▁");
-    let border = screen[(0, 3)].style();
+    // The padding row above the labels carries each cell through: the active
+    // tab's raised surface, the inactive cells' strip surface, and the
+    // separators, so every box spans the strip's full height.
+    assert_eq!(screen[(2, 4)].symbol(), " ");
+    assert_eq!(screen[(2, 4)].style().bg, Some(SURFACE_2));
+    assert_eq!(screen[(21, 4)].symbol(), " ");
+    assert_eq!(screen[(21, 4)].style().bg, Some(SURFACE));
+    for column in [17_u16, 34, 51, 68] {
+        assert_eq!(screen[(column, 4)].symbol(), "│");
+        assert_eq!(screen[(column, 4)].style().fg, Some(LINE));
+        assert!(
+            !screen[(column, 4)]
+                .style()
+                .add_modifier
+                .contains(Modifier::UNDERLINED),
+            "only the border row's separators carry the hairline"
+        );
+    }
+
+    // The bottom-border row: the strip's hairline, with the active tab's
+    // stretch in the accent colour on the tab's own raised surface, the
+    // separators running down through it to close each box, and the line
+    // carrying on under the slack and the session status. The strip starts
+    // one column in, past the frame.
+    assert_eq!(screen[(1, 6)].symbol(), "▁");
+    assert_eq!(screen[(16, 6)].symbol(), "▁");
+    let border = screen[(1, 6)].style();
     assert_eq!(border.fg, Some(CYAN));
     assert_eq!(border.bg, Some(SURFACE_2));
-    for column in [16_u16, 33, 50, 67] {
-        assert_eq!(screen[(column, 3)].symbol(), "│");
+    for column in [17_u16, 34, 51, 68] {
+        assert_eq!(screen[(column, 6)].symbol(), "│");
+        assert_eq!(screen[(column, 6)].style().fg, Some(LINE));
+        // The separator's column would otherwise be a hole in the border:
+        // the underline carries the hairline through it.
+        assert!(
+            screen[(column, 6)]
+                .style()
+                .add_modifier
+                .contains(Modifier::UNDERLINED),
+            "the border must carry through the separator column"
+        );
     }
-    // An inactive tab has no border: its stretch of the accent row is blank
-    // strip surface.
-    assert_eq!(screen[(20, 3)].symbol(), " ");
-    assert_eq!(screen[(20, 3)].style().bg, Some(SURFACE));
+    for column in [90_u16, 110] {
+        assert_eq!(screen[(column, 6)].symbol(), "▁");
+        assert_eq!(screen[(column, 6)].style().fg, Some(LINE));
+        assert_eq!(screen[(column, 6)].style().bg, Some(SURFACE));
+    }
+    // An inactive tab's stretch is the plain hairline, not the accent.
+    assert_eq!(screen[(21, 6)].symbol(), "▁");
+    assert_eq!(screen[(21, 6)].style().fg, Some(LINE));
+    assert_eq!(screen[(21, 6)].style().bg, Some(SURFACE));
 
-    // The key bar mirrors the title bar: hints on the last row, band padding
-    // on the row above, between the workspace and the hints.
-    let last = screen.area.height - 1;
+    // The key bar keeps its two rows: hints on the last row inside the
+    // frame, band padding on the row above, between the workspace and the
+    // hints.
+    let last = screen.area.height - 2;
     assert!(row_text(&screen, last).contains("q Quit"));
-    assert_eq!(row_text(&screen, last - 1), "");
-    assert_eq!(screen[(0, last - 1)].style().bg, Some(BAND));
+    assert_eq!(
+        inner_row_text(&screen, last - 1),
+        "",
+        "{}",
+        row_text(&screen, last - 1)
+    );
+    assert_eq!(screen[(1, last - 1)].style().bg, Some(BAND));
+}
+
+/// A terminal with surplus beyond the 80×24 content minimum frames the shell
+/// in the prototype's window edge: the `--line-strong` border drawn through
+/// one cell of page ground (prototype `.terminal`), with every surface inset
+/// inside the ring.
+#[test]
+fn a_surplus_terminal_frames_the_shell_in_the_window_edge() {
+    const PAGE: Color = Color::Rgb(0x00, 0x00, 0x00);
+    const LINE_STRONG: Color = Color::Rgb(0x43, 0x52, 0x64);
+    const BAND: Color = Color::Rgb(0x0d, 0x12, 0x18);
+
+    let harness = Harness::new();
+    let app = harness.completed_setup();
+
+    let screen = buffer(&app, 120, 40);
+    let (right, bottom) = (screen.area.width - 1, screen.area.height - 1);
+    // Eighth-block strokes hugging the ring's inner edge, so the line sits
+    // flush against the surfaces it frames and the page ground shows only
+    // outside it; the corner cells are bare ground where the strokes' edges
+    // already meet.
+    for (x, y, glyph) in [
+        (0, 0, " "),
+        (right, 0, " "),
+        (0, bottom, " "),
+        (right, bottom, " "),
+        (60, 0, "▁"),
+        (60, bottom, "▔"),
+        (0, 20, "▕"),
+        (right, 20, "▏"),
+    ] {
+        assert_eq!(screen[(x, y)].symbol(), glyph, "at ({x}, {y})");
+        let style = screen[(x, y)].style();
+        assert_eq!(style.fg, Some(LINE_STRONG), "at ({x}, {y})");
+        assert_eq!(style.bg, Some(PAGE), "at ({x}, {y})");
+    }
+
+    // At the minimum size the ring would tax the content it frames, so the
+    // shell runs to the edge: the title bar keeps the first row and the
+    // band, not the page, owns the corner.
+    let minimum = buffer(&app, 80, 24);
+    assert!(row_text(&minimum, 0).contains("◆ skilled"));
+    assert_eq!(minimum[(0, 0)].style().bg, Some(BAND));
 }
 
 #[test]
@@ -811,20 +916,21 @@ fn the_session_status_moves_to_the_tab_row_on_a_wide_terminal() {
 
     // Wide: the status sits right-aligned beside the tabs, the prototype's
     // placement, leaving the title bar to the product and context path. At
-    // forty rows the chrome is padded, so the tab row is the third.
+    // forty rows the chrome is framed and padded, so the tab labels sit on
+    // the sixth row and the title text on the third.
     let wide = buffer(&app, 120, 40);
     assert!(
-        row_text(&wide, 2).ends_with("● ready · 0 sources registered"),
+        inner_row_text(&wide, 5).ends_with("● ready · 0 sources registered"),
+        "{}",
+        row_text(&wide, 5)
+    );
+    assert!(
+        !row_text(&wide, 2).contains("ready"),
         "{}",
         row_text(&wide, 2)
     );
-    assert!(
-        !row_text(&wide, 0).contains("ready"),
-        "{}",
-        row_text(&wide, 0)
-    );
     assert_eq!(
-        style_in_row(&wide, 2, "●").fg,
+        style_in_row(&wide, 5, "●").fg,
         Some(Color::Rgb(0x8b, 0xd4, 0x9c))
     );
 
@@ -851,8 +957,9 @@ fn a_keyboard_owner_on_a_wide_terminal_keeps_the_status_beside_it() {
     let mut app = harness.completed_setup();
     app.update(Action::OpenSettings);
 
-    // The padded chrome puts the navigation row third at forty rows.
-    let row = row_text(&buffer(&app, 120, 40), 2);
+    // The framed, padded chrome puts the navigation labels sixth at forty
+    // rows.
+    let row = inner_row_text(&buffer(&app, 120, 40), 5);
     assert!(row.contains("Settings"), "{row}");
     assert!(row.contains("navigation is locked"), "{row}");
     assert!(row.ends_with("● ready · 0 sources registered"), "{row}");
@@ -869,14 +976,14 @@ fn an_open_dialog_returns_the_status_to_the_title_bar_on_a_wide_terminal() {
 
     let screen = buffer(&app, 120, 40);
     assert!(
-        row_text(&screen, 0).ends_with("● ready · 0 sources registered"),
+        inner_row_text(&screen, 2).ends_with("● ready · 0 sources registered"),
         "{}",
-        row_text(&screen, 0)
+        row_text(&screen, 2)
     );
     assert!(
-        !row_text(&screen, 1).contains("ready"),
+        !row_text(&screen, 5).contains("ready"),
         "{}",
-        row_text(&screen, 1)
+        row_text(&screen, 5)
     );
 }
 
@@ -953,10 +1060,9 @@ fn navigation_follows_the_active_view() {
 
     let navigation = row_text(&buffer(&app, 80, 24), 1);
 
-    // Sources is active so it drops its own digit, and Inventory gains one.
-    assert!(navigation.contains("▌Sources"), "{navigation}");
+    // Both tabs keep their caption digits; the active one moved.
+    assert!(navigation.contains("2 Sources"), "{navigation}");
     assert!(navigation.contains("1 Inventory"), "{navigation}");
-    assert!(!navigation.contains("2 Sources"), "{navigation}");
 }
 
 #[test]
@@ -1202,10 +1308,16 @@ fn complete_key_hints_render_at_compact_and_wide_sizes() {
         (&settings, " Enter Rerun setup   ? Help   Esc Close"),
     ];
 
-    for (width, height) in [(80, 24), (120, 40)] {
+    // At the framed size the window edge takes the last row and the hints
+    // sit just inside it; at the minimum the shell runs to the edge.
+    for (width, height, hint_row) in [(80_u16, 24_u16, 23_u16), (120, 40, 38)] {
         for (app, expected) in contexts {
             let screen = buffer(app, width, height);
-            let footer = row_text(&screen, height - 1);
+            let footer = if hint_row == height - 1 {
+                row_text(&screen, hint_row)
+            } else {
+                inner_row_text(&screen, hint_row)
+            };
             assert_eq!(footer, expected, "unexpected hints at {width}x{height}");
         }
     }
@@ -1218,7 +1330,7 @@ fn complete_key_hints_render_at_compact_and_wide_sizes() {
         " Tab/Shift-Tab Region   a Add source   1 Inventory   4 Doctor   Esc Back …"
     );
     assert_eq!(
-        row_text(&buffer(&sources, 120, 40), 39),
+        inner_row_text(&buffer(&sources, 120, 40), 38),
         " Tab/Shift-Tab Region   a Add source   1 Inventory   4 Doctor   ? Help   q Quit   Esc Back"
     );
 }
@@ -1502,9 +1614,9 @@ fn navigation_withholds_a_count_it_could_not_observe() {
         // evidence: nothing at all was rendered between it and the cell's
         // separator.
         assert!(rendered.contains(subtitle), "{rendered}");
-        assert!(navigation.contains("▌Inventory"), "{navigation}");
+        assert!(navigation.contains(" Inventory"), "{navigation}");
         assert_eq!(
-            after(&navigation, "▌Inventory"),
+            after(&navigation, " Inventory"),
             // The cell's own padding, and so nothing of the inventory's.
             Some(' '),
             "{subtitle:?} may not state a total: {navigation}"
@@ -1557,7 +1669,7 @@ fn navigation_states_zero_when_a_root_was_read_and_held_nothing() {
         "{}",
         text(&screen)
     );
-    assert!(navigation.contains("▌Inventory ·0 "), "{navigation}");
+    assert!(navigation.contains(" Inventory ·0 "), "{navigation}");
 }
 
 /// Entering the Inventory and the scan that fills it are two moments: the
@@ -1790,7 +1902,7 @@ fn gap_with_every_agent_deselected_does_not_claim_not_scanned() {
 }
 
 /// With three registered sources the navigation row reads
-/// '▌Inventory 1 2 Sources 3  Updates (soon) ...'. A bare amber '3' two
+/// ' Inventory 1 2 Sources 3  Updates (soon) ...'. A bare amber '3' two
 /// cells from the next tab's title teaches two readings of one digit — the
 /// count of the previous entry, or the route key of the next — and the
 /// distinction would otherwise rest on colour alone. The lead-in glyph
@@ -1822,7 +1934,7 @@ fn navigation_count_digit_cannot_read_as_a_route_key() {
     // on the left and the next tab's amber count on the right, each padded to
     // its own boxed cell.
     assert!(
-        navigation.contains("▌Inventory ·1   │ 2 Sources ·3   │ Updates (soon)"),
+        navigation.contains(" 1 Inventory ·1 │ 2 Sources ·3   │ Updates (soon)"),
         "{navigation}"
     );
     // The bare-digit form is the collision itself, so its absence is the
@@ -1893,12 +2005,12 @@ fn navigation_count_digit_cannot_read_as_a_route_key() {
     app.update(Action::OpenSources);
     let screen = buffer(&app, 80, 24);
     let navigation = row_text(&screen, 1);
-    assert!(navigation.contains("▌Sources ·3"), "{navigation}");
+    assert!(navigation.contains(" Sources ·3"), "{navigation}");
     // Probe the cell right after the title — that is the '·' cell, which is
     // the first character of the count span and so carries the patched
-    // style. Asking `style_at` for "▌Sources ·3" would land on the
-    // marker's own style and the underline would pass trivially.
-    let active_count_style = style_following(&screen, 1, "▌Sources ");
+    // style. Asking `style_at` for " Sources ·3" would land on the
+    // cell padding's own style and the underline would pass trivially.
+    let active_count_style = style_following(&screen, 1, " Sources ");
     assert_eq!(active_count_style.fg, Some(AMBER));
     assert!(
         active_count_style
@@ -2062,7 +2174,9 @@ fn sources_regions_use_the_shared_unboxed_pane_scaffold() {
     app.update(Action::OpenSources);
 
     let screen = buffer(&app, 120, 40);
-    let rendered = text(&screen);
+    // Inside the window frame, whose corners are the shell's own edge and
+    // not a pane box.
+    let rendered = inner_text(&screen);
 
     for corner in ['┌', '┐', '└', '┘'] {
         assert!(
@@ -2074,7 +2188,7 @@ fn sources_regions_use_the_shared_unboxed_pane_scaffold() {
     // The header row carries all three headings, so the regions sit beside one
     // another with two rule columns dividing them.
     let header = row_starting_with(&screen, "▌ Repositories");
-    let heading_row = row_text(&screen, header);
+    let heading_row = inner_row_text(&screen, header);
     assert!(heading_row.contains("Available variants"), "{heading_row}");
     assert!(heading_row.contains("Details"), "{heading_row}");
     assert_eq!(
@@ -2083,7 +2197,7 @@ fn sources_regions_use_the_shared_unboxed_pane_scaffold() {
         "three regions need two dividers: {heading_row:?}"
     );
     assert!(
-        row_text(&screen, header + 1).starts_with("───"),
+        inner_row_text(&screen, header + 1).starts_with("───"),
         "{:?}",
         row_text(&screen, header + 1)
     );
@@ -2123,10 +2237,11 @@ fn repository_entries_name_their_checkout_and_revision_beneath_their_label() {
 
     let screen = buffer(&app, 120, 40);
     let label = row_starting_with(&screen, "▌ source");
-    // Rows are read up to the rule that ends the pane, so the variants beside
-    // it cannot satisfy an assertion about a repository entry.
+    // Rows are read inside the frame and up to the rule that ends the pane,
+    // so neither the frame's column nor the variants beside the pane can
+    // satisfy an assertion about a repository entry.
     let pane_row = |y: u16| {
-        let line = row_text(&screen, y);
+        let line = inner_row_text(&screen, y);
         line[..line.find('│').expect("Repositories region divider")].to_owned()
     };
     let path = pane_row(label + 1);
@@ -2147,20 +2262,22 @@ fn repository_entries_name_their_checkout_and_revision_beneath_their_label() {
     );
 
     // The marker runs down every line of the selected entry, and the band
-    // crosses the whole pane on each of them.
-    let divider = row_text(&screen, label)
+    // crosses the whole pane on each of them. The divider is found inside
+    // the frame, and an inner index maps one column right on screen, so the
+    // cell before the divider sits at the divider's own inner index.
+    let divider = inner_row_text(&screen, label)
         .char_indices()
         .find(|(_, character)| *character == '│')
         .map(|(index, _)| {
-            u16::try_from(row_text(&screen, label)[..index].chars().count()).expect("column")
+            u16::try_from(inner_row_text(&screen, label)[..index].chars().count()).expect("column")
         })
         .expect("Repositories region divider");
     for row in [label, label + 1, label + 2] {
-        let line = row_text(&screen, row);
+        let line = inner_row_text(&screen, row);
         assert!(line.starts_with("▌ "), "{line:?}");
         assert_eq!(style_in_row(&screen, row, "▌").fg, Some(CYAN), "{line:?}");
         assert_eq!(
-            screen[(divider - 1, row)].style().bg,
+            screen[(divider, row)].style().bg,
             Some(SURFACE_3),
             "{line:?}"
         );
@@ -2266,10 +2383,12 @@ fn variants_are_grouped_under_a_label_naming_their_catalog() {
     //
     // Read only as far as the rule after the variants pane: the detail region
     // beside it states both facts for the catalog the selection rests in, and
-    // would otherwise answer for the label.
-    let label = |width: u16| {
-        let screen = buffer(&app, width, 40);
-        let row = row_text(
+    // would otherwise answer for the label. Read inside the window frame,
+    // whose columns sit outside the workspace the promise speaks about — the
+    // stated widths are the workspace's, two less than the terminal's.
+    let label = |workspace: u16| {
+        let screen = buffer(&app, workspace + 2, 40);
+        let row = inner_row_text(
             &screen,
             row_containing(&screen, "experimental/claude-code/skills"),
         );
@@ -2283,14 +2402,14 @@ fn variants_are_grouped_under_a_label_naming_their_catalog() {
     // Set away from the path, not appended to it.
     assert!(wider.contains("skills  "), "{wider:?}");
 
-    // The promise is the pane's, not the terminal's. Widening from 99 to 100
-    // relays the workspace — the variants pane goes from the whole terminal to
-    // a third of it, and gives up the detail region's columns rather than the
-    // label's — so the label says more at 99 than at 100. Recorded so that
-    // crossing stays a deliberate one.
+    // The promise is the pane's, not the terminal's. Widening the workspace
+    // from 99 to 100 columns relays it — the variants pane goes from the
+    // whole workspace to a third of it, and gives up the detail region's
+    // columns rather than the label's — so the label says more at 99 than at
+    // 100. Recorded so that crossing stays a deliberate one.
     app.update(Action::AdvanceSourcesPane);
-    let compact = buffer(&app, 99, 40);
-    let compact = row_text(
+    let compact = buffer(&app, 101, 40);
+    let compact = inner_row_text(
         &compact,
         row_containing(&compact, "experimental/claude-code/skills"),
     );
@@ -2324,12 +2443,13 @@ fn a_variant_row_is_bounded_to_its_pane_and_never_wraps() {
     app.confirm_source(preview).expect("register source");
     app.update(Action::OpenSources);
 
-    let screen = buffer(&app, 100, 40);
+    // A 100-column workspace inside the frame: the narrowest wide tier.
+    let screen = buffer(&app, 102, 40);
     let selected = row_containing(&screen, "▌ ✓ valid");
-    // The variants region of one row, read between the rules that divide the
-    // three regions.
+    // The variants region of one row, read inside the frame and between the
+    // rules that divide the three regions.
     let region = |y: u16| {
-        let line = row_text(&screen, y);
+        let line = inner_row_text(&screen, y);
         let dividers = line
             .char_indices()
             .filter(|(_, character)| *character == '│')
@@ -2349,7 +2469,9 @@ fn a_variant_row_is_bounded_to_its_pane_and_never_wraps() {
         region(selected + 1)
     );
 
-    let line = row_text(&screen, selected);
+    // An inner index maps one column right on screen, so the cell before the
+    // divider sits at the divider's own inner index.
+    let line = inner_row_text(&screen, selected);
     let divider = line
         .char_indices()
         .filter(|(_, character)| *character == '│')
@@ -2357,7 +2479,7 @@ fn a_variant_row_is_bounded_to_its_pane_and_never_wraps() {
         .map(|(byte_index, _)| u16::try_from(line[..byte_index].chars().count()).expect("column"))
         .expect("variants region divider");
     assert_eq!(
-        screen[(divider - 1, selected)].style().bg,
+        screen[(divider, selected)].style().bg,
         Some(SURFACE_3),
         "the band should reach the end of the pane: {line:?}"
     );
@@ -2395,7 +2517,7 @@ fn crossing_the_wide_detail_threshold_never_shrinks_the_sources_panes() {
     // rules that divide the regions.
     let region = |width: u16, index: usize, needle: &str| {
         let screen = buffer(&app, width, 40);
-        let line = row_text(&screen, row_containing(&screen, needle));
+        let line = inner_row_text(&screen, row_containing(&screen, needle));
         let dividers = line
             .char_indices()
             .filter(|(_, character)| *character == '│')
@@ -2409,6 +2531,9 @@ fn crossing_the_wide_detail_threshold_never_shrinks_the_sources_panes() {
         line[start..dividers[index]].trim_end().to_owned()
     };
 
+    // The threshold is the workspace's, which sits two columns inside the
+    // framed terminal: 152 and 153 columns hold the 150- and 151-column
+    // workspaces on either side of the crossing.
     for (index, needle) in [
         (0, "source-checkout"),
         (0, "@"),
@@ -2416,19 +2541,21 @@ fn crossing_the_wide_detail_threshold_never_shrinks_the_sources_panes() {
         (1, "✓ valid"),
     ] {
         assert_eq!(
-            region(150, index, needle),
-            region(151, index, needle),
+            region(152, index, needle),
+            region(153, index, needle),
             "the Sources panes gave up columns to the aside at the crossing"
         );
     }
 
     // Bounding the content leaves slack on a very wide terminal, and the
     // selected row's band crosses it: a band stopping where the name does
-    // would read as a row ending mid-region.
+    // would read as a row ending mid-region. An inner index maps one column
+    // right on screen, so the cell before the divider sits at the divider's
+    // own inner index.
     const SURFACE_3: Color = Color::Rgb(0x17, 0x21, 0x2c);
     let screen = buffer(&app, 200, 40);
     let selected = row_containing(&screen, "▌ ✓ valid");
-    let line = row_text(&screen, selected);
+    let line = inner_row_text(&screen, selected);
     let divider_index = line
         .char_indices()
         .filter(|(_, character)| *character == '│')
@@ -2443,7 +2570,7 @@ fn crossing_the_wide_detail_threshold_never_shrinks_the_sources_panes() {
         "expected slack beside the bounded pane: {line:?}"
     );
     assert_eq!(
-        screen[(divider - 1, selected)].style().bg,
+        screen[(divider, selected)].style().bg,
         Some(SURFACE_3),
         "the band should cross the slack, not stop at the name"
     );
@@ -2730,10 +2857,12 @@ fn a_selected_catalog_error_row_is_bounded_and_banded_like_any_row() {
     reopened.update(Action::AdvanceSourcesPane);
 
     // The corrupted catalog sorts first, so its error row is the selection.
-    let screen = buffer(&reopened, 100, 40);
+    // A 100-column workspace inside the frame; the variants region is read
+    // between the two rules inside it.
+    let screen = buffer(&reopened, 102, 40);
     let selected = row_containing(&screen, "▌ × unavailable");
     let region = |y: u16| {
-        let line = row_text(&screen, y);
+        let line = inner_row_text(&screen, y);
         let dividers = line
             .char_indices()
             .filter(|(_, character)| *character == '│')
@@ -3076,9 +3205,11 @@ fn sources_details_keep_every_path_on_its_own_line() {
     app.update(Action::AdvanceSourcesPane);
 
     // The compact drill-in and the aside beside the panes, since the aside is
-    // the narrower of the two and the one a long path crowds first.
+    // the narrower of the two and the one a long path crowds first. Read
+    // inside the frame, whose column would otherwise be every row's
+    // rightmost rule.
     for (width, height) in [(80, 24), (120, 40), (160, 48)] {
-        let region = detail_region_lines(&text(&buffer(&app, width, height)));
+        let region = detail_region_lines(&inner_text(&buffer(&app, width, height)));
         // Anchored on the section a field belongs to: REPOSITORY, CATALOG and
         // VARIANT each state a `Path`, and which one is meant should not rest
         // on the order the sections happen to be rendered in.
@@ -3178,7 +3309,7 @@ fn sources_details_name_the_agents_a_catalog_claims_in_the_group_label_words() {
     app.update(Action::AdvanceSourcesPane);
 
     let claim = |app: &SkilledApp| {
-        let rendered = text(&buffer(app, 120, 40));
+        let rendered = inner_text(&buffer(app, 120, 40));
         assert!(
             !rendered.contains("Codex: no") && !rendered.contains("Codex: yes"),
             "the detail pane should not keep the yes/no vocabulary\n{rendered}"
@@ -3258,11 +3389,13 @@ fn a_truncated_sources_detail_region_reports_the_cut() {
     // and this one does not. A stated count that drifts from the rows on
     // screen is worse than no notice, because it is read as a fact.
     let detail_rows = |height: u16| {
-        text(&buffer(&app, 120, height))
+        inner_text(&buffer(&app, 120, height))
             .lines()
             .filter_map(|line| line.rsplit_once('│'))
             .map(|(_, region)| region.trim().to_owned())
-            .filter(|region| !region.is_empty())
+            // The tall tab strip's bottom border also ends in a hairline past
+            // its last separator: chrome, not a row of this region.
+            .filter(|region| !region.is_empty() && !region.chars().all(|c| c == '▁'))
             .collect::<Vec<_>>()
     };
     let whole_rows = detail_rows(60).len();
@@ -3328,7 +3461,9 @@ fn the_longest_two_agent_registration_claim_survives_the_narrowest_detail_region
 
     // 120 columns is the narrow aside: wide enough for the detail region to
     // sit beside the variants, narrow enough that it takes its lesser share.
-    let rendered = text(&buffer(&app, 120, 40));
+    // Read inside the frame, whose column would otherwise be every row's
+    // rightmost rule.
+    let rendered = inner_text(&buffer(&app, 120, 40));
     let stated = rendered
         .lines()
         .filter_map(|line| line.rsplit_once('│'))
@@ -3401,9 +3536,13 @@ fn sources_details_state_the_last_scan_as_a_date_rather_than_an_epoch() {
     app.update(Action::AdvanceSourcesPane);
     app.update(Action::AdvanceSourcesPane);
 
+    // The stated widths are the workspace's: the window frame takes two more
+    // columns wherever it is drawn, which is every size here but the 80×24
+    // minimum's width.
     let mut scanned = String::new();
     for width in [80, 100, 120, 150, 151, 160, 200] {
-        let rendered = text(&buffer(&app, width, 40));
+        let terminal = if width > 80 { width + 2 } else { width };
+        let rendered = inner_text(&buffer(&app, terminal, 40));
         assert!(
             !rendered.contains(&stored.to_string()),
             "the raw epoch should not be shown at {width} columns\n{rendered}"
@@ -4457,8 +4596,10 @@ fn the_install_preview_carries_each_verdict_in_words_and_in_tone() {
     let update = app.update(Action::BeginInstall);
     app.perform_effects(update.effects()).expect("plan install");
 
-    let screen = buffer(&app, 100, 30);
-    let rendered = text(&screen);
+    // A 100×30 workspace inside the window frame; the interior is read past
+    // the frame so the dialog's own borders stay the outermost rules.
+    let screen = buffer(&app, 102, 32);
+    let rendered = inner_text(&screen);
 
     assert!(rendered.contains("┌ Install skill"), "{rendered}");
     assert!(rendered.contains("nothing written yet"), "{rendered}");
@@ -4495,8 +4636,9 @@ fn the_install_preview_carries_each_verdict_in_words_and_in_tone() {
         "{rendered}"
     );
     assert!(!rendered.contains("~/.agents"), "{rendered}");
-    // A blocked plan hints no key the reducer would refuse.
-    let footer = row_text(&screen, screen.area.height - 1);
+    // A blocked plan hints no key the reducer would refuse. The hints sit
+    // just inside the frame's bottom row.
+    let footer = inner_row_text(&screen, screen.area.height - 2);
     assert!(footer.contains("Esc Close"), "{footer}");
     assert!(!footer.contains("Enter"), "{footer}");
 }
@@ -4511,13 +4653,13 @@ fn the_install_report_states_each_step_and_the_verification_behind_it() {
         // The runner draws before every key; a confirmation waits on what the
         // frame measured.
         if app.pending_install().is_some() {
-            app.note_detail_max_scroll(feedback(&app, 100, 30).detail_max_scroll());
+            app.note_detail_max_scroll(feedback(&app, 102, 32).detail_max_scroll());
         }
         let update = app.update(action);
         app.perform_effects(update.effects()).expect("install");
     }
 
-    let screen = buffer(&app, 100, 30);
+    let screen = buffer(&app, 102, 32);
     let rendered = text(&screen);
 
     assert!(rendered.contains("┌ Install result"), "{rendered}");
@@ -4537,7 +4679,7 @@ fn the_install_report_states_each_step_and_the_verification_behind_it() {
     // A successful install does not need the no-undo note; a failed one does,
     // and it is tested where it appears.
     assert!(!rendered.contains("does not undo"), "{rendered}");
-    let footer = row_text(&screen, screen.area.height - 1);
+    let footer = inner_row_text(&screen, screen.area.height - 2);
     assert!(footer.contains("Esc Close"), "{footer}");
     assert!(!footer.contains("Enter"), "{footer}");
 }
@@ -4595,8 +4737,8 @@ fn the_install_hint_appears_only_where_a_variant_is_focused() {
     let mut app = harness.installable_source();
 
     let footer = |app: &SkilledApp| {
-        let screen = buffer(app, 100, 30);
-        row_text(&screen, screen.area.height - 1)
+        let screen = buffer(app, 102, 32);
+        inner_row_text(&screen, screen.area.height - 2)
     };
     assert!(footer(&app).contains("i Install"), "{}", footer(&app));
 
@@ -4665,14 +4807,16 @@ fn a_withheld_postcondition_is_stated_rather_than_reported_as_verified() {
         // The runner draws before every key; a confirmation waits on what the
         // frame measured.
         if app.pending_install().is_some() {
-            app.note_detail_max_scroll(feedback(&app, 100, 30).detail_max_scroll());
+            app.note_detail_max_scroll(feedback(&app, 102, 32).detail_max_scroll());
         }
         let update = app.update(action);
         app.perform_effects(update.effects()).expect("install");
     }
 
-    let screen = buffer(&app, 100, 30);
-    let rendered = text(&screen);
+    // A 100×30 workspace inside the window frame; the interior is read past
+    // the frame so the dialog's own borders stay the outermost rules.
+    let screen = buffer(&app, 102, 32);
+    let rendered = inner_text(&screen);
 
     // Nothing disagreed, and something was not checked. Both are said, and the
     // verdict beside the keys says the second of them too.
@@ -4849,6 +4993,18 @@ fn row_text(buffer: &Buffer, y: u16) -> String {
     line.trim_end().to_owned()
 }
 
+/// The row's text between the window frame's columns: what [`row_text`] read
+/// before the frame claimed the outermost cell on each side. Only meaningful
+/// at sizes with the surplus the frame requires.
+fn inner_row_text(buffer: &Buffer, y: u16) -> String {
+    let area = buffer.area;
+    let mut line = String::new();
+    for x in area.x + 1..area.x + area.width - 1 {
+        line.push_str(buffer[(x, y)].symbol());
+    }
+    line.trim_end().to_owned()
+}
+
 fn text(buffer: &Buffer) -> String {
     let area = buffer.area;
     (area.y..area.y + area.height)
@@ -4857,10 +5013,42 @@ fn text(buffer: &Buffer) -> String {
         .join("\n")
 }
 
+/// Whether this buffer was drawn with the window frame, which claims the
+/// outermost ring and shifts every content row and column in by one — the
+/// same surplus rule `tui::render` applies.
+fn framed(buffer: &Buffer) -> bool {
+    buffer.area.width >= skilled::tui::MINIMUM_WIDTH + 2
+        && buffer.area.height >= skilled::tui::MINIMUM_HEIGHT + 2
+}
+
+/// The screen's text inside the window frame, which is where every surface
+/// and pane lives at framed sizes; the whole screen where the shell runs to
+/// the edge.
+fn inner_text(buffer: &Buffer) -> String {
+    if !framed(buffer) {
+        return text(buffer);
+    }
+    let area = buffer.area;
+    (area.y + 1..area.y + area.height - 1)
+        .map(|y| inner_row_text(buffer, y))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The first row whose content starts with `prefix`, read past the frame's
+/// column where one is drawn: a content row can begin at the shell's edge or
+/// one cell inside it, and the caller is asking about content.
 fn row_starting_with(buffer: &Buffer, prefix: &str) -> u16 {
     let area = buffer.area;
+    let content = |y: u16| {
+        if framed(buffer) {
+            inner_row_text(buffer, y)
+        } else {
+            row_text(buffer, y)
+        }
+    };
     (area.y..area.y + area.height)
-        .find(|y| row_text(buffer, *y).starts_with(prefix))
+        .find(|y| content(*y).starts_with(prefix))
         .unwrap_or_else(|| panic!("no row starts with {prefix:?} in\n{}", text(buffer)))
 }
 
@@ -4892,6 +5080,18 @@ fn style_following(buffer: &Buffer, y: u16, needle: &str) -> Style {
     let row = row_text(buffer, y);
     let byte_index = row
         .find(needle)
+        .unwrap_or_else(|| panic!("{needle:?} not found in row {y}: {row:?}"));
+    let column = row[..byte_index].chars().count() + needle.chars().count();
+    buffer[(buffer.area.x + u16::try_from(column).expect("column"), y)].style()
+}
+
+/// Like [`style_following`], but after the last occurrence of `needle`: the
+/// window frame and the pane rules can repeat a needle earlier in the row,
+/// and the detail region these probes read is the rightmost.
+fn style_after_last(buffer: &Buffer, y: u16, needle: &str) -> Style {
+    let row = row_text(buffer, y);
+    let byte_index = row
+        .rfind(needle)
         .unwrap_or_else(|| panic!("{needle:?} not found in row {y}: {row:?}"));
     let column = row[..byte_index].chars().count() + needle.chars().count();
     buffer[(buffer.area.x + u16::try_from(column).expect("column"), y)].style()
@@ -5201,13 +5401,16 @@ mod installed {
         let table_row = |width: u16| {
             let screen = buffer(&app, width, 40);
             let row = row_starting_with(&screen, "▌ an-installed-skill");
-            let line = row_text(&screen, row);
+            let line = inner_row_text(&screen, row);
             let separator = line.find('│').expect("detail separator");
             line[..separator].trim_end().to_owned()
         };
 
-        let narrow_side = table_row(150);
-        let wide_side = table_row(151);
+        // The threshold is the workspace's, two columns inside the framed
+        // terminal: 152 and 153 columns hold the 150- and 151-column
+        // workspaces on either side of the crossing.
+        let narrow_side = table_row(152);
+        let wide_side = table_row(153);
         assert_eq!(
             narrow_side, wide_side,
             "the table gave up columns to the aside at the crossing"
@@ -5231,10 +5434,11 @@ mod installed {
         let app = harness.installed_inventory();
 
         // By its marker, because the detail region names the selected skill
-        // too and its header sits above the table.
+        // too and its header sits above the table. Read inside the frame; an
+        // inner index maps one column right on screen.
         let screen = buffer(&app, 180, 40);
         let alpha = row_starting_with(&screen, "▌ alpha");
-        let line = row_text(&screen, alpha);
+        let line = inner_row_text(&screen, alpha);
 
         // The table region ends at the detail separator; its content ends at
         // the health badge, and everything between the two is slack.
@@ -5247,7 +5451,7 @@ mod installed {
             "expected slack beside the capped columns: {line:?}"
         );
 
-        for column in [content + 1, separator - 1] {
+        for column in [content + 2, separator] {
             assert_eq!(
                 screen[(column, alpha)].style().bg,
                 Some(SURFACE_3),
@@ -5256,7 +5460,7 @@ mod installed {
         }
         // It stops at the table region, though: the detail region beside it is
         // not part of the row.
-        assert_ne!(screen[(separator, alpha)].style().bg, Some(SURFACE_3));
+        assert_ne!(screen[(separator + 1, alpha)].style().bg, Some(SURFACE_3));
     }
 
     #[test]
@@ -5275,17 +5479,18 @@ mod installed {
             .expect("a scan that read a root states a count");
         let sources = app.sources().len();
 
-        // A forty-row terminal takes the prototype's bar heights, so the tab
-        // strip's text sits on the third row, under the two-row title bar.
+        // A forty-row terminal takes the prototype's bar heights inside the
+        // window frame, so the tab labels sit on the sixth row, under the
+        // frame's edge, the three-row title bar, and the strip's own padding.
         let screen = buffer(&app, 120, 40);
-        let navigation = row_text(&screen, 2);
+        let navigation = row_text(&screen, 5);
 
         // The count says the same thing the Inventory subtitle does: skills,
         // not every listed entry. The '·' lead-in keeps the count from
         // reading as a route key beside it, so a copy change to either
         // number has to update this probe in lockstep.
         assert!(
-            navigation.contains(&format!("▌Inventory ·{skills} ")),
+            navigation.contains(&format!(" Inventory ·{skills} ")),
             "{navigation}"
         );
         assert!(
@@ -5298,7 +5503,7 @@ mod installed {
         // this tall strip the prototype's border is the accent row below
         // rather than an underline, and the bold belongs to the title and
         // stops there.
-        let inventory_count = style_following(&screen, 2, "▌Inventory ");
+        let inventory_count = style_following(&screen, 5, " Inventory ");
         assert_eq!(inventory_count.fg, Some(AMBER));
         assert_eq!(inventory_count.bg, Some(SURFACE_2));
         assert!(
@@ -5309,7 +5514,7 @@ mod installed {
             !inventory_count.add_modifier.contains(Modifier::BOLD),
             "the title's emphasis should not leak into the count"
         );
-        let sources_count = style_following(&screen, 2, "2 Sources ");
+        let sources_count = style_following(&screen, 5, "2 Sources ");
         assert_eq!(sources_count.fg, Some(AMBER));
         assert_eq!(sources_count.bg, Some(SURFACE));
         assert!(!sources_count.add_modifier.contains(Modifier::UNDERLINED));
@@ -5318,12 +5523,12 @@ mod installed {
         // Which is what makes both swap when the other tab is active.
         app.update(Action::OpenSources);
         let screen = buffer(&app, 120, 40);
-        let inventory_count = style_following(&screen, 2, "1 Inventory ");
+        let inventory_count = style_following(&screen, 5, "1 Inventory ");
         assert_eq!(inventory_count.fg, Some(AMBER));
         assert_eq!(inventory_count.bg, Some(SURFACE));
         assert!(!inventory_count.add_modifier.contains(Modifier::UNDERLINED));
         assert!(!inventory_count.add_modifier.contains(Modifier::BOLD));
-        let sources_count = style_following(&screen, 2, "▌Sources ");
+        let sources_count = style_following(&screen, 5, " Sources ");
         assert_eq!(sources_count.fg, Some(AMBER));
         assert_eq!(sources_count.bg, Some(SURFACE_2));
         assert!(!sources_count.add_modifier.contains(Modifier::UNDERLINED));
@@ -5351,7 +5556,7 @@ mod installed {
         // The tab counts skills, so two stray entries are not two of anything
         // it may report.
         let navigation = row_text(&screen, 1);
-        assert!(navigation.contains("▌Inventory ·0 "), "{navigation}");
+        assert!(navigation.contains(" Inventory ·0 "), "{navigation}");
         assert!(
             rendered.contains("Roots: Claude Code 0 installed"),
             "{rendered}"
@@ -5391,12 +5596,13 @@ mod installed {
         assert_eq!(title, kicker + 2, "{rendered}");
         assert_eq!(badge, title + 1, "{rendered}");
 
-        // By position after the separator: the table beside the detail region
-        // names the same skill on the same row.
-        let title_style = style_following(&screen, title, "│ ");
+        // By position after the separator — the last rule of the row, since
+        // the window frame opens it with one — because the table beside the
+        // detail region names the same skill on the same row.
+        let title_style = style_after_last(&screen, title, "│ ");
         assert_eq!(title_style.fg, Some(TEXT_STRONG));
         assert!(title_style.add_modifier.contains(Modifier::BOLD));
-        assert_eq!(style_following(&screen, badge, "│ ").fg, Some(GREEN));
+        assert_eq!(style_after_last(&screen, badge, "│ ").fg, Some(GREEN));
     }
 
     /// The detail region sits on its own surface, so the split reads as two
@@ -5412,9 +5618,11 @@ mod installed {
 
         let screen = buffer(&app, 120, 40);
         let row = row_containing(&screen, "│ SKILL");
-        let line = row_text(&screen, row);
+        // Found inside the frame, whose column would otherwise be the first
+        // rule of the row; an inner index maps one column right on screen.
+        let line = inner_row_text(&screen, row);
         let separator = line.find('│').expect("detail separator");
-        let separator = line[..separator].chars().count() as u16;
+        let separator = line[..separator].chars().count() as u16 + 1;
         assert_eq!(
             screen[(screen.area.x + separator + 2, row)].style().bg,
             Some(DETAIL_SURFACE)
@@ -5423,7 +5631,7 @@ mod installed {
         // column of the region — an inset paint would leave a stripe of the
         // application surface down the edge and this cell would catch it.
         assert_eq!(
-            screen[(screen.area.x + screen.area.width - 1, row)]
+            screen[(screen.area.x + screen.area.width - 2, row)]
                 .style()
                 .bg,
             Some(DETAIL_SURFACE)
@@ -5462,10 +5670,11 @@ mod installed {
         let heading = row_containing(&screen, "│ CLAUDE CODE");
         let line = row_text(&screen, heading);
         assert!(line.contains("CLAUDE CODE  × broken"), "{line:?}");
-        // Probed past the separator, not by bare text: the table beside the
+        // Probed past the separator — the last rule, since the window frame
+        // opens the row with one — not by bare text: the table beside the
         // region sets the same words in the same colours, and a probe that
         // searched the whole row could drift onto them and test nothing.
-        assert_eq!(style_following(&screen, heading, "│ ").fg, Some(MUTED));
+        assert_eq!(style_after_last(&screen, heading, "│ ").fg, Some(MUTED));
         assert_eq!(
             style_following(&screen, heading, "CLAUDE CODE  ").fg,
             Some(RED)
@@ -5477,7 +5686,7 @@ mod installed {
         let heading = row_containing(&screen, "│ CODEX");
         let line = row_text(&screen, heading);
         assert!(line.contains("CODEX  U unmanaged"), "{line:?}");
-        assert_eq!(style_following(&screen, heading, "│ ").fg, Some(MUTED));
+        assert_eq!(style_after_last(&screen, heading, "│ ").fg, Some(MUTED));
         assert_eq!(
             style_following(&screen, heading, "CODEX  ").fg,
             Some(VIOLET)
@@ -5494,13 +5703,14 @@ mod installed {
         let app = harness.installed_inventory();
 
         let screen = buffer(&app, 120, 40);
-        // Probed past the separator: the table's own SKILL heading is muted
+        // Probed past the separator, the last rule of the framed row: the
+        // table's own SKILL heading is muted
         // too, and a whole-row search could land on it instead.
         let kicker = row_containing(&screen, "│ SKILL");
-        assert_eq!(style_following(&screen, kicker, "│ ").fg, Some(MUTED));
+        assert_eq!(style_after_last(&screen, kicker, "│ ").fg, Some(MUTED));
 
         let source = row_containing(&screen, "│ SOURCE");
-        assert_eq!(style_following(&screen, source, "│ ").fg, Some(MUTED));
+        assert_eq!(style_after_last(&screen, source, "│ ").fg, Some(MUTED));
     }
 
     /// Detail that outgrows its region says so in words and in a tone, and
@@ -5597,15 +5807,32 @@ mod installed {
     #[test]
     fn the_scrolled_detail_region_accounts_for_every_row_it_does_not_show() {
         fn region_rows(app: &SkilledApp, width: u16, height: u16) -> Vec<String> {
-            let screen = text(&buffer(app, width, height));
-            let screen: Vec<&str> = screen.lines().collect();
+            let screen = buffer(app, width, height);
+            let framed = width >= 82 && height >= 26;
+            let rows: Vec<String> = (0..height)
+                .map(|y| {
+                    if framed {
+                        inner_row_text(&screen, y)
+                    } else {
+                        row_text(&screen, y)
+                    }
+                })
+                .collect();
             // The workspace: below the title bar and navigation, above the
-            // key hints. The chrome rows are excluded before probing for the
-            // region's rule, because the tab strip draws '│' separators of
-            // its own. From thirty-eight rows each chrome bar is two rows —
-            // the prototype's own heights — so the exclusion follows suit.
-            let bar = if height >= 38 { 2 } else { 1 };
-            let workspace = &screen[2 * bar..screen.len() - bar];
+            // key hints, and inside the window frame where one is drawn. The
+            // chrome and frame rows are excluded before probing for the
+            // region's rule, because the tab strip and the frame draw '│'
+            // and line glyphs of their own. From a thirty-eight-row content
+            // area the title bar is three rows and the other bars two — the
+            // prototype's own heights — so the exclusion follows suit.
+            let frame = usize::from(framed);
+            let content_height = usize::from(height) - 2 * frame;
+            let (title, nav, bar) = if content_height >= 38 {
+                (3, 3, 2)
+            } else {
+                (1, 1, 1)
+            };
+            let workspace = &rows[frame + title + nav..rows.len() - frame - bar];
             let mut rows: Vec<String> = if workspace.iter().any(|row| row.contains('│')) {
                 // Beside the table, the region is everything past the rule.
                 workspace
@@ -5642,10 +5869,15 @@ mod installed {
 
         // Three widths: the two sides of the wide breakpoint, where the region
         // is beside the table and wraps differently, and the minimum supported
-        // terminal, where it is drilled into and fills the workspace.
-        for width in [120, 100, 80] {
+        // terminal, where it is drilled into and fills the workspace. The
+        // framed widths sweep only framed heights: below twenty-six rows the
+        // frame is not drawn and the content is two columns wider, so those
+        // heights wrap the region differently and belong to another sweep's
+        // premise, not this one's.
+        for width in [120_u16, 100, 80] {
             let whole = region_rows(&app, width, 80);
-            for height in 24..40 {
+            let heights = if width > 80 { 26..40 } else { 24..40 };
+            for height in heights {
                 let extent = measured_extent(&app, width, height);
                 app.note_detail_max_scroll(Some(extent));
                 for _ in 0..=extent {

@@ -1,45 +1,44 @@
 ---
 source: tests/tui_snapshots.rs
-assertion_line: 98
 expression: "render(&app, 120, 40)"
 ---
- ◆ skilled  global
-
-▌Inventory      │ 2 Sources ·0   │ Updates (soon) │ 4 Doctor       │                     ● ready · 0 sources registered
-▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁│                │                │                │
-▌ Global inventory  no root read                                                │ Details  no selection
-Roots: Claude Code no root · Codex no root · OpenCode no root                   │ ─────────────────────────────────────
-────────────────────────────────────────────────────────────────────────────────│
-                                                                                │
-                                                                                │
-                                                                                │
-                                                                                │
-                                                                                │
-                                                                                │
-                                                                                │
-                                                                                │
-                                                                                │
-                                                                                │
-                                                                                │
-                                                                                │                   ·
-                                        ⌕                                       │
-                                                                                │            Nothing to show
-                         No agent skill root exists yet                         │
-                                                                                │     Identity, provenance, and the
-   Skilled looked for the documented global skill root of each selected agent   │  observed object in every agent root
-                 and found none of them. It did not create one.                 │ appear here once a skill is selected.
-                                                                                │
-                                                                                │
-                                                                                │
-                                                                                │
-                                                                                │
-                                                                                │
-                                                                                │
-                                                                                │
-                                                                                │
-                                                                                │
-                                                                                │
-                                                                                │
-                                                                                │
-
- Tab/Shift-Tab Region   2 Sources   4 Doctor   s Settings   ? Help   q Quit
+ ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁
+▕                                                                                                                      ▏
+▕ ◆ skilled  global                                                                                                    ▏
+▕▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▏
+▕                │                │                │                │                                                  ▏
+▕ 1 Inventory    │ 2 Sources ·0   │ Updates (soon) │ 4 Doctor       │                   ● ready · 0 sources registered ▏
+▕▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁│▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁│▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁│▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁│▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▏
+▕▌ Global inventory  no root read                                              │ Details  no selection                 ▏
+▕Roots: Claude Code no root · Codex no root · OpenCode no root                 │ ───────────────────────────────────── ▏
+▕──────────────────────────────────────────────────────────────────────────────│                                       ▏
+▕                                                                              │                                       ▏
+▕                                                                              │                                       ▏
+▕                                                                              │                                       ▏
+▕                                                                              │                                       ▏
+▕                                                                              │                                       ▏
+▕                                                                              │                                       ▏
+▕                                                                              │                                       ▏
+▕                                                                              │                                       ▏
+▕                                                                              │                                       ▏
+▕                                                                              │                   ·                   ▏
+▕                                       ⌕                                      │                                       ▏
+▕                                                                              │            Nothing to show            ▏
+▕                        No agent skill root exists yet                        │                                       ▏
+▕                                                                              │     Identity, provenance, and the     ▏
+▕  Skilled looked for the documented global skill root of each selected agent  │  observed object in every agent root  ▏
+▕                and found none of them. It did not create one.                │ appear here once a skill is selected. ▏
+▕                                                                              │                                       ▏
+▕                                                                              │                                       ▏
+▕                                                                              │                                       ▏
+▕                                                                              │                                       ▏
+▕                                                                              │                                       ▏
+▕                                                                              │                                       ▏
+▕                                                                              │                                       ▏
+▕                                                                              │                                       ▏
+▕                                                                              │                                       ▏
+▕                                                                              │                                       ▏
+▕                                                                              │                                       ▏
+▕                                                                                                                      ▏
+▕ Tab/Shift-Tab Region   2 Sources   4 Doctor   s Settings   ? Help   q Quit                                           ▏
+ ▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔

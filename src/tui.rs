@@ -61,17 +61,32 @@ pub fn render(frame: &mut Frame<'_>, app: &SkilledApp) -> RenderFeedback {
         return RenderFeedback::default();
     }
 
+    // The prototype does not run its terminal to the viewport's edge: the
+    // page shows around a bordered window (`.terminal`,
+    // spec/tui-prototype.html:55-67), and this ring is that edge — the
+    // window line drawn through one cell of page ground. It appears only
+    // where its two columns and two rows come out of surplus: the 80×24
+    // minimum is a content guarantee, and a frame that taxed it would shrink
+    // the workspace the minimum exists to protect. Everything below works in
+    // the inset area, so no surface, dialog, or overlay can reach the ring —
+    // it carries strokes, never text (see `theme::app_frame`).
+    let area = if area.width >= MINIMUM_WIDTH + 2 && area.height >= MINIMUM_HEIGHT + 2 {
+        frame.render_widget(app_frame_ring(area), area);
+        area.inner(Margin::new(1, 1))
+    } else {
+        area
+    };
     frame.render_widget(Block::new().style(theme::app_surface()), area);
 
     // The chrome takes the prototype's own bar heights where the terminal is
     // tall enough to afford them, and a single row each where it is not; the
-    // decision is made once so the three bars cannot disagree.
-    let bar = viewport::chrome_bar_height(area.height);
+    // three bars share one threshold so they cannot disagree about which
+    // terminal is tall.
     let [title_bar, navigation, workspace, key_hints] = Layout::vertical([
-        Constraint::Length(bar),
-        Constraint::Length(bar),
+        Constraint::Length(viewport::title_bar_height(area.height)),
+        Constraint::Length(viewport::nav_bar_height(area.height)),
         Constraint::Min(1),
-        Constraint::Length(bar),
+        Constraint::Length(viewport::chrome_bar_height(area.height)),
     ])
     .areas(area);
 
@@ -128,6 +143,31 @@ pub fn render(frame: &mut Frame<'_>, app: &SkilledApp) -> RenderFeedback {
     }
 }
 
+/// The window frame's ring, ready to render across the whole terminal.
+///
+/// Not a bordered [`Block`]: box-drawing lines cross the middle of their
+/// cells, which leaves half a cell of page ground *inside* the line, between
+/// the border and the title band it should sit against. Each stroke here is
+/// an eighth-block hugging the inner edge of its frame cell — `▁` along the
+/// bottom of the top row, `▔` along the top of the bottom row, `▕` and `▏`
+/// against the content on either side — so the line lands flush on the
+/// surfaces it frames and the page shows only outside the rectangle, which
+/// is where the prototype keeps it. The corner cells stay bare ground: the
+/// strokes' edges already meet at the corner point, and a corner glyph would
+/// have to be a quarter-block several times the strokes' weight.
+fn app_frame_ring(area: Rect) -> Paragraph<'static> {
+    let span = usize::from(area.width).saturating_sub(2);
+    let horizontal = |stroke: &str| Line::raw(format!(" {} ", stroke.repeat(span)));
+    let side = format!("▕{}▏", " ".repeat(span));
+    let mut rows = Vec::with_capacity(usize::from(area.height));
+    rows.push(horizontal("▁"));
+    for _ in 2..area.height {
+        rows.push(Line::raw(side.clone()));
+    }
+    rows.push(horizontal("▔"));
+    Paragraph::new(rows).style(theme::app_frame())
+}
+
 /// The persistent title row: product mark, wordmark, context path, and —
 /// when the navigation row cannot hold it — the session status.
 ///
@@ -139,10 +179,26 @@ fn render_title_bar(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp, status_
     // The band goes down first and the paragraphs only carry foreground
     // colours, so it survives underneath them.
     frame.render_widget(Block::new().style(theme::chrome_band()), area);
-    // On a tall terminal the band is the prototype's 40px bar — two rows —
-    // and the text keeps its first: the spare row falls between the title and
-    // the tab strip, where the prototype's own padding sits.
-    let area = Rect { height: 1, ..area };
+    // The band's last row carries the prototype's titlebar border
+    // (`.terminal-titlebar` `border-bottom`): a hairline hugging the pad
+    // row's bottom edge, flush against the tab strip below. A single-row
+    // band has no pad row to carry it and stays unruled.
+    if area.height > 1 {
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                "▁".repeat(usize::from(area.width)),
+                theme::title_rule(),
+            )),
+            Rect {
+                y: area.y + area.height - 1,
+                height: 1,
+                ..area
+            },
+        );
+    }
+    // On a tall terminal the band is the prototype's bar with its text
+    // centred: three rows, pad–text–pad, per `viewport::title_bar_height`.
+    let area = components::centered_band_row(area);
 
     let product = if status_on_nav {
         area
@@ -200,7 +256,7 @@ fn render_title_bar(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp, status_
 fn session_status_on_nav_row(app: &SkilledApp, area: Rect) -> bool {
     !overlay_open(app)
         && viewport::classify(area) == viewport::Viewport::Wide
-        && navigation_row_line(app, viewport::chrome_bar_height(area.height) > 1).width()
+        && navigation_row_line(app, viewport::nav_bar_height(area.height) > 1).width()
             + usize::from(session_status_width(app))
             <= usize::from(area.width)
 }
@@ -334,31 +390,35 @@ fn render_navigation(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp, status
             Constraint::Length(session_status_width(app).min(area.width)),
         ])
         .areas(area);
-        render_session_status(
-            frame,
-            Rect {
-                height: 1,
-                ..session
-            },
-            app,
-        );
+        render_session_status(frame, components::centered_band_row(session), app);
         strip
     } else {
         area
     };
+    // The labels keep the strip's middle row, centred between its padding
+    // the way the prototype's `.tab` padding centres them.
     frame.render_widget(
         Paragraph::new(navigation_row_line(app, tall)),
-        Rect { height: 1, ..strip },
+        components::centered_band_row(strip),
     );
-    // The strip's second row carries the active tab's bottom border, which the
-    // keyboard owner's takeover has no tabs to draw under.
-    if tall && keyboard_owner(app).is_none() {
+    if tall {
+        // The row above the labels: each cell's surface and separator carried
+        // up, so a tab's box spans the strip's full height.
         frame.render_widget(
-            Paragraph::new(navigation_accent_line(app)),
+            Paragraph::new(navigation_padding_line(app)),
+            Rect { height: 1, ..strip },
+        );
+        // The strip's last row is the prototype's `.app-nav` bottom border,
+        // drawn across the whole row — under the cells, the slack, and the
+        // session status alike — with the active tab's stretch in the accent
+        // colour. The keyboard owner's takeover has no tabs, so its row
+        // keeps the plain hairline and no tab claims a stretch of it.
+        frame.render_widget(
+            Paragraph::new(navigation_accent_line(app, area.width)),
             Rect {
-                y: strip.y + 1,
+                y: area.y + area.height - 1,
                 height: 1,
-                ..strip
+                ..area
             },
         );
     }
@@ -378,24 +438,30 @@ fn navigation_cells(app: &SkilledApp, tall: bool) -> Vec<(Vec<Span<'static>>, bo
             (true, true, true) => theme::nav_active_tall(),
             (true, false, _) => theme::nav_inactive(),
         };
-        let mut cell = vec![Span::styled(
-            if active {
-                components::FOCUS_MARKER
-            } else {
-                " "
-            },
-            style,
-        )];
-        // The digit is the route, so it appears only where pressing it works:
-        // never for a destination this release cannot open, and never for the
-        // view already on screen.
-        let key = match (destination.is_available(), active) {
-            (true, false) => format!("{} ", destination.key()),
-            _ => String::new(),
+        // Every cell leads with the same padding space — the strip does not
+        // borrow the list-focus marker. The active entry is already said
+        // three ways: the raised surface, the bold label, and the
+        // accent-coloured stretch of the bottom border (the underline, on a
+        // single-row strip).
+        let mut cell = vec![Span::styled(" ", style)];
+        // The digit is the prototype's `.tab-key`, part of every available
+        // tab's caption — the active tab's included, by decision: hiding it
+        // there made the active tab the one cell without its number, which
+        // read as a different kind of entry rather than the same tab
+        // selected. On the active view the digit is inert, and that is what
+        // pressing the number of the tab already on screen should be; it is
+        // caption, not a key hint. A destination this release cannot open
+        // still shows no digit, because there it would advertise a route
+        // that does not exist.
+        let key = if destination.is_available() {
+            format!("{} ", destination.key())
+        } else {
+            String::new()
         };
+        cell.push(Span::styled(key, style.patch(theme::nav_key())));
         cell.push(Span::styled(
             format!(
-                "{key}{}{} ",
+                "{}{} ",
                 destination.title(),
                 if destination.is_available() {
                     ""
@@ -456,20 +522,56 @@ fn navigation_row_line(app: &SkilledApp, tall: bool) -> Line<'static> {
     Line::from(spans)
 }
 
-/// The tall strip's second row: the active tab's bottom border, under exactly
-/// the cell the label row gives that tab, with every separator carried on so
-/// the boxes keep their full height (prototype `.tab` `border-right`).
-fn navigation_accent_line(app: &SkilledApp) -> Line<'static> {
+/// A padding row of the tall strip: each cell's surface and separator
+/// carried through the row above the labels, so a tab's box — its raised
+/// active surface and the side borders closing it — spans the strip's full
+/// height rather than stopping at the label (prototype `.tab` padding). The
+/// keyboard owner's takeover has no cells, so its padding row is bare strip.
+fn navigation_padding_line(app: &SkilledApp) -> Line<'static> {
     let mut spans = Vec::new();
-    for (cell, active) in navigation_cells(app, true) {
-        let width: usize = cell.iter().map(Span::width).sum();
-        spans.push(if active {
-            Span::styled("▁".repeat(width), theme::nav_accent())
-        } else {
-            Span::raw(" ".repeat(width))
-        });
-        spans.push(Span::styled("│", theme::nav_separator()));
+    if keyboard_owner(app).is_none() {
+        for (cell, active) in navigation_cells(app, true) {
+            let cell_width: usize = cell.iter().map(Span::width).sum();
+            let surface = if active {
+                theme::nav_active_tall()
+            } else {
+                theme::nav_inactive()
+            };
+            spans.push(Span::styled(" ".repeat(cell_width), surface));
+            spans.push(Span::styled("│", theme::nav_separator()));
+        }
     }
+    Line::from(spans)
+}
+
+/// The tall strip's last row: the prototype's `.app-nav` bottom border, with
+/// the active tab's stretch in the accent colour
+/// (`.tab[aria-selected="true"]` `border-bottom-color`), under exactly the
+/// cell the label row gives that tab. Each separator column keeps its `│`,
+/// running the tab's side border down to meet the line at the strip's edge,
+/// and carries the border through its own column as an underline (see
+/// `theme::nav_separator_at_rule`); past the last cell the hairline runs
+/// unbroken to the row's end — under the slack and the session state — so
+/// together with the titlebar's rule above, every cell reads as a closed
+/// box.
+fn navigation_accent_line(app: &SkilledApp, width: u16) -> Line<'static> {
+    let mut spans = Vec::new();
+    if keyboard_owner(app).is_none() {
+        for (cell, active) in navigation_cells(app, true) {
+            let cell_width: usize = cell.iter().map(Span::width).sum();
+            spans.push(if active {
+                Span::styled("▁".repeat(cell_width), theme::nav_accent())
+            } else {
+                Span::styled("▁".repeat(cell_width), theme::nav_rule())
+            });
+            spans.push(Span::styled("│", theme::nav_separator_at_rule()));
+        }
+    }
+    // On to the row's end; the Paragraph clips the surplus.
+    spans.push(Span::styled(
+        "▁".repeat(usize::from(width)),
+        theme::nav_rule(),
+    ));
     Line::from(spans)
 }
 

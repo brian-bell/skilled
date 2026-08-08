@@ -1,45 +1,44 @@
 ---
 source: tests/tui_snapshots.rs
-assertion_line: 274
 expression: rendered
 ---
- ◆ skilled  global                                                                       ● ready · 0 sources registered
-
- Confirm catalogs   navigation is locked while this dialog is open
-
-▌ Repositories  0 registered     │ Available variants  no source                │ Details  no selection
-─────────────────────────────────│ ─────────────────────────────────────────────│ ─────────────────────────────────────
-                                 │                                              │
-                                 │                                              │
-                                 │                                              │
-                                 │                                              │
-        ┌ Confirm catalogs ───────────────────────────────────────────────────────────────── registration only ┐
-        │                                                                                                      │
-        │  Repository: [TEMP]/source                                                                           │
-        │  Branch: main   HEAD: [HEAD]                                                                         │
-        │  Remote: not configured                                                                              │
-        │  Worktree: ✓ clean                                                                                   │
-        │                                                                                                      │
-        │  ▌ Included · skills · 1 candidate                                                                   │
-        │    Common catalog · Claude Code: yes · Codex: yes · OpenCode: yes                                    │
-        │                                                                                                      │
-        │                                                                                                      │
-    No s│                                                                                                      │
-        │                                                                                                      │
- Press a│                                                                                                      │ stored
-        │                                                                                                      │
-        │                                                                                                      │
-        │  ──────────────────────────────────────────────────────────────────────────────────────────────────  │
-        │  Registration records metadata only                                     Esc Cancel   Enter Register  │
-        │                                                                                                      │
-        └──────────────────────────────────────────────────────────────────────────────────────────────────────┘
-                                 │                                              │
-                                 │                                              │
-                                 │                                              │
-                                 │                                              │
-                                 │                                              │
-                                 │                                              │
-                                 │                                              │
-                                 │                                              │
-
- j/k Move   Space Include   c Class   1/2/3 Agents   Enter Register   Esc Cancel
+ ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁
+▕                                                                                                                      ▏
+▕ ◆ skilled  global                                                                     ● ready · 0 sources registered ▏
+▕▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▏
+▕                                                                                                                      ▏
+▕ Confirm catalogs   navigation is locked while this dialog is open                                                    ▏
+▕▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▏
+▕▌ Repositories  0 registered    │ Available variants  no source               │ Details  no selection                 ▏
+▕────────────────────────────────│ ────────────────────────────────────────────│ ───────────────────────────────────── ▏
+▕                                │                                             │                                       ▏
+▕       ┌ Confirm catalogs ───────────────────────────────────────────────────────────────── registration only ┐       ▏
+▕       │                                                                                                      │       ▏
+▕       │  Repository: [TEMP]/source                                                                           │       ▏
+▕       │  Branch: main   HEAD: [HEAD]                                                                         │       ▏
+▕       │  Remote: not configured                                                                              │       ▏
+▕       │  Worktree: ✓ clean                                                                                   │       ▏
+▕       │                                                                                                      │       ▏
+▕       │  ▌ Included · skills · 1 candidate                                                                   │       ▏
+▕       │    Common catalog · Claude Code: yes · Codex: yes · OpenCode: yes                                    │       ▏
+▕       │                                                                                                      │       ▏
+▕       │                                                                                                      │       ▏
+▕       │                                                                                                      │       ▏
+▕    No │                                                                                                      │       ▏
+▕       │                                                                                                      │       ▏
+▕ Press │                                                                                                      │stored ▏
+▕       │                                                                                                      │       ▏
+▕       │  ──────────────────────────────────────────────────────────────────────────────────────────────────  │       ▏
+▕       │  Registration records metadata only                                     Esc Cancel   Enter Register  │       ▏
+▕       │                                                                                                      │       ▏
+▕       └──────────────────────────────────────────────────────────────────────────────────────────────────────┘       ▏
+▕                                │                                             │                                       ▏
+▕                                │                                             │                                       ▏
+▕                                │                                             │                                       ▏
+▕                                │                                             │                                       ▏
+▕                                │                                             │                                       ▏
+▕                                │                                             │                                       ▏
+▕                                │                                             │                                       ▏
+▕                                                                                                                      ▏
+▕ j/k Move   Space Include   c Class   1/2/3 Agents   Enter Register   Esc Cancel                                      ▏
+ ▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔

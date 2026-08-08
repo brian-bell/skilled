@@ -1,45 +1,44 @@
 ---
 source: tests/tui_snapshots.rs
-assertion_line: 66
 expression: "render(&app, 120, 40)"
 ---
- ◆ skilled  global                                                                       ● ready · 0 sources registered
-
- Keyboard reference   navigation is locked while this dialog is open
-
-▌ Repositories  0 registered     │ Available variants  no source                │ Details  no selection
-─────────────────────────────────│ ─────────────────────────────────────────────│ ─────────────────────────────────────
-                                 │                                              │
-                                 │                                              │
-                                 │                                              │
-                                 │                                              │
-            ┌ Keyboard reference ───────────────────────────────────────────────────────────────── Sources ┐
-            │                                                                                              │
-            │  Only commands available in this context are listed.                                         │
-            │                                                                                              │
-            │  Tab / Shift-Tab Region — move region focus    Esc Back one region — return toward           │
-            │  forward or backward                           Repositories, then Inventory                  │
-            │  a Add source — inspect a local checkout       ? Help — open this keyboard reference         │
-            │  1 Inventory — return to Inventory             q Quit — quit when no dialog is open          │
-            │  4 Doctor — open the findings list                                                           │
-            │                                                                                              │
-            │                                                                                              │
-    No sourc│                                                                                              │d
-            │                                                                                              │
- Press a to │                                                                                              │ its stored
-            │                                                                                              │
-            │                                                                                              │
-            │  ──────────────────────────────────────────────────────────────────────────────────────────  │
-            │  Commands for Sources                                                             Esc Close  │
-            │                                                                                              │
-            └──────────────────────────────────────────────────────────────────────────────────────────────┘
-                                 │                                              │
-                                 │                                              │
-                                 │                                              │
-                                 │                                              │
-                                 │                                              │
-                                 │                                              │
-                                 │                                              │
-                                 │                                              │
-
- Esc Close   Ctrl-C Quit
+ ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁
+▕                                                                                                                      ▏
+▕ ◆ skilled  global                                                                     ● ready · 0 sources registered ▏
+▕▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▏
+▕                                                                                                                      ▏
+▕ Keyboard reference   navigation is locked while this dialog is open                                                  ▏
+▕▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▏
+▕▌ Repositories  0 registered    │ Available variants  no source               │ Details  no selection                 ▏
+▕────────────────────────────────│ ────────────────────────────────────────────│ ───────────────────────────────────── ▏
+▕                                │                                             │                                       ▏
+▕           ┌ Keyboard reference ───────────────────────────────────────────────────────────────── Sources ┐           ▏
+▕           │                                                                                              │           ▏
+▕           │  Only commands available in this context are listed.                                         │           ▏
+▕           │                                                                                              │           ▏
+▕           │  Tab / Shift-Tab Region — move region focus    Esc Back one region — return toward           │           ▏
+▕           │  forward or backward                           Repositories, then Inventory                  │           ▏
+▕           │  a Add source — inspect a local checkout       ? Help — open this keyboard reference         │           ▏
+▕           │  1 Inventory — return to Inventory             q Quit — quit when no dialog is open          │           ▏
+▕           │  4 Doctor — open the findings list                                                           │           ▏
+▕           │                                                                                              │           ▏
+▕           │                                                                                              │           ▏
+▕           │                                                                                              │           ▏
+▕    No sour│                                                                                              │           ▏
+▕           │                                                                                              │           ▏
+▕ Press a to│                                                                                              │its stored ▏
+▕           │                                                                                              │           ▏
+▕           │  ──────────────────────────────────────────────────────────────────────────────────────────  │           ▏
+▕           │  Commands for Sources                                                             Esc Close  │           ▏
+▕           │                                                                                              │           ▏
+▕           └──────────────────────────────────────────────────────────────────────────────────────────────┘           ▏
+▕                                │                                             │                                       ▏
+▕                                │                                             │                                       ▏
+▕                                │                                             │                                       ▏
+▕                                │                                             │                                       ▏
+▕                                │                                             │                                       ▏
+▕                                │                                             │                                       ▏
+▕                                │                                             │                                       ▏
+▕                                                                                                                      ▏
+▕ Esc Close   Ctrl-C Quit                                                                                              ▏
+ ▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
