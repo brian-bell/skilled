@@ -445,6 +445,60 @@ fn an_opencode_selection_conflict_installed_through_a_compatibility_root_is_crit
     );
 }
 
+/// Installed-root precedence and source selection answer different questions.
+/// When both are ambiguous for OpenCode, Doctor retains each fact: the runtime
+/// conflict names the roots, and the registry conflict names every candidate.
+#[test]
+fn an_opencode_root_conflict_retains_the_registry_ambiguity() {
+    let fixture = Fixture::new();
+    let first = fixture.source("alpha", &[("skills", &["review"])]);
+    let second = fixture.source("beta", &[("skills", &["review"])]);
+    drop(fixture.registered(&[&first, &second]));
+    fixture.install_symlink(AgentKind::OpenCode, "review", &first.join("skills/review"));
+    fixture.install_symlink(
+        AgentKind::ClaudeCode,
+        "review",
+        &second.join("skills/review"),
+    );
+
+    let app = fixture.app();
+    let conflicts = app
+        .inventory()
+        .doctor_findings()
+        .filter(|entry| {
+            entry.agent() == AgentKind::OpenCode
+                && entry.finding().code() == "variant.duplicate_for_agent"
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        conflicts.len(),
+        2,
+        "runtime and registry conflicts remain distinct"
+    );
+    let runtime = conflicts
+        .iter()
+        .find(|entry| !entry.concerns_the_registry())
+        .expect("effective-resolution conflict");
+    assert!(
+        runtime.finding().evidence().contains(OPENCODE_ROOT)
+            && runtime.finding().evidence().contains(CLAUDE_CODE_ROOT),
+        "the runtime conflict names every installed root: {runtime:?}"
+    );
+    let registry = conflicts
+        .iter()
+        .find(|entry| entry.concerns_the_registry())
+        .expect("registry selection conflict");
+    assert_eq!(
+        registry
+            .variants()
+            .iter()
+            .map(|variant| variant.source_label().to_owned())
+            .collect::<Vec<_>>(),
+        ["alpha", "beta"]
+    );
+}
+
 /// Doctor orders findings by the spec 9.5 groups before severity, so a broken
 /// installation leads an informational alias whatever the codes are called.
 #[test]
