@@ -808,6 +808,28 @@ fn a_keyboard_owner_on_a_wide_terminal_keeps_the_status_beside_it() {
 }
 
 #[test]
+fn an_open_dialog_returns_the_status_to_the_title_bar_on_a_wide_terminal() {
+    // A dialog clears only its own popup: a status left on the tab row would
+    // be cut at the dialog's border, its tail hanging past the frame as a
+    // stray fragment. The title bar is the row the popups leave alone.
+    let harness = Harness::new();
+    let mut app = harness.completed_setup();
+    app.update(Action::OpenHelp);
+
+    let screen = buffer(&app, 120, 40);
+    assert!(
+        row_text(&screen, 0).ends_with("● ready · 0 sources registered"),
+        "{}",
+        row_text(&screen, 0)
+    );
+    assert!(
+        !row_text(&screen, 1).contains("ready"),
+        "{}",
+        row_text(&screen, 1)
+    );
+}
+
+#[test]
 fn the_status_joins_the_tab_row_only_where_both_fit_whole() {
     let harness = Harness::new();
     let app = harness.completed_setup();

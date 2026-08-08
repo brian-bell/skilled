@@ -183,10 +183,27 @@ fn render_title_bar(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp, status_
 /// separator, a boundary glyph already in place. A keyboard owner's note has
 /// no such closing glyph and may touch the status dot at an exact fit; the
 /// dot's colour break is accepted as the seam there.
+///
+/// While an overlay dialog floats, the status returns to the title bar even
+/// where it would fit: a dialog clears only its own popup, so a status left
+/// on the navigation row would be cut at the dialog's border and its tail
+/// would hang past the frame as a stray fragment. The title bar is the row
+/// the popups leave alone.
 fn session_status_on_nav_row(app: &SkilledApp, area: Rect) -> bool {
-    viewport::classify(area) == viewport::Viewport::Wide
+    !overlay_open(app)
+        && viewport::classify(area) == viewport::Viewport::Wide
         && navigation_row_line(app).width() + usize::from(session_status_width(app))
             <= usize::from(area.width)
+}
+
+/// Whether this frame floats a dialog over the shell — the same conditions,
+/// in the same precedence, that [`render`] draws overlays under, plus the
+/// help modal that can sit over any of them.
+fn overlay_open(app: &SkilledApp) -> bool {
+    app.pending_install().is_some()
+        || app.source_path_input_active()
+        || (app.pending_source().is_some() && app.view() == View::Sources)
+        || app.help_context().is_some()
 }
 
 /// The columns the session status asks of whichever row carries it: its
