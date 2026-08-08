@@ -12,7 +12,10 @@ use std::{
     process::Command,
 };
 
-use skilled::{Action, AgentKind, AppEnvironment, InventoryPane, SkilledApp, tui::RenderFeedback};
+use skilled::{
+    Action, AgentKind, AppEnvironment, InventoryPane, SessionIdentity, SkilledApp,
+    tui::RenderFeedback,
+};
 
 #[test]
 fn setup_uses_the_shared_dialog_and_seven_segment_progress() {
@@ -308,6 +311,50 @@ fn the_title_bar_keeps_its_own_colours_beside_the_session_status() {
 }
 
 #[test]
+fn the_title_bar_states_the_session_identity_after_the_scope() {
+    let harness = Harness::new();
+    let app = harness.completed_setup_with_identity(SessionIdentity {
+        user: Some("brian".to_owned()),
+        host: Some("macbook".to_owned()),
+        os: Some("macOS".to_owned()),
+    });
+
+    let title = row_text(&buffer(&app, 80, 24), 0);
+    assert!(
+        title.contains("◆ skilled  global · brian@macbook · macOS"),
+        "{title}"
+    );
+}
+
+#[test]
+fn a_hostname_with_a_control_sequence_reaches_the_title_bar_escaped() {
+    let harness = Harness::new();
+    let app = harness.completed_setup_with_identity(SessionIdentity {
+        user: Some("brian".to_owned()),
+        host: Some("mac\u{1b}]0;x\u{7}book".to_owned()),
+        os: None,
+    });
+
+    let title = row_text(&buffer(&app, 80, 24), 0);
+    assert!(
+        title.contains("global · brian@mac\\u{1b}]0;x\\u{7}book"),
+        "{title}"
+    );
+}
+
+#[test]
+fn an_absent_identity_leaves_the_scope_without_dangling_separators() {
+    let harness = Harness::new();
+    // The default test environment injects no identity at all.
+    let title = row_text(&buffer(&harness.completed_setup(), 80, 24), 0);
+    assert!(title.contains("◆ skilled  global"), "{title}");
+    // The '·' in the right-aligned status is its own; the context path left of
+    // it must not end in a separator with nothing after it.
+    let product = title.split('●').next().expect("row text");
+    assert!(!product.contains('·'), "{title}");
+}
+
+#[test]
 fn an_open_dialog_takes_the_navigation_row_with_it() {
     let harness = Harness::new();
     let repository = harness.directory.path().join("source");
@@ -491,32 +538,43 @@ fn surfaces_are_painted_where_the_design_calls_for_them() {
         .bg,
         Some(TERMINAL)
     );
-    // The title row is laid out as two rectangles, so the band is only right
-    // if it covers the empty space between them and the far end of the second
-    // one as well as the text in the first.
+    // At this width the session status sits on the navigation row, so the
+    // title row is one rectangle whose band is only right if it reaches past
+    // the context path to the terminal's edge.
     let title = row_text(&screen, 0);
-    let status = u16::try_from(
-        title[..title.find('●').expect("session status glyph")]
-            .chars()
-            .count(),
-    )
-    .expect("column");
+    assert!(!title.contains('●'), "{title}");
     let last = screen.area.x + screen.area.width - 1;
+    let past_title = u16::try_from(title.chars().count() + 2).expect("column");
     assert_eq!(
-        screen[(screen.area.x + status - 2, 0)].style().bg,
+        screen[(screen.area.x + past_title, 0)].style().bg,
         Some(BAND),
-        "the gap between the product mark and the session status is on the band"
+        "the band should cover the row past the product and context"
     );
     assert_eq!(
         screen[(last, 0)].style().bg,
         Some(BAND),
-        "the band should reach the end of the row, not stop with the product half"
+        "the band should reach the end of the row, not stop with the text"
     );
 
     // The navigation strip is its own band, with the active tab lifted.
     // Sources is the active tab here, so Inventory is the inactive probe.
     assert_eq!(style_in_row(&screen, 1, "1 Inventory").bg, Some(SURFACE));
     assert_eq!(style_in_row(&screen, 1, "▌Sources").bg, Some(SURFACE_2));
+    // This row is laid out as two rectangles — the tab strip and the session
+    // status — so its surface is only right if it covers the gap between
+    // them as well as the text in each.
+    let navigation = row_text(&screen, 1);
+    let status = u16::try_from(
+        navigation[..navigation.find('●').expect("session status glyph")]
+            .chars()
+            .count(),
+    )
+    .expect("column");
+    assert_eq!(
+        screen[(screen.area.x + status - 2, 1)].style().bg,
+        Some(SURFACE),
+        "the gap between the tab strip and the session status is on the surface"
+    );
 
     // The key-hint row shares the title bar's band, and it reaches the edge of
     // the terminal rather than stopping where the last hint does.
@@ -662,6 +720,75 @@ fn navigation_separates_active_reachable_and_unavailable_destinations() {
     let unavailable = style_at(&screen, "Updates");
     assert_eq!(unavailable.fg, Some(Color::Rgb(0x53, 0x61, 0x71)));
     assert!(!unavailable.add_modifier.contains(Modifier::DIM));
+}
+
+#[test]
+fn the_tab_strip_boxes_padded_cells_behind_line_separators() {
+    let harness = Harness::new();
+    let screen = buffer(&harness.completed_setup(), 80, 24);
+    let navigation = row_text(&screen, 1);
+
+    // Four sixteen-column cells, each closed by a separator on the line
+    // colour (prototype `.tab` border-right), on the navigation surface.
+    assert_eq!(navigation.matches('│').count(), 4, "{navigation}");
+    for column in [16_u16, 33, 50, 67] {
+        assert_eq!(screen[(column, 1)].symbol(), "│", "{navigation}");
+        let separator = screen[(column, 1)].style();
+        assert_eq!(separator.fg, Some(Color::Rgb(0x29, 0x34, 0x40)));
+        assert_eq!(separator.bg, Some(Color::Rgb(0x0f, 0x15, 0x1d)));
+    }
+
+    // The active cell's raised surface and underline reach across its
+    // padding: the blank column before its separator still carries the cell.
+    assert_eq!(screen[(15, 1)].symbol(), " ", "{navigation}");
+    let active_padding = screen[(15, 1)].style();
+    assert_eq!(active_padding.bg, Some(Color::Rgb(0x12, 0x1a, 0x24)));
+    assert!(active_padding.add_modifier.contains(Modifier::UNDERLINED));
+
+    // An inactive cell is padded to the same width on the plain surface,
+    // with no underline pretending it is active.
+    assert_eq!(screen[(32, 1)].symbol(), " ", "{navigation}");
+    let inactive_padding = screen[(32, 1)].style();
+    assert_eq!(inactive_padding.bg, Some(Color::Rgb(0x0f, 0x15, 0x1d)));
+    assert!(!inactive_padding.add_modifier.contains(Modifier::UNDERLINED));
+}
+
+#[test]
+fn the_session_status_moves_to_the_tab_row_on_a_wide_terminal() {
+    let harness = Harness::new();
+    let app = harness.completed_setup();
+
+    // Wide: the status sits right-aligned beside the tabs, the prototype's
+    // placement, leaving the title bar to the product and context path.
+    let wide = buffer(&app, 120, 40);
+    assert!(
+        row_text(&wide, 1).ends_with("● ready · 0 sources registered"),
+        "{}",
+        row_text(&wide, 1)
+    );
+    assert!(
+        !row_text(&wide, 0).contains("ready"),
+        "{}",
+        row_text(&wide, 0)
+    );
+    assert_eq!(
+        style_in_row(&wide, 1, "●").fg,
+        Some(Color::Rgb(0x8b, 0xd4, 0x9c))
+    );
+
+    // Compact: the tab strip fills its row, so the status shares the title
+    // bar instead of competing with navigation for space.
+    let compact = buffer(&app, 80, 24);
+    assert!(
+        row_text(&compact, 0).contains("ready · 0 sources registered"),
+        "{}",
+        row_text(&compact, 0)
+    );
+    assert!(
+        !row_text(&compact, 1).contains("ready"),
+        "{}",
+        row_text(&compact, 1)
+    );
 }
 
 #[test]
@@ -1253,13 +1380,14 @@ fn navigation_withholds_a_count_it_could_not_observe() {
         let rendered = text(&screen);
 
         // The subtitle names this state, and the count beside the tab is
-        // absent in it. Two spaces after the title is the positive evidence:
-        // nothing at all was rendered between it and the next entry.
+        // absent in it. A padding space after the title is the positive
+        // evidence: nothing at all was rendered between it and the cell's
+        // separator.
         assert!(rendered.contains(subtitle), "{rendered}");
-        assert!(navigation.contains("▌Inventory  2 Sources"), "{navigation}");
+        assert!(navigation.contains("▌Inventory"), "{navigation}");
         assert_eq!(
             after(&navigation, "▌Inventory"),
-            // The next entry's own marker, and so nothing of the inventory's.
+            // The cell's own padding, and so nothing of the inventory's.
             Some(' '),
             "{subtitle:?} may not state a total: {navigation}"
         );
@@ -1282,10 +1410,10 @@ fn navigation_withholds_a_count_it_could_not_observe() {
         }
         // Doctor lists findings observed from the same roots, so it withholds
         // its count in exactly the states the Inventory withholds its own.
-        // It is the last entry, so nothing follows its title.
+        // Only its cell's padding may follow its title.
         assert_eq!(
             after(&navigation, "4 Doctor"),
-            None,
+            Some(' '),
             "{subtitle:?} may not state a finding total: {navigation}"
         );
         assert!(!navigation.contains('—'), "{navigation}");
@@ -1347,11 +1475,10 @@ fn inventory_between_its_transition_and_its_scan_says_not_scanned() {
         rendered.contains("Skilled scans the roots when this view opens."),
         "{rendered}"
     );
-    // No count may stand beside the tab for a scan that has not happened.
-    assert!(
-        navigation.contains("▌Inventory  2 Sources ·0 "),
-        "{navigation}"
-    );
+    // No count may stand beside the tab for a scan that has not happened,
+    // while the registry — always fully known — still states its own.
+    assert!(!navigation.contains("Inventory ·"), "{navigation}");
+    assert!(navigation.contains(" 2 Sources ·0 "), "{navigation}");
     // Nothing has been listed, so nothing may be hinted as movable, openable,
     // or filterable. The hint row is located by its one constant entry.
     let hints = row_text(&screen, row_containing(&screen, "Quit"));
@@ -1484,10 +1611,8 @@ fn gap_with_a_deselected_agent_keeps_selection_honest() {
     assert!(!roots.contains("Codex not scanned"), "{roots}");
     // No count: the selected roots have not been read.
     let navigation = row_text(&screen, 1);
-    assert!(
-        navigation.contains("▌Inventory  2 Sources ·0 "),
-        "{navigation}"
-    );
+    assert!(!navigation.contains("Inventory ·"), "{navigation}");
+    assert!(navigation.contains(" 2 Sources ·0 "), "{navigation}");
 
     app.perform_effects(update.effects()).expect("perform scan");
     let screen = buffer(&app, 80, 24);
@@ -1538,10 +1663,8 @@ fn gap_with_every_agent_deselected_does_not_claim_not_scanned() {
     let roots = row_text(&screen, row_containing(&screen, "Roots:"));
     assert_eq!(roots.matches("not selected").count(), 3, "{roots}");
     assert!(!roots.contains("not scanned"), "{roots}");
-    assert!(
-        navigation.contains("▌Inventory  2 Sources ·0 "),
-        "{navigation}"
-    );
+    assert!(!navigation.contains("Inventory ·"), "{navigation}");
+    assert!(navigation.contains(" 2 Sources ·0 "), "{navigation}");
 
     app.perform_effects(update.effects()).expect("perform scan");
     let rendered = text(&buffer(&app, 80, 24));
@@ -1578,9 +1701,10 @@ fn navigation_count_digit_cannot_read_as_a_route_key() {
     let navigation = row_text(&screen, 1);
 
     // Pin the exact neighbourhood the issue quotes — the active tab's count
-    // on the left and the next tab's amber count on the right.
+    // on the left and the next tab's amber count on the right, each padded to
+    // its own boxed cell.
     assert!(
-        navigation.contains("▌Inventory ·1  2 Sources ·3  Updates (soon)"),
+        navigation.contains("▌Inventory ·1   │ 2 Sources ·3   │ Updates (soon)"),
         "{navigation}"
     );
     // The bare-digit form is the collision itself, so its absence is the
@@ -3812,6 +3936,19 @@ impl Harness {
         app
     }
 
+    /// Setup completed under an injected session identity; tests never read
+    /// the real user, hostname, or operating system.
+    fn completed_setup_with_identity(&self, identity: SessionIdentity) -> SkilledApp {
+        let mut app =
+            SkilledApp::open(self.environment().with_identity(identity)).expect("open application");
+        for _ in 0..7 {
+            let update = app.update(Action::Continue);
+            app.perform_effects(update.effects())
+                .expect("perform setup effects");
+        }
+        app
+    }
+
     /// One registered source, standing on its only variant, with every agent
     /// root's own parent present so the plan has work to state.
     #[cfg(unix)]
@@ -5348,21 +5485,22 @@ mod installed {
         fn region_rows(app: &SkilledApp, width: u16, height: u16) -> Vec<String> {
             let screen = text(&buffer(app, width, height));
             let screen: Vec<&str> = screen.lines().collect();
-            let mut rows: Vec<String> = if screen.iter().any(|row| row.contains('│')) {
+            // The workspace: below the title bar and navigation, above the
+            // key hints. The chrome rows are excluded before probing for the
+            // region's rule, because the tab strip draws '│' separators of
+            // its own.
+            let workspace = &screen[2..screen.len() - 1];
+            let mut rows: Vec<String> = if workspace.iter().any(|row| row.contains('│')) {
                 // Beside the table, the region is everything past the rule.
-                screen
+                workspace
                     .iter()
                     .filter_map(|row| row.rsplit_once('│'))
                     .map(|(_, region)| region.trim().to_owned())
                     .collect()
             } else {
                 // Drilled into on a compact terminal, it is the whole
-                // workspace: below the title bar and navigation, above the
-                // key hints.
-                screen[2..screen.len() - 1]
-                    .iter()
-                    .map(|row| row.trim().to_owned())
-                    .collect()
+                // workspace.
+                workspace.iter().map(|row| row.trim().to_owned()).collect()
             };
             // The pane's own heading and rule are the scaffold around the
             // window, not rows of the content it is windowing.

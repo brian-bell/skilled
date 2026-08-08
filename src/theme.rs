@@ -139,6 +139,16 @@ pub(crate) fn nav_count() -> Style {
     Style::default().fg(AMBER).remove_modifier(Modifier::BOLD)
 }
 
+/// The line closing each navigation cell (prototype `.tab` border-right).
+///
+/// Decorative, and so exempt from the 4.5:1 sweep: the separator partitions
+/// cells that already end where their padding ends, so nothing depends on it
+/// being perceived. `LINE` on `SURFACE` sits near 1.5:1 — the hairline the
+/// prototype draws, kept faint on purpose so the strip reads as one band.
+pub(crate) fn nav_separator() -> Style {
+    Style::default().fg(LINE).bg(SURFACE)
+}
+
 /// The surface behind the focused row of a list.
 pub(crate) fn selected_row() -> Style {
     Style::default().bg(SURFACE_3).add_modifier(Modifier::BOLD)

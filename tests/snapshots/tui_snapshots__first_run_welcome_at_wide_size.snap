@@ -2,8 +2,8 @@
 source: tests/tui_snapshots.rs
 expression: "render(&app, 120, 40)"
 ---
- ◆ skilled   global                                                                                 ● setup in progress
- Setup · Welcome and scope   navigation is locked during setup
+ ◆ skilled  global
+ Setup · Welcome and scope   navigation is locked during setup                                      ● setup in progress
 
 
 

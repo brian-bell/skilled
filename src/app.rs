@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::{
-    AgentDetection, AgentKind, AppEnvironment, Result,
+    AgentDetection, AgentKind, AppEnvironment, Result, SessionIdentity,
     agents::{detect_agents, detection_at},
     inventory::{DoctorEntry, InventoryRow, InventorySnapshot, scan_installations},
     operations::{
@@ -595,6 +595,12 @@ impl SkilledApp {
     /// skill root is only ever spoken about as `~/.claude/skills`.
     pub fn home(&self) -> &Path {
         &self.environment.home_dir
+    }
+
+    /// Who and where this session is, as gathered once at startup; the
+    /// reducer never reads the process environment itself.
+    pub fn identity(&self) -> &SessionIdentity {
+        &self.environment.identity
     }
 
     pub fn doctor_pane(&self) -> DoctorPane {

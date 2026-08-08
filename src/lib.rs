@@ -23,5 +23,5 @@ pub use app::{
     UpdateResult, View,
 };
 pub use error::{Error, Result};
-pub use paths::AppEnvironment;
+pub use paths::{AppEnvironment, SessionIdentity};
 pub use runner::run;

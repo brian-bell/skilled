@@ -120,44 +120,106 @@ pub fn render(frame: &mut Frame<'_>, app: &SkilledApp) -> RenderFeedback {
     }
 }
 
+/// The columns the title bar spends before the context path begins:
+/// `" ◆ "`, the wordmark, and the prototype's gap after it.
+const TITLE_PREFIX_WIDTH: usize = 12;
+
 fn render_title_bar(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
-    // The prototype places session state beside the navigation tabs. At eighty
-    // columns the tab strip already fills that row, so the status shares the
-    // title bar instead of competing with navigation for space.
-    //
-    // The two halves get their own rectangles because a Paragraph repaints its
-    // whole area before drawing: rendering the status across the full row would
-    // silently flatten the product mark and wordmark to the status colour.
+    // The prototype places session state beside the navigation tabs, and at
+    // Viewport::Wide this row leaves it there: a hundred columns hold the
+    // sixty-eight of tab cells with room for the status beside them. Below
+    // that the strip fills its own row, so the status shares the title bar
+    // instead of competing with navigation for space.
     //
     // The band goes down first and the paragraphs only carry foreground
     // colours, so it survives underneath them.
     frame.render_widget(Block::new().style(theme::chrome_band()), area);
 
-    let status = SessionStatus::of(app);
-    let label = status.label();
-    let status_width = u16::try_from(Span::raw(&label).width() + 3)
-        .unwrap_or(u16::MAX)
-        .min(area.width);
-    let [product, session] =
-        Layout::horizontal([Constraint::Min(0), Constraint::Length(status_width)]).areas(area);
+    let product = match viewport::classify(area) {
+        viewport::Viewport::Wide => area,
+        // The status gets its own rectangle because a Paragraph repaints its
+        // whole area before drawing: rendering it across the full row would
+        // silently flatten the product mark and wordmark to the status colour.
+        viewport::Viewport::Compact => {
+            let [product, session] = Layout::horizontal([
+                Constraint::Min(0),
+                Constraint::Length(session_status_width(app).min(area.width)),
+            ])
+            .areas(area);
+            render_session_status(frame, session, app);
+            product
+        }
+    };
 
+    let context = context_path(
+        app.identity(),
+        usize::from(product.width).saturating_sub(TITLE_PREFIX_WIDTH),
+    );
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(" ◆ ", theme::product_mark()),
             Span::styled("skilled", theme::product_name()),
-            Span::styled("   global", theme::chrome()),
+            Span::styled(format!("  {context}"), theme::chrome()),
         ])),
         product,
     );
+}
+
+/// The columns the session status asks of whichever row carries it: its
+/// glyph, its label, and a one-column margin against the terminal's edge.
+fn session_status_width(app: &SkilledApp) -> u16 {
+    let status = SessionStatus::of(app);
+    u16::try_from(Span::raw(status.label()).width() + 3).unwrap_or(u16::MAX)
+}
+
+/// The session status, right-aligned in its region on whichever chrome row
+/// the viewport assigned it. Only a foreground: the region keeps the band or
+/// navigation surface already painted beneath it.
+fn render_session_status(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
+    let status = SessionStatus::of(app);
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled("● ", theme::tone_style(status.tone())),
-            Span::styled(label, theme::chrome()),
+            Span::styled(status.label(), theme::chrome()),
             Span::raw(" "),
         ]))
         .alignment(Alignment::Right),
-        session,
+        area,
     );
+}
+
+/// The context path beside the wordmark (prototype `.terminal-path`):
+/// `global · user@host · macOS`, with an absent segment and its separator
+/// omitted rather than invented, and the user and host escaped through
+/// [`terminal_safe`] because both come from outside Skilled.
+///
+/// A path too wide for its half of the row sheds segments whole — host first,
+/// then user, then the operating system — rather than colliding with the
+/// status beside it: `global · brian · macOS` still identifies the session
+/// where `global · brian@mac…` would identify nothing. The scope word always
+/// remains; at worst the layout clips it.
+fn context_path(identity: &crate::SessionIdentity, width: usize) -> String {
+    let user = identity.user.as_deref().map(terminal_safe);
+    let host = identity.host.as_deref().map(terminal_safe);
+    let os = identity.os.as_deref().map(terminal_safe);
+    let session = match (&user, &host) {
+        (Some(user), Some(host)) => Some(format!("{user}@{host}")),
+        (Some(user), None) => Some(user.clone()),
+        (None, Some(host)) => Some(host.clone()),
+        (None, None) => None,
+    };
+
+    let shedding: [Vec<Option<String>>; 3] =
+        [vec![session, os.clone()], vec![user, os.clone()], vec![os]];
+    for step in shedding {
+        let mut segments = vec!["global".to_owned()];
+        segments.extend(step.into_iter().flatten());
+        let path = segments.join(" · ");
+        if Span::raw(&path).width() <= width {
+            return path;
+        }
+    }
+    "global".to_owned()
 }
 
 /// What the application can honestly say about the current session.
@@ -199,6 +261,24 @@ impl SessionStatus {
 fn render_navigation(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
     frame.render_widget(Block::new().style(theme::nav_surface()), area);
 
+    // At Viewport::Wide the session status lives on this row — the prototype's
+    // placement — whether the row is showing the tab strip or a keyboard
+    // owner: the status is the one part of the chrome that keeps reporting
+    // while a dialog holds the keys, so it does not vanish with the tabs.
+    let strip = match viewport::classify(area) {
+        viewport::Viewport::Compact => area,
+        viewport::Viewport::Wide => {
+            let [strip, session] = Layout::horizontal([
+                Constraint::Min(0),
+                Constraint::Length(session_status_width(app).min(area.width)),
+            ])
+            .areas(area);
+            render_session_status(frame, session, app);
+            strip
+        }
+    };
+    let area = strip;
+
     if let Some((owner, note)) = keyboard_owner(app) {
         frame.render_widget(
             Paragraph::new(Line::from(vec![
@@ -218,14 +298,14 @@ fn render_navigation(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
             (true, true) => theme::nav_active(),
             (true, false) => theme::nav_inactive(),
         };
-        spans.push(Span::styled(
+        let mut cell = vec![Span::styled(
             if active {
                 components::FOCUS_MARKER
             } else {
                 " "
             },
             style,
-        ));
+        )];
         // The digit is the route, so it appears only where pressing it works:
         // never for a destination this release cannot open, and never for the
         // view already on screen.
@@ -233,7 +313,7 @@ fn render_navigation(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
             (true, false) => format!("{} ", destination.key()),
             _ => String::new(),
         };
-        spans.push(Span::styled(
+        cell.push(Span::styled(
             format!(
                 "{key}{}{} ",
                 destination.title(),
@@ -255,14 +335,32 @@ fn render_navigation(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
         // left or right only by a grammar the reader has not been taught.
         // '·' makes the class textual at every width and in any palette.
         if let Some(count) = destination.count(app) {
-            spans.push(Span::styled(
+            cell.push(Span::styled(
                 format!("·{count} "),
                 style.patch(theme::nav_count()),
             ));
         }
+        // The pad carries the cell's own style, so an active cell's raised
+        // surface and underline reach its separator instead of stopping at
+        // the last glyph and leaving the padding on the bare band.
+        let content: usize = cell.iter().map(Span::width).sum();
+        if content < NAV_CELL_MIN_WIDTH {
+            cell.push(Span::styled(
+                " ".repeat(NAV_CELL_MIN_WIDTH - content),
+                style,
+            ));
+        }
+        spans.append(&mut cell);
+        spans.push(Span::styled("│", theme::nav_separator()));
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
+
+/// The narrowest navigation cell: the prototype's tabs reserve
+/// `min-width: 126px`, sixteen columns at the same ~8px/cell conversion
+/// [`viewport`] uses for the aside. A count can push a cell wider; the
+/// minimum keeps the strip's rhythm when it does not.
+const NAV_CELL_MIN_WIDTH: usize = 16;
 
 /// The context that currently owns the keyboard, if it is not the tab strip.
 ///
@@ -5234,6 +5332,87 @@ mod tests {
         assert_eq!(
             verdict,
             "skill root created, but the link was not: permission denied"
+        );
+    }
+
+    fn identity(
+        user: Option<&str>,
+        host: Option<&str>,
+        os: Option<&str>,
+    ) -> crate::SessionIdentity {
+        crate::SessionIdentity {
+            user: user.map(str::to_owned),
+            host: host.map(str::to_owned),
+            os: os.map(str::to_owned),
+        }
+    }
+
+    /// An absent segment disappears with its separator: the path never shows
+    /// a `·` with nothing on one side of it.
+    #[test]
+    fn a_context_path_omits_absent_segments_without_dangling_separators() {
+        let wide = 80;
+        assert_eq!(
+            context_path(
+                &identity(Some("brian"), Some("macbook"), Some("macOS")),
+                wide
+            ),
+            "global · brian@macbook · macOS"
+        );
+        assert_eq!(
+            context_path(&identity(Some("brian"), None, Some("macOS")), wide),
+            "global · brian · macOS"
+        );
+        assert_eq!(
+            context_path(&identity(None, Some("macbook"), Some("macOS")), wide),
+            "global · macbook · macOS"
+        );
+        assert_eq!(
+            context_path(&identity(Some("brian"), Some("macbook"), None), wide),
+            "global · brian@macbook"
+        );
+        assert_eq!(context_path(&identity(None, None, None), wide), "global");
+    }
+
+    /// A path too wide for its row sheds segments whole: host first, then
+    /// user, then the operating system, and the scope word never.
+    #[test]
+    fn a_tight_context_path_sheds_host_then_user_then_operating_system() {
+        let full = identity(Some("brian"), Some("macbook"), Some("macOS"));
+        let width_of = |path: &str| Span::raw(path).width();
+
+        assert_eq!(
+            context_path(&full, width_of("global · brian@macbook · macOS")),
+            "global · brian@macbook · macOS"
+        );
+        // One column short of the full path: the host is shed first.
+        assert_eq!(
+            context_path(&full, width_of("global · brian@macbook · macOS") - 1),
+            "global · brian · macOS"
+        );
+        assert_eq!(
+            context_path(&full, width_of("global · brian · macOS") - 1),
+            "global · macOS"
+        );
+        assert_eq!(
+            context_path(&full, width_of("global · macOS") - 1),
+            "global"
+        );
+        // Even a row too narrow for the scope word still names the scope; the
+        // layout clips it rather than the path lying about it.
+        assert_eq!(context_path(&full, 0), "global");
+    }
+
+    /// A control sequence in the user or host is shown escaped, never given
+    /// to the terminal to execute.
+    #[test]
+    fn a_context_path_escapes_identity_text_from_outside_skilled() {
+        assert_eq!(
+            context_path(
+                &identity(Some("bri\u{1b}an"), Some("mac\u{7}book"), None),
+                80
+            ),
+            "global · bri\\u{1b}an@mac\\u{7}book"
         );
     }
 
