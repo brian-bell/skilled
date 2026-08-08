@@ -12,7 +12,10 @@ use std::{
     process::Command,
 };
 
-use skilled::{Action, AgentKind, AppEnvironment, InventoryPane, SkilledApp, tui::RenderFeedback};
+use skilled::{
+    Action, AgentKind, AppEnvironment, InventoryPane, SessionIdentity, SkilledApp,
+    tui::RenderFeedback,
+};
 
 #[test]
 fn setup_uses_the_shared_dialog_and_seven_segment_progress() {
@@ -308,6 +311,52 @@ fn the_title_bar_keeps_its_own_colours_beside_the_session_status() {
 }
 
 #[test]
+fn the_title_bar_states_the_session_identity_after_the_scope() {
+    let harness = Harness::new();
+    let app = harness.completed_setup_with_identity(SessionIdentity {
+        user: Some("brian".to_owned()),
+        host: Some("macbook".to_owned()),
+        os: Some("macOS".to_owned()),
+    });
+
+    let title = row_text(&buffer(&app, 80, 24), 0);
+    assert!(
+        title.contains("◆ skilled  global · brian@macbook · macOS"),
+        "{title}"
+    );
+}
+
+#[test]
+fn a_hostname_with_a_control_sequence_reaches_the_title_bar_escaped() {
+    let harness = Harness::new();
+    let app = harness.completed_setup_with_identity(SessionIdentity {
+        user: Some("brian".to_owned()),
+        // A full OSC title sequence: ESC ] 0 ; x BEL. Short enough that its
+        // escaped spelling still fits the compact context budget.
+        host: Some("m\u{1b}]0;x\u{7}".to_owned()),
+        os: None,
+    });
+
+    let title = row_text(&buffer(&app, 80, 24), 0);
+    assert!(
+        title.contains("global · brian@m\\u{1b}]0;x\\u{7}"),
+        "{title}"
+    );
+}
+
+#[test]
+fn an_absent_identity_leaves_the_scope_without_dangling_separators() {
+    let harness = Harness::new();
+    // The default test environment injects no identity at all.
+    let title = row_text(&buffer(&harness.completed_setup(), 80, 24), 0);
+    assert!(title.contains("◆ skilled  global"), "{title}");
+    // The '·' in the right-aligned status is its own; the context path left of
+    // it must not end in a separator with nothing after it.
+    let product = title.split('●').next().expect("row text");
+    assert!(!product.contains('·'), "{title}");
+}
+
+#[test]
 fn an_open_dialog_takes_the_navigation_row_with_it() {
     let harness = Harness::new();
     let repository = harness.directory.path().join("source");
@@ -491,32 +540,44 @@ fn surfaces_are_painted_where_the_design_calls_for_them() {
         .bg,
         Some(TERMINAL)
     );
-    // The title row is laid out as two rectangles, so the band is only right
-    // if it covers the empty space between them and the far end of the second
-    // one as well as the text in the first.
+    // At this width the session status sits on the navigation row, so the
+    // title row is one rectangle whose band is only right if it reaches past
+    // the context path to the terminal's edge.
     let title = row_text(&screen, 0);
-    let status = u16::try_from(
-        title[..title.find('●').expect("session status glyph")]
-            .chars()
-            .count(),
-    )
-    .expect("column");
+    assert!(!title.contains('●'), "{title}");
     let last = screen.area.x + screen.area.width - 1;
+    let past_title = u16::try_from(title.chars().count() + 2).expect("column");
     assert_eq!(
-        screen[(screen.area.x + status - 2, 0)].style().bg,
+        screen[(screen.area.x + past_title, 0)].style().bg,
         Some(BAND),
-        "the gap between the product mark and the session status is on the band"
+        "the band should cover the row past the product and context"
     );
     assert_eq!(
         screen[(last, 0)].style().bg,
         Some(BAND),
-        "the band should reach the end of the row, not stop with the product half"
+        "the band should reach the end of the row, not stop with the text"
     );
 
-    // The navigation strip is its own band, with the active tab lifted.
-    // Sources is the active tab here, so Inventory is the inactive probe.
-    assert_eq!(style_in_row(&screen, 1, "1 Inventory").bg, Some(SURFACE));
-    assert_eq!(style_in_row(&screen, 1, "▌Sources").bg, Some(SURFACE_2));
+    // The navigation strip is its own band, with the active tab lifted; the
+    // padded chrome at forty rows puts its text on the third row. Sources is
+    // the active tab here, so Inventory is the inactive probe.
+    assert_eq!(style_in_row(&screen, 2, "1 Inventory").bg, Some(SURFACE));
+    assert_eq!(style_in_row(&screen, 2, "▌Sources").bg, Some(SURFACE_2));
+    // This row is laid out as two rectangles — the tab strip and the session
+    // status — so its surface is only right if it covers the gap between
+    // them as well as the text in each.
+    let navigation = row_text(&screen, 2);
+    let status = u16::try_from(
+        navigation[..navigation.find('●').expect("session status glyph")]
+            .chars()
+            .count(),
+    )
+    .expect("column");
+    assert_eq!(
+        screen[(screen.area.x + status - 2, 2)].style().bg,
+        Some(SURFACE),
+        "the gap between the tab strip and the session status is on the surface"
+    );
 
     // The key-hint row shares the title bar's band, and it reaches the edge of
     // the terminal rather than stopping where the last hint does.
@@ -662,6 +723,190 @@ fn navigation_separates_active_reachable_and_unavailable_destinations() {
     let unavailable = style_at(&screen, "Updates");
     assert_eq!(unavailable.fg, Some(Color::Rgb(0x53, 0x61, 0x71)));
     assert!(!unavailable.add_modifier.contains(Modifier::DIM));
+}
+
+#[test]
+fn the_tab_strip_boxes_padded_cells_behind_line_separators() {
+    let harness = Harness::new();
+    let screen = buffer(&harness.completed_setup(), 80, 24);
+    let navigation = row_text(&screen, 1);
+
+    // Four sixteen-column cells, each closed by a separator on the line
+    // colour (prototype `.tab` border-right), on the navigation surface.
+    assert_eq!(navigation.matches('│').count(), 4, "{navigation}");
+    for column in [16_u16, 33, 50, 67] {
+        assert_eq!(screen[(column, 1)].symbol(), "│", "{navigation}");
+        let separator = screen[(column, 1)].style();
+        assert_eq!(separator.fg, Some(Color::Rgb(0x29, 0x34, 0x40)));
+        assert_eq!(separator.bg, Some(Color::Rgb(0x0f, 0x15, 0x1d)));
+    }
+
+    // The active cell's raised surface and underline reach across its
+    // padding: the blank column before its separator still carries the cell.
+    assert_eq!(screen[(15, 1)].symbol(), " ", "{navigation}");
+    let active_padding = screen[(15, 1)].style();
+    assert_eq!(active_padding.bg, Some(Color::Rgb(0x12, 0x1a, 0x24)));
+    assert!(active_padding.add_modifier.contains(Modifier::UNDERLINED));
+
+    // An inactive cell is padded to the same width on the plain surface,
+    // with no underline pretending it is active.
+    assert_eq!(screen[(32, 1)].symbol(), " ", "{navigation}");
+    let inactive_padding = screen[(32, 1)].style();
+    assert_eq!(inactive_padding.bg, Some(Color::Rgb(0x0f, 0x15, 0x1d)));
+    assert!(!inactive_padding.add_modifier.contains(Modifier::UNDERLINED));
+}
+
+/// From thirty-eight rows the chrome takes the prototype's bar heights: a
+/// two-row title bar and key bar, and a tab strip whose second row draws the
+/// active tab's bottom border (prototype `.tab[aria-selected]`
+/// `border-bottom-color`) instead of underlining its label.
+#[test]
+fn a_tall_terminal_pads_the_chrome_to_the_prototype_bar_heights() {
+    const BAND: Color = Color::Rgb(0x0d, 0x12, 0x18);
+    const SURFACE: Color = Color::Rgb(0x0f, 0x15, 0x1d);
+    const SURFACE_2: Color = Color::Rgb(0x12, 0x1a, 0x24);
+    const CYAN: Color = Color::Rgb(0x73, 0xd7, 0xee);
+
+    let harness = Harness::new();
+    let screen = buffer(&harness.completed_setup(), 120, 40);
+
+    // The title bar's second row is blank band: the padding falls between
+    // the title and the tabs, where the prototype's own padding sits.
+    assert_eq!(row_text(&screen, 1), "", "{}", row_text(&screen, 1));
+    assert_eq!(screen[(0, 1)].style().bg, Some(BAND));
+
+    // The label row carries no underline — the border is the row below.
+    let active = style_in_row(&screen, 2, "▌Inventory");
+    assert_eq!(active.bg, Some(SURFACE_2));
+    assert!(!active.add_modifier.contains(Modifier::UNDERLINED));
+
+    // The accent row: the active tab's border, in the accent colour on the
+    // tab's own raised surface, ending exactly at the tab's separator; the
+    // separators carry on so every box keeps its full height.
+    assert_eq!(screen[(0, 3)].symbol(), "▁");
+    assert_eq!(screen[(15, 3)].symbol(), "▁");
+    let border = screen[(0, 3)].style();
+    assert_eq!(border.fg, Some(CYAN));
+    assert_eq!(border.bg, Some(SURFACE_2));
+    for column in [16_u16, 33, 50, 67] {
+        assert_eq!(screen[(column, 3)].symbol(), "│");
+    }
+    // An inactive tab has no border: its stretch of the accent row is blank
+    // strip surface.
+    assert_eq!(screen[(20, 3)].symbol(), " ");
+    assert_eq!(screen[(20, 3)].style().bg, Some(SURFACE));
+
+    // The key bar mirrors the title bar: hints on the last row, band padding
+    // on the row above, between the workspace and the hints.
+    let last = screen.area.height - 1;
+    assert!(row_text(&screen, last).contains("q Quit"));
+    assert_eq!(row_text(&screen, last - 1), "");
+    assert_eq!(screen[(0, last - 1)].style().bg, Some(BAND));
+}
+
+#[test]
+fn the_session_status_moves_to_the_tab_row_on_a_wide_terminal() {
+    let harness = Harness::new();
+    let app = harness.completed_setup();
+
+    // Wide: the status sits right-aligned beside the tabs, the prototype's
+    // placement, leaving the title bar to the product and context path. At
+    // forty rows the chrome is padded, so the tab row is the third.
+    let wide = buffer(&app, 120, 40);
+    assert!(
+        row_text(&wide, 2).ends_with("● ready · 0 sources registered"),
+        "{}",
+        row_text(&wide, 2)
+    );
+    assert!(
+        !row_text(&wide, 0).contains("ready"),
+        "{}",
+        row_text(&wide, 0)
+    );
+    assert_eq!(
+        style_in_row(&wide, 2, "●").fg,
+        Some(Color::Rgb(0x8b, 0xd4, 0x9c))
+    );
+
+    // Compact: the tab strip fills its row, so the status shares the title
+    // bar instead of competing with navigation for space.
+    let compact = buffer(&app, 80, 24);
+    assert!(
+        row_text(&compact, 0).contains("ready · 0 sources registered"),
+        "{}",
+        row_text(&compact, 0)
+    );
+    assert!(
+        !row_text(&compact, 1).contains("ready"),
+        "{}",
+        row_text(&compact, 1)
+    );
+}
+
+#[test]
+fn a_keyboard_owner_on_a_wide_terminal_keeps_the_status_beside_it() {
+    // The status is the one part of the chrome that keeps reporting while a
+    // dialog holds the keys, so the takeover must not push it off the row.
+    let harness = Harness::new();
+    let mut app = harness.completed_setup();
+    app.update(Action::OpenSettings);
+
+    // The padded chrome puts the navigation row third at forty rows.
+    let row = row_text(&buffer(&app, 120, 40), 2);
+    assert!(row.contains("Settings"), "{row}");
+    assert!(row.contains("navigation is locked"), "{row}");
+    assert!(row.ends_with("● ready · 0 sources registered"), "{row}");
+}
+
+#[test]
+fn an_open_dialog_returns_the_status_to_the_title_bar_on_a_wide_terminal() {
+    // A dialog clears only its own popup: a status left on the tab row would
+    // be cut at the dialog's border, its tail hanging past the frame as a
+    // stray fragment. The title bar is the row the popups leave alone.
+    let harness = Harness::new();
+    let mut app = harness.completed_setup();
+    app.update(Action::OpenHelp);
+
+    let screen = buffer(&app, 120, 40);
+    assert!(
+        row_text(&screen, 0).ends_with("● ready · 0 sources registered"),
+        "{}",
+        row_text(&screen, 0)
+    );
+    assert!(
+        !row_text(&screen, 1).contains("ready"),
+        "{}",
+        row_text(&screen, 1)
+    );
+}
+
+#[test]
+fn the_status_joins_the_tab_row_only_where_both_fit_whole() {
+    let harness = Harness::new();
+    let app = harness.completed_setup();
+
+    // The narrowest wide terminal: the sixty-eight columns of tab cells and
+    // the thirty-one of status fit side by side with one column left, so the
+    // status takes the tab row here too — the boundary of the placement rule.
+    let boundary = buffer(&app, 100, 24);
+    assert!(
+        row_text(&boundary, 1).ends_with("● ready · 0 sources registered"),
+        "{}",
+        row_text(&boundary, 1)
+    );
+    assert!(
+        !row_text(&boundary, 0).contains("ready"),
+        "{}",
+        row_text(&boundary, 0)
+    );
+    // The strip lost nothing to the status beside it: its last cell still
+    // ends in its own separator.
+    assert_eq!(
+        boundary[(67, 1)].symbol(),
+        "│",
+        "{}",
+        row_text(&boundary, 1)
+    );
 }
 
 #[test]
@@ -1253,13 +1498,14 @@ fn navigation_withholds_a_count_it_could_not_observe() {
         let rendered = text(&screen);
 
         // The subtitle names this state, and the count beside the tab is
-        // absent in it. Two spaces after the title is the positive evidence:
-        // nothing at all was rendered between it and the next entry.
+        // absent in it. A padding space after the title is the positive
+        // evidence: nothing at all was rendered between it and the cell's
+        // separator.
         assert!(rendered.contains(subtitle), "{rendered}");
-        assert!(navigation.contains("▌Inventory  2 Sources"), "{navigation}");
+        assert!(navigation.contains("▌Inventory"), "{navigation}");
         assert_eq!(
             after(&navigation, "▌Inventory"),
-            // The next entry's own marker, and so nothing of the inventory's.
+            // The cell's own padding, and so nothing of the inventory's.
             Some(' '),
             "{subtitle:?} may not state a total: {navigation}"
         );
@@ -1282,10 +1528,10 @@ fn navigation_withholds_a_count_it_could_not_observe() {
         }
         // Doctor lists findings observed from the same roots, so it withholds
         // its count in exactly the states the Inventory withholds its own.
-        // It is the last entry, so nothing follows its title.
+        // Only its cell's padding may follow its title.
         assert_eq!(
             after(&navigation, "4 Doctor"),
-            None,
+            Some(' '),
             "{subtitle:?} may not state a finding total: {navigation}"
         );
         assert!(!navigation.contains('—'), "{navigation}");
@@ -1347,11 +1593,10 @@ fn inventory_between_its_transition_and_its_scan_says_not_scanned() {
         rendered.contains("Skilled scans the roots when this view opens."),
         "{rendered}"
     );
-    // No count may stand beside the tab for a scan that has not happened.
-    assert!(
-        navigation.contains("▌Inventory  2 Sources ·0 "),
-        "{navigation}"
-    );
+    // No count may stand beside the tab for a scan that has not happened,
+    // while the registry — always fully known — still states its own.
+    assert!(!navigation.contains("Inventory ·"), "{navigation}");
+    assert!(navigation.contains(" 2 Sources ·0 "), "{navigation}");
     // Nothing has been listed, so nothing may be hinted as movable, openable,
     // or filterable. The hint row is located by its one constant entry.
     let hints = row_text(&screen, row_containing(&screen, "Quit"));
@@ -1484,10 +1729,8 @@ fn gap_with_a_deselected_agent_keeps_selection_honest() {
     assert!(!roots.contains("Codex not scanned"), "{roots}");
     // No count: the selected roots have not been read.
     let navigation = row_text(&screen, 1);
-    assert!(
-        navigation.contains("▌Inventory  2 Sources ·0 "),
-        "{navigation}"
-    );
+    assert!(!navigation.contains("Inventory ·"), "{navigation}");
+    assert!(navigation.contains(" 2 Sources ·0 "), "{navigation}");
 
     app.perform_effects(update.effects()).expect("perform scan");
     let screen = buffer(&app, 80, 24);
@@ -1538,10 +1781,8 @@ fn gap_with_every_agent_deselected_does_not_claim_not_scanned() {
     let roots = row_text(&screen, row_containing(&screen, "Roots:"));
     assert_eq!(roots.matches("not selected").count(), 3, "{roots}");
     assert!(!roots.contains("not scanned"), "{roots}");
-    assert!(
-        navigation.contains("▌Inventory  2 Sources ·0 "),
-        "{navigation}"
-    );
+    assert!(!navigation.contains("Inventory ·"), "{navigation}");
+    assert!(navigation.contains(" 2 Sources ·0 "), "{navigation}");
 
     app.perform_effects(update.effects()).expect("perform scan");
     let rendered = text(&buffer(&app, 80, 24));
@@ -1578,9 +1819,10 @@ fn navigation_count_digit_cannot_read_as_a_route_key() {
     let navigation = row_text(&screen, 1);
 
     // Pin the exact neighbourhood the issue quotes — the active tab's count
-    // on the left and the next tab's amber count on the right.
+    // on the left and the next tab's amber count on the right, each padded to
+    // its own boxed cell.
     assert!(
-        navigation.contains("▌Inventory ·1  2 Sources ·3  Updates (soon)"),
+        navigation.contains("▌Inventory ·1   │ 2 Sources ·3   │ Updates (soon)"),
         "{navigation}"
     );
     // The bare-digit form is the collision itself, so its absence is the
@@ -3780,22 +4022,42 @@ fn control_characters_stay_escaped_under_the_shell() {
 }
 
 struct Harness {
+    /// The temporary directory owning cleanup; fixtures build under [`Self::path`].
     directory: tempfile::TempDir,
+    /// Where the fixture trees are built: the temporary directory itself, or
+    /// a deliberately long subdirectory of it.
+    base: PathBuf,
 }
 
 impl Harness {
     fn new() -> Self {
-        Self {
-            directory: tempfile::tempdir().expect("temporary application directory"),
-        }
+        let directory = tempfile::tempdir().expect("temporary application directory");
+        let base = directory.path().to_path_buf();
+        Self { directory, base }
+    }
+
+    /// A harness whose fixture trees sit under a segment long enough that an
+    /// install preview's absolute paths wrap at the smallest supported
+    /// terminal, wherever the platform keeps its temporary directory.
+    ///
+    /// The preview-overflow test measures scrolling, so its fixture must
+    /// overflow the dialog by construction: `tempfile` under macOS spells
+    /// paths long enough to wrap on its own, but a Linux runner's
+    /// `/tmp/.tmpXXXXXX` holds the whole plan at eighty columns and the test
+    /// would measure nothing there.
+    fn with_long_paths() -> Self {
+        let directory = tempfile::tempdir().expect("temporary application directory");
+        let base = directory.path().join("a".repeat(60));
+        fs::create_dir_all(&base).expect("create the long fixture directory");
+        Self { directory, base }
+    }
+
+    fn path(&self) -> &std::path::Path {
+        &self.base
     }
 
     fn environment(&self) -> AppEnvironment {
-        AppEnvironment::new(
-            self.directory.path().join("home"),
-            self.directory.path().join("data"),
-            "",
-        )
+        AppEnvironment::new(self.path().join("home"), self.path().join("data"), "")
     }
 
     fn first_run(&self) -> SkilledApp {
@@ -3803,7 +4065,14 @@ impl Harness {
     }
 
     fn completed_setup(&self) -> SkilledApp {
-        let mut app = self.first_run();
+        self.completed_setup_with_identity(SessionIdentity::default())
+    }
+
+    /// Setup completed under an injected session identity; tests never read
+    /// the real user, hostname, or operating system.
+    fn completed_setup_with_identity(&self, identity: SessionIdentity) -> SkilledApp {
+        let mut app =
+            SkilledApp::open(self.environment().with_identity(identity)).expect("open application");
         for _ in 0..7 {
             let update = app.update(Action::Continue);
             app.perform_effects(update.effects())
@@ -3816,8 +4085,8 @@ impl Harness {
     /// root's own parent present so the plan has work to state.
     #[cfg(unix)]
     fn installable_source(&self) -> SkilledApp {
-        let home = self.directory.path().join("home");
-        let repository = self.directory.path().join("library");
+        let home = self.path().join("home");
+        let repository = self.path().join("library");
         create_source_fixture(&repository);
         for root in [".claude", ".agents", ".config/opencode"] {
             fs::create_dir_all(home.join(root)).expect("create the root's parent");
@@ -3867,7 +4136,7 @@ impl Harness {
     /// home-relative and stable.
     #[cfg(unix)]
     fn installed_inventory(&self) -> SkilledApp {
-        let home = self.directory.path().join("home");
+        let home = self.path().join("home");
         let repository = home.join("library");
         for skill in ["alpha", "beta"] {
             write_skill_fixture(&repository.join("skills").join(skill), skill);
@@ -3900,7 +4169,7 @@ impl Harness {
     /// through a compatibility root with nothing OpenCode-compatible behind it.
     #[cfg(unix)]
     fn resolution_inventory(&self) -> SkilledApp {
-        let home = self.directory.path().join("home");
+        let home = self.path().join("home");
         let first = home.join("alpha");
         write_skill_fixture(&first.join("skills/review"), "review");
         write_skill_fixture(&first.join("claude/skills/exposed"), "exposed");
@@ -3938,7 +4207,7 @@ impl Harness {
     /// the issue behind the scrollable region names.
     #[cfg(unix)]
     fn everywhere_installed_inventory(&self) -> SkilledApp {
-        let home = self.directory.path().join("home");
+        let home = self.path().join("home");
         // Named long enough that the observed target path cannot share a row
         // with its label: the field then wraps, and the window has a line
         // whose first row states a path as empty if it is cut after it.
@@ -3998,7 +4267,7 @@ impl Harness {
     #[cfg(unix)]
     fn unverified_provenance_inventory(&self) -> SkilledApp {
         let mut app = self.gamma_installed_two_ways();
-        let home = self.directory.path().join("home");
+        let home = self.path().join("home");
         fs::rename(home.join("library"), home.join("moved-away")).expect("move the checkout away");
         scan_installations(&mut app);
         app
@@ -4011,7 +4280,7 @@ impl Harness {
     /// reports instead.
     #[cfg(unix)]
     fn divergent_provenance_inventory(&self) -> SkilledApp {
-        let home = self.directory.path().join("home");
+        let home = self.path().join("home");
         let mut app = self.completed_setup();
         let library = self.registered_gamma_source(&mut app, "library");
         let annex = self.registered_gamma_source(&mut app, "annex");
@@ -4031,7 +4300,7 @@ impl Harness {
     /// path the caller installs from.
     #[cfg(unix)]
     fn registered_gamma_source(&self, app: &mut SkilledApp, name: &str) -> PathBuf {
-        let repository = self.directory.path().join("home").join(name);
+        let repository = self.path().join("home").join(name);
         write_skill_fixture(&repository.join("skills/gamma"), "gamma");
         create_repository(&repository);
         let preview = app.preview_source(&repository).expect("preview source");
@@ -4043,7 +4312,7 @@ impl Harness {
     /// source's name both outrun the capped identity columns.
     #[cfg(unix)]
     fn long_name_inventory(&self) -> SkilledApp {
-        let home = self.directory.path().join("home");
+        let home = self.path().join("home");
         let repository = home.join(LONG_SOURCE_DIRECTORY);
         let variant = repository.join("skills").join(LONG_SKILL_NAME);
         write_skill_fixture(&variant, LONG_SKILL_NAME);
@@ -4065,7 +4334,7 @@ impl Harness {
     /// stopping short of the scan so the checkout can still be moved.
     #[cfg(unix)]
     fn gamma_installed_two_ways(&self) -> SkilledApp {
-        let home = self.directory.path().join("home");
+        let home = self.path().join("home");
         let repository = home.join("library");
         write_skill_fixture(&repository.join("skills/gamma"), "gamma");
         create_repository(&repository);
@@ -4358,7 +4627,9 @@ fn a_withheld_postcondition_is_stated_rather_than_reported_as_verified() {
 #[cfg(unix)]
 #[test]
 fn a_preview_taller_than_its_dialog_says_so_and_can_be_scrolled_to_its_end() {
-    let harness = Harness::new();
+    // Long paths by construction, so the preview overflows the dialog on
+    // every platform's temporary directory, not only macOS's.
+    let harness = Harness::with_long_paths();
     let mut app = harness.installable_source();
     let update = app.update(Action::BeginInstall);
     app.perform_effects(update.effects()).expect("plan install");
@@ -4395,16 +4666,19 @@ fn a_preview_taller_than_its_dialog_says_so_and_can_be_scrolled_to_its_end() {
     assert!(rendered.contains("Home:"), "{rendered}");
     assert!(rendered.contains("more above"), "{rendered}");
     assert!(!rendered.contains("more below"), "{rendered}");
-    // The last line of the plan is the last thing in the body: between it and
-    // the rule that closes the body there is nothing left unread.
-    let last = row_containing(&screen, "Home:");
+    // The last line of the plan is the last thing in the body: the final
+    // content row before the rule that closes it is the tail of the wrapped
+    // home path, so nothing of the plan is left unread beneath the window.
     let rule = row_containing(&screen, "  ──────");
-    let below = ((last + 1)..rule)
-        .map(|y| row_text(&screen, y))
-        .filter_map(|row| dialog_interior(&row).map(str::trim).map(str::to_owned))
-        .filter(|row| !row.is_empty())
-        .collect::<Vec<_>>();
-    assert!(below.is_empty(), "{below:?} in\n{rendered}");
+    let last = (0..rule)
+        .rev()
+        .filter_map(|y| {
+            let row = row_text(&screen, y);
+            dialog_interior(&row).map(str::trim).map(str::to_owned)
+        })
+        .find(|row| !row.is_empty())
+        .expect("content above the closing rule");
+    assert!(last.ends_with("/home"), "{last:?} in\n{rendered}");
     // And a confirmation is accepted only now.
     let update = app.update(Action::ConfirmInstall);
     assert!(!update.effects().is_empty(), "{rendered}");
@@ -4888,8 +5162,10 @@ mod installed {
             .expect("a scan that read a root states a count");
         let sources = app.sources().len();
 
+        // A forty-row terminal takes the prototype's bar heights, so the tab
+        // strip's text sits on the third row, under the two-row title bar.
         let screen = buffer(&app, 120, 40);
-        let navigation = row_text(&screen, 1);
+        let navigation = row_text(&screen, 2);
 
         // The count says the same thing the Inventory subtitle does: skills,
         // not every listed entry. The '·' lead-in keeps the count from
@@ -4905,22 +5181,22 @@ mod installed {
         );
 
         // A count carries no surface of its own: it sits inside its entry and
-        // inherits it, so only the accent distinguishes it from the title. The
-        // active tab's underline runs under its count as well, standing in for
-        // the prototype's border along the whole tab, but the bold belongs to
-        // the title and stops there.
-        let inventory_count = style_following(&screen, 1, "▌Inventory ");
+        // inherits it, so only the accent distinguishes it from the title. On
+        // this tall strip the prototype's border is the accent row below
+        // rather than an underline, and the bold belongs to the title and
+        // stops there.
+        let inventory_count = style_following(&screen, 2, "▌Inventory ");
         assert_eq!(inventory_count.fg, Some(AMBER));
         assert_eq!(inventory_count.bg, Some(SURFACE_2));
         assert!(
-            inventory_count.add_modifier.contains(Modifier::UNDERLINED),
-            "the active tab's underline should span its count"
+            !inventory_count.add_modifier.contains(Modifier::UNDERLINED),
+            "the tall strip draws the border as its own row, not as an underline"
         );
         assert!(
             !inventory_count.add_modifier.contains(Modifier::BOLD),
             "the title's emphasis should not leak into the count"
         );
-        let sources_count = style_following(&screen, 1, "2 Sources ");
+        let sources_count = style_following(&screen, 2, "2 Sources ");
         assert_eq!(sources_count.fg, Some(AMBER));
         assert_eq!(sources_count.bg, Some(SURFACE));
         assert!(!sources_count.add_modifier.contains(Modifier::UNDERLINED));
@@ -4929,15 +5205,15 @@ mod installed {
         // Which is what makes both swap when the other tab is active.
         app.update(Action::OpenSources);
         let screen = buffer(&app, 120, 40);
-        let inventory_count = style_following(&screen, 1, "1 Inventory ");
+        let inventory_count = style_following(&screen, 2, "1 Inventory ");
         assert_eq!(inventory_count.fg, Some(AMBER));
         assert_eq!(inventory_count.bg, Some(SURFACE));
         assert!(!inventory_count.add_modifier.contains(Modifier::UNDERLINED));
         assert!(!inventory_count.add_modifier.contains(Modifier::BOLD));
-        let sources_count = style_following(&screen, 1, "▌Sources ");
+        let sources_count = style_following(&screen, 2, "▌Sources ");
         assert_eq!(sources_count.fg, Some(AMBER));
         assert_eq!(sources_count.bg, Some(SURFACE_2));
-        assert!(sources_count.add_modifier.contains(Modifier::UNDERLINED));
+        assert!(!sources_count.add_modifier.contains(Modifier::UNDERLINED));
         assert!(!sources_count.add_modifier.contains(Modifier::BOLD));
     }
 
@@ -5210,21 +5486,24 @@ mod installed {
         fn region_rows(app: &SkilledApp, width: u16, height: u16) -> Vec<String> {
             let screen = text(&buffer(app, width, height));
             let screen: Vec<&str> = screen.lines().collect();
-            let mut rows: Vec<String> = if screen.iter().any(|row| row.contains('│')) {
+            // The workspace: below the title bar and navigation, above the
+            // key hints. The chrome rows are excluded before probing for the
+            // region's rule, because the tab strip draws '│' separators of
+            // its own. From thirty-eight rows each chrome bar is two rows —
+            // the prototype's own heights — so the exclusion follows suit.
+            let bar = if height >= 38 { 2 } else { 1 };
+            let workspace = &screen[2 * bar..screen.len() - bar];
+            let mut rows: Vec<String> = if workspace.iter().any(|row| row.contains('│')) {
                 // Beside the table, the region is everything past the rule.
-                screen
+                workspace
                     .iter()
                     .filter_map(|row| row.rsplit_once('│'))
                     .map(|(_, region)| region.trim().to_owned())
                     .collect()
             } else {
                 // Drilled into on a compact terminal, it is the whole
-                // workspace: below the title bar and navigation, above the
-                // key hints.
-                screen[2..screen.len() - 1]
-                    .iter()
-                    .map(|row| row.trim().to_owned())
-                    .collect()
+                // workspace.
+                workspace.iter().map(|row| row.trim().to_owned()).collect()
             };
             // The pane's own heading and rule are the scaffold around the
             // window, not rows of the content it is windowing.

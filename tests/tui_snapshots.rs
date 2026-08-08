@@ -838,9 +838,11 @@ mod installed {
     }
 
     /// On a very wide terminal the identity columns stop growing, so a short
-    /// label is not stranded in the middle of a very wide field. The slack
-    /// falls to the right of Health, which is where this departs from the
-    /// prototype: that grid grows these columns without bound.
+    /// label is not stranded in the middle of a very wide field — that grid
+    /// grows these columns without bound in the prototype. The agent columns
+    /// spend part of the freed width on the health labels the prototype's
+    /// `.agent-state` cells carry, and what remains falls to the right of
+    /// Health.
     #[test]
     fn inventory_capped_columns_at_a_very_wide_size() {
         let temporary = tempfile::tempdir().expect("temporary application directory");
@@ -1446,15 +1448,16 @@ fn install_fixture() -> (tempfile::TempDir, SkilledApp) {
         .prefix("sk-")
         .tempdir_in("/tmp")
         .expect("temporary application directory");
-    let repository = temporary.path().join("src");
+    let base = install_base(&temporary);
+    fs::create_dir_all(&base).expect("create the padded fixture base");
+    let repository = base.join("src");
     create_source_fixture(&repository);
     for root in [".claude", ".agents", ".config/opencode"] {
-        fs::create_dir_all(temporary.path().join("home").join(root))
-            .expect("create the root's parent");
+        fs::create_dir_all(base.join("home").join(root)).expect("create the root's parent");
     }
     let mut app = SkilledApp::open(AppEnvironment::new(
-        temporary.path().join("home"),
-        temporary.path().join("data"),
+        base.join("home"),
+        base.join("data"),
         "",
     ))
     .expect("open application");
@@ -1468,25 +1471,49 @@ fn install_fixture() -> (tempfile::TempDir, SkilledApp) {
     (temporary, app)
 }
 
-/// Replace the temporary tree's own path, keeping every line the width the
-/// application produced.
+/// Every rendered fixture path spells exactly this many characters before its
+/// `/home` or `/src` tail, whatever the platform.
 ///
-/// Both spellings are replaced, and the canonical one first: the dialog states
-/// resolved variant directories and unresolved link paths side by side, and on
-/// a platform where `/tmp` is itself a link the shorter spelling is a substring
-/// of the longer one.
+/// The install screens state absolute paths, and the snapshot normalisation
+/// keeps every line the width the application produced — so if the temporary
+/// prefix were a different length on different platforms, the recorded
+/// padding could match only the platform that recorded it. macOS's `/tmp` is
+/// a link to `/private/tmp` (twenty-two characters with the `sk-` name);
+/// Linux's is real (fourteen). Both fit under this length with a filler
+/// segment to spare, and the budget still holds the longest target path on
+/// one eighty-column dialog line.
 #[cfg(unix)]
-fn normalize_install_screen(temporary: &tempfile::TempDir, screen: String) -> String {
+const INSTALL_BASE_LENGTH: usize = 26;
+
+/// The constant-length directory the install fixture builds under: the
+/// canonical temporary directory plus a filler segment that pads its spelling
+/// to [`INSTALL_BASE_LENGTH`].
+///
+/// Canonical, so the single spelling the application renders is the one the
+/// normalisation replaces, on platforms where `/tmp` is itself a link and on
+/// those where it is not.
+#[cfg(unix)]
+fn install_base(temporary: &tempfile::TempDir) -> PathBuf {
     let canonical = temporary
         .path()
         .canonicalize()
-        .expect("canonical temporary directory")
-        .to_string_lossy()
-        .into_owned();
-    let path = temporary.path().to_string_lossy().into_owned();
-    screen
-        .replace(&canonical, &padded_placeholder(&canonical, "[CANONICAL]"))
-        .replace(&path, &padded_placeholder(&path, "[TEMP]"))
+        .expect("canonical temporary directory");
+    let spelled = canonical.to_string_lossy().chars().count();
+    let filler = INSTALL_BASE_LENGTH
+        .checked_sub(spelled + 1)
+        .filter(|&filler| filler > 0)
+        .expect("the temporary directory outgrew the padded fixture base");
+    canonical.join("p".repeat(filler))
+}
+
+/// Replace the fixture base's own path, keeping every line the width the
+/// application produced. The base spells the same number of characters on
+/// every platform, so the padded token does too, and one recorded snapshot
+/// serves them all.
+#[cfg(unix)]
+fn normalize_install_screen(temporary: &tempfile::TempDir, screen: String) -> String {
+    let base = install_base(temporary).to_string_lossy().into_owned();
+    screen.replace(&base, &padded_placeholder(&base, "[TEMP]"))
 }
 
 /// Spec 15: the preview names every target and its exact absolute path before
@@ -1510,7 +1537,7 @@ fn install_preview_at_minimum_supported_size() {
 #[test]
 fn install_preview_blocked_at_minimum_supported_size() {
     let (temporary, mut app) = install_fixture();
-    let root = temporary.path().join("home/.agents/skills");
+    let root = install_base(&temporary).join("home/.agents/skills");
     fs::create_dir_all(&root).expect("create Codex root");
     fs::write(root.join("portable"), "someone else's file").expect("occupy the slot");
     dispatch(&mut app, Action::BeginInstall);

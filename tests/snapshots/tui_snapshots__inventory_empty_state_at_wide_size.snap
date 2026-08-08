@@ -1,14 +1,15 @@
 ---
 source: tests/tui_snapshots.rs
+assertion_line: 98
 expression: "render(&app, 120, 40)"
 ---
- ◆ skilled   global                                                                      ● ready · 0 sources registered
-▌Inventory  2 Sources ·0  Updates (soon)  4 Doctor
+ ◆ skilled  global
+
+▌Inventory      │ 2 Sources ·0   │ Updates (soon) │ 4 Doctor       │                     ● ready · 0 sources registered
+▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁│                │                │                │
 ▌ Global inventory  no root read                                                │ Details  no selection
 Roots: Claude Code no root · Codex no root · OpenCode no root                   │ ─────────────────────────────────────
 ────────────────────────────────────────────────────────────────────────────────│
-                                                                                │
-                                                                                │
                                                                                 │
                                                                                 │
                                                                                 │
@@ -40,5 +41,5 @@ Roots: Claude Code no root · Codex no root · OpenCode no root                 
                                                                                 │
                                                                                 │
                                                                                 │
-                                                                                │
+
  Tab/Shift-Tab Region   2 Sources   4 Doctor   s Settings   ? Help   q Quit

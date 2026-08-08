@@ -2,7 +2,7 @@
 source: tests/tui_snapshots.rs
 expression: "render(&app, 80, 24)"
 ---
- ◆ skilled   global                                         ● setup in progress
+ ◆ skilled  global                                          ● setup in progress
  Keyboard reference   navigation is locked while this dialog is open
   ┌ First-run setup ───────────────────────────────────── global skills only ┐
   ┌ Keyboard reference ─────────────────────────────── Setup · Detect agents ┐

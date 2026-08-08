@@ -1,9 +1,12 @@
 ---
 source: tests/tui_snapshots.rs
+assertion_line: 393
 expression: "normalize_sources_screen(&app, &temporary, render(&app, 120, 40))"
 ---
- ◆ skilled   global                                                                       ● ready · 1 source registered
- 1 Inventory ▌Sources ·1  Updates (soon)  4 Doctor
+ ◆ skilled  global
+
+ 1 Inventory    │▌Sources ·1     │ Updates (soon) │ 4 Doctor       │                      ● ready · 1 source registered
+                │▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁│                │                │
 ▌ Repositories  1 registered     │ Available variants  3 found                  │ Details  broken
 ─────────────────────────────────│ ─────────────────────────────────────────────│ ─────────────────────────────────────
 ▌ source                         │ experimental/claude-code/skills   Claude Code│ REPOSITORY
@@ -38,7 +41,5 @@ expression: "normalize_sources_screen(&app, &temporary, render(&app, 120, 40))"
                                  │                                              │
                                  │                                              │
                                  │                                              │
-                                 │                                              │
-                                 │                                              │
-                                 │                                              │
+
  Tab/Shift-Tab Region   Enter Open   a Add source   1 Inventory   4 Doctor   ? Help   q Quit   Esc Back

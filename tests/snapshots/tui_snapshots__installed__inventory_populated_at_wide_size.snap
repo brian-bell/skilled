@@ -1,9 +1,12 @@
 ---
 source: tests/tui_snapshots.rs
+assertion_line: 819
 expression: "normalize_inventory(&temporary, render(&app, 120, 40))"
 ---
- ◆ skilled   global                                                                       ● ready · 1 source registered
-▌Inventory ·3  2 Sources ·1  Updates (soon)  4 Doctor ·3
+ ◆ skilled  global
+
+▌Inventory ·3   │ 2 Sources ·1   │ Updates (soon) │ 4 Doctor ·3    │                      ● ready · 1 source registered
+▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁│                │                │                │
 ▌ Global inventory  3 skills                                                    │ Details  alpha
 Roots: Claude Code 2 installed · Codex 2 installed · OpenCode no root           │ ─────────────────────────────────────
 ────────────────────────────────────────────────────────────────────────────────│ SKILL
@@ -38,7 +41,5 @@ Roots: Claude Code 2 installed · Codex 2 installed · OpenCode no root         
                                                                                 │
                                                                                 │
                                                                                 │
-                                                                                │
-                                                                                │
-                                                                                │
+
  Tab/Shift-Tab Region   j/k Move   Enter Open   / Filter   2 Sources   4 Doctor   s Settings   ? Help   q Quit
