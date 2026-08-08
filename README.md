@@ -120,12 +120,16 @@ yet repair, update, or uninstall.
   registered source metadata.
 - A persistent application frame — product title bar, primary navigation,
   session status, workspace, and contextual key hints — drawn from the tracked
-  visual prototype. Destinations without an implementation are shown as
-  explicitly unavailable rather than offered, and key hints advertise only
-  commands the active context handles. Inventory, Sources, and Doctor carry a
-  count beside their name in the navigation row — Sources always, the other two
-  whenever the scan is entitled to state one — while an unavailable destination
-  carries no count at all.
+  visual prototype. The title bar states the session's context path
+  (`global · user@host · macOS`), omitting any segment the environment does
+  not provide; the navigation is a strip of boxed, padded tab cells; and the
+  session status sits beside the tabs on wide terminals when both fit whole,
+  in the title bar otherwise. Destinations without an implementation are
+  shown as explicitly unavailable rather than offered, and key hints advertise
+  only commands the active context handles. Inventory, Sources, and Doctor
+  carry a count beside their name in the navigation row — Sources always, the
+  other two whenever the scan is entitled to state one — while an unavailable
+  destination carries no count at all.
 - Contextual keyboard help from Setup, Inventory, Sources, Doctor, and
   Settings. Help is
   modal, lists only commands implemented in the underlying context, and closes
