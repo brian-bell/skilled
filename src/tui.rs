@@ -8,7 +8,8 @@ use ratatui::{
 };
 
 use crate::{
-    AgentKind, DoctorPane, InventoryPane, SetupStep, SkilledApp, SourcesPane, View,
+    AgentKind, DoctorPane, InventoryPane, SessionIdentity, SetupStep, SkilledApp, SourcesPane,
+    View,
     app::{MAX_INVENTORY_FILTER, SourceRow, catalog_rows},
     components::{self, KeyHint, terminal_safe},
     inventory::{
@@ -70,8 +71,11 @@ pub fn render(frame: &mut Frame<'_>, app: &SkilledApp) -> RenderFeedback {
     ])
     .areas(area);
 
-    render_title_bar(frame, title_bar, app);
-    render_navigation(frame, navigation, app);
+    // One decision for both chrome rows, so they cannot disagree about which
+    // of them carries the session status.
+    let status_on_nav = session_status_on_nav_row(app, area);
+    render_title_bar(frame, title_bar, app, status_on_nav);
+    render_navigation(frame, navigation, app, status_on_nav);
     let body = workspace;
     // Measured once, for this frame's geometry, and used by everything that
     // speaks about the detail region: the window drawn, the key hint, and the
@@ -120,49 +124,69 @@ pub fn render(frame: &mut Frame<'_>, app: &SkilledApp) -> RenderFeedback {
     }
 }
 
-/// The columns the title bar spends before the context path begins:
-/// `" ◆ "`, the wordmark, and the prototype's gap after it.
-const TITLE_PREFIX_WIDTH: usize = 12;
-
-fn render_title_bar(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
-    // The prototype places session state beside the navigation tabs, and at
-    // Viewport::Wide this row leaves it there: a hundred columns hold the
-    // sixty-eight of tab cells with room for the status beside them. Below
-    // that the strip fills its own row, so the status shares the title bar
-    // instead of competing with navigation for space.
-    //
+/// The persistent title row: product mark, wordmark, context path, and —
+/// when the navigation row cannot hold it — the session status.
+///
+/// Recorded departure: the prototype's titlebar ends in an `interactive
+/// prototype · no filesystem writes` flag (spec/tui-prototype.html:531).
+/// The flag is prototype-only, and its claim would be false for the real
+/// application — installation writes — so no equivalent exists here.
+fn render_title_bar(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp, status_on_nav: bool) {
     // The band goes down first and the paragraphs only carry foreground
     // colours, so it survives underneath them.
     frame.render_widget(Block::new().style(theme::chrome_band()), area);
 
-    let product = match viewport::classify(area) {
-        viewport::Viewport::Wide => area,
+    let product = if status_on_nav {
+        area
+    } else {
         // The status gets its own rectangle because a Paragraph repaints its
         // whole area before drawing: rendering it across the full row would
         // silently flatten the product mark and wordmark to the status colour.
-        viewport::Viewport::Compact => {
-            let [product, session] = Layout::horizontal([
-                Constraint::Min(0),
-                Constraint::Length(session_status_width(app).min(area.width)),
-            ])
-            .areas(area);
-            render_session_status(frame, session, app);
-            product
-        }
+        let [product, session] = Layout::horizontal([
+            Constraint::Min(0),
+            Constraint::Length(session_status_width(app).min(area.width)),
+        ])
+        .areas(area);
+        render_session_status(frame, session, app);
+        product
     };
 
+    let prefix = [
+        Span::styled(" ◆ ", theme::product_mark()),
+        Span::styled("skilled", theme::product_name()),
+    ];
+    // Measured from the spans themselves so a reworded mark or wordmark
+    // cannot silently mis-budget the truncation; plus the two-column gap the
+    // prototype leaves before the path, and one more column so the path can
+    // never end flush against the status glyph beside it.
+    let reserved = prefix.iter().map(Span::width).sum::<usize>() + 3;
     let context = context_path(
         app.identity(),
-        usize::from(product.width).saturating_sub(TITLE_PREFIX_WIDTH),
+        usize::from(product.width).saturating_sub(reserved),
     );
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(" ◆ ", theme::product_mark()),
-            Span::styled("skilled", theme::product_name()),
-            Span::styled(format!("  {context}"), theme::chrome()),
-        ])),
-        product,
-    );
+    let mut spans = prefix.to_vec();
+    spans.push(Span::styled(format!("  {context}"), theme::chrome()));
+    frame.render_widget(Paragraph::new(Line::from(spans)), product);
+}
+
+/// Whether this frame puts the session status beside the navigation, which
+/// is where the prototype places it.
+///
+/// Only at [`viewport::Viewport::Wide`], and only when the whole status fits
+/// beside the whole row: a strip clipped by the status could cut a count's
+/// trailing digit and turn `·12` into a smaller claim, and a clipped status
+/// would misreport the session, so whichever cannot fit whole sends the
+/// status back to the title bar instead.
+///
+/// An exact fit is allowed — unlike the title bar, which reserves a seam
+/// column before the status — because the tab strip ends in its own `│`
+/// separator, a boundary glyph already in place. A keyboard owner's note has
+/// no such closing glyph and may touch the status dot at an exact fit; the
+/// dot's colour break is accepted as the seam there.
+fn session_status_on_nav_row(app: &SkilledApp, area: Rect) -> bool {
+    viewport::classify(area) == viewport::Viewport::Wide
+        && navigation_row_line(app).width() + usize::from(session_status_width(app))
+            <= usize::from(area.width)
 }
 
 /// The columns the session status asks of whichever row carries it: its
@@ -198,7 +222,7 @@ fn render_session_status(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
 /// status beside it: `global · brian · macOS` still identifies the session
 /// where `global · brian@mac…` would identify nothing. The scope word always
 /// remains; at worst the layout clips it.
-fn context_path(identity: &crate::SessionIdentity, width: usize) -> String {
+fn context_path(identity: &SessionIdentity, width: usize) -> String {
     let user = identity.user.as_deref().map(terminal_safe);
     let host = identity.host.as_deref().map(terminal_safe);
     let os = identity.os.as_deref().map(terminal_safe);
@@ -209,12 +233,16 @@ fn context_path(identity: &crate::SessionIdentity, width: usize) -> String {
         (None, None) => None,
     };
 
-    let shedding: [Vec<Option<String>>; 3] =
-        [vec![session, os.clone()], vec![user, os.clone()], vec![os]];
+    let shedding = [
+        [session.as_deref(), os.as_deref()],
+        [user.as_deref(), os.as_deref()],
+        [None, os.as_deref()],
+    ];
     for step in shedding {
-        let mut segments = vec!["global".to_owned()];
-        segments.extend(step.into_iter().flatten());
-        let path = segments.join(" · ");
+        let path = std::iter::once("global")
+            .chain(step.into_iter().flatten())
+            .collect::<Vec<_>>()
+            .join(" · ");
         if Span::raw(&path).width() <= width {
             return path;
         }
@@ -226,6 +254,13 @@ fn context_path(identity: &crate::SessionIdentity, width: usize) -> String {
 ///
 /// Skilled performs no network access in this release, so the status may only
 /// describe setup progress and what the local scan observed.
+///
+/// Recorded departure: the prototype's session label reads `scan complete ·
+/// 2s ago` (spec/tui-prototype.html:541). The reducer is time-blind and the
+/// redraw event-driven, so a relative timestamp would sit on screen going
+/// stale. A future `scanning…` state may rest on
+/// [`crate::inventory::InventorySnapshot::scan_pending`]; a clock claim,
+/// never.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SessionStatus {
     SetupInProgress,
@@ -258,36 +293,37 @@ impl SessionStatus {
     }
 }
 
-fn render_navigation(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
+fn render_navigation(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp, status_on_nav: bool) {
     frame.render_widget(Block::new().style(theme::nav_surface()), area);
 
-    // At Viewport::Wide the session status lives on this row — the prototype's
-    // placement — whether the row is showing the tab strip or a keyboard
-    // owner: the status is the one part of the chrome that keeps reporting
-    // while a dialog holds the keys, so it does not vanish with the tabs.
-    let strip = match viewport::classify(area) {
-        viewport::Viewport::Compact => area,
-        viewport::Viewport::Wide => {
-            let [strip, session] = Layout::horizontal([
-                Constraint::Min(0),
-                Constraint::Length(session_status_width(app).min(area.width)),
-            ])
-            .areas(area);
-            render_session_status(frame, session, app);
-            strip
-        }
+    // When the status shares this row — the prototype's placement — it lives
+    // beside whatever the row is showing, a tab strip or a keyboard owner:
+    // the status is the one part of the chrome that keeps reporting while a
+    // dialog holds the keys, so it does not vanish with the tabs.
+    // `session_status_on_nav_row` has already measured that both fit whole.
+    let strip = if status_on_nav {
+        let [strip, session] = Layout::horizontal([
+            Constraint::Min(0),
+            Constraint::Length(session_status_width(app).min(area.width)),
+        ])
+        .areas(area);
+        render_session_status(frame, session, app);
+        strip
+    } else {
+        area
     };
-    let area = strip;
+    frame.render_widget(Paragraph::new(navigation_row_line(app)), strip);
+}
 
+/// The navigation row's content: the keyboard owner's takeover, or the boxed
+/// tab strip. Built apart from [`render_navigation`] so the placement
+/// decision can measure the same line the frame will draw.
+fn navigation_row_line(app: &SkilledApp) -> Line<'static> {
     if let Some((owner, note)) = keyboard_owner(app) {
-        frame.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled(format!(" {owner} "), theme::nav_active()),
-                Span::styled(format!("  {note}"), theme::nav_note()),
-            ])),
-            area,
-        );
-        return;
+        return Line::from(vec![
+            Span::styled(format!(" {owner} "), theme::nav_active()),
+            Span::styled(format!("  {note}"), theme::nav_note()),
+        ]);
     }
 
     let mut spans = Vec::new();
@@ -353,7 +389,7 @@ fn render_navigation(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
         spans.append(&mut cell);
         spans.push(Span::styled("│", theme::nav_separator()));
     }
-    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+    Line::from(spans)
 }
 
 /// The narrowest navigation cell: the prototype's tabs reserve
