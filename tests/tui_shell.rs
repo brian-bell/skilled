@@ -3816,13 +3816,22 @@ impl Harness {
     /// root's own parent present so the plan has work to state.
     #[cfg(unix)]
     fn installable_source(&self) -> SkilledApp {
-        let home = self.directory.path().join("home");
-        let repository = self.directory.path().join("library");
+        self.installable_source_at(self.directory.path())
+    }
+
+    /// The same fixture rooted at a caller-chosen path, for layout tests whose
+    /// wrapped rows must not depend on the system temporary directory's length.
+    #[cfg(unix)]
+    fn installable_source_at(&self, application_root: &Path) -> SkilledApp {
+        let home = application_root.join("home");
+        let repository = application_root.join("library");
         create_source_fixture(&repository);
         for root in [".claude", ".agents", ".config/opencode"] {
             fs::create_dir_all(home.join(root)).expect("create the root's parent");
         }
-        let mut app = self.first_run();
+        let mut app =
+            SkilledApp::open(AppEnvironment::new(home, application_root.join("data"), ""))
+                .expect("open application");
         let preview = app.preview_source(&repository).expect("preview source");
         app.confirm_source(preview).expect("register source");
         for _ in 0..7 {
@@ -4376,7 +4385,16 @@ fn a_withheld_postcondition_is_stated_rather_than_reported_as_verified() {
 #[test]
 fn a_preview_taller_than_its_dialog_says_so_and_can_be_scrolled_to_its_end() {
     let harness = Harness::new();
-    let mut app = harness.installable_source();
+    // The preview's exact absolute paths are the content that makes it taller
+    // than this dialog. Root it beneath two deliberately long components so
+    // the precondition is the same under GitHub's short `/tmp/.tmpXXXXXX` as it
+    // is under a longer platform-specific temporary directory.
+    let application_root = harness
+        .directory
+        .path()
+        .join("install-preview-overflow-fixture-with-a-deliberately-long-root")
+        .join("whose-length-does-not-depend-on-the-system-temporary-directory");
+    let mut app = harness.installable_source_at(&application_root);
     let update = app.update(Action::BeginInstall);
     app.perform_effects(update.effects()).expect("plan install");
 
@@ -4412,16 +4430,21 @@ fn a_preview_taller_than_its_dialog_says_so_and_can_be_scrolled_to_its_end() {
     assert!(rendered.contains("Home:"), "{rendered}");
     assert!(rendered.contains("more above"), "{rendered}");
     assert!(!rendered.contains("more below"), "{rendered}");
-    // The last line of the plan is the last thing in the body: between it and
-    // the rule that closes the body there is nothing left unread.
-    let last = row_containing(&screen, "Home:");
+    // The Home field is the last thing in the body. Reassemble its wrapped
+    // rows and require the complete absolute path, with no other content
+    // between it and the rule that closes the body.
+    let home = row_containing(&screen, "Home:");
     let rule = row_containing(&screen, "  ──────");
-    let below = ((last + 1)..rule)
+    let home_block = (home..rule)
         .map(|y| row_text(&screen, y))
         .filter_map(|row| dialog_interior(&row).map(str::trim).map(str::to_owned))
         .filter(|row| !row.is_empty())
-        .collect::<Vec<_>>();
-    assert!(below.is_empty(), "{below:?} in\n{rendered}");
+        .collect::<String>();
+    assert_eq!(
+        home_block,
+        format!("Home:{}", application_root.join("home").display()),
+        "{rendered}"
+    );
     // And a confirmation is accepted only now.
     let update = app.update(Action::ConfirmInstall);
     assert!(!update.effects().is_empty(), "{rendered}");
