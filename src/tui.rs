@@ -63,11 +63,15 @@ pub fn render(frame: &mut Frame<'_>, app: &SkilledApp) -> RenderFeedback {
 
     frame.render_widget(Block::new().style(theme::app_surface()), area);
 
+    // The chrome takes the prototype's own bar heights where the terminal is
+    // tall enough to afford them, and a single row each where it is not; the
+    // decision is made once so the three bars cannot disagree.
+    let bar = viewport::chrome_bar_height(area.height);
     let [title_bar, navigation, workspace, key_hints] = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Length(1),
+        Constraint::Length(bar),
+        Constraint::Length(bar),
         Constraint::Min(1),
-        Constraint::Length(1),
+        Constraint::Length(bar),
     ])
     .areas(area);
 
@@ -135,6 +139,10 @@ fn render_title_bar(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp, status_
     // The band goes down first and the paragraphs only carry foreground
     // colours, so it survives underneath them.
     frame.render_widget(Block::new().style(theme::chrome_band()), area);
+    // On a tall terminal the band is the prototype's 40px bar — two rows —
+    // and the text keeps its first: the spare row falls between the title and
+    // the tab strip, where the prototype's own padding sits.
+    let area = Rect { height: 1, ..area };
 
     let product = if status_on_nav {
         area
@@ -192,7 +200,8 @@ fn render_title_bar(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp, status_
 fn session_status_on_nav_row(app: &SkilledApp, area: Rect) -> bool {
     !overlay_open(app)
         && viewport::classify(area) == viewport::Viewport::Wide
-        && navigation_row_line(app).width() + usize::from(session_status_width(app))
+        && navigation_row_line(app, viewport::chrome_bar_height(area.height) > 1).width()
+            + usize::from(session_status_width(app))
             <= usize::from(area.width)
 }
 
@@ -312,6 +321,7 @@ impl SessionStatus {
 
 fn render_navigation(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp, status_on_nav: bool) {
     frame.render_widget(Block::new().style(theme::nav_surface()), area);
+    let tall = area.height > 1;
 
     // When the status shares this row — the prototype's placement — it lives
     // beside whatever the row is showing, a tab strip or a keyboard owner:
@@ -324,32 +334,49 @@ fn render_navigation(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp, status
             Constraint::Length(session_status_width(app).min(area.width)),
         ])
         .areas(area);
-        render_session_status(frame, session, app);
+        render_session_status(
+            frame,
+            Rect {
+                height: 1,
+                ..session
+            },
+            app,
+        );
         strip
     } else {
         area
     };
-    frame.render_widget(Paragraph::new(navigation_row_line(app)), strip);
+    frame.render_widget(
+        Paragraph::new(navigation_row_line(app, tall)),
+        Rect { height: 1, ..strip },
+    );
+    // The strip's second row carries the active tab's bottom border, which the
+    // keyboard owner's takeover has no tabs to draw under.
+    if tall && keyboard_owner(app).is_none() {
+        frame.render_widget(
+            Paragraph::new(navigation_accent_line(app)),
+            Rect {
+                y: strip.y + 1,
+                height: 1,
+                ..strip
+            },
+        );
+    }
 }
 
-/// The navigation row's content: the keyboard owner's takeover, or the boxed
-/// tab strip. Built apart from [`render_navigation`] so the placement
-/// decision can measure the same line the frame will draw.
-fn navigation_row_line(app: &SkilledApp) -> Line<'static> {
-    if let Some((owner, note)) = keyboard_owner(app) {
-        return Line::from(vec![
-            Span::styled(format!(" {owner} "), theme::nav_active()),
-            Span::styled(format!("  {note}"), theme::nav_note()),
-        ]);
-    }
-
-    let mut spans = Vec::new();
+/// One destination's cell of the tab strip, and whether it is the active one.
+///
+/// The accent row must end each border exactly where the label row ends its
+/// tab, so both rows are laid out from the same cells.
+fn navigation_cells(app: &SkilledApp, tall: bool) -> Vec<(Vec<Span<'static>>, bool)> {
+    let mut cells = Vec::new();
     for destination in Destination::ALL {
         let active = destination.is_active(app.view());
-        let style = match (destination.is_available(), active) {
-            (false, _) => theme::nav_disabled(),
-            (true, true) => theme::nav_active(),
-            (true, false) => theme::nav_inactive(),
+        let style = match (destination.is_available(), active, tall) {
+            (false, _, _) => theme::nav_disabled(),
+            (true, true, false) => theme::nav_active(),
+            (true, true, true) => theme::nav_active_tall(),
+            (true, false, _) => theme::nav_inactive(),
         };
         let mut cell = vec![Span::styled(
             if active {
@@ -403,7 +430,44 @@ fn navigation_row_line(app: &SkilledApp) -> Line<'static> {
                 style,
             ));
         }
+        cells.push((cell, active));
+    }
+    cells
+}
+
+/// The navigation row's content: the keyboard owner's takeover, or the boxed
+/// tab strip. Built apart from [`render_navigation`] so the placement
+/// decision can measure the same line the frame will draw. `tall` says the
+/// strip has an accent row beneath it, which changes the active entry's style
+/// and nothing about the line's width.
+fn navigation_row_line(app: &SkilledApp, tall: bool) -> Line<'static> {
+    if let Some((owner, note)) = keyboard_owner(app) {
+        return Line::from(vec![
+            Span::styled(format!(" {owner} "), theme::nav_active()),
+            Span::styled(format!("  {note}"), theme::nav_note()),
+        ]);
+    }
+
+    let mut spans = Vec::new();
+    for (mut cell, _) in navigation_cells(app, tall) {
         spans.append(&mut cell);
+        spans.push(Span::styled("│", theme::nav_separator()));
+    }
+    Line::from(spans)
+}
+
+/// The tall strip's second row: the active tab's bottom border, under exactly
+/// the cell the label row gives that tab, with every separator carried on so
+/// the boxes keep their full height (prototype `.tab` `border-right`).
+fn navigation_accent_line(app: &SkilledApp) -> Line<'static> {
+    let mut spans = Vec::new();
+    for (cell, active) in navigation_cells(app, true) {
+        let width: usize = cell.iter().map(Span::width).sum();
+        spans.push(if active {
+            Span::styled("▁".repeat(width), theme::nav_accent())
+        } else {
+            Span::raw(" ".repeat(width))
+        });
         spans.push(Span::styled("│", theme::nav_separator()));
     }
     Line::from(spans)
@@ -799,14 +863,39 @@ fn render_inventory(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
 ///
 /// The three agent columns and the health column are sized by their headings,
 /// which never change; the identity columns divide whatever is left, up to a
-/// cap.
+/// cap. On a table wide enough that both identity caps still bind, the agent
+/// columns widen instead to carry each observation's health label.
 #[derive(Clone, Copy)]
 struct InventoryColumns {
     skill: usize,
     source: usize,
+    /// Whether the agent columns carry a health label beside each glyph.
+    labeled: bool,
+}
+
+impl InventoryColumns {
+    fn agent_widths(self) -> [usize; 3] {
+        if self.labeled {
+            LABELED_AGENT_COLUMN_WIDTHS
+        } else {
+            AGENT_COLUMN_WIDTHS
+        }
+    }
 }
 
 const AGENT_COLUMN_WIDTHS: [usize; 3] = [8, 7, 10];
+/// The agent columns when they carry labels: the longest labelled cell —
+/// `- not a skill`, thirteen cells — plus the same column of clearance the
+/// Health column keeps.
+///
+/// The prototype's `.agent-state` cells pair every glyph with the state's
+/// word and collapse to the glyph alone below its 1050px breakpoint
+/// (`.agent-state span { display: none }`). The labels here claim only the
+/// slack the capped identity columns leave behind — see
+/// [`inventory_columns`] — so no name or source narrows to pay for a label,
+/// and the columns still match on either side of the workspace's
+/// wide-detail crossing ([`viewport::DETAIL_REGION_WIDE_THRESHOLD`]).
+const LABELED_AGENT_COLUMN_WIDTHS: [usize; 3] = [14, 14, 14];
 /// Wide enough for the longest health badge — `- not a skill`, thirteen cells
 /// — plus a column of clearance, so the row is never clipped and never abuts
 /// the detail region's separator.
@@ -834,6 +923,19 @@ const MAX_SKILL_WIDTH: usize = 36;
 const MAX_SOURCE_WIDTH: usize = 24;
 
 fn inventory_columns(width: u16) -> InventoryColumns {
+    // Labels enter only after both identity caps are fully served: below
+    // that, every column is exactly what it was before labels existed, so
+    // widening a terminal can never take width from a name to spend on a
+    // word the glyph already implies.
+    let labeled_fixed =
+        ROW_MARKER_WIDTH + LABELED_AGENT_COLUMN_WIDTHS.iter().sum::<usize>() + HEALTH_COLUMN_WIDTH;
+    if usize::from(width) >= labeled_fixed + MAX_SKILL_WIDTH + MAX_SOURCE_WIDTH {
+        return InventoryColumns {
+            skill: MAX_SKILL_WIDTH,
+            source: MAX_SOURCE_WIDTH,
+            labeled: true,
+        };
+    }
     let fixed = ROW_MARKER_WIDTH + AGENT_COLUMN_WIDTHS.iter().sum::<usize>() + HEALTH_COLUMN_WIDTH;
     let remaining = usize::from(width).saturating_sub(fixed);
     let skill = (remaining * 6 / 10).clamp(MINIMUM_SKILL_WIDTH, MAX_SKILL_WIDTH);
@@ -848,9 +950,14 @@ fn inventory_columns(width: u16) -> InventoryColumns {
         return InventoryColumns {
             skill: remaining.clamp(MINIMUM_SKILL_WIDTH, MAX_SKILL_WIDTH),
             source: 0,
+            labeled: false,
         };
     }
-    InventoryColumns { skill, source }
+    InventoryColumns {
+        skill,
+        source,
+        labeled: false,
+    }
 }
 
 fn render_inventory_skills(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
@@ -993,6 +1100,13 @@ fn inventory_subtitle(app: &SkilledApp, shown: usize) -> String {
 ///
 /// The query is bounded on entry, and bounded again here: the header must
 /// never grow at the expense of the table the query exists to narrow.
+///
+/// Recorded departure: the prototype keeps an input field with a placeholder
+/// in the pane header at all times (spec/tui-prototype.html:774). That is a
+/// mouse affordance; here the filter's affordance is the `/` hint in the key
+/// bar, and this line exists only while a query is being typed or is still
+/// narrowing the list — a permanently drawn box a terminal cannot click
+/// would advertise a control that is not there.
 fn inventory_filter_line(app: &SkilledApp) -> Line<'static> {
     let query = terminal_safe_bounded_start(app.inventory_filter(), MAX_INVENTORY_FILTER);
     if app.inventory_filter_active() {
@@ -1042,13 +1156,18 @@ fn root_tone(root: &RootScan) -> Tone {
 /// The prototype sets that row in its faint grey; MUTED is the recorded
 /// substitution, because a heading that names a column is information-bearing
 /// and has to meet 4.5:1.
+///
+/// Recorded departure: the prototype's grid has an UPDATE column
+/// (spec/tui-prototype.html:776). Update checking is not implemented, and a
+/// column stating `current`, `available`, or `blocked` would be a claim the
+/// code cannot produce, so the column does not exist until it can.
 fn inventory_column_headings(columns: InventoryColumns) -> Line<'static> {
     let mut heading = " ".repeat(ROW_MARKER_WIDTH);
     heading.push_str(&padded("SKILL", columns.skill));
     heading.push_str(&padded("SOURCE", columns.source));
     for (label, width) in ["CLAUDE", "CODEX", "OPENCODE"]
         .into_iter()
-        .zip(AGENT_COLUMN_WIDTHS)
+        .zip(columns.agent_widths())
     {
         heading.push_str(&padded(label, width));
     }
@@ -1065,7 +1184,12 @@ fn inventory_row_line(
     let provenance = row.provenance();
     let source = padded(&terminal_safe(provenance.label()), columns.source);
     let mut spans = vec![
-        Span::raw(padded(&terminal_safe(row.name()), columns.skill)),
+        // The name is the row's identity, set off as the prototype's
+        // `.skill-name` weight sets it; the colour stays the row's own.
+        Span::styled(
+            padded(&terminal_safe(row.name()), columns.skill),
+            theme::row_title(),
+        ),
         // A label that places content with a registered source is body text.
         // A source name does that outright, and so do "mixed" and "multiple
         // sources": each reports at least one installation that resolved to
@@ -1083,16 +1207,26 @@ fn inventory_row_line(
             | RowProvenance::Divergent => Span::raw(source),
         },
     ];
-    for (agent, width) in AgentKind::ALL.into_iter().zip(AGENT_COLUMN_WIDTHS) {
-        let tone = row
-            .observation(agent)
-            .map_or(Tone::Inactive, |observation| {
-                installation_tone(observation.health())
-            });
-        spans.push(Span::styled(
-            padded(components::tone_glyph(tone), width),
-            theme::tone_style(tone),
-        ));
+    for (agent, width) in AgentKind::ALL.into_iter().zip(columns.agent_widths()) {
+        let observation = row.observation(agent);
+        let tone = observation.map_or(Tone::Inactive, |observation| {
+            installation_tone(observation.health())
+        });
+        // A present observation names its health beside the glyph when the
+        // column can hold the words. An absent one keeps the bare `-` at
+        // every width: "not installed" would outrun what an unscanned root
+        // backs, and the Roots line above carries that half of the reading.
+        let cell = match observation {
+            Some(observation) if columns.labeled => {
+                format!(
+                    "{} {}",
+                    components::tone_glyph(tone),
+                    observation.health().label()
+                )
+            }
+            _ => components::tone_glyph(tone).to_owned(),
+        };
+        spans.push(Span::styled(padded(&cell, width), theme::tone_style(tone)));
     }
     let verdict = row.verdict();
     spans.push(components::badge(verdict_tone(verdict), verdict.label()));
@@ -5071,13 +5205,21 @@ fn render_footer(
     // as a smear the length of the hints. The hint line itself only sets
     // foreground colours, apart from the key caps' own emphasis.
     frame.render_widget(Block::new().style(theme::chrome_band()), area);
+    // On a tall terminal the band is the prototype's 36px key bar — two rows
+    // — and the hints keep the last: the spare row falls between the
+    // workspace and the hints, mirroring the title bar at the other edge.
+    let hints = Rect {
+        y: area.y + area.height.saturating_sub(1),
+        height: 1.min(area.height),
+        ..area
+    };
     frame.render_widget(
         Paragraph::new(components::key_hint_line(
             &key_hints(app, detail_extent),
-            area.width,
+            hints.width,
         ))
         .style(theme::chrome()),
-        area,
+        hints,
     );
 }
 

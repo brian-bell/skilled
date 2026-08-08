@@ -39,6 +39,28 @@ pub(crate) const DETAIL_REGION_WIDE_THRESHOLD: u16 = 151;
 /// beside it are the reason the workspace is split at all.
 pub(crate) const DETAIL_REGION_WIDTH_WIDE: u16 = 50;
 
+/// The terminal height from which the chrome bars take the prototype's own
+/// heights.
+///
+/// The prototype sizes its bars in pixels — a 40px title bar and tab strip, a
+/// 36px key bar — which at the ~19px a 13px monospace line occupies is two
+/// cells each. Its terminal never renders shorter than 720px, about
+/// thirty-eight of those cells, so the prototype says nothing about what the
+/// bars do below that; this threshold decides it: a shorter terminal keeps
+/// every chrome bar at a single row, because rows of padding would come out
+/// of the workspace the chrome exists to frame.
+pub(crate) const PADDED_CHROME_MINIMUM_HEIGHT: u16 = 38;
+
+/// The rows one chrome bar takes at this terminal height: the prototype's two
+/// at or above [`PADDED_CHROME_MINIMUM_HEIGHT`], one below it.
+pub(crate) fn chrome_bar_height(terminal_height: u16) -> u16 {
+    if terminal_height >= PADDED_CHROME_MINIMUM_HEIGHT {
+        2
+    } else {
+        1
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Viewport {
     /// One region at a time.

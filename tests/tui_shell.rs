@@ -558,14 +558,15 @@ fn surfaces_are_painted_where_the_design_calls_for_them() {
         "the band should reach the end of the row, not stop with the text"
     );
 
-    // The navigation strip is its own band, with the active tab lifted.
-    // Sources is the active tab here, so Inventory is the inactive probe.
-    assert_eq!(style_in_row(&screen, 1, "1 Inventory").bg, Some(SURFACE));
-    assert_eq!(style_in_row(&screen, 1, "▌Sources").bg, Some(SURFACE_2));
+    // The navigation strip is its own band, with the active tab lifted; the
+    // padded chrome at forty rows puts its text on the third row. Sources is
+    // the active tab here, so Inventory is the inactive probe.
+    assert_eq!(style_in_row(&screen, 2, "1 Inventory").bg, Some(SURFACE));
+    assert_eq!(style_in_row(&screen, 2, "▌Sources").bg, Some(SURFACE_2));
     // This row is laid out as two rectangles — the tab strip and the session
     // status — so its surface is only right if it covers the gap between
     // them as well as the text in each.
-    let navigation = row_text(&screen, 1);
+    let navigation = row_text(&screen, 2);
     let status = u16::try_from(
         navigation[..navigation.find('●').expect("session status glyph")]
             .chars()
@@ -573,7 +574,7 @@ fn surfaces_are_painted_where_the_design_calls_for_them() {
     )
     .expect("column");
     assert_eq!(
-        screen[(screen.area.x + status - 2, 1)].style().bg,
+        screen[(screen.area.x + status - 2, 2)].style().bg,
         Some(SURFACE),
         "the gap between the tab strip and the session status is on the surface"
     );
@@ -755,18 +756,67 @@ fn the_tab_strip_boxes_padded_cells_behind_line_separators() {
     assert!(!inactive_padding.add_modifier.contains(Modifier::UNDERLINED));
 }
 
+/// From thirty-eight rows the chrome takes the prototype's bar heights: a
+/// two-row title bar and key bar, and a tab strip whose second row draws the
+/// active tab's bottom border (prototype `.tab[aria-selected]`
+/// `border-bottom-color`) instead of underlining its label.
+#[test]
+fn a_tall_terminal_pads_the_chrome_to_the_prototype_bar_heights() {
+    const BAND: Color = Color::Rgb(0x0d, 0x12, 0x18);
+    const SURFACE: Color = Color::Rgb(0x0f, 0x15, 0x1d);
+    const SURFACE_2: Color = Color::Rgb(0x12, 0x1a, 0x24);
+    const CYAN: Color = Color::Rgb(0x73, 0xd7, 0xee);
+
+    let harness = Harness::new();
+    let screen = buffer(&harness.completed_setup(), 120, 40);
+
+    // The title bar's second row is blank band: the padding falls between
+    // the title and the tabs, where the prototype's own padding sits.
+    assert_eq!(row_text(&screen, 1), "", "{}", row_text(&screen, 1));
+    assert_eq!(screen[(0, 1)].style().bg, Some(BAND));
+
+    // The label row carries no underline — the border is the row below.
+    let active = style_in_row(&screen, 2, "▌Inventory");
+    assert_eq!(active.bg, Some(SURFACE_2));
+    assert!(!active.add_modifier.contains(Modifier::UNDERLINED));
+
+    // The accent row: the active tab's border, in the accent colour on the
+    // tab's own raised surface, ending exactly at the tab's separator; the
+    // separators carry on so every box keeps its full height.
+    assert_eq!(screen[(0, 3)].symbol(), "▁");
+    assert_eq!(screen[(15, 3)].symbol(), "▁");
+    let border = screen[(0, 3)].style();
+    assert_eq!(border.fg, Some(CYAN));
+    assert_eq!(border.bg, Some(SURFACE_2));
+    for column in [16_u16, 33, 50, 67] {
+        assert_eq!(screen[(column, 3)].symbol(), "│");
+    }
+    // An inactive tab has no border: its stretch of the accent row is blank
+    // strip surface.
+    assert_eq!(screen[(20, 3)].symbol(), " ");
+    assert_eq!(screen[(20, 3)].style().bg, Some(SURFACE));
+
+    // The key bar mirrors the title bar: hints on the last row, band padding
+    // on the row above, between the workspace and the hints.
+    let last = screen.area.height - 1;
+    assert!(row_text(&screen, last).contains("q Quit"));
+    assert_eq!(row_text(&screen, last - 1), "");
+    assert_eq!(screen[(0, last - 1)].style().bg, Some(BAND));
+}
+
 #[test]
 fn the_session_status_moves_to_the_tab_row_on_a_wide_terminal() {
     let harness = Harness::new();
     let app = harness.completed_setup();
 
     // Wide: the status sits right-aligned beside the tabs, the prototype's
-    // placement, leaving the title bar to the product and context path.
+    // placement, leaving the title bar to the product and context path. At
+    // forty rows the chrome is padded, so the tab row is the third.
     let wide = buffer(&app, 120, 40);
     assert!(
-        row_text(&wide, 1).ends_with("● ready · 0 sources registered"),
+        row_text(&wide, 2).ends_with("● ready · 0 sources registered"),
         "{}",
-        row_text(&wide, 1)
+        row_text(&wide, 2)
     );
     assert!(
         !row_text(&wide, 0).contains("ready"),
@@ -774,7 +824,7 @@ fn the_session_status_moves_to_the_tab_row_on_a_wide_terminal() {
         row_text(&wide, 0)
     );
     assert_eq!(
-        style_in_row(&wide, 1, "●").fg,
+        style_in_row(&wide, 2, "●").fg,
         Some(Color::Rgb(0x8b, 0xd4, 0x9c))
     );
 
@@ -801,7 +851,8 @@ fn a_keyboard_owner_on_a_wide_terminal_keeps_the_status_beside_it() {
     let mut app = harness.completed_setup();
     app.update(Action::OpenSettings);
 
-    let row = row_text(&buffer(&app, 120, 40), 1);
+    // The padded chrome puts the navigation row third at forty rows.
+    let row = row_text(&buffer(&app, 120, 40), 2);
     assert!(row.contains("Settings"), "{row}");
     assert!(row.contains("navigation is locked"), "{row}");
     assert!(row.ends_with("● ready · 0 sources registered"), "{row}");
@@ -5224,8 +5275,10 @@ mod installed {
             .expect("a scan that read a root states a count");
         let sources = app.sources().len();
 
+        // A forty-row terminal takes the prototype's bar heights, so the tab
+        // strip's text sits on the third row, under the two-row title bar.
         let screen = buffer(&app, 120, 40);
-        let navigation = row_text(&screen, 1);
+        let navigation = row_text(&screen, 2);
 
         // The count says the same thing the Inventory subtitle does: skills,
         // not every listed entry. The '·' lead-in keeps the count from
@@ -5241,22 +5294,22 @@ mod installed {
         );
 
         // A count carries no surface of its own: it sits inside its entry and
-        // inherits it, so only the accent distinguishes it from the title. The
-        // active tab's underline runs under its count as well, standing in for
-        // the prototype's border along the whole tab, but the bold belongs to
-        // the title and stops there.
-        let inventory_count = style_following(&screen, 1, "▌Inventory ");
+        // inherits it, so only the accent distinguishes it from the title. On
+        // this tall strip the prototype's border is the accent row below
+        // rather than an underline, and the bold belongs to the title and
+        // stops there.
+        let inventory_count = style_following(&screen, 2, "▌Inventory ");
         assert_eq!(inventory_count.fg, Some(AMBER));
         assert_eq!(inventory_count.bg, Some(SURFACE_2));
         assert!(
-            inventory_count.add_modifier.contains(Modifier::UNDERLINED),
-            "the active tab's underline should span its count"
+            !inventory_count.add_modifier.contains(Modifier::UNDERLINED),
+            "the tall strip draws the border as its own row, not as an underline"
         );
         assert!(
             !inventory_count.add_modifier.contains(Modifier::BOLD),
             "the title's emphasis should not leak into the count"
         );
-        let sources_count = style_following(&screen, 1, "2 Sources ");
+        let sources_count = style_following(&screen, 2, "2 Sources ");
         assert_eq!(sources_count.fg, Some(AMBER));
         assert_eq!(sources_count.bg, Some(SURFACE));
         assert!(!sources_count.add_modifier.contains(Modifier::UNDERLINED));
@@ -5265,15 +5318,15 @@ mod installed {
         // Which is what makes both swap when the other tab is active.
         app.update(Action::OpenSources);
         let screen = buffer(&app, 120, 40);
-        let inventory_count = style_following(&screen, 1, "1 Inventory ");
+        let inventory_count = style_following(&screen, 2, "1 Inventory ");
         assert_eq!(inventory_count.fg, Some(AMBER));
         assert_eq!(inventory_count.bg, Some(SURFACE));
         assert!(!inventory_count.add_modifier.contains(Modifier::UNDERLINED));
         assert!(!inventory_count.add_modifier.contains(Modifier::BOLD));
-        let sources_count = style_following(&screen, 1, "▌Sources ");
+        let sources_count = style_following(&screen, 2, "▌Sources ");
         assert_eq!(sources_count.fg, Some(AMBER));
         assert_eq!(sources_count.bg, Some(SURFACE_2));
-        assert!(sources_count.add_modifier.contains(Modifier::UNDERLINED));
+        assert!(!sources_count.add_modifier.contains(Modifier::UNDERLINED));
         assert!(!sources_count.add_modifier.contains(Modifier::BOLD));
     }
 
@@ -5549,8 +5602,10 @@ mod installed {
             // The workspace: below the title bar and navigation, above the
             // key hints. The chrome rows are excluded before probing for the
             // region's rule, because the tab strip draws '│' separators of
-            // its own.
-            let workspace = &screen[2..screen.len() - 1];
+            // its own. From thirty-eight rows each chrome bar is two rows —
+            // the prototype's own heights — so the exclusion follows suit.
+            let bar = if height >= 38 { 2 } else { 1 };
+            let workspace = &screen[2 * bar..screen.len() - bar];
             let mut rows: Vec<String> = if workspace.iter().any(|row| row.contains('│')) {
                 // Beside the table, the region is everything past the rule.
                 workspace

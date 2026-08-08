@@ -838,9 +838,11 @@ mod installed {
     }
 
     /// On a very wide terminal the identity columns stop growing, so a short
-    /// label is not stranded in the middle of a very wide field. The slack
-    /// falls to the right of Health, which is where this departs from the
-    /// prototype: that grid grows these columns without bound.
+    /// label is not stranded in the middle of a very wide field — that grid
+    /// grows these columns without bound in the prototype. The agent columns
+    /// spend part of the freed width on the health labels the prototype's
+    /// `.agent-state` cells carry, and what remains falls to the right of
+    /// Health.
     #[test]
     fn inventory_capped_columns_at_a_very_wide_size() {
         let temporary = tempfile::tempdir().expect("temporary application directory");
