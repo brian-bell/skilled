@@ -8,14 +8,61 @@ use crate::{Error, Result};
 ///
 /// Every segment is optional: a value the environment does not provide is
 /// omitted from the title bar rather than invented. Gathered once at startup —
-/// by [`AppEnvironment::for_process`] in production, by injection in tests,
-/// which never read the real environment — so the reducer and renderer stay
-/// free of process and filesystem work.
+/// by [`SessionIdentity::for_process`] on the interactive path in production,
+/// by injection in tests, which never read the real environment — so the
+/// reducer and renderer stay free of process and filesystem work.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct SessionIdentity {
     pub user: Option<String>,
     pub host: Option<String>,
     pub os: Option<String>,
+}
+
+/// Where a `hostname` executable is expected to be found, addressed
+/// absolutely: resolving the name through `PATH` would execute whatever
+/// binary the caller's environment put first, with this process's
+/// privileges, on every launch. macOS keeps it in `/bin`; Linux
+/// distributions in `/bin` or `/usr/bin`. Where neither exists — native
+/// Windows among them — the host segment is omitted rather than searched
+/// for.
+const HOSTNAME_COMMANDS: [&str; 2] = ["/bin/hostname", "/usr/bin/hostname"];
+
+impl SessionIdentity {
+    /// The identity the interactive session can observe, each segment
+    /// omitted when the environment does not provide it.
+    ///
+    /// The hostname comes from a one-shot command at startup — no new
+    /// dependency, and running it here rather than at render time keeps
+    /// `update` free of process work. Only the interactive application calls
+    /// this: `skilled install` never shows identity, so it never runs the
+    /// command at all.
+    pub fn for_process() -> Self {
+        let non_empty = |value: String| {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_owned())
+            }
+        };
+        Self {
+            user: std::env::var("USER")
+                .or_else(|_| std::env::var("LOGNAME"))
+                // Native Windows spells the same fact USERNAME.
+                .or_else(|_| std::env::var("USERNAME"))
+                .ok()
+                .and_then(non_empty),
+            host: HOSTNAME_COMMANDS.iter().find_map(|command| {
+                Command::new(command)
+                    .output()
+                    .ok()
+                    .filter(|output| output.status.success())
+                    .and_then(|output| String::from_utf8(output.stdout).ok())
+                    .and_then(non_empty)
+            }),
+            os: os_label(std::env::consts::OS).map(str::to_owned),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -57,43 +104,7 @@ impl AppEnvironment {
             .map(|directories| directories.data_dir().to_owned())
             .ok_or(Error::DataDirectoryUnavailable)?;
         let executable_path = std::env::var_os("PATH").unwrap_or_default();
-        Ok(Self::new(home_dir, data_dir, executable_path).with_identity(process_identity()))
-    }
-}
-
-/// The identity the real process can observe, each segment omitted when the
-/// environment does not provide it.
-///
-/// The hostname comes from a one-shot `hostname` command at startup — no new
-/// dependency, and running it here rather than at render time keeps `update`
-/// free of process work. The command runs on every startup, including
-/// `skilled install`, whose output never shows identity: one short-lived
-/// child is accepted so the environment has one shape on every path, but a
-/// second executing dependency is a real cost, and gathering lazily on the
-/// interactive path alone is the recorded alternative if it grows.
-fn process_identity() -> SessionIdentity {
-    let non_empty = |value: String| {
-        let trimmed = value.trim();
-        if trimmed.is_empty() {
-            None
-        } else {
-            Some(trimmed.to_owned())
-        }
-    };
-    SessionIdentity {
-        user: std::env::var("USER")
-            .or_else(|_| std::env::var("LOGNAME"))
-            // Native Windows spells the same fact USERNAME.
-            .or_else(|_| std::env::var("USERNAME"))
-            .ok()
-            .and_then(non_empty),
-        host: Command::new("hostname")
-            .output()
-            .ok()
-            .filter(|output| output.status.success())
-            .and_then(|output| String::from_utf8(output.stdout).ok())
-            .and_then(non_empty),
-        os: os_label(std::env::consts::OS).map(str::to_owned),
+        Ok(Self::new(home_dir, data_dir, executable_path))
     }
 }
 
