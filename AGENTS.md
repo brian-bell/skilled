@@ -82,7 +82,9 @@ signal needs both, because colour alone is not an acceptable cue.
 - `src/runner.rs`: terminal event loop and effect execution boundary.
 - `src/terminal.rs`: raw-mode/alternate-screen ownership and restoration.
 - `src/paths.rs`: injectable home, application-data, and executable search
-  paths.
+  paths, plus the session identity (user, host, operating system) gathered
+  once at startup — every segment optional, omitted rather than invented, and
+  injected by tests so they never read the real environment.
 - `src/main.rs`: no arguments runs the interactive application; anything else is
   a command, reported through an exit status.
 
