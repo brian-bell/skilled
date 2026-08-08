@@ -1454,20 +1454,54 @@ fn normalize_scan_timestamp(screen: String) -> String {
 /// written, so the dialog never elides a path, and a snapshot of one folded
 /// across two rows would be measuring the fixture rather than the layout.
 #[cfg(unix)]
-fn install_fixture() -> (tempfile::TempDir, SkilledApp) {
+struct InstallFixture {
+    _temporary: tempfile::TempDir,
+    application_root: PathBuf,
+}
+
+#[cfg(unix)]
+impl InstallFixture {
+    fn path(&self) -> &Path {
+        &self.application_root
+    }
+}
+
+#[cfg(unix)]
+fn install_fixture() -> (InstallFixture, SkilledApp) {
     let temporary = tempfile::Builder::new()
         .prefix("sk-")
         .tempdir_in("/tmp")
         .expect("temporary application directory");
-    let repository = temporary.path().join("src");
+    // The dialog shows canonical source paths beside unresolved home paths.
+    // Give those spellings different final components of equal length beneath
+    // a fixed-width absolute prefix, so their rendered widths do not depend on
+    // whether this platform redirects `/tmp` (macOS does; Linux does not).
+    const CONTAINER_PATH_BYTES: usize = 26;
+    let canonical_temporary = temporary
+        .path()
+        .canonicalize()
+        .expect("canonical temporary directory");
+    let padding = CONTAINER_PATH_BYTES
+        .checked_sub(canonical_temporary.as_os_str().as_encoded_bytes().len() + 1)
+        .expect("the short install fixture base fits beneath the fixed-width root");
+    let container = canonical_temporary.join("x".repeat(padding));
+    let real = container.join("r");
+    let view = container.join("v");
+    fs::create_dir_all(&real).expect("create canonical application root");
+    std::os::unix::fs::symlink("r", &view).expect("create unresolved application root");
+    let fixture = InstallFixture {
+        _temporary: temporary,
+        application_root: view,
+    };
+    let repository = fixture.path().join("src");
     create_source_fixture(&repository);
     for root in [".claude", ".agents", ".config/opencode"] {
-        fs::create_dir_all(temporary.path().join("home").join(root))
+        fs::create_dir_all(fixture.path().join("home").join(root))
             .expect("create the root's parent");
     }
     let mut app = SkilledApp::open(AppEnvironment::new(
-        temporary.path().join("home"),
-        temporary.path().join("data"),
+        fixture.path().join("home"),
+        fixture.path().join("data"),
         "",
     ))
     .expect("open application");
@@ -1478,7 +1512,7 @@ fn install_fixture() -> (tempfile::TempDir, SkilledApp) {
     }
     app.update(Action::OpenSources);
     app.update(Action::AdvanceSourcesPane);
-    (temporary, app)
+    (fixture, app)
 }
 
 /// Replace the temporary tree's own path, keeping every line the width the
@@ -1489,7 +1523,7 @@ fn install_fixture() -> (tempfile::TempDir, SkilledApp) {
 /// a platform where `/tmp` is itself a link the shorter spelling is a substring
 /// of the longer one.
 #[cfg(unix)]
-fn normalize_install_screen(temporary: &tempfile::TempDir, screen: String) -> String {
+fn normalize_install_screen(temporary: &InstallFixture, screen: String) -> String {
     let canonical = temporary
         .path()
         .canonicalize()
