@@ -1375,10 +1375,17 @@ pub enum InstallPrompt {
 /// guard here resolves a path by name, so a process that replaced the checked
 /// root — or a directory above it — between the check and the `symlink` call
 /// would have the link created somewhere other than the path the plan stated.
-/// Closing it needs directory handles and `O_NOFOLLOW`, which the standard
-/// library does not offer portably, so it is a deliberate follow-up rather than
-/// a new production dependency taken without review. An attacker able to use it
-/// already has write access to the user's home directory.
+/// Closing it needs `openat` and `symlinkat` against a directory handle, which
+/// the standard library does not expose; that is a production dependency, and
+/// this project takes those under explicit review rather than at a closeout.
+/// Tracked as `skilled-cb2`.
+///
+/// It is not silent if it happens. The scan that follows reads the documented
+/// root, finds nothing at the path the plan named, and [`verify_install`]
+/// reports that failure — so the outcome is a run that says it did not end up
+/// where it said it would, rather than one that claims success. An attacker
+/// able to reach the window already has write access to the user's home
+/// directory.
 ///
 /// There is no rollback. The links written before a failure are real, healthy,
 /// receipted installations, and deleting them would be a second unrequested
