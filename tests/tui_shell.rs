@@ -331,13 +331,15 @@ fn a_hostname_with_a_control_sequence_reaches_the_title_bar_escaped() {
     let harness = Harness::new();
     let app = harness.completed_setup_with_identity(SessionIdentity {
         user: Some("brian".to_owned()),
-        host: Some("mac\u{1b}]0;x\u{7}book".to_owned()),
+        // A full OSC title sequence: ESC ] 0 ; x BEL. Short enough that its
+        // escaped spelling still fits the compact context budget.
+        host: Some("m\u{1b}]0;x\u{7}".to_owned()),
         os: None,
     });
 
     let title = row_text(&buffer(&app, 80, 24), 0);
     assert!(
-        title.contains("global · brian@mac\\u{1b}]0;x\\u{7}book"),
+        title.contains("global · brian@m\\u{1b}]0;x\\u{7}"),
         "{title}"
     );
 }
@@ -788,6 +790,49 @@ fn the_session_status_moves_to_the_tab_row_on_a_wide_terminal() {
         !row_text(&compact, 1).contains("ready"),
         "{}",
         row_text(&compact, 1)
+    );
+}
+
+#[test]
+fn a_keyboard_owner_on_a_wide_terminal_keeps_the_status_beside_it() {
+    // The status is the one part of the chrome that keeps reporting while a
+    // dialog holds the keys, so the takeover must not push it off the row.
+    let harness = Harness::new();
+    let mut app = harness.completed_setup();
+    app.update(Action::OpenSettings);
+
+    let row = row_text(&buffer(&app, 120, 40), 1);
+    assert!(row.contains("Settings"), "{row}");
+    assert!(row.contains("navigation is locked"), "{row}");
+    assert!(row.ends_with("● ready · 0 sources registered"), "{row}");
+}
+
+#[test]
+fn the_status_joins_the_tab_row_only_where_both_fit_whole() {
+    let harness = Harness::new();
+    let app = harness.completed_setup();
+
+    // The narrowest wide terminal: the sixty-eight columns of tab cells and
+    // the thirty-one of status fit side by side with one column left, so the
+    // status takes the tab row here too — the boundary of the placement rule.
+    let boundary = buffer(&app, 100, 24);
+    assert!(
+        row_text(&boundary, 1).ends_with("● ready · 0 sources registered"),
+        "{}",
+        row_text(&boundary, 1)
+    );
+    assert!(
+        !row_text(&boundary, 0).contains("ready"),
+        "{}",
+        row_text(&boundary, 0)
+    );
+    // The strip lost nothing to the status beside it: its last cell still
+    // ends in its own separator.
+    assert_eq!(
+        boundary[(67, 1)].symbol(),
+        "│",
+        "{}",
+        row_text(&boundary, 1)
     );
 }
 
@@ -3927,13 +3972,7 @@ impl Harness {
     }
 
     fn completed_setup(&self) -> SkilledApp {
-        let mut app = self.first_run();
-        for _ in 0..7 {
-            let update = app.update(Action::Continue);
-            app.perform_effects(update.effects())
-                .expect("perform setup effects");
-        }
-        app
+        self.completed_setup_with_identity(SessionIdentity::default())
     }
 
     /// Setup completed under an injected session identity; tests never read

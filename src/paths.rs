@@ -66,7 +66,11 @@ impl AppEnvironment {
 ///
 /// The hostname comes from a one-shot `hostname` command at startup — no new
 /// dependency, and running it here rather than at render time keeps `update`
-/// free of process work.
+/// free of process work. The command runs on every startup, including
+/// `skilled install`, whose output never shows identity: one short-lived
+/// child is accepted so the environment has one shape on every path, but a
+/// second executing dependency is a real cost, and gathering lazily on the
+/// interactive path alone is the recorded alternative if it grows.
 fn process_identity() -> SessionIdentity {
     let non_empty = |value: String| {
         let trimmed = value.trim();
@@ -95,7 +99,7 @@ fn process_identity() -> SessionIdentity {
 ///
 /// Only the platforms the prototype speaks of are mapped; any other value is
 /// omitted rather than shown as a raw identifier the title bar never promised.
-pub(crate) fn os_label(os: &str) -> Option<&'static str> {
+fn os_label(os: &str) -> Option<&'static str> {
     match os {
         "macos" => Some("macOS"),
         "linux" => Some("Linux"),
