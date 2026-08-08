@@ -16,9 +16,10 @@ use skilled::{
     Action, AgentKind, AppEnvironment, SkilledApp,
     inventory::{Finding, FindingSeverity, InstallationHealth},
     operations::{
-        InstallPrompt, InstallStatus, StepOutcome, TargetDisposition, VerifyFailure,
-        VerifyWithheld, verify_install,
+        InstallPrompt, InstallStatus, OpenCodeOutlook, StepOutcome, TargetDisposition,
+        VerifyFailure, VerifyWithheld, verify_install,
     },
+    resolution::OpenCodeResolution,
 };
 
 const CLAUDE_CODE_ROOT: &str = ".claude/skills";
@@ -110,6 +111,62 @@ fn a_confirmed_plan_links_every_agent_records_receipts_and_verifies_itself() {
         !fixture.an_agent_was_launched(),
         "no agent executable may be launched"
     );
+}
+
+/// A catalog that explicitly excludes OpenCode is still installable for the
+/// compatible agents. OpenCode discovers those links through its documented
+/// compatibility roots, and verification must compare that incompatible
+/// exposure with the plan instead of treating it as an unknown outcome.
+#[test]
+fn incompatible_opencode_exposure_matches_the_confirmed_plan() {
+    let fixture = Fixture::new();
+    let repository = fixture.source("library", &["portable"]);
+    let mut app = fixture.registered_without_opencode_compatibility(&repository);
+    fixture.create_root_parents();
+    focus_first_variant(&mut app);
+
+    dispatch(&mut app, Action::BeginInstall);
+    let Some(InstallPrompt::Preview(plan)) = app.pending_install() else {
+        panic!(
+            "a preview is shown before the apply: {:?}",
+            app.pending_install()
+        );
+    };
+    assert!(plan.is_executable());
+    assert!(
+        plan.warnings()
+            .iter()
+            .any(|warning| warning.contains("not registered for OpenCode")),
+        "{:?}",
+        plan.warnings()
+    );
+    assert_eq!(
+        plan.opencode_outlook(),
+        Some(&OpenCodeOutlook::Exposure {
+            winner: fixture.root(AgentKind::Codex).join("portable")
+        })
+    );
+    dispatch(&mut app, Action::ConfirmInstall);
+
+    let Some(InstallPrompt::Report(outcome)) = app.pending_install() else {
+        panic!("a report follows the apply: {:?}", app.pending_install());
+    };
+    assert_eq!(outcome.status(), InstallStatus::Installed);
+    assert!(
+        outcome.verification().is_verified(),
+        "{:?}",
+        outcome.verification()
+    );
+    assert!(outcome.verification().is_complete());
+    assert!(outcome.step(AgentKind::OpenCode).is_none());
+    assert_eq!(app.receipts().expect("read receipts").len(), 2);
+    assert!(matches!(
+        app.inventory()
+            .row("portable")
+            .and_then(|row| row.opencode_resolution()),
+        Some(OpenCodeResolution::IncompatibleExposure { .. })
+    ));
+    assert!(!fixture.root(AgentKind::OpenCode).join("portable").exists());
 }
 
 /// A blocked plan is shown and refuses to be confirmed. Nothing is written
@@ -657,6 +714,28 @@ impl Fixture {
             let update = app.update(Action::Continue);
             app.perform_effects(update.effects())
                 .expect("perform setup effects");
+        }
+        app
+    }
+
+    /// Complete setup after explicitly removing OpenCode from a common
+    /// catalog's stored compatibility declaration.
+    fn registered_without_opencode_compatibility(&self, repository: &Path) -> SkilledApp {
+        let mut app = self.app();
+        for _ in 0..3 {
+            dispatch(&mut app, Action::Continue);
+        }
+        dispatch(&mut app, Action::BeginAddSource);
+        for character in repository.to_string_lossy().chars() {
+            dispatch(&mut app, Action::AppendSourcePath(character));
+        }
+        dispatch(&mut app, Action::SubmitSourcePath);
+        dispatch(
+            &mut app,
+            Action::ToggleCatalogCompatibility(AgentKind::OpenCode),
+        );
+        for _ in 0..3 {
+            dispatch(&mut app, Action::Continue);
         }
         app
     }

@@ -529,8 +529,8 @@ impl InstallTarget {
 pub enum OpenCodeOutlook {
     /// OpenCode will load the directory reached through this installation slot.
     Selected { winner: PathBuf },
-    /// The only definition it can see will be another agent's edition, at this
-    /// slot.
+    /// The only definition it can see will be one Skilled cannot claim is
+    /// usable by OpenCode, at this slot.
     Exposure { winner: PathBuf },
     /// More than one directory will answer to the name.
     Conflict,
@@ -546,7 +546,8 @@ impl OpenCodeOutlook {
             OpenCodeResolution::Selected { winner, .. } => Self::Selected {
                 winner: winner.path().to_path_buf(),
             },
-            OpenCodeResolution::ForeignExposure { winner, .. } => Self::Exposure {
+            OpenCodeResolution::ForeignExposure { winner, .. }
+            | OpenCodeResolution::IncompatibleExposure { winner, .. } => Self::Exposure {
                 winner: winner.path().to_path_buf(),
             },
             OpenCodeResolution::Conflict { .. } => Self::Conflict,
@@ -841,8 +842,9 @@ fn predicted_kind(resolution: &OpenCodeResolution) -> u8 {
         OpenCodeResolution::NothingVisible => 0,
         OpenCodeResolution::Selected { .. } => 1,
         OpenCodeResolution::ForeignExposure { .. } => 2,
-        OpenCodeResolution::Conflict { .. } => 3,
-        OpenCodeResolution::Incomplete { .. } => 4,
+        OpenCodeResolution::IncompatibleExposure { .. } => 3,
+        OpenCodeResolution::Conflict { .. } => 4,
+        OpenCodeResolution::Incomplete { .. } => 5,
     }
 }
 
@@ -850,6 +852,9 @@ fn opencode_concern(resolution: &OpenCodeResolution) -> Option<&'static str> {
     match resolution {
         OpenCodeResolution::ForeignExposure { .. } => {
             Some("can see, but cannot use, the content another agent's root holds")
+        }
+        OpenCodeResolution::IncompatibleExposure { .. } => {
+            Some("can see a registered definition whose catalog is not registered for OpenCode")
         }
         OpenCodeResolution::Conflict { .. } => {
             Some("would have more than one directory to choose between")
@@ -871,6 +876,11 @@ fn observed_summary(resolution: &OpenCodeResolution) -> String {
         ),
         OpenCodeResolution::ForeignExposure { .. } => {
             "the only definition it can see is another agent's edition".to_owned()
+        }
+        OpenCodeResolution::IncompatibleExposure { .. } => {
+            "the only registered definition it can see comes from a catalog not registered for \
+             OpenCode"
+                .to_owned()
         }
         OpenCodeResolution::Incomplete { roots } => unknown_roots(roots),
         OpenCodeResolution::NothingVisible => "it finds nothing under that name".to_owned(),
