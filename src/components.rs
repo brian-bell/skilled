@@ -247,6 +247,26 @@ pub(crate) fn dialog_regions(inner: Rect, action_width: u16) -> DialogRegions {
     }
 }
 
+/// Text from the filesystem, made safe to write to a terminal.
+///
+/// Skill names, catalog paths, checkout directories, link targets, and the text
+/// of an operating-system error all come from outside Skilled, and a control
+/// sequence in any of them would be executed by the terminal rather than shown.
+/// Every surface that puts one in front of a reader passes it through here —
+/// the screens, and the `skilled install` command, which writes to the same
+/// terminal by a different route.
+pub(crate) fn terminal_safe(value: &str) -> String {
+    let mut safe = String::with_capacity(value.len());
+    for character in value.chars() {
+        if character.is_control() {
+            safe.extend(character.escape_default());
+        } else {
+            safe.push(character);
+        }
+    }
+    safe
+}
+
 /// The marker that identifies the focused row in a list.
 pub(crate) const FOCUS_MARKER: &str = "▌";
 

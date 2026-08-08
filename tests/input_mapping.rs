@@ -472,6 +472,112 @@ fn repeat(code: KeyCode) -> KeyEvent {
     KeyEvent::new_with_kind(code, KeyModifiers::NONE, KeyEventKind::Repeat)
 }
 
+/// `i` reaches the install flow only from the regions that stand on a variant.
+///
+/// The repositories pane stands on a source, and its variant selection is
+/// whatever it was last left at — a key that acted there would install a row
+/// the user is not looking at.
+#[cfg(unix)]
+#[test]
+fn install_is_offered_only_where_a_variant_is_focused() {
+    use skilled::input::action_for_app_key;
+
+    let temporary = tempfile::tempdir().expect("temporary application directory");
+    let repository = temporary.path().join("library");
+    create_source_fixture(&repository);
+    let mut app = SkilledApp::open(AppEnvironment::new(
+        temporary.path().join("home"),
+        temporary.path().join("data"),
+        "",
+    ))
+    .expect("open application");
+    let preview = app.preview_source(&repository).expect("preview source");
+    app.confirm_source(preview).expect("register source");
+    for _ in 0..7 {
+        let update = app.update(Action::Continue);
+        app.perform_effects(update.effects())
+            .expect("setup effects");
+    }
+    app.update(Action::OpenSources);
+
+    // The repositories pane offers nothing to install.
+    assert_eq!(action_for_app_key(&app, key(KeyCode::Char('i'))), None);
+    assert!(!app.can_install_selection());
+
+    app.update(Action::AdvanceSourcesPane);
+    assert!(app.can_install_selection());
+    assert_eq!(
+        action_for_app_key(&app, key(KeyCode::Char('i'))),
+        Some(Action::BeginInstall)
+    );
+    // A held key must not queue a second install of the same row.
+    assert_eq!(action_for_app_key(&app, repeat(KeyCode::Char('i'))), None);
+
+    // The Inventory has no variant to stand on, so `i` is not its key.
+    let update = app.update(Action::OpenInventory);
+    app.perform_effects(update.effects()).expect("scan");
+    assert_eq!(action_for_app_key(&app, key(KeyCode::Char('i'))), None);
+}
+
+/// The install preview owns the keyboard: only a confirmation, a dismissal, and
+/// the one command no context may swallow get through.
+#[cfg(unix)]
+#[test]
+fn the_install_prompt_owns_input_until_it_is_answered() {
+    use skilled::input::action_for_app_key;
+
+    let temporary = tempfile::tempdir().expect("temporary application directory");
+    let repository = temporary.path().join("library");
+    create_source_fixture(&repository);
+    let mut app = SkilledApp::open(AppEnvironment::new(
+        temporary.path().join("home"),
+        temporary.path().join("data"),
+        "",
+    ))
+    .expect("open application");
+    let preview = app.preview_source(&repository).expect("preview source");
+    app.confirm_source(preview).expect("register source");
+    for _ in 0..7 {
+        let update = app.update(Action::Continue);
+        app.perform_effects(update.effects())
+            .expect("setup effects");
+    }
+    app.update(Action::OpenSources);
+    app.update(Action::AdvanceSourcesPane);
+    let update = app.update(Action::BeginInstall);
+    app.perform_effects(update.effects()).expect("plan install");
+    assert!(app.pending_install().is_some());
+
+    assert_eq!(
+        action_for_app_key(&app, key(KeyCode::Enter)),
+        Some(Action::ConfirmInstall)
+    );
+    assert_eq!(
+        action_for_app_key(&app, key(KeyCode::Esc)),
+        Some(Action::DismissInstall)
+    );
+    for blocked in [
+        KeyCode::Char('q'),
+        KeyCode::Char('?'),
+        KeyCode::Char('1'),
+        KeyCode::Char('i'),
+        KeyCode::Tab,
+    ] {
+        assert_eq!(
+            action_for_app_key(&app, key(blocked)),
+            None,
+            "key {blocked:?}"
+        );
+    }
+    assert_eq!(
+        action_for_app_key(
+            &app,
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)
+        ),
+        Some(Action::Quit)
+    );
+}
+
 #[cfg(unix)]
 fn create_source_fixture(repository: &Path) {
     fs::create_dir_all(repository.join("skills/portable")).expect("create source fixture");

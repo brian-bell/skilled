@@ -32,6 +32,7 @@ pub struct VariantRef {
     source_label: String,
     catalog_relative_path: PathBuf,
     variant_relative_path: PathBuf,
+    skill_name: String,
     classification: CatalogClassification,
     compatibility: Compatibility,
 }
@@ -47,9 +48,20 @@ impl VariantRef {
             source_label: source.label().to_owned(),
             catalog_relative_path: catalog.relative_path().to_path_buf(),
             variant_relative_path: candidate.relative_path().to_path_buf(),
+            skill_name: candidate.directory_name().to_owned(),
             classification: catalog.classification(),
             compatibility: catalog.compatibility(),
         }
+    }
+
+    /// The name an agent would load this variant under.
+    ///
+    /// Carried from the candidate's own directory name rather than recovered
+    /// from the tail of [`Self::variant_relative_path`]: a path component that
+    /// is not valid UTF-8 has no `&str` to hand back, and a name is not
+    /// something an installation may guess at.
+    pub fn skill_name(&self) -> &str {
+        &self.skill_name
     }
 
     /// The registered source's stable identity.

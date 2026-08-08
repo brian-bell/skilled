@@ -22,6 +22,10 @@ pub enum Error {
     SourceScanLimitExceeded,
     #[error("stored catalog classification is invalid: {0}")]
     InvalidCatalogClassification(String),
+    #[error("path is not representable in the application metadata: {0:?}")]
+    UnrepresentablePath(PathBuf),
+    #[error("stored ownership receipt names an unknown agent: {0}")]
+    InvalidStoredAgent(String),
     #[error("stored catalog path must be repository-relative: {0:?}")]
     UnsafeCatalogPath(PathBuf),
     #[error("stored catalog root must not be a symbolic link: {0:?}")]

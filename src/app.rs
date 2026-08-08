@@ -4,6 +4,11 @@ use crate::{
     AgentDetection, AgentKind, AppEnvironment, Result,
     agents::{detect_agents, detection_at},
     inventory::{DoctorEntry, InventoryRow, InventorySnapshot, scan_installations},
+    operations::{
+        InstallOutcome, InstallPlan, InstallPrompt, Receipt, apply_install, plan_install,
+        probe_install, verify_install,
+    },
+    resolution::VariantRef,
     source::{
         CatalogProposal, RegisteredSource, SkillCandidate, SourcePreview, preview_local_source,
         revalidate_source_preview,
@@ -151,6 +156,13 @@ pub enum Action {
     AppendInventoryFilter(char),
     DeleteInventoryFilterCharacter,
     SubmitInventoryFilter,
+    /// Plan installing the focused variant, and show what it would do.
+    ///
+    /// Nothing is written by this, and nothing is written by anything until
+    /// [`Action::ConfirmInstall`] is applied to the preview it produces.
+    BeginInstall,
+    ConfirmInstall,
+    DismissInstall,
     RerunSetup,
     Quit,
 }
@@ -163,12 +175,29 @@ pub enum UpdateOutcome {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Effect {
-    PersistSetup { agent_selections: [bool; 3] },
+    PersistSetup {
+        agent_selections: [bool; 3],
+    },
     ResetSetup,
-    RedetectAgents { agent_selections: [bool; 3] },
-    InspectSource { path: PathBuf },
-    RegisterSource { preview: SourcePreview },
+    RedetectAgents {
+        agent_selections: [bool; 3],
+    },
+    InspectSource {
+        path: PathBuf,
+    },
+    RegisterSource {
+        preview: SourcePreview,
+    },
     ScanInstallations,
+    /// Read the machine and build an install preview for the focused variant.
+    ///
+    /// The variant is not carried on the effect: the reducer decided that this
+    /// is what the user is standing on, and the runner reads it back from the
+    /// same state the reducer read, exactly as [`Effect::ScanInstallations`]
+    /// carries no roots.
+    PlanInstall,
+    /// Create the links the shown preview calls work, then rescan and verify.
+    ApplyInstall,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -315,6 +344,27 @@ pub fn variant_rows(source: &RegisteredSource) -> impl Iterator<Item = SourceRow
     catalogs.iter().flat_map(catalog_rows)
 }
 
+/// Why no install plan could be built.
+///
+/// The two are kept apart because a caller acts on them differently: a request
+/// Skilled cannot honour is the user's to correct, and metadata Skilled cannot
+/// read is not something a different request would fix.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PlanRequestFailure {
+    /// The request names no variant Skilled can plan an install for.
+    Unplannable(String),
+    /// Skilled's own metadata could not be read.
+    Metadata(String),
+}
+
+impl PlanRequestFailure {
+    pub fn message(&self) -> &str {
+        match self {
+            Self::Unplannable(message) | Self::Metadata(message) => message,
+        }
+    }
+}
+
 pub struct SkilledApp {
     view: View,
     store: Store,
@@ -351,8 +401,21 @@ pub struct SkilledApp {
     /// bound the reducer has: `update` never learns the terminal's size, so
     /// the renderer measures the region and the runner notes what it found.
     detail_max_scroll: usize,
+    /// Whether the last frame measured the scrollable region at all.
+    ///
+    /// A frame that drew nothing — a terminal below the minimum size — measured
+    /// nothing, which is not the same as measuring zero. Kept apart because a
+    /// confirmation waits on a plan having been on screen, and a stale extent
+    /// would answer for a frame the reader never saw.
+    detail_measured: bool,
     doctor_pane: DoctorPane,
     focused_finding: usize,
+    /// The install dialog, when one is open.
+    ///
+    /// While it is set it owns the keyboard, the way the help overlay and the
+    /// catalog confirmation do: a preview is a question, and a stray navigation
+    /// key must not answer it.
+    pending_install: Option<InstallPrompt>,
     help_context: Option<View>,
 }
 
@@ -404,8 +467,10 @@ impl SkilledApp {
             inventory_filter_active: false,
             detail_scroll: 0,
             detail_max_scroll: 0,
+            detail_measured: false,
             doctor_pane: DoctorPane::Findings,
             focused_finding: 0,
+            pending_install: None,
             help_context: None,
         };
         app.refilter_installations();
@@ -486,6 +551,40 @@ impl SkilledApp {
         self.help_context
     }
 
+    pub fn pending_install(&self) -> Option<&InstallPrompt> {
+        self.pending_install.as_ref()
+    }
+
+    /// Whether the focused row is one the install flow would act on.
+    ///
+    /// The variants pane and the detail region beside it both stand on a row;
+    /// the repositories pane stands on a source, and its variant selection is
+    /// whatever it was left at, which is not something the user is looking at.
+    ///
+    /// A candidate that does not validate is not one any agent would resolve to
+    /// — `resolution::select_candidates` drops it — so there is nothing to
+    /// install from it, and offering the key would promise an answer whose only
+    /// content is that the row was never installable.
+    pub fn can_install_selection(&self) -> bool {
+        self.view == View::Sources
+            && matches!(
+                self.sources_pane,
+                SourcesPane::Variants | SourcesPane::Details
+            )
+            && matches!(
+                self.selected_variant_row(),
+                Some(SourceRow::Variant { candidate, .. }) if candidate.validation().is_valid()
+            )
+    }
+
+    /// Every ownership receipt Skilled holds.
+    ///
+    /// Spec 7 evidence, exposed so a caller can see what Skilled claims to have
+    /// put on disk. Nothing reads one as an instruction.
+    pub fn receipts(&self) -> Result<Vec<Receipt>> {
+        self.store.receipts()
+    }
+
     pub fn inventory(&self) -> &InventorySnapshot {
         &self.inventory
     }
@@ -545,16 +644,25 @@ impl SkilledApp {
     }
 
     /// Record what the frame just drawn measured the detail region's scrollable
-    /// extent to be.
+    /// extent to be, or that it measured nothing.
     ///
     /// The offset is pulled back with it, so a terminal that shrank between
     /// frames cannot leave the state pointing past the end of the content.
     /// This is the one place geometry reaches the application state, and it is
     /// not a reducer transition: `update` stays free of anything the terminal
     /// knows and the renderer measures.
-    pub fn note_detail_max_scroll(&mut self, max_scroll: usize) {
-        self.detail_max_scroll = max_scroll;
-        self.detail_scroll = self.detail_scroll.min(max_scroll);
+    ///
+    /// `None` — a frame that did not draw the thing — is itself recorded. An
+    /// extent kept from an earlier frame is a measurement of content that is
+    /// not on screen now, and a terminal too small to draw the install dialog
+    /// at all would otherwise leave a stale zero standing for "the reader has
+    /// seen the whole plan".
+    pub fn note_detail_max_scroll(&mut self, max_scroll: Option<usize>) {
+        self.detail_measured = max_scroll.is_some();
+        if let Some(max_scroll) = max_scroll {
+            self.detail_max_scroll = max_scroll;
+            self.detail_scroll = self.detail_scroll.min(max_scroll);
+        }
     }
 
     pub fn inventory_filter_active(&self) -> bool {
@@ -619,6 +727,28 @@ impl SkilledApp {
                     UpdateResult::continuing(Vec::new())
                 }
                 Action::Quit => UpdateResult::quit(),
+                _ => UpdateResult::continuing(Vec::new()),
+            };
+        }
+
+        // A preview is a question about writes that have not happened yet, so
+        // it owns the keyboard until it is answered: nothing may navigate out
+        // from under it, and nothing but a confirmation may confirm it.
+        if self.pending_install.is_some() {
+            return match action {
+                Action::Quit => UpdateResult::quit(),
+                Action::ConfirmInstall => UpdateResult::continuing(self.confirm_install()),
+                Action::DismissInstall => {
+                    self.pending_install = None;
+                    self.reset_detail_scroll();
+                    UpdateResult::continuing(Vec::new())
+                }
+                // A dialog taller than the terminal is still one the reader has
+                // to be able to read all of before agreeing to it.
+                Action::ScrollDetail(delta) => {
+                    self.scroll_detail(delta);
+                    UpdateResult::continuing(Vec::new())
+                }
                 _ => UpdateResult::continuing(Vec::new()),
             };
         }
@@ -856,6 +986,16 @@ impl SkilledApp {
             Action::AppendInventoryFilter(_)
             | Action::DeleteInventoryFilterCharacter
             | Action::SubmitInventoryFilter => Vec::new(),
+            Action::BeginInstall => {
+                if self.can_install_selection() {
+                    vec![Effect::PlanInstall]
+                } else {
+                    Vec::new()
+                }
+            }
+            // Reachable only with no prompt open, where there is nothing to
+            // confirm and nothing to dismiss.
+            Action::ConfirmInstall | Action::DismissInstall => Vec::new(),
             Action::RerunSetup => self.rerun_setup(),
             Action::Quit => return UpdateResult::quit(),
         };
@@ -925,9 +1065,124 @@ impl SkilledApp {
                     self.rescan_installations();
                 }
                 Effect::ScanInstallations => self.rescan_installations(),
+                Effect::PlanInstall => {
+                    self.pending_install = Some(self.build_install_preview());
+                    // The window belongs to the content under it, and this is
+                    // new content.
+                    self.reset_detail_scroll();
+                }
+                Effect::ApplyInstall => self.apply_pending_install(),
             }
         }
         Ok(())
+    }
+
+    /// Only a preview of executable work that has been read to its end accepts
+    /// a confirmation.
+    ///
+    /// A blocked plan and a plan with nothing left to do both stay on screen
+    /// rather than turning into a report of an install that never ran.
+    fn confirm_install(&mut self) -> Vec<Effect> {
+        match &self.pending_install {
+            Some(InstallPrompt::Preview(plan))
+                if plan.is_executable() && self.install_preview_fully_seen() =>
+            {
+                vec![Effect::ApplyInstall]
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// Whether every row of the open preview has been on screen.
+    ///
+    /// Nothing is written until a plan the user has *seen* in full is
+    /// confirmed, and a dialog taller than the terminal is not seen in full by
+    /// being opened. The extent is the last frame's own measurement, so this is
+    /// a fact about the terminal the reader is looking at rather than about the
+    /// plan; a preview that always fitted is fully seen at rest, which is why
+    /// the ordinary case costs no keystrokes at all.
+    pub fn install_preview_fully_seen(&self) -> bool {
+        self.detail_measured && self.detail_scroll >= self.detail_max_scroll
+    }
+
+    /// Read the machine and decide what installing the focused variant would
+    /// do.
+    ///
+    /// A failure here becomes something the dialog states rather than an error
+    /// out of `perform_effects`, which would end the process: the user asked a
+    /// question about their machine and is owed the answer, not an exit.
+    fn build_install_preview(&self) -> InstallPrompt {
+        let Some(SourceRow::Variant { catalog, candidate }) = self.selected_variant_row() else {
+            return InstallPrompt::Failed(
+                "the focused row is not a skill variant, so there is nothing to install".to_owned(),
+            );
+        };
+        let Some(source) = self.selected_source() else {
+            return InstallPrompt::Failed("no source is selected".to_owned());
+        };
+        let variant = VariantRef::of(source, catalog, candidate);
+        match self.plan_install_for(&variant, [true; 3]) {
+            Ok(plan) => InstallPrompt::Preview(plan),
+            // The dialog states either, because either is the answer to the
+            // question the user asked. Only a caller that has to choose an exit
+            // status needs them apart.
+            Err(failure) => InstallPrompt::Failed(failure.message().to_owned()),
+        }
+    }
+
+    /// Decide what installing one variant would do, for one set of agents.
+    ///
+    /// The one place planning happens: the Sources flow and `skilled install`
+    /// go through it together, so the command line cannot end up applying a
+    /// different set of checks from the screen.
+    pub(crate) fn plan_install_for(
+        &self,
+        variant: &VariantRef,
+        requested: [bool; 3],
+    ) -> std::result::Result<InstallPlan, PlanRequestFailure> {
+        let receipts = self.store.receipts().map_err(|error| {
+            PlanRequestFailure::Metadata(format!(
+                "the ownership receipts could not be read, so Skilled cannot tell its own links \
+                 from anyone else\'s: {error}"
+            ))
+        })?;
+        let probe = probe_install(&self.agents, &self.sources, variant, self.home());
+        plan_install(
+            &self.agents,
+            &self.sources,
+            variant,
+            requested,
+            &probe,
+            &receipts,
+        )
+        .map_err(|failure| PlanRequestFailure::Unplannable(failure.to_string()))
+    }
+
+    /// Apply a plan, restate the inventory, and check the plan against it.
+    ///
+    /// The same three steps [`Effect::ApplyInstall`] performs, in the same
+    /// order and for the same reason.
+    pub(crate) fn apply_plan(&mut self, plan: &InstallPlan) -> InstallOutcome {
+        let applied = apply_install(plan, &self.store, &self.environment.home_dir);
+        self.rescan_installations();
+        let verification = verify_install(plan, &applied, &self.inventory);
+        InstallOutcome::new(plan.clone(), applied, verification)
+    }
+
+    /// Apply the shown preview, then restate the inventory and check the plan
+    /// against it.
+    ///
+    /// The rescan happens before verification and not after, because the scan
+    /// is the evidence verification rests on; and it happens whatever the apply
+    /// did, so the inventory left behind describes the machine as it now is.
+    fn apply_pending_install(&mut self) {
+        let Some(InstallPrompt::Preview(plan)) = self.pending_install.take() else {
+            return;
+        };
+        let outcome = self.apply_plan(&plan);
+        self.pending_install = Some(InstallPrompt::Report(outcome));
+        // The report is different content from the preview it replaced.
+        self.reset_detail_scroll();
     }
 
     /// Replace the inventory with a fresh read-only pass over the native roots.
@@ -991,6 +1246,7 @@ impl SkilledApp {
     fn reset_detail_scroll(&mut self) {
         self.detail_scroll = 0;
         self.detail_max_scroll = 0;
+        self.detail_measured = false;
     }
 
     /// Open Doctor on a scan taken for Doctor.
@@ -1087,6 +1343,12 @@ impl SkilledApp {
     /// drawn: a window belongs to the content under it, and moving between
     /// screens replaces that content.
     fn detail_region_has_the_keyboard(&self) -> bool {
+        // A modal dialog is drawn over whatever screen is behind it and takes
+        // the keyboard with it, so while one is open it is the window the
+        // movement keys move.
+        if self.pending_install.is_some() {
+            return true;
+        }
         match self.view {
             View::Inventory => self.inventory_pane == InventoryPane::Details,
             View::Doctor => self.doctor_pane == DoctorPane::Details,
