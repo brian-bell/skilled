@@ -3971,22 +3971,42 @@ fn control_characters_stay_escaped_under_the_shell() {
 }
 
 struct Harness {
+    /// The temporary directory owning cleanup; fixtures build under [`Self::path`].
     directory: tempfile::TempDir,
+    /// Where the fixture trees are built: the temporary directory itself, or
+    /// a deliberately long subdirectory of it.
+    base: PathBuf,
 }
 
 impl Harness {
     fn new() -> Self {
-        Self {
-            directory: tempfile::tempdir().expect("temporary application directory"),
-        }
+        let directory = tempfile::tempdir().expect("temporary application directory");
+        let base = directory.path().to_path_buf();
+        Self { directory, base }
+    }
+
+    /// A harness whose fixture trees sit under a segment long enough that an
+    /// install preview's absolute paths wrap at the smallest supported
+    /// terminal, wherever the platform keeps its temporary directory.
+    ///
+    /// The preview-overflow test measures scrolling, so its fixture must
+    /// overflow the dialog by construction: `tempfile` under macOS spells
+    /// paths long enough to wrap on its own, but a Linux runner's
+    /// `/tmp/.tmpXXXXXX` holds the whole plan at eighty columns and the test
+    /// would measure nothing there.
+    fn with_long_paths() -> Self {
+        let directory = tempfile::tempdir().expect("temporary application directory");
+        let base = directory.path().join("a".repeat(60));
+        fs::create_dir_all(&base).expect("create the long fixture directory");
+        Self { directory, base }
+    }
+
+    fn path(&self) -> &std::path::Path {
+        &self.base
     }
 
     fn environment(&self) -> AppEnvironment {
-        AppEnvironment::new(
-            self.directory.path().join("home"),
-            self.directory.path().join("data"),
-            "",
-        )
+        AppEnvironment::new(self.path().join("home"), self.path().join("data"), "")
     }
 
     fn first_run(&self) -> SkilledApp {
@@ -4014,8 +4034,8 @@ impl Harness {
     /// root's own parent present so the plan has work to state.
     #[cfg(unix)]
     fn installable_source(&self) -> SkilledApp {
-        let home = self.directory.path().join("home");
-        let repository = self.directory.path().join("library");
+        let home = self.path().join("home");
+        let repository = self.path().join("library");
         create_source_fixture(&repository);
         for root in [".claude", ".agents", ".config/opencode"] {
             fs::create_dir_all(home.join(root)).expect("create the root's parent");
@@ -4065,7 +4085,7 @@ impl Harness {
     /// home-relative and stable.
     #[cfg(unix)]
     fn installed_inventory(&self) -> SkilledApp {
-        let home = self.directory.path().join("home");
+        let home = self.path().join("home");
         let repository = home.join("library");
         for skill in ["alpha", "beta"] {
             write_skill_fixture(&repository.join("skills").join(skill), skill);
@@ -4098,7 +4118,7 @@ impl Harness {
     /// through a compatibility root with nothing OpenCode-compatible behind it.
     #[cfg(unix)]
     fn resolution_inventory(&self) -> SkilledApp {
-        let home = self.directory.path().join("home");
+        let home = self.path().join("home");
         let first = home.join("alpha");
         write_skill_fixture(&first.join("skills/review"), "review");
         write_skill_fixture(&first.join("claude/skills/exposed"), "exposed");
@@ -4136,7 +4156,7 @@ impl Harness {
     /// the issue behind the scrollable region names.
     #[cfg(unix)]
     fn everywhere_installed_inventory(&self) -> SkilledApp {
-        let home = self.directory.path().join("home");
+        let home = self.path().join("home");
         // Named long enough that the observed target path cannot share a row
         // with its label: the field then wraps, and the window has a line
         // whose first row states a path as empty if it is cut after it.
@@ -4196,7 +4216,7 @@ impl Harness {
     #[cfg(unix)]
     fn unverified_provenance_inventory(&self) -> SkilledApp {
         let mut app = self.gamma_installed_two_ways();
-        let home = self.directory.path().join("home");
+        let home = self.path().join("home");
         fs::rename(home.join("library"), home.join("moved-away")).expect("move the checkout away");
         scan_installations(&mut app);
         app
@@ -4209,7 +4229,7 @@ impl Harness {
     /// reports instead.
     #[cfg(unix)]
     fn divergent_provenance_inventory(&self) -> SkilledApp {
-        let home = self.directory.path().join("home");
+        let home = self.path().join("home");
         let mut app = self.completed_setup();
         let library = self.registered_gamma_source(&mut app, "library");
         let annex = self.registered_gamma_source(&mut app, "annex");
@@ -4229,7 +4249,7 @@ impl Harness {
     /// path the caller installs from.
     #[cfg(unix)]
     fn registered_gamma_source(&self, app: &mut SkilledApp, name: &str) -> PathBuf {
-        let repository = self.directory.path().join("home").join(name);
+        let repository = self.path().join("home").join(name);
         write_skill_fixture(&repository.join("skills/gamma"), "gamma");
         create_repository(&repository);
         let preview = app.preview_source(&repository).expect("preview source");
@@ -4241,7 +4261,7 @@ impl Harness {
     /// source's name both outrun the capped identity columns.
     #[cfg(unix)]
     fn long_name_inventory(&self) -> SkilledApp {
-        let home = self.directory.path().join("home");
+        let home = self.path().join("home");
         let repository = home.join(LONG_SOURCE_DIRECTORY);
         let variant = repository.join("skills").join(LONG_SKILL_NAME);
         write_skill_fixture(&variant, LONG_SKILL_NAME);
@@ -4263,7 +4283,7 @@ impl Harness {
     /// stopping short of the scan so the checkout can still be moved.
     #[cfg(unix)]
     fn gamma_installed_two_ways(&self) -> SkilledApp {
-        let home = self.directory.path().join("home");
+        let home = self.path().join("home");
         let repository = home.join("library");
         write_skill_fixture(&repository.join("skills/gamma"), "gamma");
         create_repository(&repository);
@@ -4556,7 +4576,9 @@ fn a_withheld_postcondition_is_stated_rather_than_reported_as_verified() {
 #[cfg(unix)]
 #[test]
 fn a_preview_taller_than_its_dialog_says_so_and_can_be_scrolled_to_its_end() {
-    let harness = Harness::new();
+    // Long paths by construction, so the preview overflows the dialog on
+    // every platform's temporary directory, not only macOS's.
+    let harness = Harness::with_long_paths();
     let mut app = harness.installable_source();
     let update = app.update(Action::BeginInstall);
     app.perform_effects(update.effects()).expect("plan install");
@@ -4593,16 +4615,19 @@ fn a_preview_taller_than_its_dialog_says_so_and_can_be_scrolled_to_its_end() {
     assert!(rendered.contains("Home:"), "{rendered}");
     assert!(rendered.contains("more above"), "{rendered}");
     assert!(!rendered.contains("more below"), "{rendered}");
-    // The last line of the plan is the last thing in the body: between it and
-    // the rule that closes the body there is nothing left unread.
-    let last = row_containing(&screen, "Home:");
+    // The last line of the plan is the last thing in the body: the final
+    // content row before the rule that closes it is the tail of the wrapped
+    // home path, so nothing of the plan is left unread beneath the window.
     let rule = row_containing(&screen, "  ──────");
-    let below = ((last + 1)..rule)
-        .map(|y| row_text(&screen, y))
-        .filter_map(|row| dialog_interior(&row).map(str::trim).map(str::to_owned))
-        .filter(|row| !row.is_empty())
-        .collect::<Vec<_>>();
-    assert!(below.is_empty(), "{below:?} in\n{rendered}");
+    let last = (0..rule)
+        .rev()
+        .filter_map(|y| {
+            let row = row_text(&screen, y);
+            dialog_interior(&row).map(str::trim).map(str::to_owned)
+        })
+        .find(|row| !row.is_empty())
+        .expect("content above the closing rule");
+    assert!(last.ends_with("/home"), "{last:?} in\n{rendered}");
     // And a confirmation is accepted only now.
     let update = app.update(Action::ConfirmInstall);
     assert!(!update.effects().is_empty(), "{rendered}");
