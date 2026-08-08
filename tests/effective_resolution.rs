@@ -230,6 +230,38 @@ fn a_claude_only_variant_seen_through_a_compatibility_root_is_foreign_exposure()
     );
 }
 
+/// A compatibility declaration and an edition owner answer different
+/// questions. A common catalog with OpenCode unchecked is not another agent's
+/// edition, but Skilled still must not present it as a healthy OpenCode choice.
+#[test]
+fn an_incompatible_common_variant_is_not_foreign_or_healthy() {
+    let fixture = Fixture::new();
+    let repository = fixture.source("library", &[("skills", &["review"])]);
+    fixture.install_symlink(
+        AgentKind::ClaudeCode,
+        "review",
+        &repository.join("skills/review"),
+    );
+    let app = fixture.registered_without_opencode_compatibility(&repository);
+    let row = app.inventory().row("review").expect("review row");
+
+    assert!(matches!(
+        row.opencode_resolution(),
+        Some(OpenCodeResolution::IncompatibleExposure { .. })
+    ));
+    assert_eq!(row.verdict(), RowVerdict::IncompatibleVariant);
+    let finding = resolution_finding(row, "variant.incompatible_for_opencode");
+    assert_eq!(finding.severity(), FindingSeverity::Warning);
+    assert!(
+        finding.evidence().contains("not registered for OpenCode"),
+        "the evidence states the compatibility declaration: {finding:?}"
+    );
+    assert!(
+        !finding.evidence().contains("another agent's edition"),
+        "incompatibility is not misreported as foreignness: {finding:?}"
+    );
+}
+
 /// The non-case beside it: content Skilled did not place is not claimed to be a
 /// foreign variant, because compatibility cannot be checked for content that
 /// resolved to no registered variant.
@@ -870,6 +902,27 @@ impl Fixture {
 
     fn registered(&self, repositories: &[&Path]) -> SkilledApp {
         self.registered_with(repositories, [true; 3])
+    }
+
+    /// Complete setup through the public source-confirmation flow after
+    /// explicitly removing OpenCode from a common catalog's compatibility set.
+    fn registered_without_opencode_compatibility(&self, repository: &Path) -> SkilledApp {
+        let mut app = self.app();
+        for _ in 0..3 {
+            self.advance(&mut app);
+        }
+        app.update(Action::BeginAddSource);
+        for character in repository.to_string_lossy().chars() {
+            app.update(Action::AppendSourcePath(character));
+        }
+        let update = app.update(Action::SubmitSourcePath);
+        app.perform_effects(update.effects())
+            .expect("inspect source");
+        app.update(Action::ToggleCatalogCompatibility(AgentKind::OpenCode));
+        self.advance(&mut app);
+        self.advance(&mut app);
+        self.advance(&mut app);
+        app
     }
 
     /// An application whose setup is complete, with these repositories

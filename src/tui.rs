@@ -948,7 +948,7 @@ fn verdict_tone(verdict: RowVerdict) -> Tone {
         RowVerdict::NotASkill => Tone::Inactive,
         RowVerdict::Healthy => Tone::Healthy,
         RowVerdict::Unverified | RowVerdict::Unmanaged => Tone::Unmanaged,
-        RowVerdict::ForeignVariant => Tone::Warning,
+        RowVerdict::IncompatibleVariant | RowVerdict::ForeignVariant => Tone::Warning,
         RowVerdict::Broken | RowVerdict::Conflict => Tone::Critical,
     }
 }
@@ -1061,8 +1061,8 @@ struct DoctorColumns {
 const SEVERITY_COLUMN_WIDTH: usize = 11;
 /// Wide enough for `Claude Code` and a column of clearance.
 const DOCTOR_AGENT_WIDTH: usize = 12;
-/// The longest stable code this release can produce is
-/// `variant.foreign_opencode_exposure`, at thirty-three cells.
+/// The longest stable codes this release can produce are the OpenCode
+/// exposure codes, at thirty-three cells.
 const MAX_FINDING_CODE_WIDTH: usize = 34;
 const MINIMUM_FINDING_CODE_WIDTH: usize = 12;
 
@@ -1438,6 +1438,10 @@ fn finding_consequence(entry: &DoctorEntry<'_>) -> &'static str {
         "variant.foreign_opencode_exposure" => {
             "OpenCode can see another agent's edition of this skill and no edition of \
              its own. Skilled does not claim one agent's edition is usable by another."
+        }
+        "variant.incompatible_for_opencode" => {
+            "OpenCode can reach this registered variant, but its catalog excludes OpenCode. \
+             Skilled therefore does not claim the variant is usable by it."
         }
         "variant.benign_alias" => {
             "Nothing is wrong: every root reaches one directory, so one skill loads."
@@ -2051,7 +2055,11 @@ fn inventory_detail_lines(
     // is about rather than displacing an agent section that carries one.
     let resolution_leads = matches!(
         row.opencode_resolution(),
-        Some(OpenCodeResolution::Conflict { .. } | OpenCodeResolution::ForeignExposure { .. })
+        Some(
+            OpenCodeResolution::Conflict { .. }
+                | OpenCodeResolution::ForeignExposure { .. }
+                | OpenCodeResolution::IncompatibleExposure { .. },
+        )
     );
     if resolution_leads {
         push_opencode_resolution(&mut lines, row, roots, home, width);
@@ -2130,6 +2138,9 @@ fn push_opencode_resolution(
         OpenCodeResolution::ForeignExposure { .. } => {
             components::badge(Tone::Warning, "foreign variant")
         }
+        OpenCodeResolution::IncompatibleExposure { .. } => {
+            components::badge(Tone::Warning, "incompatible")
+        }
         OpenCodeResolution::Conflict { .. } => components::badge(Tone::Critical, "conflict"),
         // The same "could not tell" the scanner keeps everywhere else: a root
         // Skilled was asked to leave alone was not read, and a lower root can
@@ -2157,7 +2168,8 @@ fn push_opencode_resolution(
     match resolution {
         OpenCodeResolution::NothingVisible => {}
         OpenCodeResolution::Selected { winner, aliases }
-        | OpenCodeResolution::ForeignExposure { winner, aliases } => {
+        | OpenCodeResolution::ForeignExposure { winner, aliases }
+        | OpenCodeResolution::IncompatibleExposure { winner, aliases } => {
             lines.push(loaded_field("Loads", winner, home, width));
             if !aliases.is_empty() {
                 lines.push(detail_field_bounded(

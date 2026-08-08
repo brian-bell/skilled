@@ -276,9 +276,9 @@ impl InstalledSkillObservation {
 /// The declared order is the rule: a row takes the greatest of what its
 /// installations are and what OpenCode's effective resolution makes of them.
 /// A conflicting duplicate outranks everything, because an agent resolving the
-/// wrong content is worse than an agent resolving nothing; foreign exposure
-/// ranks below broken, because content OpenCode merely cannot claim is a
-/// lesser fault than content no agent can load.
+/// wrong content is worse than an agent resolving nothing; incompatible and
+/// foreign exposure rank below broken, because content OpenCode merely cannot
+/// claim is a lesser fault than content no agent can load.
 ///
 /// [`InstallationHealth`] stays the vocabulary of one installation. This is the
 /// vocabulary of a row, which is the only place an effective resolution exists.
@@ -288,6 +288,8 @@ pub enum RowVerdict {
     Healthy,
     Unverified,
     Unmanaged,
+    /// A registered variant is visible to OpenCode but excludes it.
+    IncompatibleVariant,
     /// Another agent's agent-specific variant is all OpenCode can see.
     ForeignVariant,
     Broken,
@@ -308,6 +310,7 @@ impl RowVerdict {
             Self::Healthy => "healthy",
             Self::Unverified => "unverified",
             Self::Unmanaged => "unmanaged",
+            Self::IncompatibleVariant => "incompatible",
             Self::ForeignVariant => "foreign",
             Self::Broken => "broken",
             Self::Conflict => "conflict",
@@ -368,6 +371,9 @@ impl InventoryRow {
         let installations = RowVerdict::of(self.health);
         match &self.opencode_resolution {
             Some(OpenCodeResolution::Conflict { .. }) => installations.max(RowVerdict::Conflict),
+            Some(OpenCodeResolution::IncompatibleExposure { .. }) => {
+                installations.max(RowVerdict::IncompatibleVariant)
+            }
             Some(OpenCodeResolution::ForeignExposure { .. }) => {
                 installations.max(RowVerdict::ForeignVariant)
             }
@@ -662,8 +668,8 @@ fn doctor_order(code: &str) -> u8 {
         "variant.duplicate_for_agent" => 1,
         // 3. Invalid SKILL.md content or frontmatter.
         code if code.starts_with("skill.") => 2,
-        // 4. Wrong or foreign agent variant.
-        "variant.foreign_opencode_exposure" => 3,
+        // 4. Wrong, foreign, or explicitly incompatible agent variant.
+        "variant.foreign_opencode_exposure" | "variant.incompatible_for_opencode" => 3,
         // 5 and 6 — disabled skills, blocked updates — have no codes yet.
         // 7. Missing or ambiguous provenance.
         "install.provenance_unverified" => 6,
@@ -1130,6 +1136,22 @@ fn opencode_findings(name: &str, resolution: &OpenCodeResolution, rule: &str) ->
                 ),
             }]
         }
+        OpenCodeResolution::IncompatibleExposure { winner, aliases } => {
+            let variant = winner
+                .variant()
+                .map(VariantRef::evidence_label)
+                .unwrap_or_default();
+            vec![Finding {
+                code: "variant.incompatible_for_opencode",
+                severity: FindingSeverity::Warning,
+                evidence: format!(
+                    "{} resolves to {variant}, whose registered catalog is not registered for \
+                     OpenCode. {rule}, so OpenCode can reach this name but Skilled does not \
+                     claim the variant is usable by it.",
+                    joined_paths(std::iter::once(winner).chain(aliases), name)
+                ),
+            }]
+        }
         OpenCodeResolution::Conflict { entries } => {
             let paths = joined_paths(entries, name);
             let winner = entries
@@ -1219,6 +1241,7 @@ fn selection_findings(
                             Some(
                                 OpenCodeResolution::Selected { .. }
                                     | OpenCodeResolution::ForeignExposure { .. }
+                                    | OpenCodeResolution::IncompatibleExposure { .. }
                                     | OpenCodeResolution::Conflict { .. }
                             )
                         ))

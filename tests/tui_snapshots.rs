@@ -1051,6 +1051,9 @@ mod installed {
         let second = home.join("beta");
         write_skill(&second.join("skills/review"), "review");
         create_repository(&second);
+        let third = home.join("gamma");
+        write_skill(&third.join("skills/excluded"), "excluded");
+        create_repository(&third);
 
         let mut app = SkilledApp::open(AppEnvironment::new(
             &home,
@@ -1065,6 +1068,14 @@ mod installed {
             let preview = app.preview_source(repository).expect("preview source");
             app.confirm_source(preview).expect("register source");
         }
+        app.update(Action::OpenSources);
+        app.update(Action::BeginAddSource);
+        for character in third.to_string_lossy().chars() {
+            app.update(Action::AppendSourcePath(character));
+        }
+        dispatch(&mut app, Action::SubmitSourcePath);
+        app.update(Action::ToggleCatalogCompatibility(AgentKind::OpenCode));
+        dispatch(&mut app, Action::ConfirmPendingSource);
 
         let claude = home.join(".claude/skills");
         let codex = home.join(".agents/skills");
@@ -1083,6 +1094,8 @@ mod installed {
             &first.join("claude/skills/exposed"),
             &claude.join("exposed"),
         );
+        // A common variant OpenCode can reach whose catalog excludes it.
+        link(&third.join("skills/excluded"), &claude.join("excluded"));
         // And a link with nothing behind it.
         link(&home.join("gone"), &claude.join("dangling"));
 

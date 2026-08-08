@@ -110,13 +110,34 @@ impl VariantRef {
         if !self.compatibility.supports(agent) {
             return false;
         }
+        self.edition_owner().is_none_or(|owner| owner == agent)
+    }
+
+    /// The agent whose edition an agent-specific catalog path names.
+    ///
+    /// Common catalogs have no edition owner, and neither does an
+    /// agent-specific catalog whose path matches no adapter convention. That
+    /// distinction matters to effective resolution: either catalog can be
+    /// incompatible with an agent, but incompatibility alone does not make its
+    /// contents another agent's edition.
+    fn edition_owner(&self) -> Option<AgentKind> {
         if self.classification == CatalogClassification::Common {
-            return true;
+            return None;
         }
-        let owner = AgentKind::ALL
+        AgentKind::ALL
             .into_iter()
-            .find(|kind| adapter(*kind).owns_source_catalog(&self.catalog_relative_path));
-        owner.is_none_or(|owner| owner == agent)
+            .find(|kind| adapter(*kind).owns_source_catalog(&self.catalog_relative_path))
+    }
+
+    /// Whether this variant is specifically another agent's edition.
+    fn is_foreign_to(&self, agent: AgentKind) -> bool {
+        self.edition_owner().is_some_and(|owner| owner != agent)
+    }
+
+    /// Whether the catalog's stored compatibility declaration includes this
+    /// agent, independently of which agent-specific edition its path names.
+    fn registered_for(&self, agent: AgentKind) -> bool {
+        self.compatibility.supports(agent)
     }
 
     /// One phrase naming this variant, for a finding's evidence.
@@ -349,6 +370,13 @@ pub enum OpenCodeResolution {
         winner: OpenCodeEntry,
         aliases: Vec<OpenCodeEntry>,
     },
+    /// The visible registered definition is not another agent's edition, but
+    /// its catalog explicitly excludes OpenCode. Skilled can state what
+    /// OpenCode would reach without claiming that the content is usable.
+    IncompatibleExposure {
+        winner: OpenCodeEntry,
+        aliases: Vec<OpenCodeEntry>,
+    },
     /// More than one directory is visible under the name. Precedence still
     /// picks one, but the arrangement is a conflicting duplicate.
     Conflict { entries: Vec<OpenCodeEntry> },
@@ -439,25 +467,39 @@ pub fn resolve_opencode(sightings: [RootSighting; 3]) -> OpenCodeResolution {
         };
     }
     // Exposure is decided over every root the name is visible through, not the
-    // winner alone: content that resolved to no registered variant cannot have
-    // its compatibility checked at all, and one OpenCode-compatible sighting is
-    // enough to make the name usable.
+    // winner alone: content that resolved to no registered variant has no
+    // edition owner, and one sighting that is not another agent's edition is
+    // enough to keep the name from being labelled foreign.
     //
     // The root it was reached through is deliberately not part of the test:
     // the claim Skilled must not make — that OpenCode can use this — is exactly
     // as false for another agent's variant sitting in OpenCode's own root, and
     // reporting only the compatibility-root case would put a healthy badge over
-    // the worse arrangement. What OpenCode can use is
-    // [`VariantRef::usable_by`], which is narrower than the stored
-    // compatibility set for the reason recorded there.
+    // the worse arrangement. Foreignness deliberately asks only which agent's
+    // edition the path names. [`VariantRef::usable_by`] also considers the
+    // independently stored compatibility set, so it is too broad a predicate
+    // for this classification.
     let foreign = std::iter::once(&winner).chain(&aliases).all(|entry| {
         entry
             .variant
             .as_ref()
-            .is_some_and(|variant| !variant.usable_by(AgentKind::OpenCode))
+            .is_some_and(|variant| variant.is_foreign_to(AgentKind::OpenCode))
     });
     if foreign {
-        OpenCodeResolution::ForeignExposure { winner, aliases }
+        return OpenCodeResolution::ForeignExposure { winner, aliases };
+    }
+    // Compatibility is a separate declaration from edition ownership. Once
+    // the exclusively-foreign case above has been ruled out, every visible
+    // registered variant excluding OpenCode is still a weakened resolution:
+    // Skilled can name what the agent reaches, but cannot call it usable.
+    let incompatible = std::iter::once(&winner).chain(&aliases).all(|entry| {
+        entry
+            .variant
+            .as_ref()
+            .is_some_and(|variant| !variant.registered_for(AgentKind::OpenCode))
+    });
+    if incompatible {
+        OpenCodeResolution::IncompatibleExposure { winner, aliases }
     } else {
         OpenCodeResolution::Selected { winner, aliases }
     }
@@ -787,6 +829,45 @@ mod tests {
                     OpenCodeResolution::Selected { .. }
                 ),
                 "content OpenCode may load is a selection, not exposure"
+            );
+        }
+    }
+
+    /// Compatibility answers whether an agent may use a variant, not which
+    /// agent's edition it is. A common catalog and an agent-specific catalog
+    /// whose path names no owner therefore remain selections when OpenCode is
+    /// unchecked; neither is evidence that another agent's edition is exposed.
+    #[test]
+    fn incompatibility_alone_is_not_misreported_as_a_foreign_edition() {
+        for candidate in [
+            variant(
+                "skills",
+                CatalogClassification::Common,
+                &[AgentKind::ClaudeCode, AgentKind::Codex],
+            ),
+            variant(
+                "custom/skills",
+                CatalogClassification::AgentSpecific,
+                &[AgentKind::ClaudeCode],
+            ),
+        ] {
+            let mut per_agent = [
+                RootSighting::NothingToLoad,
+                RootSighting::NothingToLoad,
+                RootSighting::NothingToLoad,
+            ];
+            per_agent[AgentKind::ClaudeCode.index()] = entry(
+                "/home/.claude/skills/review",
+                "/repo/skills/review",
+                Some(candidate),
+            );
+
+            assert!(
+                matches!(
+                    resolve_opencode(per_agent),
+                    OpenCodeResolution::IncompatibleExposure { .. }
+                ),
+                "incompatibility is recorded without inventing a foreign edition"
             );
         }
     }

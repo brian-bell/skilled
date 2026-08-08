@@ -2,18 +2,18 @@
 source: tests/tui_snapshots.rs
 expression: "normalize_inventory(&temporary, render(&app, 120, 40))"
 ---
- ◆ skilled   global                                                                      ● ready · 2 sources registered
- 1 Inventory ·4  2 Sources ·2  Updates (soon) ▌Doctor ·6
-▌ Doctor  6 findings                                                            │ Details  dangling
+ ◆ skilled   global                                                                      ● ready · 3 sources registered
+ 1 Inventory ·5  2 Sources ·3  Updates (soon) ▌Doctor ·7
+▌ Doctor  7 findings                                                            │ Details  dangling
 ────────────────────────────────────────────────────────────────────────────────│ ─────────────────────────────────────
   SEVERITY   FINDING                           SKILL                AGENT       │ FINDING
 ▌ × critical install.dangling_symlink          dangling             Claude Code │ ─────────────────────────────────────
   × critical variant.duplicate_for_agent       review               Claude Code │ install.dangling_symlink
   × critical variant.duplicate_for_agent       review               OpenCode    │ × critical
   ! warning  variant.duplicate_for_agent       review               Codex       │ Agent: Claude Code
-  ! warning  variant.foreign_opencode_exposure exposed              OpenCode    │ OBSERVED
-  - info     variant.benign_alias              shared               OpenCode    │ ─────────────────────────────────────
-                                                                                │ the link target does not exist
+  ! warning  variant.incompatible_for_opencode excluded             OpenCode    │ OBSERVED
+  ! warning  variant.foreign_opencode_exposure exposed              OpenCode    │ ─────────────────────────────────────
+  - info     variant.benign_alias              shared               OpenCode    │ the link target does not exist
                                                                                 │ CONSEQUENCE
                                                                                 │ ─────────────────────────────────────
                                                                                 │ The agent finds a link with nothing

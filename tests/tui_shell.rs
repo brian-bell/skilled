@@ -3846,10 +3846,11 @@ impl Harness {
         app
     }
 
-    /// Two rows whose verdict comes from OpenCode's effective resolution
+    /// Three rows whose verdict comes from OpenCode's effective resolution
     /// rather than from any one installation: one name resolving to two
-    /// different directories, and one Claude Code edition reaching OpenCode
-    /// through a compatibility root with nothing OpenCode-compatible behind it.
+    /// different directories, one Claude Code edition reaching OpenCode
+    /// through a compatibility root, and one common variant whose catalog
+    /// explicitly excludes OpenCode.
     #[cfg(unix)]
     fn resolution_inventory(&self) -> SkilledApp {
         let home = self.directory.path().join("home");
@@ -3860,12 +3861,27 @@ impl Harness {
         let second = home.join("beta");
         write_skill_fixture(&second.join("skills/review"), "review");
         create_repository(&second);
+        let third = home.join("gamma");
+        write_skill_fixture(&third.join("skills/excluded"), "excluded");
+        create_repository(&third);
 
         let mut app = self.completed_setup();
         for repository in [&first, &second] {
             let preview = app.preview_source(repository).expect("preview source");
             app.confirm_source(preview).expect("register source");
         }
+        app.update(Action::OpenSources);
+        app.update(Action::BeginAddSource);
+        for character in third.to_string_lossy().chars() {
+            app.update(Action::AppendSourcePath(character));
+        }
+        let update = app.update(Action::SubmitSourcePath);
+        app.perform_effects(update.effects())
+            .expect("inspect source");
+        app.update(Action::ToggleCatalogCompatibility(AgentKind::OpenCode));
+        let update = app.update(Action::ConfirmPendingSource);
+        app.perform_effects(update.effects())
+            .expect("register source");
         let claude = home.join(".claude/skills");
         let opencode = home.join(".config/opencode/skills");
         fs::create_dir_all(&claude).expect("create Claude Code root");
@@ -3874,6 +3890,7 @@ impl Harness {
         symlink(first.join("skills/review"), opencode.join("review"));
         symlink(second.join("skills/review"), claude.join("review"));
         symlink(first.join("claude/skills/exposed"), claude.join("exposed"));
+        symlink(third.join("skills/excluded"), claude.join("excluded"));
 
         app.update(Action::OpenSources);
         let update = app.update(Action::OpenInventory);
@@ -4304,6 +4321,12 @@ mod installed {
                 "warning",
                 Color::Rgb(0xe6, 0xbd, 0x6a),
             ),
+            (
+                "variant.incompatible_for_opencode",
+                "!",
+                "warning",
+                Color::Rgb(0xe6, 0xbd, 0x6a),
+            ),
         ] {
             let row = row_containing(&screen, code);
             let line = row_text(&screen, row);
@@ -4340,6 +4363,12 @@ mod installed {
         for (name, glyph, word, colour) in [
             ("review", "×", "conflict", Color::Rgb(0xee, 0x6b, 0x73)),
             ("exposed", "!", "foreign", Color::Rgb(0xe6, 0xbd, 0x6a)),
+            (
+                "excluded",
+                "!",
+                "incompatible",
+                Color::Rgb(0xe6, 0xbd, 0x6a),
+            ),
         ] {
             let row = row_containing(&screen, name);
             let line = row_text(&screen, row);
