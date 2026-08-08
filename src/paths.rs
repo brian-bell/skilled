@@ -83,6 +83,8 @@ fn process_identity() -> SessionIdentity {
     SessionIdentity {
         user: std::env::var("USER")
             .or_else(|_| std::env::var("LOGNAME"))
+            // Native Windows spells the same fact USERNAME.
+            .or_else(|_| std::env::var("USERNAME"))
             .ok()
             .and_then(non_empty),
         host: Command::new("hostname")

@@ -2,8 +2,8 @@
 source: tests/tui_snapshots.rs
 expression: "normalize_install_screen(&temporary, render(&app, 120, 40))"
 ---
- ◆ skilled  global
- 1┌ Install skill ────────────────────────────────────────────────────────────────────────────── nothing written yet ┐d
+ ◆ skilled  global                                                                        ● ready · 1 source registered
+ 1┌ Install skill ────────────────────────────────────────────────────────────────────────────── nothing written yet ┐
 Re│                                                                                                                  │
 ──│  Skill: portable                                                                                                 │─
 ▌ │  From: src · skills                                                                                              │
