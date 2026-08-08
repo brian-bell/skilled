@@ -2,8 +2,8 @@
 source: tests/tui_snapshots.rs
 expression: "render(&app, 120, 40)"
 ---
- ◆ skilled   global                                                                      ● ready · 0 sources registered
-▌Inventory  2 Sources ·0  Updates (soon)  4 Doctor
+ ◆ skilled  global
+▌Inventory      │ 2 Sources ·0   │ Updates (soon) │ 4 Doctor       │                     ● ready · 0 sources registered
 ▌ Global inventory  no root read                                                │ Details  no selection
 Roots: Claude Code no root · Codex no root · OpenCode no root                   │ ─────────────────────────────────────
 ────────────────────────────────────────────────────────────────────────────────│

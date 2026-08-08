@@ -2,7 +2,7 @@
 source: tests/tui_snapshots.rs
 expression: "normalize_inventory(&temporary, render(&app, 80, 24))"
 ---
- ◆ skilled   global                               ● ready · 1 source registered
+ ◆ skilled  global                                ● ready · 1 source registered
  Filter inventory   navigation is locked while the filter is open
 ▌ Global inventory  1 of 3 listed
 /unman▌

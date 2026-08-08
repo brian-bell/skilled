@@ -2,7 +2,7 @@
 source: tests/tui_snapshots.rs
 expression: "render(&app, 80, 24)"
 ---
- ◆ skilled   global                                         ● setup in progress
+ ◆ skilled  global                                          ● setup in progress
  Setup · Scan installations   navigation is locked during setup
   ┌ First-run setup ───────────────────────────────────── global skills only ┐
   │                                                                          │

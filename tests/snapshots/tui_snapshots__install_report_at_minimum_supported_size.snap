@@ -2,7 +2,7 @@
 source: tests/tui_snapshots.rs
 expression: "normalize_install_screen(&temporary, render(&app, 80, 24))"
 ---
- ◆ skilled   global                               ● ready · 1 source registered
+ ◆ skilled  global                                ● ready · 1 source registered
  1┌ Install result ───────────────────────────────────────── already applied ┐
 ▌ │                                                                          │
 ──│  Skill: portable                                                         │──

@@ -2,8 +2,8 @@
 source: tests/tui_snapshots.rs
 expression: rendered
 ---
- ◆ skilled   global                                                                      ● ready · 0 sources registered
- Confirm catalogs   navigation is locked while this dialog is open
+ ◆ skilled  global
+ Confirm catalogs   navigation is locked while this dialog is open                       ● ready · 0 sources registered
 ▌ Repositories  0 registered     │ Available variants  no source                │ Details  no selection
 ─────────────────────────────────│ ─────────────────────────────────────────────│ ─────────────────────────────────────
                                  │                                              │

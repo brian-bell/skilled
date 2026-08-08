@@ -2,8 +2,8 @@
 source: tests/tui_snapshots.rs
 expression: "render(&app, 120, 40)"
 ---
- ◆ skilled   global                                                                      ● ready · 0 sources registered
- Keyboard reference   navigation is locked while this dialog is open
+ ◆ skilled  global
+ Keyboard reference   navigation is locked while this dialog is open                     ● ready · 0 sources registered
 ▌ Repositories  0 registered     │ Available variants  no source                │ Details  no selection
 ─────────────────────────────────│ ─────────────────────────────────────────────│ ─────────────────────────────────────
                                  │                                              │
