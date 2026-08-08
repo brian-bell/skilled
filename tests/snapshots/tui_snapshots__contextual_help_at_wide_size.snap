@@ -1,13 +1,14 @@
 ---
 source: tests/tui_snapshots.rs
+assertion_line: 66
 expression: "render(&app, 120, 40)"
 ---
  ◆ skilled  global                                                                       ● ready · 0 sources registered
+
  Keyboard reference   navigation is locked while this dialog is open
+
 ▌ Repositories  0 registered     │ Available variants  no source                │ Details  no selection
 ─────────────────────────────────│ ─────────────────────────────────────────────│ ─────────────────────────────────────
-                                 │                                              │
-                                 │                                              │
                                  │                                              │
                                  │                                              │
                                  │                                              │
@@ -22,10 +23,10 @@ expression: "render(&app, 120, 40)"
             │  1 Inventory — return to Inventory             q Quit — quit when no dialog is open          │
             │  4 Doctor — open the findings list                                                           │
             │                                                                                              │
+            │                                                                                              │
     No sourc│                                                                                              │d
             │                                                                                              │
  Press a to │                                                                                              │ its stored
-            │                                                                                              │
             │                                                                                              │
             │                                                                                              │
             │  ──────────────────────────────────────────────────────────────────────────────────────────  │
@@ -40,5 +41,5 @@ expression: "render(&app, 120, 40)"
                                  │                                              │
                                  │                                              │
                                  │                                              │
-                                 │                                              │
+
  Esc Close   Ctrl-C Quit

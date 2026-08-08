@@ -115,6 +115,30 @@ pub(crate) fn nav_active() -> Style {
         .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
 }
 
+/// The active navigation entry where the strip is tall enough to draw the
+/// prototype's tab border as a row of its own.
+///
+/// The underline [`nav_active()`] carries stands in for that border when the
+/// strip is a single row; with an accent row beneath the label doing the
+/// border's work, keeping it would draw the border twice at two heights. The
+/// marker, the weight, the raised surface, and the absent route digit still
+/// signal the active entry without colour.
+pub(crate) fn nav_active_tall() -> Style {
+    Style::default()
+        .fg(TEXT_STRONG)
+        .bg(SURFACE_2)
+        .add_modifier(Modifier::BOLD)
+}
+
+/// The active tab's bottom border, drawn as its own row of the tall strip
+/// (prototype `.tab[aria-selected="true"]` `border-bottom-color: var(--cyan)`).
+///
+/// The glyph row keeps the active entry's raised surface, so the tab reads as
+/// one box from its label to its border.
+pub(crate) fn nav_accent() -> Style {
+    Style::default().fg(CYAN).bg(SURFACE_2)
+}
+
 /// A navigation entry the user can reach but is not currently viewing.
 pub(crate) fn nav_inactive() -> Style {
     Style::default().fg(MUTED).bg(SURFACE)
@@ -152,6 +176,17 @@ pub(crate) fn nav_separator() -> Style {
 /// The surface behind the focused row of a list.
 pub(crate) fn selected_row() -> Style {
     Style::default().bg(SURFACE_3).add_modifier(Modifier::BOLD)
+}
+
+/// The name that identifies a list row (prototype `.skill-name`, set at
+/// `font-weight: 600`).
+///
+/// Emphasis only: no foreground of its own, so the name keeps the row's text
+/// colour on every surface — including the selected band, where the
+/// prototype brightens it to `--text-strong` and a terminal's bold is the
+/// closest equivalent — and the contrast sweep needs no entry for it.
+pub(crate) fn row_title() -> Style {
+    Style::default().add_modifier(Modifier::BOLD)
 }
 
 /// The marker on the focused row of a list.
@@ -399,6 +434,8 @@ mod tests {
             ("product_mark()", product_mark()),
             ("product_name()", product_name()),
             ("nav_active()", nav_active()),
+            ("nav_active_tall()", nav_active_tall()),
+            ("nav_accent()", nav_accent()),
             ("nav_inactive()", nav_inactive()),
             ("nav_count()", nav_count()),
             ("nav_note()", nav_note()),

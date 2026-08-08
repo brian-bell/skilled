@@ -1,13 +1,14 @@
 ---
 source: tests/tui_snapshots.rs
+assertion_line: 274
 expression: rendered
 ---
  ◆ skilled  global                                                                       ● ready · 0 sources registered
+
  Confirm catalogs   navigation is locked while this dialog is open
+
 ▌ Repositories  0 registered     │ Available variants  no source                │ Details  no selection
 ─────────────────────────────────│ ─────────────────────────────────────────────│ ─────────────────────────────────────
-                                 │                                              │
-                                 │                                              │
                                  │                                              │
                                  │                                              │
                                  │                                              │
@@ -22,10 +23,10 @@ expression: rendered
         │  ▌ Included · skills · 1 candidate                                                                   │
         │    Common catalog · Claude Code: yes · Codex: yes · OpenCode: yes                                    │
         │                                                                                                      │
+        │                                                                                                      │
     No s│                                                                                                      │
         │                                                                                                      │
  Press a│                                                                                                      │ stored
-        │                                                                                                      │
         │                                                                                                      │
         │                                                                                                      │
         │  ──────────────────────────────────────────────────────────────────────────────────────────────────  │
@@ -40,5 +41,5 @@ expression: rendered
                                  │                                              │
                                  │                                              │
                                  │                                              │
-                                 │                                              │
+
  j/k Move   Space Include   c Class   1/2/3 Agents   Enter Register   Esc Cancel

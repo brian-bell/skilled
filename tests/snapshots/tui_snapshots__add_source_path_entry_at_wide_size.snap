@@ -1,13 +1,14 @@
 ---
 source: tests/tui_snapshots.rs
+assertion_line: 211
 expression: "render(&app, 120, 40)"
 ---
  ◆ skilled  global                                                                       ● ready · 0 sources registered
+
  Add source   navigation is locked while this dialog is open
+
 ▌ Repositories  0 registered     │ Available variants  no source                │ Details  no selection
 ─────────────────────────────────│ ─────────────────────────────────────────────│ ─────────────────────────────────────
-                                 │                                              │
-                                 │                                              │
                                  │                                              │
                                  │                                              │
                                  │                                              │
@@ -20,13 +21,13 @@ expression: "render(&app, 120, 40)"
                     │                                                                              │
                     │  Local Git repository                                                        │
                     │  Enter a path inside a local Git checkout:                                   │
-                ·   │                                                                              │·
-                    │  > /Users/example/dev/skills                                                 │
+                    │                                                                              │
+                ·   │  > /Users/example/dev/skills                                                 │·
+                    │                                                                              │
     No sources are r│                                                                              │ selected
-                    │                                                                              │
- Press a to register│  ──────────────────────────────────────────────────────────────────────────  │y to see its stored
-            checkout│  Read-only checkout and catalog scan             Esc Cancel   Enter Inspect  │ils.
-                    │                                                                              │
+                    │  ──────────────────────────────────────────────────────────────────────────  │
+ Press a to register│  Read-only checkout and catalog scan             Esc Cancel   Enter Inspect  │y to see its stored
+            checkout│                                                                              │ils.
                     └──────────────────────────────────────────────────────────────────────────────┘
                                  │                                              │
                                  │                                              │
@@ -40,5 +41,5 @@ expression: "render(&app, 120, 40)"
                                  │                                              │
                                  │                                              │
                                  │                                              │
-                                 │                                              │
+
  Enter Inspect   Esc Cancel   Ctrl-C Quit

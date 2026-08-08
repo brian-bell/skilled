@@ -1,8 +1,10 @@
 ---
 source: tests/tui_snapshots.rs
+assertion_line: 33
 expression: "render(&app, 120, 40)"
 ---
  ◆ skilled  global
+
  Setup · Welcome and scope   navigation is locked during setup                                      ● setup in progress
 
 
@@ -36,7 +38,6 @@ expression: "render(&app, 120, 40)"
               │  Setup is persisted when it finishes                                     Enter Continue  │
               │                                                                                          │
               └──────────────────────────────────────────────────────────────────────────────────────────┘
-
 
 
 

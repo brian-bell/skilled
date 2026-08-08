@@ -1,9 +1,12 @@
 ---
 source: tests/tui_snapshots.rs
+assertion_line: 1119
 expression: "normalize_inventory(&temporary, render(&app, 120, 40))"
 ---
  ◆ skilled  global
+
  1 Inventory ·4 │ 2 Sources ·2   │ Updates (soon) │▌Doctor ·6      │                     ● ready · 2 sources registered
+                │                │                │▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁│
 ▌ Doctor  6 findings                                                            │ Details  dangling
 ────────────────────────────────────────────────────────────────────────────────│ ─────────────────────────────────────
   SEVERITY   FINDING                           SKILL                AGENT       │ FINDING
@@ -38,7 +41,5 @@ expression: "normalize_inventory(&temporary, render(&app, 120, 40))"
                                                                                 │
                                                                                 │
                                                                                 │
-                                                                                │
-                                                                                │
-                                                                                │
+
  Tab/Shift-Tab Region   j/k Move   Enter Open   1 Inventory   2 Sources   ? Help   q Quit   Esc Back

@@ -4,25 +4,25 @@ assertion_line: 1562
 expression: "normalize_install_screen(&temporary, render(&app, 120, 40))"
 ---
  ◆ skilled  global                                                                        ● ready · 1 source registered
- 1┌ Install result ───────────────────────────────────────────────────────────────────────────────── already applied ┐
-Re│                                                                                                                  │
-──│  Skill: portable                                                                                                 │─
-▌ │  Links to: [TEMP]                    /src/skills/portable                                                        │
-▌ │                                                                                                                  │─
+  ┌ Install result ───────────────────────────────────────────────────────────────────────────────── already applied ┐
+ 1│                                                                                                                  │
+  │  Skill: portable                                                                                                 │
+Re│  Links to: [TEMP]                    /src/skills/portable                                                        │
+──│                                                                                                                  │─
 ▌ │  Steps                                                                                                           │
-  │  ✓ Claude Code: link created                                                                                     │
-  │      [TEMP]                    /home/.claude/skills/portable                                                     │
+▌ │  ✓ Claude Code: link created                                                                                     │─
+▌ │      [TEMP]                    /home/.claude/skills/portable                                                     │
   │  ✓ Codex: link created                                                                                           │
   │      [TEMP]                    /home/.agents/skills/portable                                                     │
   │  ✓ OpenCode: link created                                                                                        │
   │      [TEMP]                    /home/.config/opencode/skills/portable                                            │
-  │                                                                                                                  │─
-  │  Verification                                                                                                    │n
-  │  ✓ every link written was observed again and matches this plan                                                   │
+  │                                                                                                                  │
+  │  Verification                                                                                                    │
+  │  ✓ every link written was observed again and matches this plan                                                   │─
+  │                                                                                                                  │n
+  │                                                                                                                  │
   │                                                                                                                  │
   │                                                                                                                  │─
-  │                                                                                                                  │
-  │                                                                                                                  │
   │                                                                                                                  │
   │                                                                                                                  │
   │                                                                                                                  │
