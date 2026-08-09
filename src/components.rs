@@ -247,6 +247,23 @@ pub(crate) fn dialog_regions(inner: Rect, action_width: u16) -> DialogRegions {
     }
 }
 
+/// The one text row of a band drawn taller than its content: pad–text–pad.
+///
+/// The prototype centres a chrome bar's single line vertically
+/// (`.terminal-titlebar` is a flex row with `align-items: center`), and whole
+/// rows of padding either side are how a terminal says that. The caller
+/// paints the band across the full rectangle and renders its text in the row
+/// this returns; integer halving keeps the middle row for any odd height and
+/// the lower of the two middle rows for an even one, where true centring
+/// does not exist.
+pub(crate) fn centered_band_row(band: Rect) -> Rect {
+    Rect {
+        y: band.y + band.height / 2,
+        height: band.height.min(1),
+        ..band
+    }
+}
+
 /// Text from the filesystem, made safe to write to a terminal.
 ///
 /// Skill names, catalog paths, checkout directories, link targets, and the text

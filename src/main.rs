@@ -3,7 +3,7 @@ use std::{
     process::ExitCode,
 };
 
-use skilled::{AppEnvironment, cli, run};
+use skilled::{AppEnvironment, SessionIdentity, cli, run};
 
 fn main() -> ExitCode {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
@@ -16,9 +16,11 @@ fn main() -> ExitCode {
     };
     // No arguments is the interactive application, which is what Skilled has
     // always been. Anything else is a command, and a command reports through
-    // an exit status a script can act on.
+    // an exit status a script can act on. Only the interactive application
+    // gathers the session identity its title bar shows; a command never runs
+    // the hostname lookup whose result it would not display.
     if arguments.is_empty() {
-        return match run(environment) {
+        return match run(environment.with_identity(SessionIdentity::for_process())) {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
                 eprintln!("skilled: {error}");

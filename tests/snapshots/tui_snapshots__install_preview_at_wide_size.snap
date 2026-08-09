@@ -2,43 +2,43 @@
 source: tests/tui_snapshots.rs
 expression: "normalize_install_screen(&temporary, render(&app, 120, 40))"
 ---
- ◆ skilled   global                                                                       ● ready · 1 source registered
- 1┌ Install skill ────────────────────────────────────────────────────────────────────────────── nothing written yet ┐
-Re│                                                                                                                  │
-──│  Skill: portable                                                                                                 │─
-▌ │  From: src · skills                                                                                              │
-▌ │  Links to: [CANONICAL]                 /src/skills/portable                                                      │─
-▌ │                                                                                                                  │
-  │  Targets                                                                                                         │c
-  │  ✓ Claude Code: create the skill root, then the link                                                             │
-  │      [TEMP]                      /home/.claude/skills/portable                                                   │
-  │  ✓ Codex: create the skill root, then the link                                                                   │
-  │      [TEMP]                      /home/.agents/skills/portable                                                   │
-  │  ✓ OpenCode: create the skill root, then the link                                                                │
-  │      [TEMP]                      /home/.config/opencode/skills/portable                                          │─
-  │                                                                                                                  │n
-  │  Home: [TEMP]                      /home                                                                         │
-  │                                                                                                                  │
-  │                                                                                                                  │─
-  │                                                                                                                  │
-  │                                                                                                                  │
-  │                                                                                                                  │
-  │                                                                                                                  │
-  │                                                                                                                  │
-  │                                                                                                                  │
-  │                                                                                                                  │
-  │                                                                                                                  │
-  │                                                                                                                  │
-  │                                                                                                                  │
-  │                                                                                                                  │
-  │                                                                                                                  │
-  │                                                                                                                  │
-  │                                                                                                                  │
-  │                                                                                                                  │
-  │                                                                                                                  │
-  │                                                                                                                  │
-  │  ──────────────────────────────────────────────────────────────────────────────────────────────────────────────  │
-  │  3 links to create                                                                   Enter Install   Esc Cancel  │
-  │                                                                                                                  │
-  └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
- Enter Install   Esc Cancel   Ctrl-C Quit
+ ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁
+▕                                                                                                                      ▏
+▕ ◆┌ Install skill ──────────────────────────────────────────────────────────────────────────── nothing written yet ┐d ▏
+▕▁▁│                                                                                                                │▁▁▏
+▕  │  Skill: portable                                                                                               │  ▏
+▕ 1│  From: src · skills                                                                                            │  ▏
+▕▁▁│  Links to: [CANONICAL]                 /src/skills/portable                                                    │▁▁▏
+▕Re│                                                                                                                │  ▏
+▕──│  Targets                                                                                                       │─ ▏
+▕▌ │  ✓ Claude Code: create the skill root, then the link                                                           │  ▏
+▕▌ │      [TEMP]                      /home/.claude/skills/portable                                                 │─ ▏
+▕▌ │  ✓ Codex: create the skill root, then the link                                                                 │  ▏
+▕  │      [TEMP]                      /home/.agents/skills/portable                                                 │c ▏
+▕  │  ✓ OpenCode: create the skill root, then the link                                                              │  ▏
+▕  │      [TEMP]                      /home/.config/opencode/skills/portable                                        │  ▏
+▕  │                                                                                                                │  ▏
+▕  │  Home: [TEMP]                      /home                                                                       │  ▏
+▕  │                                                                                                                │  ▏
+▕  │                                                                                                                │─ ▏
+▕  │                                                                                                                │n ▏
+▕  │                                                                                                                │  ▏
+▕  │                                                                                                                │  ▏
+▕  │                                                                                                                │─ ▏
+▕  │                                                                                                                │  ▏
+▕  │                                                                                                                │  ▏
+▕  │                                                                                                                │  ▏
+▕  │                                                                                                                │  ▏
+▕  │                                                                                                                │  ▏
+▕  │                                                                                                                │  ▏
+▕  │                                                                                                                │  ▏
+▕  │                                                                                                                │  ▏
+▕  │                                                                                                                │  ▏
+▕  │                                                                                                                │  ▏
+▕  │                                                                                                                │  ▏
+▕  │  ────────────────────────────────────────────────────────────────────────────────────────────────────────────  │  ▏
+▕  │  3 links to create                                                                 Enter Install   Esc Cancel  │  ▏
+▕  │                                                                                                                │  ▏
+▕  └────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘  ▏
+▕ Enter Install   Esc Cancel   Ctrl-C Quit                                                                             ▏
+ ▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔

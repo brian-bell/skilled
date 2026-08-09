@@ -2,43 +2,43 @@
 source: tests/tui_snapshots.rs
 expression: "normalize_inventory(&temporary, render(&app, 120, 40))"
 ---
- ◆ skilled   global                                                                       ● ready · 1 source registered
-▌Inventory ·3  2 Sources ·1  Updates (soon)  4 Doctor ·3
-▌ Global inventory  3 skills                                                    │ Details  alpha
-Roots: Claude Code 2 installed · Codex 2 installed · OpenCode no root           │ ─────────────────────────────────────
-────────────────────────────────────────────────────────────────────────────────│ SKILL
-  SKILL                  SOURCE          CLAUDE  CODEX  OPENCODE  HEALTH        │ ─────────────────────────────────────
-▌ alpha                  library         ✓       ✓      -         ✓ healthy     │ alpha
-  broken                 not registered  ×       -      -         × broken      │ ✓ healthy
-  copied                 not registered  -       U      -         U unmanaged   │ Description: alpha fixture
-                                                                                │ SOURCE
-                                                                                │ ─────────────────────────────────────
-                                                                                │ Source: library
-                                                                                │ CLAUDE CODE  ✓ healthy
-                                                                                │ ─────────────────────────────────────
-                                                                                │ Path: ~/.claude/skills/alpha
-                                                                                │ Object: symbolic link
-                                                                                │ Variant: skills · skills/alpha
-                                                                                │ Target: ~/library/skills/alpha
-                                                                                │ Validation: ✓ valid as alpha
-                                                                                │ CODEX  ✓ healthy
-                                                                                │ ─────────────────────────────────────
-                                                                                │ Path: ~/.agents/skills/alpha
-                                                                                │ Object: symbolic link
-                                                                                │ Variant: skills · skills/alpha
-                                                                                │ Target: ~/library/skills/alpha
-                                                                                │ Validation: ✓ valid as alpha
-                                                                                │ OPENCODE RESOLUTION  ✓ resolved
-                                                                                │ ─────────────────────────────────────
-                                                                                │ Loads: ~/.agents/skills/alpha
-                                                                                │ Also at: ~/.claude/skills/alpha
-                                                                                │ NOT INSTALLED
-                                                                                │ ─────────────────────────────────────
-                                                                                │ - OpenCode
-                                                                                │
-                                                                                │
-                                                                                │
-                                                                                │
-                                                                                │
-                                                                                │
- Tab/Shift-Tab Region   j/k Move   Enter Open   / Filter   2 Sources   4 Doctor   s Settings   ? Help   q Quit
+ ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁
+▕                                                                                                                      ▏
+▕ ◆ skilled  global                                                                                                    ▏
+▕▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▏
+▕                │                │                │                │                                                  ▏
+▕ 1 Inventory ·3 │ 2 Sources ·1   │ Updates (soon) │ 4 Doctor ·3    │                    ● ready · 1 source registered ▏
+▕▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁│▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁│▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁│▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁│▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▏
+▕▌ Global inventory  3 skills                                                  │ Details  alpha                        ▏
+▕Roots: Claude Code 2 installed · Codex 2 installed · OpenCode no root         │ ───────────────────────────────────── ▏
+▕──────────────────────────────────────────────────────────────────────────────│ SKILL                                 ▏
+▕  SKILL                 SOURCE         CLAUDE  CODEX  OPENCODE  HEALTH        │ ───────────────────────────────────── ▏
+▕▌ alpha                 library        ✓       ✓      -         ✓ healthy     │ alpha                                 ▏
+▕  broken                not registered ×       -      -         × broken      │ ✓ healthy                             ▏
+▕  copied                not registered -       U      -         U unmanaged   │ Description: alpha fixture            ▏
+▕                                                                              │ SOURCE                                ▏
+▕                                                                              │ ───────────────────────────────────── ▏
+▕                                                                              │ Source: library                       ▏
+▕                                                                              │ CLAUDE CODE  ✓ healthy                ▏
+▕                                                                              │ ───────────────────────────────────── ▏
+▕                                                                              │ Path: ~/.claude/skills/alpha          ▏
+▕                                                                              │ Object: symbolic link                 ▏
+▕                                                                              │ Variant: skills · skills/alpha        ▏
+▕                                                                              │ Target: ~/library/skills/alpha        ▏
+▕                                                                              │ Validation: ✓ valid as alpha          ▏
+▕                                                                              │ CODEX  ✓ healthy                      ▏
+▕                                                                              │ ───────────────────────────────────── ▏
+▕                                                                              │ Path: ~/.agents/skills/alpha          ▏
+▕                                                                              │ Object: symbolic link                 ▏
+▕                                                                              │ Variant: skills · skills/alpha        ▏
+▕                                                                              │ Target: ~/library/skills/alpha        ▏
+▕                                                                              │ Validation: ✓ valid as alpha          ▏
+▕                                                                              │ OPENCODE RESOLUTION  ✓ resolved       ▏
+▕                                                                              │ ───────────────────────────────────── ▏
+▕                                                                              │ Loads: ~/.agents/skills/alpha         ▏
+▕                                                                              │ Also at: ~/.claude/skills/alpha       ▏
+▕                                                                              │ NOT INSTALLED                         ▏
+▕                                                                              │ ! 2 more lines below — Tab, then j/k  ▏
+▕                                                                                                                      ▏
+▕ Tab/Shift-Tab Region   j/k Move   Enter Open   / Filter   2 Sources   4 Doctor   s Settings   ? Help   q Quit        ▏
+ ▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔

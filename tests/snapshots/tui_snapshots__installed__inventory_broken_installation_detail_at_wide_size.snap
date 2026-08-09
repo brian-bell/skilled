@@ -2,43 +2,43 @@
 source: tests/tui_snapshots.rs
 expression: "normalize_inventory(&temporary, render(&app, 120, 40))"
 ---
- ◆ skilled   global                                                                       ● ready · 1 source registered
-▌Inventory ·3  2 Sources ·1  Updates (soon)  4 Doctor ·3
-▌ Global inventory  3 skills                                                    │ Details  broken
-Roots: Claude Code 2 installed · Codex 2 installed · OpenCode no root           │ ─────────────────────────────────────
-────────────────────────────────────────────────────────────────────────────────│ SKILL
-  SKILL                  SOURCE          CLAUDE  CODEX  OPENCODE  HEALTH        │ ─────────────────────────────────────
-  alpha                  library         ✓       ✓      -         ✓ healthy     │ broken
-▌ broken                 not registered  ×       -      -         × broken      │ × broken
-  copied                 not registered  -       U      -         U unmanaged   │ SOURCE
-                                                                                │ ─────────────────────────────────────
-                                                                                │ Not resolved to any registered
-                                                                                │ source; Skilled does not manage it.
-                                                                                │ CLAUDE CODE  × broken
-                                                                                │ ─────────────────────────────────────
-                                                                                │ Finding: install.dangling_symlink ·
-                                                                                │ critical
-                                                                                │   the link target does not exist
-                                                                                │ Path: ~/.claude/skills/broken
-                                                                                │ Object: symbolic link
-                                                                                │ Target: ~/gone
-                                                                                │ Validation: - not attempted
-                                                                                │ NOT INSTALLED
-                                                                                │ ─────────────────────────────────────
-                                                                                │ - Codex, OpenCode
-                                                                                │
-                                                                                │
-                                                                                │
-                                                                                │
-                                                                                │
-                                                                                │
-                                                                                │
-                                                                                │
-                                                                                │
-                                                                                │
-                                                                                │
-                                                                                │
-                                                                                │
-                                                                                │
-                                                                                │
- Tab/Shift-Tab Region   j/k Move   Enter Open   / Filter   2 Sources   4 Doctor   s Settings   ? Help   q Quit
+ ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁
+▕                                                                                                                      ▏
+▕ ◆ skilled  global                                                                                                    ▏
+▕▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▏
+▕                │                │                │                │                                                  ▏
+▕ 1 Inventory ·3 │ 2 Sources ·1   │ Updates (soon) │ 4 Doctor ·3    │                    ● ready · 1 source registered ▏
+▕▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁│▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁│▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁│▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁│▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▏
+▕▌ Global inventory  3 skills                                                  │ Details  broken                       ▏
+▕Roots: Claude Code 2 installed · Codex 2 installed · OpenCode no root         │ ───────────────────────────────────── ▏
+▕──────────────────────────────────────────────────────────────────────────────│ SKILL                                 ▏
+▕  SKILL                 SOURCE         CLAUDE  CODEX  OPENCODE  HEALTH        │ ───────────────────────────────────── ▏
+▕  alpha                 library        ✓       ✓      -         ✓ healthy     │ broken                                ▏
+▕▌ broken                not registered ×       -      -         × broken      │ × broken                              ▏
+▕  copied                not registered -       U      -         U unmanaged   │ SOURCE                                ▏
+▕                                                                              │ ───────────────────────────────────── ▏
+▕                                                                              │ Not resolved to any registered        ▏
+▕                                                                              │ source; Skilled does not manage it.   ▏
+▕                                                                              │ CLAUDE CODE  × broken                 ▏
+▕                                                                              │ ───────────────────────────────────── ▏
+▕                                                                              │ Finding: install.dangling_symlink ·   ▏
+▕                                                                              │ critical                              ▏
+▕                                                                              │   the link target does not exist      ▏
+▕                                                                              │ Path: ~/.claude/skills/broken         ▏
+▕                                                                              │ Object: symbolic link                 ▏
+▕                                                                              │ Target: ~/gone                        ▏
+▕                                                                              │ Validation: - not attempted           ▏
+▕                                                                              │ NOT INSTALLED                         ▏
+▕                                                                              │ ───────────────────────────────────── ▏
+▕                                                                              │ - Codex, OpenCode                     ▏
+▕                                                                              │                                       ▏
+▕                                                                              │                                       ▏
+▕                                                                              │                                       ▏
+▕                                                                              │                                       ▏
+▕                                                                              │                                       ▏
+▕                                                                              │                                       ▏
+▕                                                                              │                                       ▏
+▕                                                                              │                                       ▏
+▕                                                                                                                      ▏
+▕ Tab/Shift-Tab Region   j/k Move   Enter Open   / Filter   2 Sources   4 Doctor   s Settings   ? Help   q Quit        ▏
+ ▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔

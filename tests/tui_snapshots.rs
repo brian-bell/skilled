@@ -827,7 +827,9 @@ mod installed {
         let temporary = tempfile::tempdir().expect("temporary application directory");
         let app = inventory_app(&temporary);
 
-        let screen = normalize_inventory(&temporary, render(&app, 100, 26));
+        // A 100×26 workspace inside the window frame: the breakpoint is the
+        // workspace's, two columns and rows inside the terminal's.
+        let screen = normalize_inventory(&temporary, render(&app, 102, 28));
 
         // Scoped to the table's heading row: the detail region beside it has a
         // SOURCE section of its own, which is exactly where the dropped column
@@ -838,9 +840,11 @@ mod installed {
     }
 
     /// On a very wide terminal the identity columns stop growing, so a short
-    /// label is not stranded in the middle of a very wide field. The slack
-    /// falls to the right of Health, which is where this departs from the
-    /// prototype: that grid grows these columns without bound.
+    /// label is not stranded in the middle of a very wide field — that grid
+    /// grows these columns without bound in the prototype. The agent columns
+    /// spend part of the freed width on the health labels the prototype's
+    /// `.agent-state` cells carry, and what remains falls to the right of
+    /// Health.
     #[test]
     fn inventory_capped_columns_at_a_very_wide_size() {
         let temporary = tempfile::tempdir().expect("temporary application directory");
@@ -854,18 +858,20 @@ mod installed {
         insta::assert_snapshot!(screen);
     }
 
-    /// The table side of the heading row, cut at the detail region's
-    /// separator so nothing the detail pane happens to render can answer for
-    /// the table's columns.
+    /// The table side of the heading row, read past the window frame's own
+    /// column and cut at the detail region's separator, so neither the frame
+    /// nor anything the detail pane happens to render can answer for the
+    /// table's columns.
     fn heading_row(screen: &str) -> &str {
         let row = screen
             .lines()
             .find(|line| line.contains("HEALTH"))
             .unwrap_or_else(|| panic!("no heading row in\n{screen}"));
+        let row = row.strip_prefix('▕').unwrap_or(row);
         row.split('│').next().unwrap_or(row)
     }
 
-    /// The screen column a heading starts at, counted in characters because
+    /// The content column a heading starts at, counted in characters because
     /// the chrome around the table is single width.
     fn column_of(line: &str, needle: &str) -> usize {
         let byte_index = line
@@ -960,8 +966,9 @@ mod installed {
         // Beside the table the region is only thirty-seven cells wide, and the
         // keys belong to the table: the notice names the focus that reaches
         // the window before the keys that move it, and that form still fits.
+        // A 100×26 workspace inside the window frame.
         app.update(Action::MoveInventoryPane(1));
-        let beside = normalize_inventory(&temporary, render(&app, 100, 26));
+        let beside = normalize_inventory(&temporary, render(&app, 102, 28));
         assert!(
             beside.contains("! 9 more lines below — Tab, then j/k"),
             "{beside}"
@@ -974,7 +981,7 @@ mod installed {
         // cut must not itself be cut.
         app.update(Action::BeginInventoryFilter);
         assert!(app.inventory_filter_active());
-        let narrow = normalize_inventory(&temporary, render(&app, 100, 26));
+        let narrow = normalize_inventory(&temporary, render(&app, 102, 28));
         assert!(narrow.contains("! 9 more lines"), "{narrow}");
         assert!(!narrow.contains("widen or lengthen"), "{narrow}");
         assert!(!narrow.contains("more lines below"), "{narrow}");
@@ -1210,7 +1217,7 @@ mod installed {
     /// matched whole however the region happened to wrap it.
     fn unwrapped(screen: &str) -> String {
         screen
-            .replace('│', " ")
+            .replace(['│', '▕', '▏'], " ")
             .split_whitespace()
             .collect::<Vec<_>>()
             .join(" ")

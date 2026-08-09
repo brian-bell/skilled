@@ -2,43 +2,43 @@
 source: tests/tui_snapshots.rs
 expression: "normalize_inventory(&temporary, render(&app, 120, 40))"
 ---
- ◆ skilled   global                                                                      ● ready · 3 sources registered
- 1 Inventory ·5  2 Sources ·3  Updates (soon) ▌Doctor ·8
-▌ Doctor  8 findings                                                            │ Details  dangling
-────────────────────────────────────────────────────────────────────────────────│ ─────────────────────────────────────
-  SEVERITY   FINDING                           SKILL                AGENT       │ FINDING
-▌ × critical install.dangling_symlink          dangling             Claude Code │ ─────────────────────────────────────
-  × critical variant.duplicate_for_agent       review               Claude Code │ install.dangling_symlink
-  × critical variant.duplicate_for_agent       review               OpenCode    │ × critical
-  × critical variant.duplicate_for_agent       review               OpenCode    │ Agent: Claude Code
-  ! warning  variant.duplicate_for_agent       review               Codex       │ OBSERVED
-  ! warning  variant.incompatible_for_opencode excluded             OpenCode    │ ─────────────────────────────────────
-  ! warning  variant.foreign_opencode_exposure exposed              OpenCode    │ the link target does not exist
-  - info     variant.benign_alias              shared               OpenCode    │ CONSEQUENCE
-                                                                                │ ─────────────────────────────────────
-                                                                                │ The agent finds a link with nothing
-                                                                                │ behind it, so the skill does not
-                                                                                │ load.
-                                                                                │ INSTALLATION
-                                                                                │ ─────────────────────────────────────
-                                                                                │ Path: ~/.claude/skills/dangling
-                                                                                │ Object: symbolic link
-                                                                                │ Target: ~/gone
-                                                                                │ Repair: not offered in this release
-                                                                                │
-                                                                                │
-                                                                                │
-                                                                                │
-                                                                                │
-                                                                                │
-                                                                                │
-                                                                                │
-                                                                                │
-                                                                                │
-                                                                                │
-                                                                                │
-                                                                                │
-                                                                                │
-                                                                                │
-                                                                                │
- Tab/Shift-Tab Region   j/k Move   Enter Open   1 Inventory   2 Sources   ? Help   q Quit   Esc Back
+ ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁
+▕                                                                                                                      ▏
+▕ ◆ skilled  global                                                                                                    ▏
+▕▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▏
+▕                │                │                │                │                                                  ▏
+▕ 1 Inventory ·5 │ 2 Sources ·3   │ Updates (soon) │ 4 Doctor ·8    │                   ● ready · 3 sources registered ▏
+▕▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁│▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁│▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁│▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁│▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▏
+▕▌ Doctor  8 findings                                                          │ Details  dangling                     ▏
+▕──────────────────────────────────────────────────────────────────────────────│ ───────────────────────────────────── ▏
+▕  SEVERITY   FINDING                           SKILL              AGENT       │ FINDING                               ▏
+▕▌ × critical install.dangling_symlink          dangling           Claude Code │ ───────────────────────────────────── ▏
+▕  × critical variant.duplicate_for_agent       review             Claude Code │ install.dangling_symlink              ▏
+▕  × critical variant.duplicate_for_agent       review             OpenCode    │ × critical                            ▏
+▕  × critical variant.duplicate_for_agent       review             OpenCode    │ Agent: Claude Code                    ▏
+▕  ! warning  variant.duplicate_for_agent       review             Codex       │ OBSERVED                              ▏
+▕  ! warning  variant.incompatible_for_opencode excluded           OpenCode    │ ───────────────────────────────────── ▏
+▕  ! warning  variant.foreign_opencode_exposure exposed            OpenCode    │ the link target does not exist        ▏
+▕  - info     variant.benign_alias              shared             OpenCode    │ CONSEQUENCE                           ▏
+▕                                                                              │ ───────────────────────────────────── ▏
+▕                                                                              │ The agent finds a link with nothing   ▏
+▕                                                                              │ behind it, so the skill does not      ▏
+▕                                                                              │ load.                                 ▏
+▕                                                                              │ INSTALLATION                          ▏
+▕                                                                              │ ───────────────────────────────────── ▏
+▕                                                                              │ Path: ~/.claude/skills/dangling       ▏
+▕                                                                              │ Object: symbolic link                 ▏
+▕                                                                              │ Target: ~/gone                        ▏
+▕                                                                              │ Repair: not offered in this release   ▏
+▕                                                                              │                                       ▏
+▕                                                                              │                                       ▏
+▕                                                                              │                                       ▏
+▕                                                                              │                                       ▏
+▕                                                                              │                                       ▏
+▕                                                                              │                                       ▏
+▕                                                                              │                                       ▏
+▕                                                                              │                                       ▏
+▕                                                                              │                                       ▏
+▕                                                                                                                      ▏
+▕ Tab/Shift-Tab Region   j/k Move   Enter Open   1 Inventory   2 Sources   ? Help   q Quit   Esc Back                  ▏
+ ▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔

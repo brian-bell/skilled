@@ -2,43 +2,43 @@
 source: tests/tui_snapshots.rs
 expression: "normalize_install_screen(&temporary, render(&app, 120, 40))"
 ---
- ◆ skilled   global                                                                       ● ready · 1 source registered
- 1┌ Install result ───────────────────────────────────────────────────────────────────────────────── already applied ┐
-Re│                                                                                                                  │
-──│  Skill: portable                                                                                                 │─
-▌ │  Links to: [CANONICAL]                 /src/skills/portable                                                      │
-▌ │                                                                                                                  │─
-▌ │  Steps                                                                                                           │
-  │  ✓ Claude Code: link created                                                                                     │c
-  │      [TEMP]                      /home/.claude/skills/portable                                                   │
-  │  ✓ Codex: link created                                                                                           │
-  │      [TEMP]                      /home/.agents/skills/portable                                                   │
-  │  ✓ OpenCode: link created                                                                                        │
-  │      [TEMP]                      /home/.config/opencode/skills/portable                                          │
-  │                                                                                                                  │─
-  │  Verification                                                                                                    │n
-  │  ✓ every link written was observed again and matches this plan                                                   │
-  │                                                                                                                  │
-  │                                                                                                                  │─
-  │                                                                                                                  │
-  │                                                                                                                  │
-  │                                                                                                                  │
-  │                                                                                                                  │
-  │                                                                                                                  │
-  │                                                                                                                  │
-  │                                                                                                                  │
-  │                                                                                                                  │
-  │                                                                                                                  │
-  │                                                                                                                  │
-  │                                                                                                                  │
-  │                                                                                                                  │
-  │                                                                                                                  │
-  │                                                                                                                  │
-  │                                                                                                                  │
-  │                                                                                                                  │
-  │                                                                                                                  │
-  │  ──────────────────────────────────────────────────────────────────────────────────────────────────────────────  │
-  │  Installed and verified                                                                               Esc Close  │
-  │                                                                                                                  │
-  └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
- Esc Close   Ctrl-C Quit
+ ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁
+▕                                                                                                                      ▏
+▕ ◆┌ Install result ─────────────────────────────────────────────────────────────────────────────── already applied ┐d ▏
+▕▁▁│                                                                                                                │▁▁▏
+▕  │  Skill: portable                                                                                               │  ▏
+▕ 1│  Links to: [CANONICAL]                 /src/skills/portable                                                    │  ▏
+▕▁▁│                                                                                                                │▁▁▏
+▕Re│  Steps                                                                                                         │  ▏
+▕──│  ✓ Claude Code: link created                                                                                   │─ ▏
+▕▌ │      [TEMP]                      /home/.claude/skills/portable                                                 │  ▏
+▕▌ │  ✓ Codex: link created                                                                                         │─ ▏
+▕▌ │      [TEMP]                      /home/.agents/skills/portable                                                 │  ▏
+▕  │  ✓ OpenCode: link created                                                                                      │c ▏
+▕  │      [TEMP]                      /home/.config/opencode/skills/portable                                        │  ▏
+▕  │                                                                                                                │  ▏
+▕  │  Verification                                                                                                  │  ▏
+▕  │  ✓ every link written was observed again and matches this plan                                                 │  ▏
+▕  │                                                                                                                │  ▏
+▕  │                                                                                                                │─ ▏
+▕  │                                                                                                                │n ▏
+▕  │                                                                                                                │  ▏
+▕  │                                                                                                                │  ▏
+▕  │                                                                                                                │─ ▏
+▕  │                                                                                                                │  ▏
+▕  │                                                                                                                │  ▏
+▕  │                                                                                                                │  ▏
+▕  │                                                                                                                │  ▏
+▕  │                                                                                                                │  ▏
+▕  │                                                                                                                │  ▏
+▕  │                                                                                                                │  ▏
+▕  │                                                                                                                │  ▏
+▕  │                                                                                                                │  ▏
+▕  │                                                                                                                │  ▏
+▕  │                                                                                                                │  ▏
+▕  │  ────────────────────────────────────────────────────────────────────────────────────────────────────────────  │  ▏
+▕  │  Installed and verified                                                                             Esc Close  │  ▏
+▕  │                                                                                                                │  ▏
+▕  └────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘  ▏
+▕ Esc Close   Ctrl-C Quit                                                                                              ▏
+ ▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔

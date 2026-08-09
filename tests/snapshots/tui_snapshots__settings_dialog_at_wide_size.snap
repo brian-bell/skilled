@@ -2,43 +2,43 @@
 source: tests/tui_snapshots.rs
 expression: "render(&app, 120, 40)"
 ---
- ◆ skilled   global                                                                      ● ready · 0 sources registered
- Settings   navigation is locked while this dialog is open
-
-
-
-
-
-
-
-
-
-
-
-                        ┌ Settings ────────────────────────────────────────────── global scope ┐
-                        │                                                                      │
-                        │  Setup                                                               │
-                        │                                                                      │
-                        │  ▌ Rerun setup                                                       │
-                        │                                                                      │
-                        │  Reset setup completion and return to Welcome.                       │
-                        │  Agent root and executable detection is refreshed.                   │
-                        │  Agent selections and registered sources are retained.               │
-                        │  Enter reruns setup; Esc closes Settings.                            │
-                        │  ──────────────────────────────────────────────────────────────────  │
-                        │  No agent is launched                       Enter Rerun   Esc Close  │
-                        │                                                                      │
-                        └──────────────────────────────────────────────────────────────────────┘
-
-
-
-
-
-
-
-
-
-
-
-
- Enter Rerun setup   ? Help   Esc Close
+ ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁
+▕                                                                                                                      ▏
+▕ ◆ skilled  global                                                                                                    ▏
+▕▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▏
+▕                                                                                                                      ▏
+▕ Settings   navigation is locked while this dialog is open                             ● ready · 0 sources registered ▏
+▕▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▏
+▕                                                                                                                      ▏
+▕                                                                                                                      ▏
+▕                                                                                                                      ▏
+▕                                                                                                                      ▏
+▕                                                                                                                      ▏
+▕                                                                                                                      ▏
+▕                                                                                                                      ▏
+▕                                                                                                                      ▏
+▕                       ┌ Settings ────────────────────────────────────────────── global scope ┐                       ▏
+▕                       │                                                                      │                       ▏
+▕                       │  Setup                                                               │                       ▏
+▕                       │                                                                      │                       ▏
+▕                       │  ▌ Rerun setup                                                       │                       ▏
+▕                       │                                                                      │                       ▏
+▕                       │  Reset setup completion and return to Welcome.                       │                       ▏
+▕                       │  Agent root and executable detection is refreshed.                   │                       ▏
+▕                       │  Agent selections and registered sources are retained.               │                       ▏
+▕                       │  Enter reruns setup; Esc closes Settings.                            │                       ▏
+▕                       │  ──────────────────────────────────────────────────────────────────  │                       ▏
+▕                       │  No agent is launched                       Enter Rerun   Esc Close  │                       ▏
+▕                       │                                                                      │                       ▏
+▕                       └──────────────────────────────────────────────────────────────────────┘                       ▏
+▕                                                                                                                      ▏
+▕                                                                                                                      ▏
+▕                                                                                                                      ▏
+▕                                                                                                                      ▏
+▕                                                                                                                      ▏
+▕                                                                                                                      ▏
+▕                                                                                                                      ▏
+▕                                                                                                                      ▏
+▕                                                                                                                      ▏
+▕ Enter Rerun setup   ? Help   Esc Close                                                                               ▏
+ ▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔

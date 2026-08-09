@@ -8,6 +8,14 @@ use ratatui::style::{Color, Modifier, Style};
 
 // Prototype palette: the `:root` variables plus the selector-local surfaces.
 pub(crate) const TERMINAL: Color = Color::Rgb(0x0b, 0x0f, 0x14);
+/// The ground outside the application's window border.
+///
+/// The prototype floats its terminal on a page (`--page: #07090c`,
+/// spec/tui-prototype.html:10). Recorded departure: full black rather than
+/// the page's own value, which sits within five points of `TERMINAL` and
+/// would vanish beside it — the ground exists to read as a gap against both
+/// the window line drawn through it and the emulator chrome outside it.
+pub(crate) const PAGE: Color = Color::Rgb(0x00, 0x00, 0x00);
 /// Prototype `.terminal-titlebar` / `.keybar` background: the band the
 /// persistent chrome rows sit on.
 pub(crate) const BAND: Color = Color::Rgb(0x0d, 0x12, 0x18);
@@ -90,6 +98,23 @@ pub(crate) fn chrome_band() -> Style {
     Style::default().bg(BAND)
 }
 
+/// The one-cell ring around the whole shell: the prototype's window edge —
+/// its terminal sits on the page behind a one-pixel `--line-strong` border
+/// (`.terminal`, spec/tui-prototype.html:64) — collapsed to the cells a
+/// terminal can draw. The strokes hug the ring's inner edge (see
+/// `tui::app_frame_ring`), so the line lands flush on the surfaces it frames
+/// and the page ground shows only outside it, and the shell reads as a
+/// window rather than running into the emulator chrome.
+///
+/// Decorative, and so exempt from the 4.5:1 sweep, like `nav_separator()`:
+/// the ring carries only box-drawing strokes, never text — every surface,
+/// dialog, and overlay is inset within it, which a shell test enforces — so
+/// nothing depends on the line being perceived. Deliberately absent from
+/// `background_roles_paint_covered_surfaces` for the same reason.
+pub(crate) fn app_frame() -> Style {
+    Style::default().fg(LINE_STRONG).bg(PAGE)
+}
+
 /// The product mark in the title bar.
 pub(crate) fn product_mark() -> Style {
     Style::default().fg(GREEN)
@@ -115,9 +140,45 @@ pub(crate) fn nav_active() -> Style {
         .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
 }
 
+/// The active navigation entry where the strip is tall enough to draw the
+/// prototype's tab border as a row of its own.
+///
+/// The underline [`nav_active()`] carries stands in for that border when the
+/// strip is a single row; with an accent row beneath the label doing the
+/// border's work, keeping it would draw the border twice at two heights. The
+/// weight and the raised surface still signal the active entry without
+/// colour.
+pub(crate) fn nav_active_tall() -> Style {
+    Style::default()
+        .fg(TEXT_STRONG)
+        .bg(SURFACE_2)
+        .add_modifier(Modifier::BOLD)
+}
+
+/// The active tab's bottom border, drawn as its own row of the tall strip
+/// (prototype `.tab[aria-selected="true"]` `border-bottom-color: var(--cyan)`).
+///
+/// The glyph row keeps the active entry's raised surface, so the tab reads as
+/// one box from its label to its border.
+pub(crate) fn nav_accent() -> Style {
+    Style::default().fg(CYAN).bg(SURFACE_2)
+}
+
 /// A navigation entry the user can reach but is not currently viewing.
 pub(crate) fn nav_inactive() -> Style {
     Style::default().fg(MUTED).bg(SURFACE)
+}
+
+/// A navigation cell's route digit (prototype `.tab-key`).
+///
+/// No background of its own, like `nav_count()`: the digit sits inside its
+/// cell and inherits that cell's surface, active or not. `MUTED` rather than
+/// the prototype's faint, because the digit is how a destination is
+/// addressed and must stay readable; and without the bold, which is the
+/// title's emphasis and not the digit's, so an active cell's caption keeps
+/// its number quiet beside its strong name.
+pub(crate) fn nav_key() -> Style {
+    Style::default().fg(MUTED).remove_modifier(Modifier::BOLD)
 }
 
 /// The count beside a navigation entry (prototype `.tab-count`).
@@ -139,9 +200,71 @@ pub(crate) fn nav_count() -> Style {
     Style::default().fg(AMBER).remove_modifier(Modifier::BOLD)
 }
 
+/// The line closing each navigation cell (prototype `.tab` border-right).
+///
+/// Decorative, and so exempt from the 4.5:1 sweep: the separator partitions
+/// cells that already end where their padding ends, so nothing depends on it
+/// being perceived. `LINE` on `SURFACE` sits near 1.5:1 — the hairline the
+/// prototype draws, kept faint on purpose so the strip reads as one band.
+pub(crate) fn nav_separator() -> Style {
+    Style::default().fg(LINE).bg(SURFACE)
+}
+
+/// The titlebar's bottom border (prototype `.terminal-titlebar`
+/// `border-bottom: 1px solid var(--line)`), drawn as a hairline along the
+/// bottom edge of the tall title band's last pad row, flush against the tab
+/// strip beneath it.
+///
+/// Decorative, and so exempt from the 4.5:1 sweep, like `nav_separator()`:
+/// the boundary it draws already exists as the change of surface beneath it,
+/// so nothing depends on the line being perceived.
+pub(crate) fn title_rule() -> Style {
+    Style::default().fg(LINE).bg(BAND)
+}
+
+/// The navigation strip's bottom border (prototype `.app-nav`
+/// `border-bottom: 1px solid var(--line)`): the hairline the accent row
+/// draws wherever the active tab does not claim its stretch, closing every
+/// cell into the box the prototype's borders describe.
+///
+/// Decorative and sweep-exempt like `nav_separator()`, whose colours it
+/// shares: the active tab's segment is the information on that row, and that
+/// segment carries `nav_accent()` rather than this.
+pub(crate) fn nav_rule() -> Style {
+    Style::default().fg(LINE).bg(SURFACE)
+}
+
+/// A separator cell on the strip's bottom-border row.
+///
+/// One cell cannot hold both the vertical stroke and the bottom-edge
+/// eighth-block, so without help the hairline would break for a column
+/// beside every tab. The underline attribute is the help: the terminal
+/// draws a thin rule across the cell near its bottom, in the separator's
+/// own colour, so the border carries through while the vertical passes down
+/// to the strip's edge. Where a terminal sets its underline higher, the row
+/// degrades to the plain break — a seam, never a wrong claim. Decorative
+/// and sweep-exempt like `nav_separator()`.
+pub(crate) fn nav_separator_at_rule() -> Style {
+    Style::default()
+        .fg(LINE)
+        .bg(SURFACE)
+        .add_modifier(Modifier::UNDERLINED)
+}
+
 /// The surface behind the focused row of a list.
 pub(crate) fn selected_row() -> Style {
     Style::default().bg(SURFACE_3).add_modifier(Modifier::BOLD)
+}
+
+/// The name that identifies a list row (prototype `.skill-name`, set at
+/// `font-weight: 600`).
+///
+/// Emphasis only: no foreground of its own, so the name keeps the row's text
+/// colour on every surface — including the selected band, where the
+/// prototype brightens it to `--text-strong` and a terminal's bold is the
+/// closest equivalent — and the contrast sweep needs no entry for it.
+pub(crate) fn row_title() -> Style {
+    Style::default().add_modifier(Modifier::BOLD)
 }
 
 /// The marker on the focused row of a list.
@@ -389,7 +512,10 @@ mod tests {
             ("product_mark()", product_mark()),
             ("product_name()", product_name()),
             ("nav_active()", nav_active()),
+            ("nav_active_tall()", nav_active_tall()),
+            ("nav_accent()", nav_accent()),
             ("nav_inactive()", nav_inactive()),
+            ("nav_key()", nav_key()),
             ("nav_count()", nav_count()),
             ("nav_note()", nav_note()),
             ("focus_marker()", focus_marker()),

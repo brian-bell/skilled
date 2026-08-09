@@ -2,43 +2,43 @@
 source: tests/tui_snapshots.rs
 expression: "render(&app, 120, 40)"
 ---
- ◆ skilled   global                                                                      ● ready · 0 sources registered
- Add source   navigation is locked while this dialog is open
-▌ Repositories  0 registered     │ Available variants  no source                │ Details  no selection
-─────────────────────────────────│ ─────────────────────────────────────────────│ ─────────────────────────────────────
-                                 │                                              │
-                                 │                                              │
-                                 │                                              │
-                                 │                                              │
-                                 │                                              │
-                                 │                                              │
-                                 │                                              │
-                                 │                                              │
-                                 │                                              │
-                                 │                                              │
-                    ┌ Add source ────────────────────────────────────────────── local Git checkout ┐
-                    │                                                                              │
-                    │  Local Git repository                                                        │
-                    │  Enter a path inside a local Git checkout:                                   │
-                ·   │                                                                              │·
-                    │  > /Users/example/dev/skills                                                 │
-    No sources are r│                                                                              │ selected
-                    │                                                                              │
- Press a to register│  ──────────────────────────────────────────────────────────────────────────  │y to see its stored
-            checkout│  Read-only checkout and catalog scan             Esc Cancel   Enter Inspect  │ils.
-                    │                                                                              │
-                    └──────────────────────────────────────────────────────────────────────────────┘
-                                 │                                              │
-                                 │                                              │
-                                 │                                              │
-                                 │                                              │
-                                 │                                              │
-                                 │                                              │
-                                 │                                              │
-                                 │                                              │
-                                 │                                              │
-                                 │                                              │
-                                 │                                              │
-                                 │                                              │
-                                 │                                              │
- Enter Inspect   Esc Cancel   Ctrl-C Quit
+ ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁
+▕                                                                                                                      ▏
+▕ ◆ skilled  global                                                                     ● ready · 0 sources registered ▏
+▕▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▏
+▕                                                                                                                      ▏
+▕ Add source   navigation is locked while this dialog is open                                                          ▏
+▕▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▏
+▕▌ Repositories  0 registered    │ Available variants  no source               │ Details  no selection                 ▏
+▕────────────────────────────────│ ────────────────────────────────────────────│ ───────────────────────────────────── ▏
+▕                                │                                             │                                       ▏
+▕                                │                                             │                                       ▏
+▕                                │                                             │                                       ▏
+▕                                │                                             │                                       ▏
+▕                                │                                             │                                       ▏
+▕                   ┌ Add source ────────────────────────────────────────────── local Git checkout ┐                   ▏
+▕                   │                                                                              │                   ▏
+▕                   │  Local Git repository                                                        │                   ▏
+▕                   │  Enter a path inside a local Git checkout:                                   │                   ▏
+▕                   │                                                                              │                   ▏
+▕                   │  > /Users/example/dev/skills                                                 │                   ▏
+▕                ·  │                                                                              │                   ▏
+▕                   │                                                                              │                   ▏
+▕    No sources are │  ──────────────────────────────────────────────────────────────────────────  │selected           ▏
+▕                   │  Read-only checkout and catalog scan             Esc Cancel   Enter Inspect  │                   ▏
+▕ Press a to registe│                                                                              │ to see its stored ▏
+▕            checkou└──────────────────────────────────────────────────────────────────────────────┘ls.                ▏
+▕                                │                                             │                                       ▏
+▕                                │                                             │                                       ▏
+▕                                │                                             │                                       ▏
+▕                                │                                             │                                       ▏
+▕                                │                                             │                                       ▏
+▕                                │                                             │                                       ▏
+▕                                │                                             │                                       ▏
+▕                                │                                             │                                       ▏
+▕                                │                                             │                                       ▏
+▕                                │                                             │                                       ▏
+▕                                │                                             │                                       ▏
+▕                                                                                                                      ▏
+▕ Enter Inspect   Esc Cancel   Ctrl-C Quit                                                                             ▏
+ ▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
