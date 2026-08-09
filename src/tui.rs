@@ -1073,7 +1073,7 @@ fn render_inventory_skills(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) 
         Line::default(),
         pane_header(
             "Global inventory",
-            &inventory_subtitle(app, rows.len()),
+            &qualified_inventory_subtitle(app, rows.len()),
             app.inventory_pane() == InventoryPane::Skills,
             area.width,
         ),
@@ -1208,6 +1208,37 @@ fn inventory_subtitle(app: &SkilledApp, shown: usize) -> String {
     }
 }
 
+/// The claim a completed scan makes, qualified by the roots it was never
+/// asked about.
+///
+/// A stated count is complete over the roots the user selected, so a count
+/// can stand while an agent's column shows only `-`. Without a qualifier
+/// that `-` under a deselected agent would read as a root that was read and
+/// found empty — the flattening the inventory's truthfulness rule forbids.
+/// The qualifier is the subtitle's last clause, so a narrow pane sheds it
+/// after the count it qualifies ([`bounded_subtitle`]). The pending and
+/// all-deselected states keep their single phrases: "no root read" speaks
+/// for every root at once, and "not scanned" stands while nothing per-agent
+/// is on screen yet — a deselected root beside pending ones becomes worth
+/// naming only when a count starts speaking for the roots that were read.
+fn qualified_inventory_subtitle(app: &SkilledApp, shown: usize) -> String {
+    let claim = inventory_subtitle(app, shown);
+    let inventory = app.inventory();
+    if inventory.scan_pending() || inventory.no_agent_configured() {
+        return claim;
+    }
+    let deselected: Vec<&str> = inventory
+        .roots()
+        .iter()
+        .filter(|root| matches!(root.status(), RootStatus::NotSelected))
+        .map(|root| root.agent().display_name())
+        .collect();
+    if deselected.is_empty() {
+        return claim;
+    }
+    format!("{claim} · {} not selected", deselected.join(", "))
+}
+
 /// The query box, or the query that is still narrowing the list.
 ///
 /// The query is bounded on entry, and bounded again here: the header must
@@ -1306,8 +1337,10 @@ fn inventory_row_line(
         // A present observation names its health beside the glyph when the
         // column can hold the words. An absent one keeps the bare `-` at
         // every width: "not installed" would outrun what an unscanned root
-        // backs, and the pane subtitle carries the scan-scope half of that
-        // reading.
+        // backs. The scan-scope half of that reading lives in the subtitle —
+        // whose last clause names any deselected agent
+        // (`qualified_inventory_subtitle`) — and in the detail region, which
+        // keeps NOT INSTALLED apart from NOT READ.
         let cell = match observation {
             Some(observation) if columns.labeled => {
                 format!(
@@ -1858,7 +1891,7 @@ fn render_region_separator(frame: &mut Frame<'_>, area: Rect) {
     );
 }
 
-/// The heading and its rule, which every pane spends before its body.
+/// The heading and its rule, which a flush pane spends before its body.
 const PANE_HEADER_HEIGHT: u16 = 2;
 
 /// The header block of a pane that carries the prototype's `.pane-header`
@@ -2537,18 +2570,55 @@ fn inventory_detail_lines(
         push_opencode_resolution(&mut lines, row, roots, home, width);
     }
 
-    // The agents that carry nothing share one line rather than three empty
-    // sections, so the observations that exist keep the room.
-    let absent: Vec<&str> = AgentKind::ALL
-        .into_iter()
-        .filter(|agent| row.observation(*agent).is_none())
-        .map(AgentKind::display_name)
-        .collect();
-    if !absent.is_empty() {
+    // The agents that carry nothing share one line per answer rather than
+    // three empty sections, so the observations that exist keep the room.
+    // There are two answers, and they are kept apart: NOT INSTALLED is an
+    // observation — the root was read, or does not exist, and holds nothing
+    // under this name — while NOT READ means the scan never looked, and says
+    // why in the scanner's own words. Folding the second into the first
+    // would state an absence nobody observed.
+    let mut not_installed = Vec::new();
+    let mut not_read = Vec::new();
+    for agent in AgentKind::ALL {
+        if row.observation(agent).is_some() {
+            continue;
+        }
+        let status = roots
+            .iter()
+            .find(|root| root.agent() == agent)
+            .map(RootScan::status);
+        match status {
+            Some(RootStatus::Scanned { .. } | RootStatus::Missing) => {
+                not_installed.push(agent.display_name().to_owned());
+            }
+            Some(unread) => {
+                not_read.push(format!(
+                    "{} ({})",
+                    agent.display_name(),
+                    unread.short_summary()
+                ));
+            }
+            // A root the snapshot does not list was never approached; it
+            // borrows the not-scanned wording rather than coining its own.
+            None => not_read.push(format!(
+                "{} ({})",
+                agent.display_name(),
+                RootStatus::NotScanned.short_summary()
+            )),
+        }
+    }
+    if !not_installed.is_empty() {
         push_detail_section(&mut lines, "NOT INSTALLED", width);
         lines.push(Line::from(components::badge(
             Tone::Inactive,
-            &absent.join(", "),
+            &not_installed.join(", "),
+        )));
+    }
+    if !not_read.is_empty() {
+        push_detail_section(&mut lines, "NOT READ", width);
+        lines.push(Line::from(components::badge(
+            Tone::Inactive,
+            &not_read.join(", "),
         )));
     }
     lines
@@ -2637,10 +2707,11 @@ fn push_opencode_resolution(
             ));
         }
         OpenCodeResolution::Incomplete { roots: unread } => {
-            // Each root says why it was not read, in the same words the Roots
-            // line uses: a root left alone on the user's own instruction and
-            // one that defeated the scan are not the same answer, and "not
-            // read" alone would flatten them into one.
+            // Each root says why it was not read, in the scanner's own words
+            // (`short_summary`, the vocabulary the setup scan step and the
+            // NOT READ section use): a root left alone on the user's own
+            // instruction and one that defeated the scan are not the same
+            // answer, and "not read" alone would flatten them into one.
             let reasons: Vec<String> = unread
                 .iter()
                 .map(|unknown| {

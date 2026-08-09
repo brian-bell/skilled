@@ -1432,6 +1432,10 @@ fn an_inventory_with_no_root_to_read_says_so_without_inventing_a_result() {
     }
 }
 
+/// The distinction lives in the empty-state copy: an inventory whose only
+/// read root is empty says skills are not installed in the roots that were
+/// read, while an inventory with no root at all says no root exists yet
+/// (the sibling test above). The two phrases may never trade places.
 #[test]
 fn a_root_that_exists_but_holds_nothing_is_distinguished_from_a_missing_one() {
     let harness = Harness::new();
@@ -1534,6 +1538,25 @@ fn a_partially_read_inventory_lists_rows_without_claiming_a_total() {
         rendered.contains("the skill root is not a directory"),
         "{rendered}"
     );
+
+    // The detail region separates the two things a `-` cell can mean: a root
+    // that was read and holds nothing is NOT INSTALLED; a root the scan never
+    // read is NOT READ, with the scanner's own word for why. Flattening the
+    // unreadable Codex root into "not installed" would claim an observation
+    // the scan does not have.
+    let wide = text(&buffer(&app, 120, 40));
+    assert!(wide.contains("NOT READ"), "{wide}");
+    assert!(wide.contains("Codex (unreadable)"), "{wide}");
+    assert!(!wide.contains("Codex, OpenCode"), "{wide}");
+    // The other half of the partition: OpenCode's root does not exist, which
+    // is an observed absence — NOT INSTALLED, on its own, with no unread
+    // agent lumped beside it.
+    assert!(wide.contains("NOT INSTALLED"), "{wide}");
+    let screen = buffer(&app, 120, 40);
+    // A detail section is its title, its rule, and then its content.
+    let not_installed = row_text(&screen, row_containing(&screen, "NOT INSTALLED") + 2);
+    assert!(not_installed.contains("OpenCode"), "{not_installed}");
+    assert!(!not_installed.contains("Codex"), "{not_installed}");
 }
 
 /// A tab count is a claim about a scan, so it is withheld whenever the scan
@@ -1822,8 +1845,12 @@ fn gap_with_a_deselected_agent_keeps_selection_honest() {
 
     app.perform_effects(update.effects()).expect("perform scan");
     let screen = buffer(&app, 80, 24);
+    // The count speaks for the roots that were in scope, and the subtitle
+    // says in the same breath which agent was not: without the qualifier a
+    // deselected root would be indistinguishable from one that was read and
+    // found empty.
     assert!(
-        text(&screen).contains("nothing installed"),
+        text(&screen).contains("nothing installed · Codex not selected"),
         "{}",
         text(&screen)
     );
@@ -2128,9 +2155,10 @@ fn sources_wide_workspace_shows_three_regions_and_marks_focus_in_text() {
     assert!(rendered.contains("Details"), "{rendered}");
 }
 
-/// Sources reads as the same application as Inventory: no pane boxes, a rule
-/// under every pane header, and a single column of vertical rule between one
-/// region and the next.
+/// Sources reads as the same application as Inventory: no pane boxes, a
+/// border closing every pane header (Sources' flush `─` rule; Inventory's
+/// padded header ends the same block with `▁`), and a single column of
+/// vertical rule between one region and the next.
 #[test]
 fn sources_regions_use_the_shared_unboxed_pane_scaffold() {
     let harness = Harness::new();
@@ -6245,8 +6273,10 @@ mod installed {
 
     /// The prototype's inventory pane goes straight from its header to the
     /// table; a per-agent root-status line above the list is not part of it.
-    /// The scan-scope story lives in the subtitle ("not scanned", "no root
-    /// read", "not fully read") and the empty states, not in a header row.
+    /// The scan-scope story lives in the subtitle — "not scanned", "no root
+    /// read", "not fully read", and a last clause naming any deselected
+    /// agent — in the empty states, and in the detail region's NOT READ
+    /// section, not in a header row.
     #[test]
     fn the_inventory_header_carries_no_roots_status_line() {
         let harness = Harness::new();
