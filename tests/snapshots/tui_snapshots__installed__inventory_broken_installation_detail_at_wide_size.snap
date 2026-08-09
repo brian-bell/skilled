@@ -11,15 +11,15 @@ expression: "normalize_inventory(&temporary, render(&app, 120, 40))"
 ▕▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁│▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁│▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁│▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁│▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▏
 ▕                                                                              │                                       ▏
 ▕▌ Global inventory  3 skills                                                  │   Details  broken                     ▏
-▕▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁│ ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁ ▏
+▕──────────────────────────────────────────────────────────────────────────────│ ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁ ▏
 ▕  SKILL                 SOURCE         CLAUDE  CODEX  OPENCODE  HEALTH        │ SKILL                                 ▏
-▕  alpha                 library        ✓       ✓      -         ✓ healthy     │ ───────────────────────────────────── ▏
-▕▌ broken                not registered ×       -      -         × broken      │ broken                                ▏
-▕  copied                not registered -       U      -         U unmanaged   │ × broken                              ▏
-▕                                                                              │ SOURCE                                ▏
-▕                                                                              │ ───────────────────────────────────── ▏
-▕                                                                              │ Not resolved to any registered        ▏
-▕                                                                              │ source; Skilled does not manage it.   ▏
+▕──────────────────────────────────────────────────────────────────────────────│ ───────────────────────────────────── ▏
+▕  alpha                 library        ✓       ✓      -         ✓ healthy     │ broken                                ▏
+▕──────────────────────────────────────────────────────────────────────────────│ × broken                              ▏
+▕▌ broken                not registered ×       -      -         × broken      │ SOURCE                                ▏
+▕──────────────────────────────────────────────────────────────────────────────│ ───────────────────────────────────── ▏
+▕  copied                not registered -       U      -         U unmanaged   │ Not resolved to any registered        ▏
+▕──────────────────────────────────────────────────────────────────────────────│ source; Skilled does not manage it.   ▏
 ▕                                                                              │ CLAUDE CODE  × broken                 ▏
 ▕                                                                              │ ───────────────────────────────────── ▏
 ▕                                                                              │ Finding: install.dangling_symlink ·   ▏
