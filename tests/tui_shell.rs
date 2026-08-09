@@ -3812,6 +3812,63 @@ impl Harness {
         app
     }
 
+    /// One registered source, standing on its only variant, with every agent
+    /// root's own parent present so the plan has work to state.
+    #[cfg(unix)]
+    fn installable_source(&self) -> SkilledApp {
+        self.installable_source_at(self.directory.path())
+    }
+
+    /// The same fixture rooted at a caller-chosen path, for layout tests whose
+    /// wrapped rows must not depend on the system temporary directory's length.
+    #[cfg(unix)]
+    fn installable_source_at(&self, application_root: &Path) -> SkilledApp {
+        let home = application_root.join("home");
+        let repository = application_root.join("library");
+        create_source_fixture(&repository);
+        for root in [".claude", ".agents", ".config/opencode"] {
+            fs::create_dir_all(home.join(root)).expect("create the root's parent");
+        }
+        let mut app =
+            SkilledApp::open(AppEnvironment::new(home, application_root.join("data"), ""))
+                .expect("open application");
+        let preview = app.preview_source(&repository).expect("preview source");
+        app.confirm_source(preview).expect("register source");
+        for _ in 0..7 {
+            let update = app.update(Action::Continue);
+            app.perform_effects(update.effects())
+                .expect("perform setup effects");
+        }
+        app.update(Action::OpenSources);
+        app.update(Action::AdvanceSourcesPane);
+        app
+    }
+
+    /// Rerun setup and leave Codex deselected, through the steps a user takes.
+    #[cfg(unix)]
+    fn deselect_codex(&self, app: &mut SkilledApp) {
+        for action in [
+            // Settings opens from the Inventory, which is where a user reaching
+            // for it would be standing.
+            Action::OpenInventory,
+            Action::OpenSettings,
+            Action::RerunSetup,
+            Action::Continue,
+            Action::MoveSelection(1),
+            Action::ToggleSelection,
+        ] {
+            let update = app.update(action);
+            app.perform_effects(update.effects())
+                .expect("setup effects");
+        }
+        for _ in 0..6 {
+            let update = app.update(Action::Continue);
+            app.perform_effects(update.effects())
+                .expect("setup effects");
+        }
+        assert!(!app.agent(AgentKind::Codex).selected());
+    }
+
     /// One healthy skill installed for two agents, one dangling link, and one
     /// physical copy, with the OpenCode root absent entirely.
     ///
@@ -4094,6 +4151,322 @@ fn write_skill_fixture(directory: &Path, name: &str) {
     .expect("write skill fixture");
 }
 
+/// The install dialog states each target's verdict in words as well as in
+/// colour, and shows the exact absolute path unabbreviated.
+///
+/// Both channels are checked because neither may carry the verdict alone: a
+/// terminal may not render the palette, and a reader may not distinguish it.
+#[cfg(unix)]
+#[test]
+fn the_install_preview_carries_each_verdict_in_words_and_in_tone() {
+    let harness = Harness::new();
+    let mut app = harness.installable_source();
+    let codex = harness.directory.path().join("home/.agents/skills");
+    fs::create_dir_all(&codex).expect("create Codex root");
+    fs::write(codex.join("portable"), "someone else's file").expect("occupy the slot");
+    let update = app.update(Action::BeginInstall);
+    app.perform_effects(update.effects()).expect("plan install");
+
+    let screen = buffer(&app, 100, 30);
+    let rendered = text(&screen);
+
+    assert!(rendered.contains("┌ Install skill"), "{rendered}");
+    assert!(rendered.contains("nothing written yet"), "{rendered}");
+    // A plan blocks whole, so the targets that would have been work say
+    // "would" and are drawn inactive: a green tick above "Blocked — nothing
+    // will be written" would be the screen contradicting itself.
+    let creating = row_containing(&screen, "Claude Code: would create the skill root");
+    assert!(row_text(&screen, creating).contains('-'), "{rendered}");
+    assert_eq!(
+        style_in_row(&screen, creating, "-").fg,
+        Some(Color::Rgb(0x84, 0x91, 0xa1))
+    );
+    assert!(
+        rendered.contains("nothing will be written here: this plan is blocked"),
+        "{rendered}"
+    );
+    let blocked = row_containing(&screen, "install.physical_path_collision");
+    assert!(row_text(&screen, blocked).contains('×'), "{rendered}");
+    assert_eq!(
+        style_in_row(&screen, blocked, "×").fg,
+        Some(Color::Rgb(0xee, 0x6b, 0x73))
+    );
+    // The path a user is being asked to agree to is stated in full, and never
+    // abbreviated against the home directory. A long one wraps across rows
+    // rather than being elided, so it is checked with the wrap taken back out.
+    let home = harness.directory.path().join("home");
+    let unwrapped: String = rendered
+        .lines()
+        .filter_map(dialog_interior)
+        .flat_map(|interior| interior.chars().filter(|c| !c.is_whitespace()))
+        .collect();
+    assert!(
+        unwrapped.contains(&home.join(".agents/skills/portable").display().to_string()),
+        "{rendered}"
+    );
+    assert!(!rendered.contains("~/.agents"), "{rendered}");
+    // A blocked plan hints no key the reducer would refuse.
+    let footer = row_text(&screen, screen.area.height - 1);
+    assert!(footer.contains("Esc Close"), "{footer}");
+    assert!(!footer.contains("Enter"), "{footer}");
+}
+
+/// The report states what was written, and says plainly that nothing is undone.
+#[cfg(unix)]
+#[test]
+fn the_install_report_states_each_step_and_the_verification_behind_it() {
+    let harness = Harness::new();
+    let mut app = harness.installable_source();
+    for action in [Action::BeginInstall, Action::ConfirmInstall] {
+        // The runner draws before every key; a confirmation waits on what the
+        // frame measured.
+        if app.pending_install().is_some() {
+            app.note_detail_max_scroll(feedback(&app, 100, 30).detail_max_scroll());
+        }
+        let update = app.update(action);
+        app.perform_effects(update.effects()).expect("install");
+    }
+
+    let screen = buffer(&app, 100, 30);
+    let rendered = text(&screen);
+
+    assert!(rendered.contains("┌ Install result"), "{rendered}");
+    assert!(rendered.contains("already applied"), "{rendered}");
+    for agent in ["Claude Code", "Codex", "OpenCode"] {
+        let row = row_containing(&screen, &format!("{agent}: link created"));
+        assert_eq!(
+            style_in_row(&screen, row, "✓").fg,
+            Some(Color::Rgb(0x8b, 0xd4, 0x9c))
+        );
+    }
+    let verified = row_containing(&screen, "observed again and matches this plan");
+    assert_eq!(
+        style_in_row(&screen, verified, "✓").fg,
+        Some(Color::Rgb(0x8b, 0xd4, 0x9c))
+    );
+    // A successful install does not need the no-undo note; a failed one does,
+    // and it is tested where it appears.
+    assert!(!rendered.contains("does not undo"), "{rendered}");
+    let footer = row_text(&screen, screen.area.height - 1);
+    assert!(footer.contains("Esc Close"), "{footer}");
+    assert!(!footer.contains("Enter"), "{footer}");
+}
+
+/// `i · Install` appears exactly where the reducer would act on it.
+#[cfg(unix)]
+#[test]
+fn the_install_hint_appears_only_where_a_variant_is_focused() {
+    let harness = Harness::new();
+    let mut app = harness.installable_source();
+
+    let footer = |app: &SkilledApp| {
+        let screen = buffer(app, 100, 30);
+        row_text(&screen, screen.area.height - 1)
+    };
+    assert!(footer(&app).contains("i Install"), "{}", footer(&app));
+
+    // Back in the repositories pane there is no variant to stand on.
+    app.update(Action::Back);
+    assert!(!footer(&app).contains("i Install"), "{}", footer(&app));
+}
+
+/// The report escapes what it prints, as every other surface does.
+///
+/// A step's failure reason carries paths and operating-system error text, both
+/// of which come from outside Skilled; a terminal would execute a control
+/// sequence in one rather than show it.
+#[cfg(unix)]
+#[test]
+fn the_install_report_escapes_filesystem_text_in_a_failed_step() {
+    let harness = Harness::new();
+    let home = harness.directory.path().join("home");
+    // A checkout directory whose name carries an escape sequence, moved out
+    // from under the plan so the failure names the path it resolved.
+    let repository = harness.directory.path().join("lib\u{1b}[31mrary");
+    create_source_fixture(&repository);
+    for root in [".claude", ".agents", ".config/opencode"] {
+        fs::create_dir_all(home.join(root)).expect("create the root's parent");
+    }
+    let mut app = harness.first_run();
+    let preview = app.preview_source(&repository).expect("preview source");
+    app.confirm_source(preview).expect("register source");
+    for _ in 0..7 {
+        let update = app.update(Action::Continue);
+        app.perform_effects(update.effects())
+            .expect("perform setup effects");
+    }
+    app.update(Action::OpenSources);
+    app.update(Action::AdvanceSourcesPane);
+    let update = app.update(Action::BeginInstall);
+    app.perform_effects(update.effects()).expect("plan install");
+    fs::rename(&repository, harness.directory.path().join("moved")).expect("move the checkout");
+    // The runner draws before every key, and a confirmation waits on what the
+    // frame measured.
+    app.note_detail_max_scroll(feedback(&app, 100, 30).detail_max_scroll());
+    let update = app.update(Action::ConfirmInstall);
+    app.perform_effects(update.effects())
+        .expect("apply install");
+
+    let rendered = text(&buffer(&app, 100, 30));
+
+    assert!(rendered.contains("not written"), "{rendered:?}");
+    assert!(
+        !rendered.contains('\u{1b}'),
+        "an escape sequence reached the terminal: {rendered:?}"
+    );
+}
+
+/// A postcondition Skilled could not check is stated as withheld, and the
+/// one-line verdict does not claim a verification it did not make.
+#[cfg(unix)]
+#[test]
+fn a_withheld_postcondition_is_stated_rather_than_reported_as_verified() {
+    let harness = Harness::new();
+    let mut app = harness.installable_source();
+    harness.deselect_codex(&mut app);
+    app.update(Action::OpenSources);
+    app.update(Action::AdvanceSourcesPane);
+    for action in [Action::BeginInstall, Action::ConfirmInstall] {
+        // The runner draws before every key; a confirmation waits on what the
+        // frame measured.
+        if app.pending_install().is_some() {
+            app.note_detail_max_scroll(feedback(&app, 100, 30).detail_max_scroll());
+        }
+        let update = app.update(action);
+        app.perform_effects(update.effects()).expect("install");
+    }
+
+    let screen = buffer(&app, 100, 30);
+    let rendered = text(&screen);
+
+    // Nothing disagreed, and something was not checked. Both are said, and the
+    // verdict beside the keys says the second of them too.
+    assert!(
+        rendered.contains("nothing disagreed with this plan"),
+        "{rendered}"
+    );
+    assert!(!rendered.contains("matches this plan"), "{rendered}");
+    let withheld = row_containing(&screen, "could not be established");
+    assert!(
+        row_text(&screen, withheld).contains("OpenCode"),
+        "{rendered}"
+    );
+    // The two kinds of unknown stay apart, and the root that was never read is
+    // named. The sentence wraps, so it is looked for on the screen rather than
+    // on the row the badge sits on.
+    let unwrapped: String = rendered
+        .lines()
+        .filter_map(dialog_interior)
+        .map(str::trim)
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        unwrapped.contains("did not read Codex's skill root"),
+        "{rendered}"
+    );
+    assert!(row_text(&screen, withheld).contains('-'), "{rendered}");
+    assert_eq!(
+        style_in_row(&screen, withheld, "-").fg,
+        Some(Color::Rgb(0x84, 0x91, 0xa1))
+    );
+    assert!(
+        rendered.contains("Installed · not fully verified"),
+        "{rendered}"
+    );
+}
+
+/// A preview taller than the terminal says so and can be read to its end.
+///
+/// A user cannot consent to writes the screen never showed them, so content
+/// past the body is reachable rather than silently dropped: the dialog says
+/// which way the rest lies, the footer offers the keys that move it, and the
+/// last target is on screen once it has been scrolled to.
+#[cfg(unix)]
+#[test]
+fn a_preview_taller_than_its_dialog_says_so_and_can_be_scrolled_to_its_end() {
+    let harness = Harness::new();
+    // The preview's exact absolute paths are the content that makes it taller
+    // than this dialog. Root it beneath two deliberately long components so
+    // the precondition is the same under GitHub's short `/tmp/.tmpXXXXXX` as it
+    // is under a longer platform-specific temporary directory.
+    let application_root = harness
+        .directory
+        .path()
+        .join("install-preview-overflow-fixture-with-a-deliberately-long-root")
+        .join("whose-length-does-not-depend-on-the-system-temporary-directory");
+    let mut app = harness.installable_source_at(&application_root);
+    let update = app.update(Action::BeginInstall);
+    app.perform_effects(update.effects()).expect("plan install");
+
+    // Eighty by twenty-four is the smallest terminal Skilled supports, and the
+    // dialog's body does not hold three targets and their absolute paths there.
+    let screen = buffer(&app, 80, 24);
+    let rendered = text(&screen);
+    assert!(
+        !rendered.contains("Home:"),
+        "the fixture no longer overflows, so this measures nothing: {rendered}"
+    );
+    assert!(rendered.contains("more below"), "{rendered}");
+    let footer = row_text(&screen, screen.area.height - 1);
+    assert!(footer.contains("j/k Scroll"), "{footer}");
+    // Nothing is written until a plan the reader has seen in full is confirmed,
+    // so Enter is not offered while part of it is still below the window.
+    assert!(!footer.contains("Enter"), "{footer}");
+    // The runner notes what the frame measured before reading the next key, so
+    // by the time Enter could arrive the reducer refuses it too.
+    app.note_detail_max_scroll(Some(measured_extent(&app, 80, 24)));
+    assert!(!app.install_preview_fully_seen());
+    assert!(app.update(Action::ConfirmInstall).effects().is_empty());
+
+    // The window moves the way it does everywhere else: the frame measures the
+    // extent, the runner notes it, and the next keystroke is clamped to it.
+    // Far more steps than the content needs, so the clamp is what stops it —
+    // the last row of a wrapped preview has to be reachable, which it is only
+    // if the extent is counted in the rows the paragraph actually draws.
+    scroll_detail(&mut app, 80, 24, 60);
+    let screen = buffer(&app, 80, 24);
+    let rendered = text(&screen);
+
+    assert!(rendered.contains("Home:"), "{rendered}");
+    assert!(rendered.contains("more above"), "{rendered}");
+    assert!(!rendered.contains("more below"), "{rendered}");
+    // The Home field is the last thing in the body. Reassemble its wrapped
+    // rows and require the complete absolute path, with no other content
+    // between it and the rule that closes the body.
+    let home = row_containing(&screen, "Home:");
+    let rule = row_containing(&screen, "  ──────");
+    let home_block = (home..rule)
+        .map(|y| row_text(&screen, y))
+        .filter_map(|row| dialog_interior(&row).map(str::trim).map(str::to_owned))
+        .filter(|row| !row.is_empty())
+        .collect::<String>();
+    assert_eq!(
+        home_block,
+        format!("Home:{}", application_root.join("home").display()),
+        "{rendered}"
+    );
+    // And a confirmation is accepted only now.
+    let update = app.update(Action::ConfirmInstall);
+    assert!(!update.effects().is_empty(), "{rendered}");
+    // Once the end has been on screen, the key the reducer would accept is the
+    // key the footer offers.
+    assert!(app.install_preview_fully_seen());
+    let footer = row_text(&screen, screen.area.height - 1);
+    assert!(footer.contains("Enter Install"), "{footer}");
+    assert!(footer.contains("Esc Cancel"), "{footer}");
+}
+
+/// The text between a dialog row's own borders.
+///
+/// The workspace behind a dialog is still drawn either side of it, so a
+/// wrapped line cannot simply be joined to the one below: the columns outside
+/// the border belong to another screen.
+fn dialog_interior(row: &str) -> Option<&str> {
+    let start = row.find('│')? + '│'.len_utf8();
+    let end = row.rfind('│')?;
+    (start <= end).then(|| &row[start..end])
+}
+
 fn buffer(app: &SkilledApp, width: u16, height: u16) -> Buffer {
     drawn(app, width, height).0
 }
@@ -4116,7 +4489,7 @@ fn measured_extent(app: &SkilledApp, width: u16, height: u16) -> usize {
 fn scroll_detail(app: &mut SkilledApp, width: u16, height: u16, steps: usize) {
     for _ in 0..steps {
         if let Some(extent) = feedback(app, width, height).detail_max_scroll() {
-            app.note_detail_max_scroll(extent);
+            app.note_detail_max_scroll(Some(extent));
         }
         app.update(Action::ScrollDetail(1));
     }
@@ -4934,7 +5307,7 @@ mod installed {
             let whole = region_rows(&app, width, 80);
             for height in 24..40 {
                 let extent = measured_extent(&app, width, height);
-                app.note_detail_max_scroll(extent);
+                app.note_detail_max_scroll(Some(extent));
                 for _ in 0..=extent {
                     app.update(Action::ScrollDetail(-1));
                 }
@@ -5070,7 +5443,7 @@ mod installed {
         // back first, and the next one — the runner notes before every key —
         // pulls it back for good.
         let stale_frame = text(&buffer(&app, 80, 30));
-        app.note_detail_max_scroll(extent);
+        app.note_detail_max_scroll(Some(extent));
         assert_eq!(app.detail_scroll(), extent);
         assert_eq!(stale_frame, text(&buffer(&app, 80, 30)));
 
@@ -5096,7 +5469,7 @@ mod installed {
             // Drawn between each step, the way the runner does it.
             for _ in 0..2 {
                 if let Some(extent) = feedback(&app, width, height).detail_max_scroll() {
-                    app.note_detail_max_scroll(extent);
+                    app.note_detail_max_scroll(Some(extent));
                 }
                 app.update(Action::MoveInventoryPane(1));
             }

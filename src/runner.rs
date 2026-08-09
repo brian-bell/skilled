@@ -24,12 +24,12 @@ pub fn run(environment: AppEnvironment) -> Result<()> {
         // keystroke is clamped against.
         let mut feedback = tui::RenderFeedback::default();
         terminal.draw(|frame| feedback = tui::render(frame, &app))?;
-        // A frame that did not draw the region measured nothing, and nothing
-        // is not zero: the offset it was last scrolled to survives the frames
-        // where the region is off screen.
-        if let Some(max_scroll) = feedback.detail_max_scroll() {
-            app.note_detail_max_scroll(max_scroll);
-        }
+        // A frame that did not draw the region measured nothing, and nothing is
+        // not zero: the offset it was last scrolled to survives the frames
+        // where the region is off screen. That the frame measured nothing is
+        // itself reported, so a dialog the terminal was too small to draw
+        // cannot be confirmed on the strength of an earlier frame's extent.
+        app.note_detail_max_scroll(feedback.detail_max_scroll());
         let Event::Key(key) = event::read()? else {
             continue;
         };

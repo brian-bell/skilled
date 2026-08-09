@@ -695,6 +695,61 @@ fn an_empty_inventory_cannot_open_the_filter_bar() {
     assert!(!app.inventory_filter_active());
 }
 
+/// The install flow asks for nothing where there is nothing to install, and
+/// asks for it exactly once where there is.
+///
+/// A row that is a catalog's state rather than a variant is a place to stand,
+/// not a thing to install, and neither is a repositories-pane selection whose
+/// variant index is only whatever it was last left at.
+#[test]
+fn install_is_requested_only_from_a_focused_variant() {
+    let temporary = tempfile::tempdir().expect("temporary application directory");
+    let mut app = app_in(&temporary);
+    finish_setup(&mut app);
+    register_source(&mut app, &temporary.path().join("empty"), 0);
+    app.update(Action::OpenSources);
+
+    // The repositories pane stands on a source, not on a variant.
+    let update = app.update(Action::BeginInstall);
+    assert!(update.effects().is_empty());
+    assert!(app.pending_install().is_none());
+
+    // The variants pane of a catalog holding nothing stands on its `no
+    // variants` row, which is a state and not a skill.
+    app.update(Action::AdvanceSourcesPane);
+    let update = app.update(Action::BeginInstall);
+    assert!(update.effects().is_empty());
+    assert!(app.pending_install().is_none());
+    assert!(!app.can_install_selection());
+}
+
+/// Dismissing a preview writes nothing and asks for nothing: the question was
+/// asked and answered, and the answer was no.
+#[test]
+fn dismissing_a_preview_is_effect_free() {
+    let temporary = tempfile::tempdir().expect("temporary application directory");
+    let mut app = app_in(&temporary);
+    finish_setup(&mut app);
+    register_source(&mut app, &temporary.path().join("library"), 1);
+    app.update(Action::OpenSources);
+    app.update(Action::AdvanceSourcesPane);
+    let update = app.update(Action::BeginInstall);
+    assert_eq!(update.effects(), [Effect::PlanInstall]);
+    app.perform_effects(update.effects()).expect("plan install");
+    assert!(app.pending_install().is_some());
+
+    let update = app.update(Action::DismissInstall);
+
+    assert!(update.effects().is_empty());
+    assert!(app.pending_install().is_none());
+    assert!(
+        !temporary
+            .path()
+            .join("home/.claude/skills/variant-0")
+            .exists()
+    );
+}
+
 fn app_in(directory: &tempfile::TempDir) -> SkilledApp {
     SkilledApp::open(AppEnvironment::new(
         directory.path().join("home"),
@@ -848,7 +903,7 @@ mod installed {
         let temporary = tempfile::tempdir().expect("temporary application directory");
         let mut app = inventory_app(&temporary);
         app.update(Action::AdvanceInventoryPane);
-        app.note_detail_max_scroll(2);
+        app.note_detail_max_scroll(Some(2));
 
         for expected in [1, 2, 2] {
             let update = app.update(Action::ScrollDetail(1));
@@ -869,16 +924,16 @@ mod installed {
         let temporary = tempfile::tempdir().expect("temporary application directory");
         let mut app = inventory_app(&temporary);
         app.update(Action::AdvanceInventoryPane);
-        app.note_detail_max_scroll(5);
+        app.note_detail_max_scroll(Some(5));
         for _ in 0..5 {
             app.update(Action::ScrollDetail(1));
         }
         assert_eq!(app.detail_scroll(), 5);
 
-        app.note_detail_max_scroll(2);
+        app.note_detail_max_scroll(Some(2));
         assert_eq!(app.detail_scroll(), 2);
 
-        app.note_detail_max_scroll(0);
+        app.note_detail_max_scroll(Some(0));
         assert_eq!(app.detail_scroll(), 0);
     }
     /// A wide terminal draws the detail region beside a focused table, so the
@@ -887,7 +942,7 @@ mod installed {
     fn the_detail_window_moves_only_where_the_detail_region_has_focus() {
         let temporary = tempfile::tempdir().expect("temporary application directory");
         let mut app = inventory_app(&temporary);
-        app.note_detail_max_scroll(4);
+        app.note_detail_max_scroll(Some(4));
 
         assert_eq!(app.inventory_pane(), InventoryPane::Skills);
         app.update(Action::ScrollDetail(1));
@@ -905,7 +960,7 @@ mod installed {
     fn the_detail_window_returns_to_the_top_when_the_content_behind_it_changes() {
         fn scroll_into_details(app: &mut SkilledApp) {
             app.update(Action::AdvanceInventoryPane);
-            app.note_detail_max_scroll(3);
+            app.note_detail_max_scroll(Some(3));
             app.update(Action::ScrollDetail(1));
             assert_eq!(app.detail_scroll(), 1);
         }

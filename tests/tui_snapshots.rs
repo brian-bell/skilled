@@ -1004,7 +1004,7 @@ mod installed {
             .detail_max_scroll()
             .expect("the frame drew the detail region");
         assert!(extent > 0, "the region should have somewhere to scroll");
-        app.note_detail_max_scroll(extent);
+        app.note_detail_max_scroll(Some(extent));
         for _ in 0..extent {
             app.update(Action::ScrollDetail(1));
         }
@@ -1444,6 +1444,145 @@ fn normalize_scan_timestamp(screen: String) -> String {
         }
     }
     normalized
+}
+
+/// An application standing on the first variant of one registered source, in a
+/// temporary tree short enough that the install dialog's absolute paths fit on
+/// one line at eighty columns.
+///
+/// They have to: spec 15 asks the preview to state exactly what is about to be
+/// written, so the dialog never elides a path, and a snapshot of one folded
+/// across two rows would be measuring the fixture rather than the layout.
+#[cfg(unix)]
+struct InstallFixture {
+    _temporary: tempfile::TempDir,
+    application_root: PathBuf,
+}
+
+#[cfg(unix)]
+impl InstallFixture {
+    fn path(&self) -> &Path {
+        &self.application_root
+    }
+}
+
+#[cfg(unix)]
+fn install_fixture() -> (InstallFixture, SkilledApp) {
+    let temporary = tempfile::Builder::new()
+        .prefix("sk-")
+        .tempdir_in("/tmp")
+        .expect("temporary application directory");
+    // The dialog shows canonical source paths beside unresolved home paths.
+    // Give those spellings different final components of equal length beneath
+    // a fixed-width absolute prefix, so their rendered widths do not depend on
+    // whether this platform redirects `/tmp` (macOS does; Linux does not).
+    const CONTAINER_PATH_BYTES: usize = 26;
+    let canonical_temporary = temporary
+        .path()
+        .canonicalize()
+        .expect("canonical temporary directory");
+    let padding = CONTAINER_PATH_BYTES
+        .checked_sub(canonical_temporary.as_os_str().as_encoded_bytes().len() + 1)
+        .expect("the short install fixture base fits beneath the fixed-width root");
+    let container = canonical_temporary.join("x".repeat(padding));
+    let real = container.join("r");
+    let view = container.join("v");
+    fs::create_dir_all(&real).expect("create canonical application root");
+    std::os::unix::fs::symlink("r", &view).expect("create unresolved application root");
+    let fixture = InstallFixture {
+        _temporary: temporary,
+        application_root: view,
+    };
+    let repository = fixture.path().join("src");
+    create_source_fixture(&repository);
+    for root in [".claude", ".agents", ".config/opencode"] {
+        fs::create_dir_all(fixture.path().join("home").join(root))
+            .expect("create the root's parent");
+    }
+    let mut app = SkilledApp::open(AppEnvironment::new(
+        fixture.path().join("home"),
+        fixture.path().join("data"),
+        "",
+    ))
+    .expect("open application");
+    let preview = app.preview_source(&repository).expect("preview source");
+    app.confirm_source(preview).expect("register source");
+    for _ in 0..7 {
+        dispatch(&mut app, Action::Continue);
+    }
+    app.update(Action::OpenSources);
+    app.update(Action::AdvanceSourcesPane);
+    (fixture, app)
+}
+
+/// Replace the temporary tree's own path, keeping every line the width the
+/// application produced.
+///
+/// Both spellings are replaced, and the canonical one first: the dialog states
+/// resolved variant directories and unresolved link paths side by side, and on
+/// a platform where `/tmp` is itself a link the shorter spelling is a substring
+/// of the longer one.
+#[cfg(unix)]
+fn normalize_install_screen(temporary: &InstallFixture, screen: String) -> String {
+    let canonical = temporary
+        .path()
+        .canonicalize()
+        .expect("canonical temporary directory")
+        .to_string_lossy()
+        .into_owned();
+    let path = temporary.path().to_string_lossy().into_owned();
+    screen
+        .replace(&canonical, &padded_placeholder(&canonical, "[CANONICAL]"))
+        .replace(&path, &padded_placeholder(&path, "[TEMP]"))
+}
+
+/// Spec 15: the preview names every target and its exact absolute path before
+/// anything is written.
+#[cfg(unix)]
+#[test]
+fn install_preview_at_minimum_supported_size() {
+    let (temporary, mut app) = install_fixture();
+    dispatch(&mut app, Action::BeginInstall);
+
+    insta::assert_snapshot!(normalize_install_screen(&temporary, render(&app, 80, 24)));
+    insta::assert_snapshot!(
+        "install_preview_at_wide_size",
+        normalize_install_screen(&temporary, render(&app, 120, 40))
+    );
+}
+
+/// A blocked plan states the finding that blocks it and offers no way to
+/// confirm: the footer must not hint a key the reducer would refuse.
+#[cfg(unix)]
+#[test]
+fn install_preview_blocked_at_minimum_supported_size() {
+    let (temporary, mut app) = install_fixture();
+    let root = temporary.path().join("home/.agents/skills");
+    fs::create_dir_all(&root).expect("create Codex root");
+    fs::write(root.join("portable"), "someone else's file").expect("occupy the slot");
+    dispatch(&mut app, Action::BeginInstall);
+
+    insta::assert_snapshot!(normalize_install_screen(&temporary, render(&app, 80, 24)));
+}
+
+/// The report states each step, the receipts behind it, and what the scan taken
+/// afterwards made of the links.
+#[cfg(unix)]
+#[test]
+fn install_report_at_minimum_supported_size() {
+    let (temporary, mut app) = install_fixture();
+    dispatch(&mut app, Action::BeginInstall);
+    // The runner draws before every key, and a confirmation waits on what the
+    // frame measured. This preview fits at the size the report is snapshotted
+    // at, so the measurement is that there is nothing left to scroll to.
+    app.note_detail_max_scroll(drawn(&app, 120, 40).1.detail_max_scroll());
+    dispatch(&mut app, Action::ConfirmInstall);
+
+    insta::assert_snapshot!(normalize_install_screen(&temporary, render(&app, 80, 24)));
+    insta::assert_snapshot!(
+        "install_report_at_wide_size",
+        normalize_install_screen(&temporary, render(&app, 120, 40))
+    );
 }
 
 fn padded_placeholder(value: &str, placeholder: &str) -> String {

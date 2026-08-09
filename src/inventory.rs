@@ -98,6 +98,20 @@ pub struct Finding {
 }
 
 impl Finding {
+    /// State one observed fact, under a stable code.
+    ///
+    /// Findings are built here and in [`crate::operations`], which states the
+    /// spec 18.2 collision codes over a plan rather than over a scan. The type
+    /// is shared because the two say the same kind of thing to a reader, and
+    /// Doctor's ordering already keys on the code.
+    pub(crate) fn new(code: &'static str, severity: FindingSeverity, evidence: String) -> Self {
+        Self {
+            code,
+            severity,
+            evidence,
+        }
+    }
+
     pub fn code(&self) -> &'static str {
         self.code
     }

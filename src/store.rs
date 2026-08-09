@@ -7,7 +7,8 @@ use std::{
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::{
-    Error, Result,
+    AgentKind, Error, Result,
+    operations::Receipt,
     source::{
         CatalogClassification, CatalogProposal, Compatibility, InspectedSource, RegisteredSource,
         SourcePreview, contains_revision, inspect_local_source,
@@ -15,7 +16,7 @@ use crate::{
     validation::InspectionBudget,
 };
 
-const SCHEMA_VERSION: i64 = 4;
+const SCHEMA_VERSION: i64 = 5;
 
 pub(crate) struct Store {
     connection: Connection,
@@ -53,7 +54,7 @@ impl Store {
 
     pub(crate) fn agent_selections(&self) -> Result<Option<[bool; 3]>> {
         let mut selections = [false; 3];
-        for (index, agent) in ["claude-code", "codex", "opencode"].iter().enumerate() {
+        for (index, agent) in AGENT_IDENTIFIERS.iter().enumerate() {
             let selected = self
                 .connection
                 .query_row(
@@ -72,10 +73,7 @@ impl Store {
 
     pub(crate) fn complete_setup(&mut self, selections: [bool; 3]) -> Result<()> {
         let transaction = self.connection.transaction()?;
-        for (agent, selected) in ["claude-code", "codex", "opencode"]
-            .into_iter()
-            .zip(selections)
-        {
+        for (agent, selected) in AGENT_IDENTIFIERS.into_iter().zip(selections) {
             transaction.execute(
                 "INSERT INTO configured_agents (agent, selected) VALUES (?1, ?2)
                  ON CONFLICT(agent) DO UPDATE SET selected = excluded.selected",
@@ -89,6 +87,113 @@ impl Store {
         )?;
         transaction.commit()?;
         Ok(())
+    }
+
+    /// Check every path against the representation the receipt table stores.
+    ///
+    /// The install guard calls this before creating anything, then
+    /// [`Self::record_receipt`] repeats it so no caller can bypass the table's
+    /// contract and turn a path conversion into a post-write surprise.
+    pub(crate) fn ensure_receipt_recordable(&self, receipt: &Receipt) -> Result<()> {
+        stored_path(receipt.link_path())?;
+        stored_path(receipt.link_target())?;
+        receipt
+            .catalog_relative_path()
+            .map(stored_path)
+            .transpose()?;
+        receipt
+            .variant_relative_path()
+            .map(stored_path)
+            .transpose()?;
+        Ok(())
+    }
+
+    /// Record that Skilled created one particular link.
+    ///
+    /// One statement, and therefore its own transaction: the receipt is written
+    /// the moment the link exists, so a crash between two targets still leaves
+    /// the store describing exactly what is on disk.
+    ///
+    /// A receipt identical to one already recorded is left alone rather than
+    /// refused. Timestamps are whole seconds, so a link removed and put back
+    /// inside one second would otherwise fail its insert and leave Skilled
+    /// reporting that it does not own something it just created — when the
+    /// receipt it needs is already there.
+    pub(crate) fn record_receipt(&self, receipt: &Receipt) -> Result<()> {
+        self.ensure_receipt_recordable(receipt)?;
+        self.connection.execute(
+            "INSERT INTO operation_receipts
+                (created_at, operation, agent, skill_name, link_path, link_target,
+                 source_id, catalog_relative_path, variant_relative_path)
+             VALUES (?1, 'install', ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT DO NOTHING",
+            params![
+                current_timestamp(),
+                agent_identifier(receipt.agent()),
+                receipt.skill_name(),
+                stored_path(receipt.link_path())?,
+                stored_path(receipt.link_target())?,
+                receipt.source_id(),
+                receipt
+                    .catalog_relative_path()
+                    .map(stored_path)
+                    .transpose()?,
+                receipt
+                    .variant_relative_path()
+                    .map(stored_path)
+                    .transpose()?,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Every ownership receipt, oldest first.
+    ///
+    /// A row naming an agent this build does not know is an error rather than a
+    /// row to skip: a receipt Skilled cannot read is ownership it would go on to
+    /// deny, and denying it would let the next plan treat its own link as a
+    /// stranger's.
+    pub(crate) fn receipts(&self) -> Result<Vec<Receipt>> {
+        let mut statement = self.connection.prepare(
+            "SELECT agent, skill_name, link_path, link_target, source_id,
+                    catalog_relative_path, variant_relative_path
+             FROM operation_receipts ORDER BY created_at, id",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, Option<i64>>(4)?,
+                row.get::<_, Option<String>>(5)?,
+                row.get::<_, Option<String>>(6)?,
+            ))
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()?
+            .into_iter()
+            .map(
+                |(
+                    agent,
+                    skill_name,
+                    link_path,
+                    link_target,
+                    source_id,
+                    catalog_relative_path,
+                    variant_relative_path,
+                )| {
+                    Ok(Receipt::new(
+                        agent_kind(&agent)?,
+                        skill_name,
+                        PathBuf::from(link_path),
+                        PathBuf::from(link_target),
+                        source_id,
+                        catalog_relative_path.map(PathBuf::from),
+                        variant_relative_path.map(PathBuf::from),
+                    ))
+                },
+            )
+            .collect()
     }
 
     pub(crate) fn register_source(&mut self, preview: &SourcePreview) -> Result<()> {
@@ -300,11 +405,63 @@ fn path_text(path: &Path) -> Result<String> {
         .ok_or_else(|| Error::InvalidSourcePath(path.to_path_buf()))
 }
 
+/// A path stored outside the source tables, where "not a portable catalog path"
+/// would be the wrong thing to say about it.
+fn stored_path(path: &Path) -> Result<String> {
+    path.to_str()
+        .map(str::to_owned)
+        .ok_or_else(|| Error::UnrepresentablePath(path.to_path_buf()))
+}
+
+/// The stored spelling of an agent, shared by every table that names one.
+const AGENT_IDENTIFIERS: [&str; 3] = ["claude-code", "codex", "opencode"];
+
+fn agent_identifier(agent: AgentKind) -> &'static str {
+    AGENT_IDENTIFIERS[agent.index()]
+}
+
+fn agent_kind(identifier: &str) -> Result<AgentKind> {
+    AgentKind::ALL
+        .into_iter()
+        .find(|agent| agent_identifier(*agent) == identifier)
+        .ok_or_else(|| Error::InvalidStoredAgent(identifier.to_owned()))
+}
+
 fn current_timestamp() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::{ffi::OsString, os::unix::ffi::OsStringExt};
+
+    use super::*;
+
+    #[test]
+    fn an_ownership_receipt_requires_representable_paths_before_it_can_be_written() {
+        let temporary = tempfile::tempdir().expect("temporary data directory");
+        let store = Store::open(temporary.path()).expect("open store");
+        let link_path = PathBuf::from(OsString::from_vec(b"link-\xff".to_vec()));
+        let receipt = Receipt::new(
+            AgentKind::ClaudeCode,
+            "portable".to_owned(),
+            link_path.clone(),
+            PathBuf::from("/source/portable"),
+            None,
+            None,
+            None,
+        );
+
+        let result = store.ensure_receipt_recordable(&receipt);
+
+        assert!(matches!(
+            result,
+            Err(Error::UnrepresentablePath(path)) if path == link_path
+        ));
+    }
 }
 
 fn migrate(connection: &mut Connection) -> Result<()> {
@@ -371,6 +528,36 @@ fn migrate(connection: &mut Connection) -> Result<()> {
             "ALTER TABLE source_repositories ADD COLUMN
                 dirty_known INTEGER NOT NULL DEFAULT 1 CHECK (dirty_known IN (0, 1));
              PRAGMA user_version = 4;",
+        )?;
+        transaction.commit()?;
+    }
+    if current_version < 5 {
+        let transaction = connection.transaction()?;
+        // `source_id` deliberately carries no foreign key: a receipt is spec 7
+        // ownership evidence for a link Skilled put on disk, and forgetting the
+        // source it came from must not erase the record of what is out there.
+        // The columns beside it are the identity that evidence is *about*, kept
+        // as text for the same reason — they have to remain readable after the
+        // row they were copied from is gone.
+        transaction.execute_batch(
+            "CREATE TABLE operation_receipts (
+                id INTEGER PRIMARY KEY,
+                created_at INTEGER NOT NULL,
+                operation TEXT NOT NULL CHECK (operation IN ('install')),
+                agent TEXT NOT NULL,
+                skill_name TEXT NOT NULL,
+                link_path TEXT NOT NULL,
+                link_target TEXT NOT NULL,
+                source_id INTEGER,
+                catalog_relative_path TEXT,
+                variant_relative_path TEXT,
+                -- Receipts accumulate: a link removed and put back is two
+                -- facts, not one. The constraint only rules out recording the
+                -- identical fact twice, and the second of those is refused
+                -- rather than failing the write it belongs to.
+                UNIQUE (agent, link_path, link_target, created_at)
+             );
+             PRAGMA user_version = 5;",
         )?;
         transaction.commit()?;
     }

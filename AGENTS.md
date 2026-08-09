@@ -7,15 +7,21 @@ commands, the sync model, and the session-close protocol.
 ## Project Status
 
 Skilled is an early Rust 2024 / Ratatui terminal application for inspecting
-and eventually managing global coding-agent skills. First-run setup, local Git
-source registration, Sources browsing, a read-only installation inventory,
-OpenCode effective resolution across its documented roots, and a read-only
-Doctor findings view are implemented. Updates, repair, and every filesystem or
-network mutation beyond the private metadata database are not: do not turn the
-current placeholders into behavior unless the active Beads issue places that
-work in scope, and do not display a count, finding, status, or key hint the
-code cannot currently produce. Doctor lists what was observed and states that
-no repair exists; it offers no key that would perform one.
+and managing global coding-agent skills. First-run setup, local Git source
+registration, Sources browsing, a read-only installation inventory, OpenCode
+effective resolution across its documented roots, a read-only Doctor findings
+view, and installation — previewed, confirmed, and verified — are implemented.
+
+Installation is the only filesystem mutation Skilled performs, and it is
+narrow on purpose: it creates one directory symbolic link per agent, and
+creates an agent's documented skill root when its own parent already exists.
+It never replaces, overwrites, unlinks, or recursively creates anything, so
+every occupied path is a refusal. Updates, repair, uninstall, adoption of links
+Skilled did not create, and every network operation are not implemented: do not
+turn the current placeholders into behavior unless the active Beads issue
+places that work in scope, and do not display a count, finding, status, or key
+hint the code cannot currently produce. Doctor lists what was observed and
+states that no repair exists; it offers no key that would perform one.
 
 [GitHub issue #3](https://github.com/brian-bell/skilled/issues/3) is the
 product and technical source of truth. The tracked `spec/tui-prototype.html`
@@ -30,6 +36,7 @@ Requires stable Rust 1.97 or newer.
 
 ```bash
 cargo run
+cargo run -- install --source <id-or-path> --skill <name> --agents claude-code
 cargo build --release
 cargo test --all-targets
 cargo fmt --check
@@ -52,6 +59,14 @@ signal needs both, because colour alone is not an acceptable cue.
   candidate validation.
 - `src/inventory.rs`: read-only scan of the native agent skill roots; owns the
   finding codes, the state vocabulary, and the count-or-phrase verdict.
+- `src/operations.rs`: install planning and its guarded execution. `probe_install`
+  is the only read of the machine, `plan_install` decides everything over the
+  value it returns, `apply_install` re-reads each target immediately before
+  writing it, and `verify_install` checks a fresh scan against the plan. It
+  reuses `inventory::Finding` for the spec 18.2 collision codes.
+- `src/cli.rs`: the `skilled install` command — one hand-parsed surface over the
+  same planner, guards, rescan, and verification the Sources screen runs, with
+  distinguishable exit statuses.
 - `src/resolution.rs`: pure per-agent variant selection and OpenCode effective
   resolution; decides which registered variant an agent resolves a name to and
   what OpenCode would load, over data the caller already holds. It states no
@@ -68,6 +83,8 @@ signal needs both, because colour alone is not an acceptable cue.
 - `src/terminal.rs`: raw-mode/alternate-screen ownership and restoration.
 - `src/paths.rs`: injectable home, application-data, and executable search
   paths.
+- `src/main.rs`: no arguments runs the interactive application; anything else is
+  a command, reported through an exit status.
 
 ## Invariants
 
@@ -100,6 +117,34 @@ signal needs both, because colour alone is not an acceptable cue.
   data behind it supports one. Counts render as `·N` so a bare amber digit
   cannot read as the next tab's route key — the prototype separates the
   two classes by colour alone, which a terminal may not rest on.
+- Nothing is written until a plan the user has seen in full is confirmed, and
+  that is enforced rather than assumed: a preview taller than its dialog scrolls
+  rather than dropping what it cannot hold, and neither the reducer nor the
+  footer offers a confirmation until its last row has been on screen. A plan
+  blocks whole: one blocked target and nothing is written anywhere. Every
+  target's absolute path is stated unabbreviated — the `~` spelling the rest of
+  the application uses would soften the thing being agreed to.
+- Skilled writes only inside a root it established. A skill root, or any
+  directory between it and the home directory, that is a symbolic link is
+  refused rather than followed: the path the preview stated has to be the path
+  the write lands on. One pathname window remains between the check and the
+  write; it is recorded on `apply_install` and tracked as `skilled-cb2`.
+- Text from the filesystem — names, paths, link targets, operating-system error
+  messages — is escaped through `components::terminal_safe` before it reaches a
+  terminal, on every surface. The screens and `skilled install` write to the
+  same terminal by different routes and both go through it.
+- Verification has three answers, not two. `VerifyReport::is_verified` means
+  nothing disagreed with the plan; `is_complete` means every postcondition was
+  also checked. A root the scan could not read leaves its check withheld, which
+  no surface may report as a pass. This is the inventory's own rule applied to
+  the operation that follows it.
+- `--yes` removes the confirmation and nothing else: it requires `--source`,
+  `--skill`, and `--agents` to be explicit, and every collision check, apply
+  guard, rescan, and verification still runs. An agent `--agents` named that the
+  plan cannot act on is a blocked request rather than a silent skip.
+- Ownership receipts are evidence, never instructions. Nothing recreates a link
+  from one, the scanner does not consult them, they outlive the source they came
+  from, and a link Skilled did not create is never adopted by writing one.
 - Production dependencies require explicit review.
 
 ## Non-Interactive Shell Commands

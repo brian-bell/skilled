@@ -1,0 +1,28 @@
+---
+source: tests/tui_snapshots.rs
+expression: "normalize_install_screen(&temporary, render(&app, 80, 24))"
+---
+ ◆ skilled   global                               ● ready · 1 source registered
+ 1┌ Install result ───────────────────────────────────────── already applied ┐
+▌ │                                                                          │
+──│  Skill: portable                                                         │──
+sk│  Links to: [CANONICAL]                 /src/skills/portable              │ts
+▌ │                                                                          │
+  │  Steps                                                                   │
+  │  ✓ Claude Code: link created                                             │
+  │      [TEMP]                      /home/.claude/skills/portable           │
+  │  ✓ Codex: link created                                                   │
+  │      [TEMP]                      /home/.agents/skills/portable           │
+  │  ✓ OpenCode: link created                                                │
+  │      [TEMP]                      /home/.config/opencode/skills/portable  │
+  │                                                                          │
+  │  Verification                                                            │
+  │  ✓ every link written was observed again and matches this plan           │
+  │                                                                          │
+  │                                                                          │
+  │                                                                          │
+  │  ──────────────────────────────────────────────────────────────────────  │
+  │  Installed and verified                                       Esc Close  │
+  │                                                                          │
+  └──────────────────────────────────────────────────────────────────────────┘
+ Esc Close   Ctrl-C Quit
