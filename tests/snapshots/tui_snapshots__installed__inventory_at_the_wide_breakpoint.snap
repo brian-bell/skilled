@@ -5,14 +5,15 @@ expression: screen
  ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁
 ▕ ◆ skilled  global                                                                                  ▏
 ▕ 1 Inventory ·3 │ 2 Sources ·1   │ Updates (soon) │ 4 Doctor ·3    │  ● ready · 1 source registered ▏
-▕▌ Global inventory  3 skills                                │ Details  alpha                        ▏
-▕Roots: Claude Code 2 installed · Codex 2 installed ·        │ ───────────────────────────────────── ▏
-▕OpenCode no root                                            │ SKILL                                 ▏
-▕────────────────────────────────────────────────────────────│ ───────────────────────────────────── ▏
-▕  SKILL              CLAUDE  CODEX  OPENCODE  HEALTH        │ alpha                                 ▏
-▕▌ alpha              ✓       ✓      -         ✓ healthy     │ ✓ healthy                             ▏
-▕  broken             ×       -      -         × broken      │ Description: alpha fixture            ▏
-▕  copied             -       U      -         U unmanaged   │ SOURCE                                ▏
+▕                                                            │                                       ▏
+▕▌ Global inventory  3 skills                                │   Details  alpha                      ▏
+▕▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁│ ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁ ▏
+▕  SKILL              CLAUDE  CODEX  OPENCODE  HEALTH        │ SKILL                                 ▏
+▕▌ alpha              ✓       ✓      -         ✓ healthy     │ ───────────────────────────────────── ▏
+▕  broken             ×       -      -         × broken      │ alpha                                 ▏
+▕  copied             -       U      -         U unmanaged   │ ✓ healthy                             ▏
+▕                                                            │ Description: alpha fixture            ▏
+▕                                                            │ SOURCE                                ▏
 ▕                                                            │ ───────────────────────────────────── ▏
 ▕                                                            │ Source: library                       ▏
 ▕                                                            │ CLAUDE CODE  ✓ healthy                ▏
@@ -26,7 +27,6 @@ expression: screen
 ▕                                                            │ ───────────────────────────────────── ▏
 ▕                                                            │ Path: ~/.agents/skills/alpha          ▏
 ▕                                                            │ Object: symbolic link                 ▏
-▕                                                            │ Variant: skills · skills/alpha        ▏
-▕                                                            │ ! 9 more lines below — Tab, then j/k  ▏
+▕                                                            │ ! 10 more lines below — Tab, then j/k ▏
 ▕ Tab/Shift-Tab Region   j/k Move   Enter Open   / Filter   2 Sources   4 Doctor   q Quit …          ▏
  ▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔

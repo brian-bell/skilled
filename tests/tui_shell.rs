@@ -1420,11 +1420,6 @@ fn an_inventory_with_no_root_to_read_says_so_without_inventing_a_result() {
         "{screen}"
     );
     assert!(screen.contains("It did not create one"), "{screen}");
-    // The Roots line accounts for each agent, so absence is legible.
-    assert!(
-        screen.contains("Roots: Claude Code no root · Codex no root · OpenCode no root"),
-        "{screen}"
-    );
 
     // Doctor, updates, installation, and repair do not exist yet, so nothing
     // may report their results or offer their actions.
@@ -1437,6 +1432,10 @@ fn an_inventory_with_no_root_to_read_says_so_without_inventing_a_result() {
     }
 }
 
+/// The distinction lives in the empty-state copy: an inventory whose only
+/// read root is empty says skills are not installed in the roots that were
+/// read, while an inventory with no root at all says no root exists yet
+/// (the sibling test above). The two phrases may never trade places.
 #[test]
 fn a_root_that_exists_but_holds_nothing_is_distinguished_from_a_missing_one() {
     let harness = Harness::new();
@@ -1448,10 +1447,6 @@ fn a_root_that_exists_but_holds_nothing_is_distinguished_from_a_missing_one() {
 
     assert!(screen.contains("No skills are installed"), "{screen}");
     assert!(screen.contains("hold no skill directories"), "{screen}");
-    assert!(
-        screen.contains("Roots: Claude Code 0 installed · Codex no root · OpenCode no root"),
-        "{screen}"
-    );
 }
 
 #[test]
@@ -1487,15 +1482,6 @@ fn deselecting_every_agent_says_nothing_was_looked_at_rather_than_nothing_exists
         "{rendered}"
     );
     assert!(!rendered.contains("No skills are installed"), "{rendered}");
-    assert!(
-        rendered.contains("Roots: Claude Code not selected"),
-        "{rendered}"
-    );
-    let roots = row_starting_with(&screen, "Roots:");
-    assert_eq!(
-        style_in_row(&screen, roots, "not selected").fg,
-        Some(Color::Rgb(0x84, 0x91, 0xa1))
-    );
 }
 
 #[test]
@@ -1522,8 +1508,9 @@ fn an_unreadable_root_names_its_reason_in_a_critical_tone() {
     // The count is withheld, because no count was observed.
     assert!(rendered.contains("not fully read"), "{rendered}");
     assert!(!rendered.contains("nothing installed"), "{rendered}");
-    // The header rule survives the extra line rather than being displaced.
-    assert!(rendered.contains("──────"), "{rendered}");
+    // The border closing the header survives the extra line rather than
+    // being displaced.
+    assert!(rendered.contains("▁▁▁▁▁▁"), "{rendered}");
     assert!(
         rendered.contains("An agent skill root could not be read"),
         "{rendered}"
@@ -1551,6 +1538,50 @@ fn a_partially_read_inventory_lists_rows_without_claiming_a_total() {
         rendered.contains("the skill root is not a directory"),
         "{rendered}"
     );
+
+    // The detail region separates the three things a `-` cell can mean: a
+    // root that was read and holds nothing is NOT INSTALLED, a missing root
+    // is NO ROOT, and a root the scan never read is NOT READ with the
+    // scanner's own word for why. Flattening the unreadable Codex root into
+    // "not installed" would claim an observation the scan does not have.
+    let wide = text(&buffer(&app, 120, 40));
+    assert!(wide.contains("NOT READ"), "{wide}");
+    assert!(wide.contains("Codex (unreadable)"), "{wide}");
+    assert!(!wide.contains("Codex, OpenCode"), "{wide}");
+    // OpenCode's missing root has its own answer rather than being flattened
+    // into either a root that was read or one the scan could not read.
+    assert!(wide.contains("NO ROOT"), "{wide}");
+    assert!(!wide.contains("NOT INSTALLED"), "{wide}");
+    let screen = buffer(&app, 120, 40);
+    // A detail section is its title, its rule, and then its content.
+    let no_root = row_text(&screen, row_containing(&screen, "NO ROOT") + 2);
+    assert!(no_root.contains("OpenCode"), "{no_root}");
+    assert!(!no_root.contains("Codex"), "{no_root}");
+}
+
+#[test]
+fn inventory_detail_keeps_missing_roots_distinct_from_scanned_empty_roots() {
+    let harness = Harness::new();
+    let home = harness.directory.path().join("home");
+    write_skill_fixture(&home.join(".claude/skills/alpha"), "alpha");
+    fs::create_dir_all(home.join(".agents/skills")).expect("create empty Codex root");
+    let app = harness.completed_setup();
+
+    let screen = buffer(&app, 120, 40);
+    let rendered = text(&screen);
+    assert!(rendered.contains("NOT INSTALLED"), "{rendered}");
+    assert!(rendered.contains("NO ROOT"), "{rendered}");
+
+    // A root that was read and found empty is an observed absence. A root
+    // that does not exist is a different scanner result, and neither detail
+    // section may flatten the other into its answer.
+    let not_installed = row_text(&screen, row_containing(&screen, "NOT INSTALLED") + 2);
+    assert!(not_installed.contains("Codex"), "{not_installed}");
+    assert!(!not_installed.contains("OpenCode"), "{not_installed}");
+
+    let no_root = row_text(&screen, row_containing(&screen, "NO ROOT") + 2);
+    assert!(no_root.contains("OpenCode"), "{no_root}");
+    assert!(!no_root.contains("Codex"), "{no_root}");
 }
 
 /// A tab count is a claim about a scan, so it is withheld whenever the scan
@@ -1695,8 +1726,6 @@ fn inventory_between_its_transition_and_its_scan_says_not_scanned() {
 
     let header = row_text(&screen, row_containing(&screen, "Global inventory"));
     assert!(header.contains("not scanned"), "{header}");
-    let roots = row_text(&screen, row_containing(&screen, "Roots:"));
-    assert_eq!(roots.matches("not scanned").count(), 3, "{roots}");
     assert!(
         rendered.contains("Installation roots have not been scanned"),
         "{rendered}"
@@ -1828,17 +1857,12 @@ fn gap_with_a_deselected_agent_keeps_selection_honest() {
     let screen = buffer(&app, 80, 24);
     let rendered = text(&screen);
     let header = row_text(&screen, row_containing(&screen, "Global inventory"));
-    let roots = row_text(&screen, row_containing(&screen, "Roots:"));
 
     assert!(header.contains("not scanned"), "{header}");
     assert!(
         rendered.contains("Installation roots have not been scanned"),
         "{rendered}"
     );
-    assert!(roots.contains("Claude Code not scanned"), "{roots}");
-    assert!(roots.contains("Codex not selected"), "{roots}");
-    assert!(roots.contains("OpenCode not scanned"), "{roots}");
-    assert!(!roots.contains("Codex not scanned"), "{roots}");
     // No count: the selected roots have not been read.
     let navigation = row_text(&screen, 1);
     assert!(!navigation.contains("Inventory ·"), "{navigation}");
@@ -1846,11 +1870,12 @@ fn gap_with_a_deselected_agent_keeps_selection_honest() {
 
     app.perform_effects(update.effects()).expect("perform scan");
     let screen = buffer(&app, 80, 24);
-    let roots = row_text(&screen, row_containing(&screen, "Roots:"));
-    assert!(roots.contains("Codex not selected"), "{roots}");
-    assert!(!roots.contains("not scanned"), "{roots}");
+    // The count speaks for the roots that were in scope, and the subtitle
+    // says in the same breath which agent was not: without the qualifier a
+    // deselected root would be indistinguishable from one that was read and
+    // found empty.
     assert!(
-        text(&screen).contains("nothing installed"),
+        text(&screen).contains("nothing installed · Codex not selected"),
         "{}",
         text(&screen)
     );
@@ -1890,9 +1915,6 @@ fn gap_with_every_agent_deselected_does_not_claim_not_scanned() {
         "{rendered}"
     );
     assert!(rendered.contains("No agent is configured"), "{rendered}");
-    let roots = row_text(&screen, row_containing(&screen, "Roots:"));
-    assert_eq!(roots.matches("not selected").count(), 3, "{roots}");
-    assert!(!roots.contains("not scanned"), "{roots}");
     assert!(!navigation.contains("Inventory ·"), "{navigation}");
     assert!(navigation.contains(" 2 Sources ·0 "), "{navigation}");
 
@@ -2047,7 +2069,6 @@ fn a_surviving_filter_does_not_speak_for_a_mixed_unscanned_gap() {
     let screen = buffer(&app, 80, 24);
     let rendered = text(&screen);
     let header = row_text(&screen, row_containing(&screen, "Global inventory"));
-    let roots = row_text(&screen, row_containing(&screen, "Roots:"));
 
     assert!(header.contains("not scanned"), "{header}");
     assert!(!rendered.contains("0 of 0 listed"), "{rendered}");
@@ -2059,7 +2080,6 @@ fn a_surviving_filter_does_not_speak_for_a_mixed_unscanned_gap() {
         !rendered.contains("No skills match the filter"),
         "{rendered}"
     );
-    assert!(roots.contains("Codex not selected"), "{roots}");
 
     app.perform_effects(update.effects()).expect("perform scan");
     let rendered = text(&buffer(&app, 80, 24));
@@ -2160,9 +2180,10 @@ fn sources_wide_workspace_shows_three_regions_and_marks_focus_in_text() {
     assert!(rendered.contains("Details"), "{rendered}");
 }
 
-/// Sources reads as the same application as Inventory: no pane boxes, a rule
-/// under every pane header, and a single column of vertical rule between one
-/// region and the next.
+/// Sources reads as the same application as Inventory: no pane boxes, a
+/// border closing every pane header (Sources' flush `─` rule; Inventory's
+/// padded header ends the same block with `▁`), and a single column of
+/// vertical rule between one region and the next.
 #[test]
 fn sources_regions_use_the_shared_unboxed_pane_scaffold() {
     let harness = Harness::new();
@@ -5557,10 +5578,6 @@ mod installed {
         // it may report.
         let navigation = row_text(&screen, 1);
         assert!(navigation.contains(" Inventory ·0 "), "{navigation}");
-        assert!(
-            rendered.contains("Roots: Claude Code 0 installed"),
-            "{rendered}"
-        );
         assert!(!rendered.contains("2 skills"), "{rendered}");
         // "unmanaged" describes content Skilled could own; a README is not it.
         assert!(!rendered.contains("unmanaged"), "{rendered}");
@@ -5832,7 +5849,10 @@ mod installed {
             } else {
                 (1, 1, 1)
             };
-            let workspace = &rows[frame + title + nav..rows.len() - frame - bar];
+            // The Inventory's panes open with a row of clearance above their
+            // headings (the prototype's `.pane-header` padding); that row is
+            // chrome, not a row of the region's content.
+            let workspace = &rows[frame + title + nav + 1..rows.len() - frame - bar];
             let mut rows: Vec<String> = if workspace.iter().any(|row| row.contains('│')) {
                 // Beside the table, the region is everything past the rule.
                 workspace
@@ -5845,8 +5865,9 @@ mod installed {
                 // workspace.
                 workspace.iter().map(|row| row.trim().to_owned()).collect()
             };
-            // The pane's own heading and rule are the scaffold around the
-            // window, not rows of the content it is windowing.
+            // The pane's own heading and the underline that closes it are
+            // the scaffold around the window, not rows of the content it is
+            // windowing.
             rows.drain(..2);
             // Trailing blanks are room the region did not need, not content
             // it showed. Blanks between sections are content and stay counted,
@@ -6159,27 +6180,137 @@ mod installed {
         );
     }
 
+    /// The prototype's pane header keeps clearance above its heading
+    /// (`.pane-header`, spec/tui-prototype.html:167); one blank row between
+    /// the tab strip and the pane is the terminal's version of it. In the
+    /// wide layout the Details header shares the pane header's row, so the
+    /// clearance moves both panes together or neither.
     #[test]
-    fn the_roots_line_explains_what_a_dash_cell_means() {
+    fn the_inventory_pane_keeps_a_blank_row_below_the_tab_strip() {
         let harness = Harness::new();
         let app = harness.installed_inventory();
 
         let screen = buffer(&app, 80, 24);
-        let row = row_starting_with(&screen, "Roots:");
-        let line = row_text(&screen, row);
+        let header = row_containing(&screen, "Global inventory");
+        assert_eq!(header, 3, "{}", text(&screen));
+        assert!(
+            row_text(&screen, header - 1).trim().is_empty(),
+            "{}",
+            text(&screen)
+        );
 
-        assert!(line.contains("Claude Code 2 installed"), "{line}");
-        assert!(line.contains("Codex 2 installed"), "{line}");
-        assert!(line.contains("OpenCode no root"), "{line}");
-        // A scanned root reads as healthy; an absent one is inactive, not an error.
-        assert_eq!(
-            style_in_row(&screen, row, "2 installed").fg,
-            Some(Color::Rgb(0x8b, 0xd4, 0x9c))
+        let wide = buffer(&app, 120, 40);
+        let header = row_containing(&wide, "Global inventory");
+        assert!(
+            row_text(&wide, header).contains("Details"),
+            "{}",
+            text(&wide)
         );
-        assert_eq!(
-            style_in_row(&screen, row, "no root").fg,
-            Some(Color::Rgb(0x84, 0x91, 0xa1))
+    }
+
+    /// The prototype's pane header keeps its clearance symmetric
+    /// (`.pane-header` padding, spec/tui-prototype.html:167). In cells that
+    /// means the border beneath the heading is a bottom-edge underline (`▁`,
+    /// the tab strip's own border glyph) on the very next row: its ink sits
+    /// one row below the heading, mirroring the blank row above it. A
+    /// centred `─` rule would land its ink half a row lower and read as more
+    /// space below the heading than above. Beside the table the Details pane
+    /// closes the same way, so the two borders stay on one row.
+    #[test]
+    fn the_pane_heading_is_centered_between_the_bar_above_and_its_underline() {
+        let harness = Harness::new();
+        let app = harness.installed_inventory();
+
+        let screen = buffer(&app, 80, 24);
+        let header = row_containing(&screen, "Global inventory");
+        assert!(
+            row_text(&screen, header - 1).trim().is_empty(),
+            "{}",
+            text(&screen)
         );
+        assert!(
+            row_text(&screen, header + 1).starts_with("▁▁▁▁"),
+            "{}",
+            text(&screen)
+        );
+
+        let wide = buffer(&app, 120, 40);
+        let header = row_containing(&wide, "Global inventory");
+        let underlines = row_text(&wide, header + 1);
+        let (left, right) = underlines.rsplit_once('│').expect("split underline row");
+        assert!(left.contains("▁▁▁▁"), "{underlines}");
+        assert!(right.contains("▁▁▁▁"), "{underlines}");
+    }
+
+    /// The marker column is a gutter the heading keeps whether or not its
+    /// pane is focused, the way list rows keep it
+    /// (`components::list_row_lines`): the heading must not shift two cells
+    /// whenever focus moves, and an unfocused pane keeps its left padding
+    /// rather than sitting flush against the pane edge.
+    #[test]
+    fn the_pane_heading_keeps_its_column_when_focus_moves_away() {
+        let harness = Harness::new();
+        let mut app = harness.installed_inventory();
+
+        let skills_focused = buffer(&app, 120, 40);
+        app.update(Action::AdvanceInventoryPane);
+        let details_focused = buffer(&app, 120, 40);
+
+        let row = row_containing(&skills_focused, "Global inventory");
+        let column = |screen: &Buffer, needle: &str| {
+            let line = row_text(screen, row);
+            let start = line.find(needle).expect("heading on its row");
+            line[..start].chars().count()
+        };
+        for needle in ["Global inventory", "Details"] {
+            assert_eq!(
+                column(&skills_focused, needle),
+                column(&details_focused, needle),
+                "{needle}\n{}\n{}",
+                text(&skills_focused),
+                text(&details_focused)
+            );
+        }
+    }
+
+    /// The rule that splits off the Details pane runs the workspace's whole
+    /// height: the clearance above the pane headings sits inside the panes,
+    /// so the split climbs through it and meets the bar above instead of
+    /// hanging from the headings.
+    #[test]
+    fn the_pane_split_reaches_the_bar_above_the_workspace() {
+        let harness = Harness::new();
+        let app = harness.installed_inventory();
+
+        let wide = buffer(&app, 120, 40);
+        let header = row_containing(&wide, "Global inventory");
+        let split = |row: &str| row.chars().position(|c| c == '│');
+        let clearance = row_text(&wide, header - 1);
+        assert_eq!(
+            split(&clearance),
+            split(&row_text(&wide, header)),
+            "{}",
+            text(&wide)
+        );
+        // Directly above the clearance is the bar the split meets.
+        assert!(row_text(&wide, header - 2).contains('▁'), "{}", text(&wide));
+    }
+
+    /// The prototype's inventory pane goes straight from its header to the
+    /// table; a per-agent root-status line above the list is not part of it.
+    /// The scan-scope story lives in the subtitle — "not scanned", "no root
+    /// read", "not fully read", and a last clause naming any deselected
+    /// agent — in the empty states, and in the detail region's NOT READ
+    /// section, not in a header row.
+    #[test]
+    fn the_inventory_header_carries_no_roots_status_line() {
+        let harness = Harness::new();
+        let app = harness.installed_inventory();
+
+        for (width, height) in [(80, 24), (120, 40)] {
+            let screen = text(&buffer(&app, width, height));
+            assert!(!screen.contains("Roots:"), "{width}x{height}\n{screen}");
+        }
     }
     #[test]
     fn the_selected_installation_is_marked_and_its_detail_follows_the_selection() {

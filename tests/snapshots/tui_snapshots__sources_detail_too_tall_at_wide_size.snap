@@ -4,7 +4,7 @@ expression: screen
 ---
  ◆ skilled  global
  1 Inventory    │ 2 Sources ·1   │ Updates (soon) │ 4 Doctor       │                      ● ready · 1 source registered
-▌ Repositories  1 registered     │ Available variants  1 found                  │ Details  verbose
+▌ Repositories  1 registered     │   Available variants  1 found                │   Details  verbose
 ─────────────────────────────────│ ─────────────────────────────────────────────│ ─────────────────────────────────────
 ▌ source                         │ skills                    Common · all agents│ REPOSITORY
 ▌ [TEMP]/source                  │ ▌ ✓ valid verbose                            │ ─────────────────────────────────────

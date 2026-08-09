@@ -4,8 +4,9 @@ expression: "normalize_inventory(&temporary, render(&app, 80, 24))"
 ---
  ◆ skilled  global                                ● ready · 1 source registered
  1 Inventory ·3 │ 2 Sources ·1   │ Updates (soon) │ 4 Doctor ·3    │
+
  ▌ Details  copied
- ──────────────────────────────────────────────────────────────────────────────
+ ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁
  SKILL
  ──────────────────────────────────────────────────────────────────────────────
  copied
@@ -23,6 +24,5 @@ expression: "normalize_inventory(&temporary, render(&app, 80, 24))"
  Validation: ✓ valid as copied
  OPENCODE RESOLUTION  ✓ resolved
  ──────────────────────────────────────────────────────────────────────────────
- Loads: ~/.agents/skills/copied
- ! 3 more lines below — j/k to scroll
+ ! 7 more lines below — j/k to scroll
  Tab/Shift-Tab Region   j/k Scroll   2 Sources   4 Doctor   q Quit   Esc Back …

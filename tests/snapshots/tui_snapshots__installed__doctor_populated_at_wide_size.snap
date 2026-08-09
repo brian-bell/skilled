@@ -9,7 +9,7 @@ expression: "normalize_inventory(&temporary, render(&app, 120, 40))"
 ▕                │                │                │                │                                                  ▏
 ▕ 1 Inventory ·5 │ 2 Sources ·3   │ Updates (soon) │ 4 Doctor ·8    │                   ● ready · 3 sources registered ▏
 ▕▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁│▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁│▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁│▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁│▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▏
-▕▌ Doctor  8 findings                                                          │ Details  dangling                     ▏
+▕▌ Doctor  8 findings                                                          │   Details  dangling                   ▏
 ▕──────────────────────────────────────────────────────────────────────────────│ ───────────────────────────────────── ▏
 ▕  SEVERITY   FINDING                           SKILL              AGENT       │ FINDING                               ▏
 ▕▌ × critical install.dangling_symlink          dangling           Claude Code │ ───────────────────────────────────── ▏

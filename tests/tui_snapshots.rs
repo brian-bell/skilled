@@ -958,7 +958,7 @@ mod installed {
 
         let screen = normalize_inventory(&temporary, render(&app, 80, 24));
         assert!(
-            screen.contains("! 11 more lines below — j/k to scroll"),
+            screen.contains("! 12 more lines below — j/k to scroll"),
             "{screen}"
         );
         insta::assert_snapshot!(screen);
@@ -970,7 +970,7 @@ mod installed {
         app.update(Action::MoveInventoryPane(1));
         let beside = normalize_inventory(&temporary, render(&app, 102, 28));
         assert!(
-            beside.contains("! 9 more lines below — Tab, then j/k"),
+            beside.contains("! 10 more lines below — Tab, then j/k"),
             "{beside}"
         );
 
@@ -982,7 +982,7 @@ mod installed {
         app.update(Action::BeginInventoryFilter);
         assert!(app.inventory_filter_active());
         let narrow = normalize_inventory(&temporary, render(&app, 102, 28));
-        assert!(narrow.contains("! 9 more lines"), "{narrow}");
+        assert!(narrow.contains("! 10 more lines"), "{narrow}");
         assert!(!narrow.contains("widen or lengthen"), "{narrow}");
         assert!(!narrow.contains("more lines below"), "{narrow}");
     }
@@ -998,7 +998,7 @@ mod installed {
         scroll_detail_to_the_end(&mut app, 80, 24);
 
         let screen = normalize_inventory(&temporary, render(&app, 80, 24));
-        assert!(screen.contains("! 11 lines above"), "{screen}");
+        assert!(screen.contains("! 12 lines above"), "{screen}");
         assert!(!screen.contains("more lines below"), "{screen}");
         insta::assert_snapshot!(screen);
     }
@@ -1272,6 +1272,42 @@ mod installed {
     ///
     /// The source checkout lives inside the temporary home so every path the
     /// screen shows is home-relative and therefore stable across machines.
+    /// One agent deselected while another's root was read: the subtitle's
+    /// last clause names the agent that was not in scope, and the detail
+    /// region keeps it under NOT READ — apart from NO ROOT, which states that
+    /// an agent's root itself is absent.
+    #[test]
+    fn inventory_with_a_deselected_agent_at_wide_size() {
+        let temporary = tempfile::tempdir().expect("temporary application directory");
+        let repository = temporary.path().join("home/library");
+        write_skill(&repository.join("skills/alpha"), "alpha");
+        create_repository(&repository);
+
+        let mut app = SkilledApp::open(AppEnvironment::new(
+            temporary.path().join("home"),
+            temporary.path().join("data"),
+            "",
+        ))
+        .expect("open application");
+        app.update(Action::Continue);
+        app.update(Action::MoveSelection(1));
+        app.update(Action::ToggleSelection);
+        for _ in 0..6 {
+            dispatch(&mut app, Action::Continue);
+        }
+        let preview = app.preview_source(&repository).expect("preview source");
+        app.confirm_source(preview).expect("register source");
+
+        let claude = temporary.path().join("home/.claude/skills");
+        fs::create_dir_all(&claude).expect("create Claude Code root");
+        link(&repository.join("skills/alpha"), &claude.join("alpha"));
+
+        app.update(Action::OpenSources);
+        dispatch(&mut app, Action::OpenInventory);
+
+        insta::assert_snapshot!(normalize_inventory(&temporary, render(&app, 120, 40)));
+    }
+
     fn inventory_app(temporary: &tempfile::TempDir) -> SkilledApp {
         let repository = temporary.path().join("home/library");
         for skill in ["alpha", "beta"] {

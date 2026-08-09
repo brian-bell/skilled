@@ -1064,16 +1064,23 @@ fn inventory_columns(width: u16) -> InventoryColumns {
 
 fn render_inventory_skills(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
     let rows = app.filtered_rows();
-    let mut header_lines = vec![pane_header(
-        "Global inventory",
-        &inventory_subtitle(app, rows.len()),
-        app.inventory_pane() == InventoryPane::Skills,
-        area.width,
-    )];
+    // The prototype's pane header keeps clearance above its content as well
+    // as beneath it (`.pane-header`, spec/tui-prototype.html:167: `min-height:
+    // 48px`, `padding: 8px 12px`). The row above lives inside the pane rather
+    // than being cut from the workspace, so the rule that splits off the
+    // Details pane runs through it and meets the bar above.
+    let mut header_lines = vec![
+        Line::default(),
+        pane_header(
+            "Global inventory",
+            &qualified_inventory_subtitle(app, rows.len()),
+            app.inventory_pane() == InventoryPane::Skills,
+            area.width,
+        ),
+    ];
     if app.inventory_filter_active() || !app.inventory_filter().is_empty() {
         header_lines.push(inventory_filter_line(app));
     }
-    header_lines.push(inventory_roots_line(app));
     // A root that could not be read contributes nothing, so its reason is the
     // only account the user gets of what is inside it. Every root that failed
     // gets its own line: dropping the second would hide a second obstruction.
@@ -1103,7 +1110,10 @@ fn render_inventory_skills(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) 
         Constraint::Min(1),
     ])
     .areas(area);
-    header_lines.push(components::rule(header.width));
+    // The block closes at its bottom edge, like the Details pane beside it
+    // (see `PADDED_PANE_HEADER_HEIGHT` for why the border is not a centred
+    // rule).
+    header_lines.push(components::underline(header.width));
     frame.render_widget(
         Paragraph::new(header_lines).wrap(Wrap { trim: false }),
         header,
@@ -1198,6 +1208,37 @@ fn inventory_subtitle(app: &SkilledApp, shown: usize) -> String {
     }
 }
 
+/// The claim a completed scan makes, qualified by the roots it was never
+/// asked about.
+///
+/// A stated count is complete over the roots the user selected, so a count
+/// can stand while an agent's column shows only `-`. Without a qualifier
+/// that `-` under a deselected agent would read as a root that was read and
+/// found empty — the flattening the inventory's truthfulness rule forbids.
+/// The qualifier is the subtitle's last clause, so a narrow pane sheds it
+/// after the count it qualifies ([`bounded_subtitle`]). The pending and
+/// all-deselected states keep their single phrases: "no root read" speaks
+/// for every root at once, and "not scanned" stands while nothing per-agent
+/// is on screen yet — a deselected root beside pending ones becomes worth
+/// naming only when a count starts speaking for the roots that were read.
+fn qualified_inventory_subtitle(app: &SkilledApp, shown: usize) -> String {
+    let claim = inventory_subtitle(app, shown);
+    let inventory = app.inventory();
+    if inventory.scan_pending() || inventory.no_agent_configured() {
+        return claim;
+    }
+    let deselected: Vec<&str> = inventory
+        .roots()
+        .iter()
+        .filter(|root| matches!(root.status(), RootStatus::NotSelected))
+        .map(|root| root.agent().display_name())
+        .collect();
+    if deselected.is_empty() {
+        return claim;
+    }
+    format!("{claim} · {} not selected", deselected.join(", "))
+}
+
 /// The query box, or the query that is still narrowing the list.
 ///
 /// The query is bounded on entry, and bounded again here: the header must
@@ -1222,27 +1263,6 @@ fn inventory_filter_line(app: &SkilledApp) -> Line<'static> {
         Span::styled("Filter: ", theme::pane_subtitle()),
         Span::raw(query),
     ])
-}
-
-/// What each agent's root contributed.
-///
-/// A `-` cell means no skill is installed under that name in that root, which
-/// covers both "nothing is there" and "something is there that is not a skill";
-/// the Health column names which. This line supplies the other half a `-` needs
-/// to be read: whether the root was scanned at all.
-fn inventory_roots_line(app: &SkilledApp) -> Line<'static> {
-    let mut spans = vec![Span::styled("Roots: ", theme::pane_subtitle())];
-    for (position, root) in app.inventory().roots().iter().enumerate() {
-        if position > 0 {
-            spans.push(Span::styled(" · ", theme::pane_subtitle()));
-        }
-        spans.push(Span::raw(format!("{} ", root.agent().display_name())));
-        spans.push(Span::styled(
-            root.status().short_summary(),
-            theme::tone_style(root_tone(root)),
-        ));
-    }
-    Line::from(spans)
 }
 
 fn root_tone(root: &RootScan) -> Tone {
@@ -1317,7 +1337,10 @@ fn inventory_row_line(
         // A present observation names its health beside the glyph when the
         // column can hold the words. An absent one keeps the bare `-` at
         // every width: "not installed" would outrun what an unscanned root
-        // backs, and the Roots line above carries that half of the reading.
+        // backs. The scan-scope half of that reading lives in the subtitle —
+        // whose last clause names any deselected agent
+        // (`qualified_inventory_subtitle`) — and in the detail region, which
+        // keeps NOT INSTALLED, NO ROOT, and NOT READ apart.
         let cell = match observation {
             Some(observation) if columns.labeled => {
                 format!(
@@ -1493,6 +1516,7 @@ fn render_doctor_findings(
         "Doctor",
         &doctor_subtitle(app, findings.len()),
         app.doctor_pane() == DoctorPane::Findings,
+        false,
     );
 
     if findings.is_empty() {
@@ -1698,6 +1722,7 @@ fn render_doctor_detail(
         ),
         app.doctor_pane() == DoctorPane::Details,
         beside_the_table,
+        false,
     );
 
     let Some(entry) = selected else {
@@ -1866,35 +1891,57 @@ fn render_region_separator(frame: &mut Frame<'_>, area: Rect) {
     );
 }
 
-/// The heading and its rule, which every pane spends before its body.
+/// The heading and its rule, which a flush pane spends before its body.
 const PANE_HEADER_HEIGHT: u16 = 2;
+
+/// The header block of a pane that carries the prototype's `.pane-header`
+/// clearance (spec/tui-prototype.html:167): a blank row above the heading,
+/// and a bottom-edge underline — not a centred rule — on the row beneath it,
+/// so the border's ink sits one row below the heading the way the blank row
+/// sits one row above, and the heading reads centered. The clearance is
+/// inside the pane rather than cut from the workspace, so a separator beside
+/// the pane runs through it to the bar above. The Inventory's panes carry it;
+/// the other views' panes still sit flush, so the choice is the pane's rather
+/// than the scaffold's.
+const PADDED_PANE_HEADER_HEIGHT: u16 = 3;
 
 /// The header and body a pane's area divides into.
 ///
 /// Shared so a caller that has to measure a body it is not drawing — the
 /// scroll extent the detail region reports — divides the area exactly as the
 /// scaffold that draws it does.
-fn pane_regions(area: Rect) -> [Rect; 2] {
-    Layout::vertical([Constraint::Length(PANE_HEADER_HEIGHT), Constraint::Min(1)]).areas(area)
+fn pane_regions(area: Rect, padded: bool) -> [Rect; 2] {
+    let header = if padded {
+        PADDED_PANE_HEADER_HEIGHT
+    } else {
+        PANE_HEADER_HEIGHT
+    };
+    Layout::vertical([Constraint::Length(header), Constraint::Min(1)]).areas(area)
 }
 
 /// A workspace pane: its header, the rule that closes it, and the body left
-/// for the pane's own content.
+/// for the pane's own content. `padded` keeps the clearance
+/// [`PADDED_PANE_HEADER_HEIGHT`] describes.
 fn render_pane_scaffold(
     frame: &mut Frame<'_>,
     area: Rect,
     heading: &str,
     subtitle: &str,
     focused: bool,
+    padded: bool,
 ) -> Rect {
-    let [header, body] = pane_regions(area);
-    frame.render_widget(
-        Paragraph::new(vec![
-            pane_header(heading, subtitle, focused, header.width),
-            components::rule(header.width),
-        ]),
-        header,
-    );
+    let [header, body] = pane_regions(area, padded);
+    let mut lines = Vec::with_capacity(usize::from(PADDED_PANE_HEADER_HEIGHT));
+    if padded {
+        lines.push(Line::default());
+    }
+    lines.push(pane_header(heading, subtitle, focused, header.width));
+    lines.push(if padded {
+        components::underline(header.width)
+    } else {
+        components::rule(header.width)
+    });
+    frame.render_widget(Paragraph::new(lines), header);
     body
 }
 
@@ -1914,7 +1961,7 @@ fn pane_header(heading: &str, subtitle: &str, focused: bool, width: u16) -> Line
         subtitle,
         usize::from(width)
             .saturating_sub(Span::raw(heading).width())
-            .saturating_sub(if focused { ROW_MARKER_WIDTH } else { 0 })
+            .saturating_sub(ROW_MARKER_WIDTH)
             .saturating_sub(SUBTITLE_GAP),
     );
     components::focused_pane_header(heading, &subtitle, focused)
@@ -1955,6 +2002,7 @@ fn render_detail_scaffold(
     subtitle: &str,
     focused: bool,
     beside_the_primary_region: bool,
+    padded: bool,
 ) -> Rect {
     let region = detail_regions(area, beside_the_primary_region);
     if let Some(separator) = region.separator {
@@ -1963,7 +2011,7 @@ fn render_detail_scaffold(
     // Painted whole, before the margin: the surface is what makes the region
     // read as a region, so it reaches the edges the text does not.
     frame.render_widget(Block::new().style(theme::detail_surface()), region.surface);
-    render_pane_scaffold(frame, region.text, heading, subtitle, focused)
+    render_pane_scaffold(frame, region.text, heading, subtitle, focused, padded)
 }
 
 /// The rectangles a detail region is built from.
@@ -1981,8 +2029,10 @@ struct DetailRegions {
 
 impl DetailRegions {
     /// The rows the region's own lines get, below the header and its rule.
-    fn body(&self) -> Rect {
-        pane_regions(self.text)[1]
+    /// `padded` must match what the scaffold drew, or the extent measured is
+    /// not the extent shown.
+    fn body(&self, padded: bool) -> Rect {
+        pane_regions(self.text, padded)[1]
     }
 }
 
@@ -2022,6 +2072,7 @@ fn render_inventory_detail(
         ),
         app.inventory_pane() == InventoryPane::Details,
         beside_the_table,
+        true,
     );
 
     let Some(row) = selected else {
@@ -2284,14 +2335,16 @@ fn detail_scroll_extent(
         return Some(rows.saturating_sub(usize::from(body.height)));
     }
     let (primary, detail) = viewport::workspace_regions(workspace);
-    let focused_alone = |drilled_in: bool| match (detail, drilled_in) {
-        (Some(detail), _) => Some(detail_regions(detail, true).body()),
-        (None, true) => Some(detail_regions(primary, false).body()),
+    // `padded` mirrors what each view's scaffold draws: the Inventory's
+    // panes carry the header clearance, the Doctor's do not.
+    let focused_alone = |drilled_in: bool, padded: bool| match (detail, drilled_in) {
+        (Some(detail), _) => Some(detail_regions(detail, true).body(padded)),
+        (None, true) => Some(detail_regions(primary, false).body(padded)),
         (None, false) => None,
     };
     let (body, lines) = match app.view() {
         View::Inventory => {
-            let body = focused_alone(app.inventory_pane() == InventoryPane::Details)?;
+            let body = focused_alone(app.inventory_pane() == InventoryPane::Details, true)?;
             if body.width == 0 {
                 return None;
             }
@@ -2307,7 +2360,7 @@ fn detail_scroll_extent(
             )
         }
         View::Doctor => {
-            let body = focused_alone(app.doctor_pane() == DoctorPane::Details)?;
+            let body = focused_alone(app.doctor_pane() == DoctorPane::Details, false)?;
             if body.width == 0 {
                 return None;
             }
@@ -2517,18 +2570,64 @@ fn inventory_detail_lines(
         push_opencode_resolution(&mut lines, row, roots, home, width);
     }
 
-    // The agents that carry nothing share one line rather than three empty
-    // sections, so the observations that exist keep the room.
-    let absent: Vec<&str> = AgentKind::ALL
-        .into_iter()
-        .filter(|agent| row.observation(*agent).is_none())
-        .map(AgentKind::display_name)
-        .collect();
-    if !absent.is_empty() {
+    // The agents that carry nothing share one line per answer rather than
+    // three empty sections, so the observations that exist keep the room.
+    // There are three answers, and they are kept apart: NOT INSTALLED is an
+    // observation from a root that was read, NO ROOT says the root itself
+    // does not exist, and NOT READ means the scan never looked and says why
+    // in the scanner's own words. Folding any two together would flatten the
+    // scanner's distinctions.
+    let mut not_installed = Vec::new();
+    let mut no_root = Vec::new();
+    let mut not_read = Vec::new();
+    for agent in AgentKind::ALL {
+        if row.observation(agent).is_some() {
+            continue;
+        }
+        let status = roots
+            .iter()
+            .find(|root| root.agent() == agent)
+            .map(RootScan::status);
+        match status {
+            Some(RootStatus::Scanned { .. }) => {
+                not_installed.push(agent.display_name().to_owned());
+            }
+            Some(RootStatus::Missing) => no_root.push(agent.display_name().to_owned()),
+            Some(unread) => {
+                not_read.push(format!(
+                    "{} ({})",
+                    agent.display_name(),
+                    unread.short_summary()
+                ));
+            }
+            // A root the snapshot does not list was never approached; it
+            // borrows the not-scanned wording rather than coining its own.
+            None => not_read.push(format!(
+                "{} ({})",
+                agent.display_name(),
+                RootStatus::NotScanned.short_summary()
+            )),
+        }
+    }
+    if !not_installed.is_empty() {
         push_detail_section(&mut lines, "NOT INSTALLED", width);
         lines.push(Line::from(components::badge(
             Tone::Inactive,
-            &absent.join(", "),
+            &not_installed.join(", "),
+        )));
+    }
+    if !no_root.is_empty() {
+        push_detail_section(&mut lines, "NO ROOT", width);
+        lines.push(Line::from(components::badge(
+            Tone::Inactive,
+            &no_root.join(", "),
+        )));
+    }
+    if !not_read.is_empty() {
+        push_detail_section(&mut lines, "NOT READ", width);
+        lines.push(Line::from(components::badge(
+            Tone::Inactive,
+            &not_read.join(", "),
         )));
     }
     lines
@@ -2617,10 +2716,11 @@ fn push_opencode_resolution(
             ));
         }
         OpenCodeResolution::Incomplete { roots: unread } => {
-            // Each root says why it was not read, in the same words the Roots
-            // line uses: a root left alone on the user's own instruction and
-            // one that defeated the scan are not the same answer, and "not
-            // read" alone would flatten them into one.
+            // Each root says why it was not read, in the scanner's own words
+            // (`short_summary`, the vocabulary the setup scan step and the
+            // NOT READ section use): a root left alone on the user's own
+            // instruction and one that defeated the scan are not the same
+            // answer, and "not read" alone would flatten them into one.
             let reasons: Vec<String> = unread
                 .iter()
                 .map(|unknown| {
@@ -2844,6 +2944,7 @@ fn render_source_repositories(frame: &mut Frame<'_>, area: Rect, app: &SkilledAp
         "Repositories",
         &format!("{} registered", app.sources().len()),
         app.sources_pane() == SourcesPane::Repositories,
+        false,
     );
 
     if app.sources().is_empty() {
@@ -2963,6 +3064,7 @@ fn render_source_variants(
         "Available variants",
         &subtitle,
         app.sources_pane() == SourcesPane::Variants,
+        false,
     );
 
     let Some(source) = app.selected_source() else {
@@ -3372,6 +3474,7 @@ fn render_source_details(
         &subtitle,
         app.sources_pane() == SourcesPane::Details,
         beside_the_primary_region,
+        false,
     );
 
     let Some(source) = app.selected_source() else {
@@ -5722,7 +5825,7 @@ mod tests {
     fn a_bounded_subtitle_sheds_whole_clauses_before_cutting_a_word() {
         let heading = "Available variants";
         let width = |budget: usize| {
-            u16::try_from(Span::raw(heading).width() + SUBTITLE_GAP + budget)
+            u16::try_from(ROW_MARKER_WIDTH + Span::raw(heading).width() + SUBTITLE_GAP + budget)
                 .expect("test widths fit a terminal")
         };
         let subtitle = |budget: usize| {

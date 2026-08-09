@@ -549,7 +549,10 @@ impl RootStatus {
         }
     }
 
-    /// The same state, for a line that has to hold all three roots at once.
+    /// The same state, in the fewest words: the phrase surfaces that hold
+    /// several roots at once — the setup scan step, the detail region's NOT
+    /// READ section, and the OpenCode resolution's unread reasons — share
+    /// this vocabulary so one state never has two names.
     pub fn short_summary(&self) -> String {
         match self {
             Self::NotScanned => "not scanned".to_owned(),
@@ -885,8 +888,8 @@ impl InventorySnapshot {
     ///
     /// A stray file beside the skill directories is listed so the user can see
     /// it, but it is not an installation and may not be counted as one: a
-    /// `.DS_Store` must not inflate what the Roots line and the setup summary
-    /// report.
+    /// `.DS_Store` must not inflate what the inventory subtitle and the setup
+    /// summary report.
     fn installations(&self) -> impl Iterator<Item = &InstalledSkillObservation> {
         self.rows
             .iter()

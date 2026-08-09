@@ -7,15 +7,15 @@ expression: "normalize_inventory(&temporary, render(&app, 120, 40))"
 ▕ ◆ skilled  global                                                                                                    ▏
 ▕▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▏
 ▕                │                │                │                │                                                  ▏
-▕ 1 Inventory ·3 │ 2 Sources ·1   │ Updates (soon) │ 4 Doctor ·3    │                    ● ready · 1 source registered ▏
+▕ 1 Inventory ·1 │ 2 Sources ·1   │ Updates (soon) │ 4 Doctor ·0    │                    ● ready · 1 source registered ▏
 ▕▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁│▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁│▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁│▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁│▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▏
 ▕                                                                              │                                       ▏
-▕▌ Global inventory  3 skills                                                  │   Details  alpha                      ▏
+▕▌ Global inventory  1 skill · Codex not selected                              │   Details  alpha                      ▏
 ▕▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁│ ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁ ▏
 ▕  SKILL                 SOURCE         CLAUDE  CODEX  OPENCODE  HEALTH        │ SKILL                                 ▏
-▕▌ alpha                 library        ✓       ✓      -         ✓ healthy     │ ───────────────────────────────────── ▏
-▕  broken                not registered ×       -      -         × broken      │ alpha                                 ▏
-▕  copied                not registered -       U      -         U unmanaged   │ ✓ healthy                             ▏
+▕▌ alpha                 library        ✓       -      -         ✓ healthy     │ ───────────────────────────────────── ▏
+▕                                                                              │ alpha                                 ▏
+▕                                                                              │ ✓ healthy                             ▏
 ▕                                                                              │ Description: alpha fixture            ▏
 ▕                                                                              │ SOURCE                                ▏
 ▕                                                                              │ ───────────────────────────────────── ▏
@@ -27,18 +27,18 @@ expression: "normalize_inventory(&temporary, render(&app, 120, 40))"
 ▕                                                                              │ Variant: skills · skills/alpha        ▏
 ▕                                                                              │ Target: ~/library/skills/alpha        ▏
 ▕                                                                              │ Validation: ✓ valid as alpha          ▏
-▕                                                                              │ CODEX  ✓ healthy                      ▏
+▕                                                                              │ OPENCODE RESOLUTION  - could not tell ▏
 ▕                                                                              │ ───────────────────────────────────── ▏
-▕                                                                              │ Path: ~/.agents/skills/alpha          ▏
-▕                                                                              │ Object: symbolic link                 ▏
-▕                                                                              │ Variant: skills · skills/alpha        ▏
-▕                                                                              │ Target: ~/library/skills/alpha        ▏
-▕                                                                              │ Validation: ✓ valid as alpha          ▏
-▕                                                                              │ OPENCODE RESOLUTION  ✓ resolved       ▏
+▕                                                                              │ Not known: Codex (not selected)       ▏
+▕                                                                              │ NO ROOT                               ▏
 ▕                                                                              │ ───────────────────────────────────── ▏
-▕                                                                              │ Loads: ~/.agents/skills/alpha         ▏
-▕                                                                              │ Also at: ~/.claude/skills/alpha       ▏
-▕                                                                              │ ! 3 more lines below — Tab, then j/k  ▏
+▕                                                                              │ - OpenCode                            ▏
+▕                                                                              │ NOT READ                              ▏
+▕                                                                              │ ───────────────────────────────────── ▏
+▕                                                                              │ - Codex (not selected)                ▏
+▕                                                                              │                                       ▏
+▕                                                                              │                                       ▏
+▕                                                                              │                                       ▏
 ▕                                                                                                                      ▏
-▕ Tab/Shift-Tab Region   j/k Move   Enter Open   / Filter   2 Sources   4 Doctor   s Settings   ? Help   q Quit        ▏
+▕ Tab/Shift-Tab Region   Enter Open   / Filter   2 Sources   4 Doctor   s Settings   ? Help   q Quit                   ▏
  ▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
