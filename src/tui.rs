@@ -1340,7 +1340,7 @@ fn inventory_row_line(
         // backs. The scan-scope half of that reading lives in the subtitle —
         // whose last clause names any deselected agent
         // (`qualified_inventory_subtitle`) — and in the detail region, which
-        // keeps NOT INSTALLED apart from NOT READ.
+        // keeps NOT INSTALLED, NO ROOT, and NOT READ apart.
         let cell = match observation {
             Some(observation) if columns.labeled => {
                 format!(
@@ -2572,12 +2572,13 @@ fn inventory_detail_lines(
 
     // The agents that carry nothing share one line per answer rather than
     // three empty sections, so the observations that exist keep the room.
-    // There are two answers, and they are kept apart: NOT INSTALLED is an
-    // observation — the root was read, or does not exist, and holds nothing
-    // under this name — while NOT READ means the scan never looked, and says
-    // why in the scanner's own words. Folding the second into the first
-    // would state an absence nobody observed.
+    // There are three answers, and they are kept apart: NOT INSTALLED is an
+    // observation from a root that was read, NO ROOT says the root itself
+    // does not exist, and NOT READ means the scan never looked and says why
+    // in the scanner's own words. Folding any two together would flatten the
+    // scanner's distinctions.
     let mut not_installed = Vec::new();
+    let mut no_root = Vec::new();
     let mut not_read = Vec::new();
     for agent in AgentKind::ALL {
         if row.observation(agent).is_some() {
@@ -2588,9 +2589,10 @@ fn inventory_detail_lines(
             .find(|root| root.agent() == agent)
             .map(RootScan::status);
         match status {
-            Some(RootStatus::Scanned { .. } | RootStatus::Missing) => {
+            Some(RootStatus::Scanned { .. }) => {
                 not_installed.push(agent.display_name().to_owned());
             }
+            Some(RootStatus::Missing) => no_root.push(agent.display_name().to_owned()),
             Some(unread) => {
                 not_read.push(format!(
                     "{} ({})",
@@ -2612,6 +2614,13 @@ fn inventory_detail_lines(
         lines.push(Line::from(components::badge(
             Tone::Inactive,
             &not_installed.join(", "),
+        )));
+    }
+    if !no_root.is_empty() {
+        push_detail_section(&mut lines, "NO ROOT", width);
+        lines.push(Line::from(components::badge(
+            Tone::Inactive,
+            &no_root.join(", "),
         )));
     }
     if !not_read.is_empty() {

@@ -30,7 +30,7 @@ expression: "normalize_inventory(&temporary, render(&app, 120, 40))"
 ▕                                                                              │ OPENCODE RESOLUTION  - could not tell ▏
 ▕                                                                              │ ───────────────────────────────────── ▏
 ▕                                                                              │ Not known: Codex (not selected)       ▏
-▕                                                                              │ NOT INSTALLED                         ▏
+▕                                                                              │ NO ROOT                               ▏
 ▕                                                                              │ ───────────────────────────────────── ▏
 ▕                                                                              │ - OpenCode                            ▏
 ▕                                                                              │ NOT READ                              ▏

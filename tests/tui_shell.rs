@@ -1539,24 +1539,49 @@ fn a_partially_read_inventory_lists_rows_without_claiming_a_total() {
         "{rendered}"
     );
 
-    // The detail region separates the two things a `-` cell can mean: a root
-    // that was read and holds nothing is NOT INSTALLED; a root the scan never
-    // read is NOT READ, with the scanner's own word for why. Flattening the
-    // unreadable Codex root into "not installed" would claim an observation
-    // the scan does not have.
+    // The detail region separates the three things a `-` cell can mean: a
+    // root that was read and holds nothing is NOT INSTALLED, a missing root
+    // is NO ROOT, and a root the scan never read is NOT READ with the
+    // scanner's own word for why. Flattening the unreadable Codex root into
+    // "not installed" would claim an observation the scan does not have.
     let wide = text(&buffer(&app, 120, 40));
     assert!(wide.contains("NOT READ"), "{wide}");
     assert!(wide.contains("Codex (unreadable)"), "{wide}");
     assert!(!wide.contains("Codex, OpenCode"), "{wide}");
-    // The other half of the partition: OpenCode's root does not exist, which
-    // is an observed absence — NOT INSTALLED, on its own, with no unread
-    // agent lumped beside it.
-    assert!(wide.contains("NOT INSTALLED"), "{wide}");
+    // OpenCode's missing root has its own answer rather than being flattened
+    // into either a root that was read or one the scan could not read.
+    assert!(wide.contains("NO ROOT"), "{wide}");
+    assert!(!wide.contains("NOT INSTALLED"), "{wide}");
     let screen = buffer(&app, 120, 40);
     // A detail section is its title, its rule, and then its content.
+    let no_root = row_text(&screen, row_containing(&screen, "NO ROOT") + 2);
+    assert!(no_root.contains("OpenCode"), "{no_root}");
+    assert!(!no_root.contains("Codex"), "{no_root}");
+}
+
+#[test]
+fn inventory_detail_keeps_missing_roots_distinct_from_scanned_empty_roots() {
+    let harness = Harness::new();
+    let home = harness.directory.path().join("home");
+    write_skill_fixture(&home.join(".claude/skills/alpha"), "alpha");
+    fs::create_dir_all(home.join(".agents/skills")).expect("create empty Codex root");
+    let app = harness.completed_setup();
+
+    let screen = buffer(&app, 120, 40);
+    let rendered = text(&screen);
+    assert!(rendered.contains("NOT INSTALLED"), "{rendered}");
+    assert!(rendered.contains("NO ROOT"), "{rendered}");
+
+    // A root that was read and found empty is an observed absence. A root
+    // that does not exist is a different scanner result, and neither detail
+    // section may flatten the other into its answer.
     let not_installed = row_text(&screen, row_containing(&screen, "NOT INSTALLED") + 2);
-    assert!(not_installed.contains("OpenCode"), "{not_installed}");
-    assert!(!not_installed.contains("Codex"), "{not_installed}");
+    assert!(not_installed.contains("Codex"), "{not_installed}");
+    assert!(!not_installed.contains("OpenCode"), "{not_installed}");
+
+    let no_root = row_text(&screen, row_containing(&screen, "NO ROOT") + 2);
+    assert!(no_root.contains("OpenCode"), "{no_root}");
+    assert!(!no_root.contains("Codex"), "{no_root}");
 }
 
 /// A tab count is a claim about a scan, so it is withheld whenever the scan

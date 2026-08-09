@@ -22,7 +22,7 @@ expression: screen
  ──────────────────────────────────────────────────────────────────────────────
  Loads: ~/.agents/skills/alpha
  Also at: ~/.claude/skills/alpha
- NOT INSTALLED
+ NO ROOT
  ──────────────────────────────────────────────────────────────────────────────
  - OpenCode
  Tab/Shift-Tab Region   j/k Scroll   2 Sources   4 Doctor   q Quit   Esc Back …

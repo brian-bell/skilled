@@ -31,10 +31,10 @@ expression: "normalize_inventory(&temporary, render(&app, 120, 40))"
 ▕                                                                              │ Validation: - not attempted           ▏
 ▕                                                                              │ NOT INSTALLED                         ▏
 ▕                                                                              │ ───────────────────────────────────── ▏
-▕                                                                              │ - Codex, OpenCode                     ▏
-▕                                                                              │                                       ▏
-▕                                                                              │                                       ▏
-▕                                                                              │                                       ▏
+▕                                                                              │ - Codex                               ▏
+▕                                                                              │ NO ROOT                               ▏
+▕                                                                              │ ───────────────────────────────────── ▏
+▕                                                                              │ - OpenCode                            ▏
 ▕                                                                              │                                       ▏
 ▕                                                                              │                                       ▏
 ▕                                                                              │                                       ▏

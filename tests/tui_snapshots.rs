@@ -1274,8 +1274,8 @@ mod installed {
     /// screen shows is home-relative and therefore stable across machines.
     /// One agent deselected while another's root was read: the subtitle's
     /// last clause names the agent that was not in scope, and the detail
-    /// region keeps it under NOT READ — apart from NOT INSTALLED, which
-    /// states only observed absences.
+    /// region keeps it under NOT READ — apart from NO ROOT, which states that
+    /// an agent's root itself is absent.
     #[test]
     fn inventory_with_a_deselected_agent_at_wide_size() {
         let temporary = tempfile::tempdir().expect("temporary application directory");
