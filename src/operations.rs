@@ -29,7 +29,7 @@ use crate::{
         CandidateSelection, OpenCodeResolution, RootSighting, SightedEntry, UnknownCause,
         UnknownRoot, VariantRef, narrow, resolve_opencode, variants_by_name,
     },
-    source::{RegisteredSource, SkillValidation},
+    source::{RegisteredSource, SkillValidation, contains_revision},
     store::Store,
     validation::{InspectionBudget, PortableValidationError, validate_portable_skill_with_budget},
 };
@@ -235,8 +235,21 @@ impl TargetProbe {
 /// user agreed to, and the scan taken afterwards is what checks them.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InstallProbe {
-    source_dir: Result<PathBuf, String>,
+    source: Result<SourceProbe, String>,
     targets: [TargetProbe; 3],
+}
+
+/// The registered checkout identity and variant directory observed together.
+///
+/// The revision distinguishes a registered checkout from another repository
+/// that later occupies the same pathname. Carrying it beside the canonical
+/// checkout and directory lets the immutable plan preserve the identity the
+/// preview established for the executor to recheck.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct SourceProbe {
+    checkout: PathBuf,
+    revision: String,
+    directory: PathBuf,
 }
 
 impl InstallProbe {
@@ -257,7 +270,7 @@ pub fn probe_install(
     home: &Path,
 ) -> InstallProbe {
     InstallProbe {
-        source_dir: probe_source_dir(sources, variant),
+        source: probe_source(sources, variant),
         targets: agents
             .each_ref()
             .map(|agent| probe_target(agent, variant.skill_name(), home)),
@@ -272,15 +285,12 @@ pub fn probe_install(
 /// link elsewhere since the source was registered, and a plan that linked to
 /// whatever now sits at the end of that path would install content the source
 /// does not contain.
-fn probe_source_dir(sources: &[RegisteredSource], variant: &VariantRef) -> Result<PathBuf, String> {
+fn probe_source(sources: &[RegisteredSource], variant: &VariantRef) -> Result<SourceProbe, String> {
     let source = sources
         .iter()
         .find(|source| source.id() == variant.source_id())
         .ok_or_else(|| "its source is no longer registered".to_owned())?;
-    let checkout = source
-        .git_top_level()
-        .canonicalize()
-        .map_err(|error| error.to_string())?;
+    let checkout = verified_checkout(source.git_top_level(), source.head())?;
     let directory = source
         .git_top_level()
         .join(variant.variant_relative_path())
@@ -302,7 +312,11 @@ fn probe_source_dir(sources: &[RegisteredSource], variant: &VariantRef) -> Resul
     let mut budget = InspectionBudget::source_scan();
     validate_portable_skill_with_budget(&directory, &mut budget)
         .map_err(|error| format!("it no longer validates as a portable skill: {error}"))?;
-    Ok(directory)
+    Ok(SourceProbe {
+        checkout,
+        revision: source.head().to_owned(),
+        directory,
+    })
 }
 
 /// One agent's slot, read only if that agent is one Skilled was asked to
@@ -568,6 +582,8 @@ impl OpenCodeOutlook {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InstallPlan {
     variant: VariantRef,
+    source_checkout: PathBuf,
+    source_revision: String,
     source_dir: PathBuf,
     targets: Vec<InstallTarget>,
     warnings: Vec<String>,
@@ -664,10 +680,13 @@ pub fn plan_install(
             skill_name: variant.skill_name().to_owned(),
         });
     }
-    let source_dir = probe
-        .source_dir
-        .clone()
-        .map_err(|reason| PlanFailure::SourceUnavailable { reason })?;
+    let source = probe
+        .source
+        .as_ref()
+        .map_err(|reason| PlanFailure::SourceUnavailable {
+            reason: reason.clone(),
+        })?;
+    let source_dir = source.directory.clone();
 
     let mut targets: Vec<InstallTarget> = AgentKind::ALL
         .into_iter()
@@ -698,6 +717,8 @@ pub fn plan_install(
 
     Ok(InstallPlan {
         variant: variant.clone(),
+        source_checkout: source.checkout.clone(),
+        source_revision: source.revision.clone(),
         source_dir,
         targets,
         warnings,
@@ -1499,6 +1520,9 @@ fn apply_target(
             "the ownership receipt cannot record this target, so nothing was written: {error}"
         ));
     }
+    if let Err(reason) = recheck_source_identity(plan) {
+        return StepOutcome::Failed(format!("{reason}, so nothing was written"));
+    }
     let root_now = probe_root(root, home);
     match (&target.disposition, &root_now) {
         // A root that has appeared since the plan was made is the root the plan
@@ -1547,6 +1571,35 @@ fn apply_target(
     match store.record_receipt(&receipt) {
         Ok(()) => StepOutcome::Created,
         Err(error) => StepOutcome::CreatedUnrecorded(error.to_string()),
+    }
+}
+
+/// Re-establish that the link target belongs to the checkout the plan named.
+///
+/// Canonical directory equality alone cannot distinguish a repository that
+/// replaced the registered checkout at the same path. The registered revision
+/// is the store's existing identity witness: if the current repository no
+/// longer contains it, this is another checkout and no write may follow.
+fn recheck_source_identity(plan: &InstallPlan) -> Result<(), String> {
+    verified_checkout(&plan.source_checkout, &plan.source_revision).map(|_| ())
+}
+
+fn verified_checkout(expected: &Path, revision: &str) -> Result<PathBuf, String> {
+    let checkout = expected
+        .canonicalize()
+        .map_err(|error| format!("the source checkout identity could not be verified: {error}"))?;
+    if checkout != expected {
+        return Err(format!(
+            "the source now resolves to a different Git checkout: {}",
+            checkout.display()
+        ));
+    }
+    match contains_revision(&checkout, revision) {
+        Ok(true) => Ok(checkout),
+        Ok(false) => Err("the source path now contains a different Git checkout".to_owned()),
+        Err(error) => Err(format!(
+            "the source checkout identity could not be verified: {error}"
+        )),
     }
 }
 

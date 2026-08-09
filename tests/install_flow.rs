@@ -494,6 +494,80 @@ fn a_variant_directory_that_moved_since_the_preview_stops_the_run() {
     assert!(app.receipts().expect("receipts").is_empty());
 }
 
+/// A cached source row identifies one Git checkout, not merely one pathname.
+/// Replacing that checkout with another repository that happens to offer the
+/// same relative skill must not let the stale row authorize an install.
+#[test]
+fn a_replaced_checkout_is_unavailable_before_the_preview() {
+    let fixture = Fixture::new();
+    let repository = fixture.source("library", &["portable"]);
+    let mut app = fixture.registered(&repository);
+    fixture.create_root_parents();
+    focus_first_variant(&mut app);
+
+    fs::rename(&repository, fixture.path().join("original-library"))
+        .expect("move the registered checkout aside");
+    write_skill(&repository.join("skills/portable"), "portable");
+    fs::write(repository.join("replacement-marker"), "another repository")
+        .expect("distinguish the replacement history");
+    initialize_repository(&repository);
+
+    dispatch(&mut app, Action::BeginInstall);
+
+    let Some(InstallPrompt::Failed(reason)) = app.pending_install() else {
+        panic!(
+            "a replacement checkout is refused: {:?}",
+            app.pending_install()
+        );
+    };
+    assert!(reason.contains("different Git checkout"), "{reason}");
+    for (_, root) in ROOTS {
+        assert!(!fixture.home().join(root).join("portable").exists());
+    }
+    assert!(app.receipts().expect("receipts").is_empty());
+}
+
+/// Confirmation rechecks the checkout identity immediately before the first
+/// write, so a valid preview cannot authorize content from a repository that
+/// later takes over the registered pathname.
+#[test]
+fn a_checkout_replaced_since_the_preview_is_not_written() {
+    let fixture = Fixture::new();
+    let repository = fixture.source("library", &["portable"]);
+    let mut app = fixture.registered(&repository);
+    fixture.create_root_parents();
+    focus_first_variant(&mut app);
+
+    dispatch(&mut app, Action::BeginInstall);
+    assert!(matches!(
+        app.pending_install(),
+        Some(InstallPrompt::Preview(_))
+    ));
+    fs::rename(&repository, fixture.path().join("original-library"))
+        .expect("move the registered checkout aside");
+    write_skill(&repository.join("skills/portable"), "portable");
+    fs::write(repository.join("replacement-marker"), "another repository")
+        .expect("distinguish the replacement history");
+    initialize_repository(&repository);
+
+    dispatch(&mut app, Action::ConfirmInstall);
+
+    let Some(InstallPrompt::Report(outcome)) = app.pending_install() else {
+        panic!("a report follows the refused apply");
+    };
+    assert_eq!(outcome.status(), InstallStatus::NotApplied);
+    assert!(matches!(
+        outcome
+            .step(AgentKind::ClaudeCode)
+            .map(|step| step.outcome()),
+        Some(StepOutcome::Failed(reason)) if reason.contains("different Git checkout")
+    ));
+    for (_, root) in ROOTS {
+        assert!(!fixture.home().join(root).join("portable").exists());
+    }
+    assert!(app.receipts().expect("receipts").is_empty());
+}
+
 /// A cached source row is not permission to install content that no longer
 /// passes the portable skill contract. The preview re-reads the selected
 /// directory, so invalid content is refused before the user can confirm it.
