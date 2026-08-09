@@ -1585,6 +1585,74 @@ fn install_report_at_minimum_supported_size() {
     );
 }
 
+/// A step that created a skill root and then could not write the link into it
+/// states the residual root, the steps it stopped, and that nothing undoes it.
+#[cfg(unix)]
+#[test]
+fn install_report_with_a_residual_root_at_minimum_supported_size() {
+    let (temporary, mut app) = install_fixture();
+    if !deny_writes_in_new_children(&temporary.path().join("home/.claude")) {
+        // Nothing here can be snapshotted over a link that was written after
+        // all, and a screen showing a successful install would pin the wrong
+        // report under this name.
+        return;
+    }
+    dispatch(&mut app, Action::BeginInstall);
+    // The preview is the same one the successful report's test measures, so the
+    // measurement is again that there is nothing left to scroll to.
+    app.note_detail_max_scroll(drawn(&app, 120, 40).1.detail_max_scroll());
+    dispatch(&mut app, Action::ConfirmInstall);
+
+    insta::assert_snapshot!(normalize_install_screen(&temporary, render(&app, 80, 24)));
+    // The narrow screen scrolls, so the note that nothing undoes the residual
+    // root is only whole at the wider size.
+    insta::assert_snapshot!(
+        "install_report_with_a_residual_root_at_wide_size",
+        normalize_install_screen(&temporary, render(&app, 120, 40))
+    );
+}
+
+/// Deny writes inside directories created beneath `parent`, leaving `parent`
+/// itself writable, and report whether the denial took effect.
+///
+/// A residual root exists only in the window between Skilled creating a skill
+/// root and failing to write the link into it, and nothing outside the process
+/// can reach into that window: the one lever on the new directory is the
+/// permission it is born with. An inheritable access-control entry sets that
+/// permission on the children alone, which the process umask — shared with
+/// every test running beside this one — could not do safely.
+///
+/// The entry is proved against a probe rather than assumed, because a
+/// filesystem without inheritable access control cannot stage this at all and
+/// a caller told `false` has to say so rather than pin a screen that shows
+/// something else.
+#[cfg(unix)]
+fn deny_writes_in_new_children(parent: &Path) -> bool {
+    let applied = if cfg!(target_os = "macos") {
+        Command::new("chmod")
+            .arg("+a")
+            .arg("everyone deny add_file,delete_child,file_inherit,directory_inherit,only_inherit")
+            .arg(parent)
+            .status()
+    } else {
+        Command::new("setfacl")
+            .args(["-d", "-m", "u::rx,g::rx,o::rx"])
+            .arg(parent)
+            .status()
+    };
+    if !applied.is_ok_and(|status| status.success()) {
+        return false;
+    }
+    let probe = parent.join("inheritance-probe");
+    fs::create_dir(&probe).expect("create the inheritance probe");
+    let denied = std::os::unix::fs::symlink(parent, probe.join("link")).is_err();
+    if !denied {
+        fs::remove_file(probe.join("link")).expect("remove the probe link");
+    }
+    fs::remove_dir(&probe).expect("remove the inheritance probe");
+    denied
+}
+
 fn padded_placeholder(value: &str, placeholder: &str) -> String {
     format!(
         "{placeholder}{}",

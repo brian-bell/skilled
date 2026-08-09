@@ -4151,6 +4151,47 @@ fn write_skill_fixture(directory: &Path, name: &str) {
     .expect("write skill fixture");
 }
 
+/// Deny writes inside directories created beneath `parent`, leaving `parent`
+/// itself writable, and report whether the denial took effect.
+///
+/// A residual root exists only in the window between Skilled creating a skill
+/// root and failing to write the link into it, and nothing outside the process
+/// can reach into that window: the one lever on the new directory is the
+/// permission it is born with. An inheritable access-control entry sets that
+/// permission on the children alone, which the process umask — shared with
+/// every test running beside this one — could not do safely.
+///
+/// The entry is proved against a probe rather than assumed, because a
+/// filesystem without inheritable access control cannot stage this at all and
+/// a caller told `false` has to say so rather than assert over a link that was
+/// written after all.
+#[cfg(unix)]
+fn deny_writes_in_new_children(parent: &Path) -> bool {
+    let applied = if cfg!(target_os = "macos") {
+        Command::new("chmod")
+            .arg("+a")
+            .arg("everyone deny add_file,delete_child,file_inherit,directory_inherit,only_inherit")
+            .arg(parent)
+            .status()
+    } else {
+        Command::new("setfacl")
+            .args(["-d", "-m", "u::rx,g::rx,o::rx"])
+            .arg(parent)
+            .status()
+    };
+    if !applied.is_ok_and(|status| status.success()) {
+        return false;
+    }
+    let probe = parent.join("inheritance-probe");
+    fs::create_dir(&probe).expect("create the inheritance probe");
+    let denied = std::os::unix::fs::symlink(parent, probe.join("link")).is_err();
+    if !denied {
+        fs::remove_file(probe.join("link")).expect("remove the probe link");
+    }
+    fs::remove_dir(&probe).expect("remove the inheritance probe");
+    denied
+}
+
 /// The install dialog states each target's verdict in words as well as in
 /// colour, and shows the exact absolute path unabbreviated.
 ///
@@ -4250,6 +4291,51 @@ fn the_install_report_states_each_step_and_the_verification_behind_it() {
     let footer = row_text(&screen, screen.area.height - 1);
     assert!(footer.contains("Esc Close"), "{footer}");
     assert!(!footer.contains("Enter"), "{footer}");
+}
+
+/// A step that created a skill root and could not write the link into it is a
+/// partial write, and the report carries that in words as well as in tone.
+///
+/// This is the one outcome that leaves something on disk without installing
+/// anything, so the note that nothing undoes it belongs beside the step, and
+/// the step itself is critical rather than merely failed.
+#[cfg(unix)]
+#[test]
+fn the_install_report_carries_a_residual_root_in_words_and_in_tone() {
+    let harness = Harness::new();
+    let mut app = harness.installable_source();
+    let claude = harness.directory.path().join("home/.claude");
+    if !deny_writes_in_new_children(&claude) {
+        // Nothing here can be asserted over a link that was written after all.
+        return;
+    }
+    for action in [Action::BeginInstall, Action::ConfirmInstall] {
+        // The runner draws before every key; a confirmation waits on what the
+        // frame measured.
+        if app.pending_install().is_some() {
+            app.note_detail_max_scroll(feedback(&app, 100, 30).detail_max_scroll());
+        }
+        let update = app.update(action);
+        app.perform_effects(update.effects()).expect("install");
+    }
+
+    let screen = buffer(&app, 100, 30);
+    let rendered = text(&screen);
+
+    let residual = row_containing(
+        &screen,
+        "Claude Code: skill root created, but the link was not",
+    );
+    assert_eq!(
+        style_in_row(&screen, residual, "×").fg,
+        Some(Color::Rgb(0xee, 0x6b, 0x73))
+    );
+    assert!(rendered.contains("Permission denied"), "{rendered}");
+    // The empty root is real and is left where it is, so the report says that
+    // nothing undoes it.
+    assert!(rendered.contains("does not undo"), "{rendered}");
+    assert!(claude.join("skills").is_dir());
+    assert!(!claude.join("skills/portable").exists());
 }
 
 /// `i · Install` appears exactly where the reducer would act on it.

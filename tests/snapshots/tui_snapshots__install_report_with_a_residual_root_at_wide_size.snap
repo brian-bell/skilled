@@ -1,0 +1,44 @@
+---
+source: tests/tui_snapshots.rs
+expression: "normalize_install_screen(&temporary, render(&app, 120, 40))"
+---
+ ◆ skilled   global                                                                       ● ready · 1 source registered
+ 1┌ Install result ───────────────────────────────────────────────────────────────────────────────── already applied ┐
+Re│                                                                                                                  │
+──│  Skill: portable                                                                                                 │─
+▌ │  Links to: [CANONICAL]                 /src/skills/portable                                                      │
+▌ │                                                                                                                  │─
+▌ │  Steps                                                                                                           │
+  │  × Claude Code: skill root created, but the link was not: Permission denied (os error 13)                        │c
+  │      [TEMP]                      /home/.claude/skills/portable                                                   │
+  │  U Codex: not attempted, because an earlier step stopped the run                                                 │
+  │      [TEMP]                      /home/.agents/skills/portable                                                   │
+  │  U OpenCode: not attempted, because an earlier step stopped the run                                              │
+  │      [TEMP]                      /home/.config/opencode/skills/portable                                          │
+  │                                                                                                                  │─
+  │  Verification                                                                                                    │n
+  │  ✓ every link written was observed again and matches this plan                                                   │
+  │                                                                                                                  │
+  │  Skilled does not undo what it wrote. Nothing above was removed, and no repair exists in this release.           │─
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │                                                                                                                  │
+  │  ──────────────────────────────────────────────────────────────────────────────────────────────────────────────  │
+  │  Partly applied                                                                                       Esc Close  │
+  │                                                                                                                  │
+  └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+ Esc Close   Ctrl-C Quit
