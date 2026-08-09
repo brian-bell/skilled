@@ -81,6 +81,18 @@ pub(crate) fn nav_bar_height(terminal_height: u16) -> u16 {
     }
 }
 
+/// Whether the workspace may spend whole rows on air at this terminal
+/// height: the closing rule under a grid's headings and the rule beneath
+/// each of its rows (`.grid-head`, `.data-row`,
+/// spec/tui-prototype.html:234, 251) each cost a row that would otherwise
+/// hold an entry. The gate is the same threshold at which the chrome bars
+/// take their padded heights, so one decision names the tall terminal and
+/// the bars and the grid cannot disagree about which terminal that is
+/// (skilled-hjo).
+pub(crate) fn airy_rows(terminal_height: u16) -> bool {
+    terminal_height >= PADDED_CHROME_MINIMUM_HEIGHT
+}
+
 /// The rows the title bar takes at this terminal height: the prototype's
 /// pad–text–pad band at or above [`PADDED_CHROME_MINIMUM_HEIGHT`], one row
 /// below it.

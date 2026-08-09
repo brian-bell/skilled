@@ -109,13 +109,16 @@ pub fn render(frame: &mut Frame<'_>, app: &SkilledApp) -> RenderFeedback {
         _ => Vec::new(),
     };
     let detail_extent = detail_scroll_extent(app, area, workspace, &findings);
+    // The grid's rules answer to the same height the chrome bars measure, so
+    // the workspace and the bars agree about which terminal is tall.
+    let airy = viewport::airy_rows(area.height);
     match app.view() {
         View::Setup(step) => render_setup(frame, body, app, step),
-        View::Inventory => render_inventory(frame, body, app),
+        View::Inventory => render_inventory(frame, body, app, airy),
         View::Sources => render_sources(frame, body, app),
         View::Doctor => render_doctor(frame, body, app, &findings),
         View::Settings => {
-            render_inventory(frame, body, app);
+            render_inventory(frame, body, app, airy);
             render_settings(frame, body);
         }
     }
@@ -948,14 +951,14 @@ fn setup_lines(app: &SkilledApp, step: SetupStep, width: u16) -> Vec<Line<'stati
 /// A wide terminal shows the table and the detail region together; a compact
 /// one shows whichever region has focus, so `Enter` is a drill-in and `Esc`
 /// comes back.
-fn render_inventory(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
+fn render_inventory(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp, airy: bool) {
     match viewport::workspace_regions(area) {
         (primary, Some(detail)) => {
-            render_inventory_skills(frame, primary, app);
+            render_inventory_skills(frame, primary, app, airy);
             render_inventory_detail(frame, detail, app, true);
         }
         (primary, None) => match app.inventory_pane() {
-            InventoryPane::Skills => render_inventory_skills(frame, primary, app),
+            InventoryPane::Skills => render_inventory_skills(frame, primary, app, airy),
             InventoryPane::Details => render_inventory_detail(frame, primary, app, false),
         },
     }
@@ -973,6 +976,9 @@ struct InventoryColumns {
     source: usize,
     /// Whether the agent columns carry a health label beside each glyph.
     labeled: bool,
+    /// Whether the columns are separated by the prototype's grid rules
+    /// (`.grid-head > span:not(:first-child)`, spec/tui-prototype.html:243).
+    chrome: bool,
 }
 
 impl InventoryColumns {
@@ -982,6 +988,28 @@ impl InventoryColumns {
         } else {
             AGENT_COLUMN_WIDTHS
         }
+    }
+
+    /// The columns the grid's vertical rules stand in, measured from the
+    /// row's left edge: after the marker, each cell's width and then the
+    /// rule with its clearance. A horizontal rule crossing these columns
+    /// takes a junction there, so the vertical reads as one line through the
+    /// grid's whole height. Empty when the chrome is collapsed.
+    fn rule_offsets(self) -> Vec<usize> {
+        if !self.chrome {
+            return Vec::new();
+        }
+        let mut offsets = Vec::with_capacity(INVENTORY_COLUMN_COUNT - 1);
+        let mut x = ROW_MARKER_WIDTH;
+        for width in [self.skill, self.source]
+            .into_iter()
+            .chain(self.agent_widths())
+        {
+            x += width;
+            offsets.push(x);
+            x += 2;
+        }
+        offsets
     }
 }
 
@@ -1024,21 +1052,50 @@ const MINIMUM_SKILL_WIDTH: usize = 8;
 const MAX_SKILL_WIDTH: usize = 36;
 const MAX_SOURCE_WIDTH: usize = 24;
 
+/// What the grid's rules cost a row: one rule cell and one cell of clearance
+/// after it, at each of the five boundaries between the six columns. The
+/// clearance *before* each rule is the trailing space every [`padded`] column
+/// already guarantees, so the boundary reads ` │ ` without charging for
+/// three cells.
+///
+/// The chrome enters only above both identity caps (skilled-hjo): below
+/// that, every column is exactly what it was before the chrome existed, so
+/// the rules can never take width from a name or cost the Source column its
+/// place — today's columns are the floor, and the rules come out of slack.
+const GRID_CHROME_WIDTH: usize = (INVENTORY_COLUMN_COUNT - 1) * 2;
+/// Skill, Source, the three agents, and Health.
+const INVENTORY_COLUMN_COUNT: usize = 6;
+
 fn inventory_columns(width: u16) -> InventoryColumns {
-    // Labels enter only after both identity caps are fully served: below
-    // that, every column is exactly what it was before labels existed, so
-    // widening a terminal can never take width from a name to spend on a
-    // word the glyph already implies.
+    // Labels enter only after both identity caps and the grid chrome are
+    // fully served: below that, every column is exactly what it was before
+    // labels existed, so widening a terminal can never take width from a
+    // name to spend on a word the glyph already implies. The chrome sits
+    // below the labels in the progression — the prototype draws its rules at
+    // every width and its labels only past a breakpoint
+    // (`.agent-state span`, spec/tui-prototype.html:500), so as a terminal
+    // widens the rules arrive first, and the label threshold moves out by
+    // the chrome's cost rather than the labels ever appearing unruled.
     let labeled_fixed =
         ROW_MARKER_WIDTH + LABELED_AGENT_COLUMN_WIDTHS.iter().sum::<usize>() + HEALTH_COLUMN_WIDTH;
-    if usize::from(width) >= labeled_fixed + MAX_SKILL_WIDTH + MAX_SOURCE_WIDTH {
+    if usize::from(width) >= labeled_fixed + MAX_SKILL_WIDTH + MAX_SOURCE_WIDTH + GRID_CHROME_WIDTH
+    {
         return InventoryColumns {
             skill: MAX_SKILL_WIDTH,
             source: MAX_SOURCE_WIDTH,
             labeled: true,
+            chrome: true,
         };
     }
     let fixed = ROW_MARKER_WIDTH + AGENT_COLUMN_WIDTHS.iter().sum::<usize>() + HEALTH_COLUMN_WIDTH;
+    if usize::from(width) >= fixed + MAX_SKILL_WIDTH + MAX_SOURCE_WIDTH + GRID_CHROME_WIDTH {
+        return InventoryColumns {
+            skill: MAX_SKILL_WIDTH,
+            source: MAX_SOURCE_WIDTH,
+            labeled: false,
+            chrome: true,
+        };
+    }
     let remaining = usize::from(width).saturating_sub(fixed);
     let skill = (remaining * 6 / 10).clamp(MINIMUM_SKILL_WIDTH, MAX_SKILL_WIDTH);
     let source = remaining.saturating_sub(skill).min(MAX_SOURCE_WIDTH);
@@ -1053,16 +1110,18 @@ fn inventory_columns(width: u16) -> InventoryColumns {
             skill: remaining.clamp(MINIMUM_SKILL_WIDTH, MAX_SKILL_WIDTH),
             source: 0,
             labeled: false,
+            chrome: false,
         };
     }
     InventoryColumns {
         skill,
         source,
         labeled: false,
+        chrome: false,
     }
 }
 
-fn render_inventory_skills(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
+fn render_inventory_skills(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp, airy: bool) {
     let rows = app.filtered_rows();
     // The prototype's pane header keeps clearance above its content as well
     // as beneath it (`.pane-header`, spec/tui-prototype.html:167: `min-height:
@@ -1110,10 +1169,24 @@ fn render_inventory_skills(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) 
         Constraint::Min(1),
     ])
     .areas(area);
+    let columns = inventory_columns(body.width);
+    let rule_offsets = columns.rule_offsets();
     // The block closes at its bottom edge, like the Details pane beside it
     // (see `PADDED_PANE_HEADER_HEIGHT` for why the border is not a centred
-    // rule).
-    header_lines.push(components::underline(header.width));
+    // rule) — except where a tall terminal sets the ruled grid directly
+    // beneath. There the closing border is the grid's own top rule: centred
+    // ink like every rule below it, so the headings keep the same half-row
+    // of air above them that they and every row keep below, and junctioned
+    // `┬` where the column verticals begin. One line serves as both borders,
+    // the way the prototype's pane-header border sits directly over its
+    // `.grid-head`. The Details pane beside it still closes with `▁`: it
+    // closes a pane, not a grid, and the two idioms may differ across the
+    // region separator.
+    if airy && !rows.is_empty() {
+        header_lines.push(components::grid_rule_row(header.width, &rule_offsets, '┬'));
+    } else {
+        header_lines.push(components::underline(header.width));
+    }
     frame.render_widget(
         Paragraph::new(header_lines).wrap(Wrap { trim: false }),
         header,
@@ -1132,24 +1205,53 @@ fn render_inventory_skills(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) 
         return;
     }
 
-    let columns = inventory_columns(body.width);
     let mut lines = vec![inventory_column_headings(columns)];
-    let capacity = usize::from(body.height.max(1)).saturating_sub(1);
+    // The heading's closing rule and each row's bottom rule spend whole rows,
+    // so they draw only on the tall terminal the gate names; a short one
+    // keeps every row for an entry. The last visible row's rule may fall
+    // past the pane's bottom edge, where the widget clips it — the rows a
+    // capacity of entries promises are never the lines given up to air.
+    //
+    // The rules are centred `─` ink, not the pane header's bottom-edge `▁`:
+    // a rule row's spare space falls to whichever side of its ink, and only
+    // the centred glyph splits it evenly, so the text between two rules sits
+    // vertically centred the way the prototype centres a row's content
+    // (`.grid-head`/`.data-row`, `align-items: center`,
+    // spec/tui-prototype.html:225). Each rule junctions the column verticals
+    // through itself — `┼` while further rows follow, `┴` under the last row
+    // of the table, which is the table's whole extent and not the window's:
+    // a rule that closed the columns at the window's edge would claim an end
+    // the data does not have.
+    if airy {
+        lines.push(components::grid_rule_row(body.width, &rule_offsets, '┼'));
+    }
+    let available = usize::from(body.height.max(1)).saturating_sub(lines.len());
+    let capacity = if airy {
+        available.div_ceil(2)
+    } else {
+        available
+    };
     let start = visible_window_start(app.focused_installation(), capacity);
-    lines.extend(
-        rows.iter()
-            .enumerate()
-            .skip(start)
-            .take(capacity)
-            .map(|(index, row)| {
-                inventory_row_line(
-                    row,
-                    columns,
-                    index == app.focused_installation(),
-                    body.width,
-                )
-            }),
-    );
+    for (index, row) in rows.iter().enumerate().skip(start).take(capacity) {
+        lines.push(inventory_row_line(
+            row,
+            columns,
+            index == app.focused_installation(),
+            body.width,
+        ));
+        if airy {
+            let junction = if index + 1 == rows.len() {
+                '┴'
+            } else {
+                '┼'
+            };
+            lines.push(components::grid_rule_row(
+                body.width,
+                &rule_offsets,
+                junction,
+            ));
+        }
+    }
     frame.render_widget(Paragraph::new(lines), body);
 }
 
@@ -1283,18 +1385,35 @@ fn root_tone(root: &RootScan) -> Tone {
 /// (spec/tui-prototype.html:776). Update checking is not implemented, and a
 /// column stating `current`, `available`, or `blocked` would be a claim the
 /// code cannot produce, so the column does not exist until it can.
+///
+/// Recorded departure (skilled-hjo): the prototype also fills this row
+/// (`.grid-head`, spec/tui-prototype.html:235: `background: #0b1016`), two
+/// hex steps off the terminal ground it sits on (`.terminal`, #0b0f14). A
+/// terminal cell cannot whisper that quietly — carrying the fill would mean
+/// a new surface role indistinguishable from [`theme::TERMINAL`] — so the
+/// fill is omitted: the faint uppercase and, on a tall terminal, the closing
+/// rule beneath this row carry the heading's boundary instead.
 fn inventory_column_headings(columns: InventoryColumns) -> Line<'static> {
-    let mut heading = " ".repeat(ROW_MARKER_WIDTH);
-    heading.push_str(&padded("SKILL", columns.skill));
-    heading.push_str(&padded("SOURCE", columns.source));
+    let mut cells = vec![
+        padded("SKILL", columns.skill),
+        padded("SOURCE", columns.source),
+    ];
     for (label, width) in ["CLAUDE", "CODEX", "OPENCODE"]
         .into_iter()
         .zip(columns.agent_widths())
     {
-        heading.push_str(&padded(label, width));
+        cells.push(padded(label, width));
     }
-    heading.push_str("HEALTH");
-    Line::from(Span::styled(heading, theme::pane_subtitle()))
+    cells.push("HEALTH".to_owned());
+    let mut spans = vec![Span::raw(" ".repeat(ROW_MARKER_WIDTH))];
+    spans.extend(components::grid_cells(
+        cells
+            .into_iter()
+            .map(|cell| Span::styled(cell, theme::pane_subtitle()))
+            .collect(),
+        columns.chrome,
+    ));
+    Line::from(spans)
 }
 
 fn inventory_row_line(
@@ -1305,7 +1424,7 @@ fn inventory_row_line(
 ) -> Line<'static> {
     let provenance = row.provenance();
     let source = padded(&terminal_safe(provenance.label()), columns.source);
-    let mut spans = vec![
+    let mut cells = vec![
         // The name is the row's identity, set off as the prototype's
         // `.skill-name` weight sets it; the colour stays the row's own.
         Span::styled(
@@ -1351,10 +1470,13 @@ fn inventory_row_line(
             }
             _ => components::tone_glyph(tone).to_owned(),
         };
-        spans.push(Span::styled(padded(&cell, width), theme::tone_style(tone)));
+        cells.push(Span::styled(padded(&cell, width), theme::tone_style(tone)));
     }
     let verdict = row.verdict();
-    spans.push(components::badge(verdict_tone(verdict), verdict.label()));
+    cells.push(components::badge(verdict_tone(verdict), verdict.label()));
+    // The rules stand in the same columns the headings put them: both lines
+    // interleave the same chrome between the same padded widths.
+    let spans = components::grid_cells(cells, columns.chrome);
     // `width` is the whole table region, not the width the capped columns
     // happen to use, so the selection band crosses the slack rather than
     // stopping where the health badge does.

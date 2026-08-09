@@ -1584,6 +1584,354 @@ fn inventory_detail_keeps_missing_roots_distinct_from_scanned_empty_roots() {
     assert!(!no_root.contains("Codex"), "{no_root}");
 }
 
+/// A home whose three agent roots all read cleanly, one holding a skill, so
+/// the inventory table has a row and no unreadable-root caveat above it.
+fn readable_inventory(harness: &Harness) -> SkilledApp {
+    let home = harness.directory.path().join("home");
+    write_skill_fixture(&home.join(".claude/skills/alpha"), "alpha");
+    for root in [".agents/skills", ".config/opencode/skills"] {
+        fs::create_dir_all(home.join(root)).expect("create agent skill root");
+    }
+    harness.completed_setup()
+}
+
+/// The first table row beneath the headings whose entry is `skill`: the
+/// detail region names the skill too, and on a tall terminal a rule row
+/// stands between the headings and the first entry, so neither a bare needle
+/// nor a fixed offset finds the row.
+fn data_row(screen: &Buffer, headings: u16, skill: &str) -> u16 {
+    (headings + 1..screen.area.y + screen.area.height)
+        .find(|y| {
+            inner_row_text(screen, *y)
+                .trim_start_matches(['▌', ' '])
+                .starts_with(skill)
+        })
+        .unwrap_or_else(|| panic!("no table row names {skill:?} in\n{}", text(screen)))
+}
+
+/// The style of the first `│` at or after `needle` in row `y`, and its
+/// column: the grid's rules share their glyph with the region separator, so
+/// a probe has to find the rule by where it stands rather than by what it is.
+fn rule_after(buffer: &Buffer, y: u16, needle: &str) -> (u16, Style) {
+    let row = row_text(buffer, y);
+    let from = row
+        .find(needle)
+        .unwrap_or_else(|| panic!("{needle:?} not found in row {y}: {row:?}"));
+    let byte_index = row[from..]
+        .find('│')
+        .map(|offset| from + offset)
+        .unwrap_or_else(|| panic!("no │ after {needle:?} in row {y}: {row:?}"));
+    let column = u16::try_from(row[..byte_index].chars().count()).expect("column");
+    (column, buffer[(buffer.area.x + column, y)].style())
+}
+
+/// The prototype's inventory grid separates every column with a faint rule
+/// (`.grid-head > span`, `.data-row > span`, spec/tui-prototype.html:243).
+/// A skills pane wide enough to hold the chrome without narrowing a column
+/// draws them between the heading cells.
+#[test]
+fn a_wide_inventory_separates_its_column_headings_with_rules() {
+    let harness = Harness::new();
+    let app = readable_inventory(&harness);
+
+    // 170×40 frames to a 168-column workspace: a 50-column detail region
+    // leaves the skills pane 118 columns — past the chrome threshold, short
+    // of the labeled-agent one.
+    let screen = buffer(&app, 170, 40);
+    let y = row_containing(&screen, "OPENCODE");
+    let headings = inner_row_text(&screen, y);
+
+    // A rule stands between every adjacent pair of heading cells.
+    for (left, right) in [
+        ("SKILL", "SOURCE"),
+        ("SOURCE", "CLAUDE"),
+        ("CLAUDE", "CODEX"),
+        ("CODEX", "OPENCODE"),
+        ("OPENCODE", "HEALTH"),
+    ] {
+        let start = headings
+            .find(left)
+            .unwrap_or_else(|| panic!("{left:?} not in headings: {headings:?}"));
+        let end = headings
+            .find(right)
+            .unwrap_or_else(|| panic!("{right:?} not in headings: {headings:?}"));
+        assert!(
+            headings[start..end].contains('│'),
+            "no rule between {left} and {right}: {headings:?}"
+        );
+    }
+
+    // The rule takes the same tone every other rule in the shell takes.
+    let (_, style) = rule_after(&screen, y, "SKILL");
+    assert_eq!(style.fg, Some(Color::Rgb(0x29, 0x34, 0x40)));
+}
+
+/// The prototype rules every data row the way it rules the heading, and its
+/// selected row keeps the rules visible over the selection tint
+/// (`.data-row.selected`, spec/tui-prototype.html:258): the tint goes under
+/// the borders, not over them.
+#[test]
+fn inventory_rows_align_their_rules_with_the_headings_and_keep_them_when_selected() {
+    let harness = Harness::new();
+    let app = readable_inventory(&harness);
+
+    let screen = buffer(&app, 170, 40);
+    let rule_columns = |y: u16| -> Vec<usize> {
+        inner_row_text(&screen, y)
+            .chars()
+            .enumerate()
+            .filter(|(_, character)| *character == '│')
+            .map(|(column, _)| column)
+            .collect()
+    };
+    let headings = row_containing(&screen, "OPENCODE");
+    let row = data_row(&screen, headings, "alpha");
+
+    // Every rule stands in the same column in the heading and in the row —
+    // including the region separator both share, which costs the comparison
+    // nothing.
+    assert_eq!(rule_columns(headings), rule_columns(row));
+
+    // The only row is the focused one, so it carries the selection band; the
+    // rules keep their tone and the band shows through behind them.
+    let name = style_in_row(&screen, row, "alpha");
+    assert!(
+        name.bg.is_some(),
+        "the focused row carries no band: {name:?}"
+    );
+    let (_, rule) = rule_after(&screen, row, "alpha");
+    assert_eq!(rule.fg, Some(Color::Rgb(0x29, 0x34, 0x40)));
+    assert_eq!(rule.bg, name.bg);
+}
+
+/// Below the chrome threshold the rules and their clearance drop before any
+/// column narrows or the Source column is sacrificed (skilled-hjo): today's
+/// columns are the floor, and the chrome only ever comes out of slack.
+#[test]
+fn a_narrow_inventory_drops_the_grid_rules_before_its_columns() {
+    let harness = Harness::new();
+    let app = readable_inventory(&harness);
+
+    // The minimum supported terminal: one region, no separator, no chrome.
+    let screen = buffer(&app, 80, 24);
+    let headings = row_containing(&screen, "OPENCODE");
+    for y in [headings, data_row(&screen, headings, "alpha")] {
+        let row = row_text(&screen, y);
+        assert!(
+            !row.contains('│'),
+            "chrome at 80 columns in row {y}: {row:?}"
+        );
+    }
+
+    // Wide enough for a detail region, not for the chrome: a 118-column
+    // workspace leaves the skills pane 78 columns, so the only rule on a
+    // table row is the region separator beside the detail pane.
+    let screen = buffer(&app, 120, 40);
+    let headings = row_containing(&screen, "OPENCODE");
+    for y in [headings, data_row(&screen, headings, "alpha")] {
+        let row = inner_row_text(&screen, y);
+        assert_eq!(
+            row.matches('│').count(),
+            1,
+            "expected only the region separator in row {y}: {row:?}"
+        );
+    }
+}
+
+/// The prototype draws its grid rules at every width and its agent labels
+/// only past a breakpoint (`.agent-state span`, spec/tui-prototype.html:500),
+/// so as a terminal widens the rules arrive first and the labels arrive
+/// ruled: the label threshold moved out by the chrome's cost rather than the
+/// labels ever appearing unruled (skilled-hjo).
+#[test]
+fn agent_labels_arrive_only_after_the_grid_rules() {
+    let harness = Harness::new();
+    let app = readable_inventory(&harness);
+
+    // The table portion of the first data row: everything left of the region
+    // separator, which is the rightmost rule on the row. The detail region
+    // beyond it repeats the health vocabulary and must not be counted.
+    let table_slice = |screen: &Buffer| -> (String, usize) {
+        let row = data_row(screen, row_containing(screen, "OPENCODE"), "alpha");
+        let text = inner_row_text(screen, row);
+        let separator = text.rfind('│').expect("region separator");
+        let rules = text[..separator].matches('│').count();
+        (text[..separator].to_owned(), rules)
+    };
+
+    // Chrome without labels: five column rules, and "unmanaged" appears only
+    // as the health badge — the agent cell keeps its bare glyph.
+    let screen = buffer(&app, 170, 40);
+    let (table, rules) = table_slice(&screen);
+    assert_eq!(rules, 5, "{table:?}");
+    assert_eq!(table.matches("unmanaged").count(), 1, "{table:?}");
+
+    // Past the labeled threshold the rules stay and the observed agent cell
+    // names its health beside the glyph.
+    let screen = buffer(&app, 182, 40);
+    let (table, rules) = table_slice(&screen);
+    assert_eq!(rules, 5, "{table:?}");
+    assert_eq!(table.matches("unmanaged").count(), 2, "{table:?}");
+}
+
+/// The prototype closes its grid heading with a border and rules the bottom
+/// of every data row (`.grid-head`, `.data-row`, spec/tui-prototype.html:234,
+/// 251). Each translated rule costs a terminal a whole row, so they draw only
+/// on a terminal tall enough that the chrome bars already take their padded
+/// heights — one threshold decides which terminal is tall (skilled-hjo).
+#[test]
+fn a_tall_inventory_rules_its_heading_and_row_bottoms_and_a_short_one_does_not() {
+    let harness = Harness::new();
+    let app = readable_inventory(&harness);
+
+    // A rule row is centred ink across the full skills pane: `─` splits its
+    // spare space evenly above and below the line, so the text between two
+    // rules sits vertically centred the way the prototype's rows centre
+    // their content (`.data-row`, `align-items: center`). Eighth-block ink
+    // would stack all of the air on one side of the text.
+    let is_rule = |screen: &Buffer, y: u16| -> bool {
+        inner_row_text(screen, y).starts_with("────────")
+    };
+
+    // Tall: heading, its closing rule, the row, the row's bottom rule.
+    let screen = buffer(&app, 170, 40);
+    let headings = row_containing(&screen, "OPENCODE");
+    assert!(is_rule(&screen, headings + 1), "{}", text(&screen));
+    assert!(
+        row_text(&screen, headings + 2).contains("alpha"),
+        "{}",
+        text(&screen)
+    );
+    assert!(is_rule(&screen, headings + 3), "{}", text(&screen));
+
+    // Short: the same pane at the same width spends nothing on air — the row
+    // sits directly beneath its heading.
+    let screen = buffer(&app, 170, 30);
+    let headings = row_containing(&screen, "OPENCODE");
+    assert!(
+        row_text(&screen, headings + 1).contains("alpha"),
+        "{}",
+        text(&screen)
+    );
+    assert!(!is_rule(&screen, headings + 2), "{}", text(&screen));
+}
+
+/// The prototype centres the heading row's text the way it centres a data
+/// row's (`.grid-head`, `align-items: center`): on a tall terminal the rule
+/// above the headings is centred ink too, so the headings sit between two
+/// half-rows of air instead of flush under bottom-edge ink. On a short
+/// terminal the pane header keeps its own idiom.
+#[test]
+fn a_tall_inventory_centres_its_headings_between_rules() {
+    let harness = Harness::new();
+    let app = readable_inventory(&harness);
+
+    let screen = buffer(&app, 170, 40);
+    let headings = row_containing(&screen, "OPENCODE");
+    let above = inner_row_text(&screen, headings - 1);
+    assert!(
+        above.starts_with("──"),
+        "no centred rule above the headings: {above:?}"
+    );
+
+    let screen = buffer(&app, 170, 30);
+    let headings = row_containing(&screen, "OPENCODE");
+    let above = inner_row_text(&screen, headings - 1);
+    assert!(
+        above.starts_with("▁▁"),
+        "a short pane should keep its bottom-edge border: {above:?}"
+    );
+}
+
+/// The prototype's cell borders run the full height of the grid
+/// (`border-left` on every cell, spec/tui-prototype.html:243): where a
+/// horizontal rule crosses a column rule, a junction carries the vertical
+/// through — `┬` where the columns begin above the headings, `┼` where rows
+/// continue below, and `┴` where the last row ends — so the verticals never
+/// read as broken at each rule row.
+#[test]
+fn grid_rules_carry_the_column_verticals_through_their_junctions() {
+    let harness = Harness::new();
+    let app = readable_inventory(&harness);
+
+    let screen = buffer(&app, 170, 40);
+    let headings = row_containing(&screen, "OPENCODE");
+    // The five column-rule positions, read off the headings row; the last
+    // `│` is the region separator, which is a pane boundary rather than a
+    // grid line and meets no junction.
+    let mut columns: Vec<usize> = inner_row_text(&screen, headings)
+        .chars()
+        .enumerate()
+        .filter(|(_, character)| *character == '│')
+        .map(|(column, _)| column)
+        .collect();
+    let separator = columns.pop().expect("region separator");
+    assert_eq!(columns.len(), 5, "{}", text(&screen));
+
+    let junctions = |y: u16, junction: char| -> Vec<usize> {
+        inner_row_text(&screen, y)
+            .chars()
+            .enumerate()
+            .filter(|(_, character)| *character == junction)
+            .map(|(column, _)| column)
+            .collect()
+    };
+    // Above the headings the columns begin; beneath them the row continues;
+    // beneath the only row nothing follows.
+    assert_eq!(junctions(headings - 1, '┬'), columns, "{}", text(&screen));
+    assert_eq!(junctions(headings + 1, '┼'), columns, "{}", text(&screen));
+    assert_eq!(junctions(headings + 3, '┴'), columns, "{}", text(&screen));
+    // The region separator survives every rule row unjunctioned.
+    for y in [headings - 1, headings + 1, headings + 3] {
+        assert_eq!(
+            inner_row_text(&screen, y).chars().nth(separator),
+            Some('│'),
+            "{}",
+            text(&screen)
+        );
+    }
+}
+
+/// The `┴` that ends the column verticals answers to the table's data, not
+/// to the window: a scrolled view whose last visible row still has rows
+/// beneath it keeps `┼`, and only the dataset's own final row closes the
+/// columns. At 170×41 the window holds thirteen of the twenty entries and
+/// the final row's rule lands on the pane's last line, so the closure is
+/// observable rather than clipped.
+#[test]
+fn the_grid_closes_its_columns_at_the_tables_end_not_the_windows() {
+    let harness = Harness::new();
+    let home = harness.directory.path().join("home");
+    for index in 1..=20 {
+        let name = format!("skill-{index:02}");
+        write_skill_fixture(&home.join(".claude/skills").join(&name), &name);
+    }
+    for root in [".agents/skills", ".config/opencode/skills"] {
+        fs::create_dir_all(home.join(root)).expect("create agent skill root");
+    }
+    let mut app = harness.completed_setup();
+
+    // Focused at the top, the window fills with the leading entries and the
+    // dataset continues past it: no rule may claim the columns end.
+    let screen = buffer(&app, 170, 41);
+    let rendered = inner_text(&screen);
+    assert!(rendered.contains("skill-01"), "{rendered}");
+    assert!(!rendered.contains("skill-20"), "{rendered}");
+    assert!(!rendered.contains('┴'), "{rendered}");
+
+    // Focused on the last entry, the window slides to keep it on screen, and
+    // the rule beneath it is the one that ends the columns.
+    for _ in 0..19 {
+        app.update(Action::MoveInventorySelection(1));
+    }
+    let screen = buffer(&app, 170, 41);
+    let headings = row_containing(&screen, "OPENCODE");
+    let last = data_row(&screen, headings, "skill-20");
+    let closing = inner_row_text(&screen, last + 1);
+    assert!(closing.contains('┴'), "{}", text(&screen));
+    assert!(!closing.contains('┼'), "{closing:?}");
+}
+
 /// A tab count is a claim about a scan, so it is withheld whenever the scan
 /// read nothing, or did not read everything it was asked to.
 ///
@@ -5456,16 +5804,23 @@ mod installed {
 
         // By its marker, because the detail region names the selected skill
         // too and its header sits above the table. Read inside the frame; an
-        // inner index maps one column right on screen.
-        let screen = buffer(&app, 180, 40);
+        // inner index maps one column right on screen. A 190-column terminal
+        // leaves the skills pane 138 columns, so the labeled columns and the
+        // grid chrome — whose own clearance is not the slack this test is
+        // about — still leave region slack beyond the health badge.
+        let screen = buffer(&app, 190, 40);
         let alpha = row_starting_with(&screen, "▌ alpha");
         let line = inner_row_text(&screen, alpha);
 
-        // The table region ends at the detail separator; its content ends at
+        // The table region ends at the detail separator — the last rule on
+        // the row, past the grid's own column rules; its content ends at
         // the health badge, and everything between the two is slack.
-        let separator = line.find('│').expect("detail separator");
+        let separator = line.rfind('│').expect("detail separator");
         let separator = line[..separator].chars().count() as u16;
-        let content = line.find("healthy").expect("health badge") + "healthy".len();
+        // The badge is the row's last "healthy": at labeled widths the agent
+        // cells carry the word too, and anchoring at the first would let the
+        // slack assertion pass with the badge flush against the separator.
+        let content = line.rfind("healthy").expect("health badge") + "healthy".len();
         let content = line[..content].chars().count() as u16;
         assert!(
             separator > content + 10,
@@ -6212,10 +6567,14 @@ mod installed {
     /// (`.pane-header` padding, spec/tui-prototype.html:167). In cells that
     /// means the border beneath the heading is a bottom-edge underline (`▁`,
     /// the tab strip's own border glyph) on the very next row: its ink sits
-    /// one row below the heading, mirroring the blank row above it. A
-    /// centred `─` rule would land its ink half a row lower and read as more
-    /// space below the heading than above. Beside the table the Details pane
-    /// closes the same way, so the two borders stay on one row.
+    /// one row below the heading, mirroring the blank row above it.
+    ///
+    /// On a tall terminal the skills pane trades half of that clearance
+    /// away (skilled-hjo): its closing border is the grid's own centred top
+    /// rule, so the column headings beneath sit between two half-rows of
+    /// air the way every data row does. The Details pane closes a pane, not
+    /// a grid, and keeps `▁` — the two borders differ across the region
+    /// separator, and that is the recorded cost of centring the headings.
     #[test]
     fn the_pane_heading_is_centered_between_the_bar_above_and_its_underline() {
         let harness = Harness::new();
@@ -6238,7 +6597,7 @@ mod installed {
         let header = row_containing(&wide, "Global inventory");
         let underlines = row_text(&wide, header + 1);
         let (left, right) = underlines.rsplit_once('│').expect("split underline row");
-        assert!(left.contains("▁▁▁▁"), "{underlines}");
+        assert!(left.contains("────"), "{underlines}");
         assert!(right.contains("▁▁▁▁"), "{underlines}");
     }
 

@@ -852,14 +852,18 @@ mod installed {
 
         let screen = normalize_inventory(&temporary, render(&app, 180, 40));
 
+        // The capped identity widths, each followed by the grid rule and its
+        // clearance: SKILL starts past the marker at 2, SOURCE at 2+36+2,
+        // CLAUDE at 40+24+2.
         let headings = heading_row(&screen);
-        assert_eq!(column_of(headings, "SOURCE"), 38, "{headings:?}");
-        assert_eq!(column_of(headings, "CLAUDE"), 62, "{headings:?}");
+        assert_eq!(column_of(headings, "SOURCE"), 40, "{headings:?}");
+        assert_eq!(column_of(headings, "CLAUDE"), 66, "{headings:?}");
         insta::assert_snapshot!(screen);
     }
 
     /// The table side of the heading row, read past the window frame's own
-    /// column and cut at the detail region's separator, so neither the frame
+    /// column and cut at the detail region's separator — the last rule on
+    /// the row, past the grid's own column rules — so neither the frame
     /// nor anything the detail pane happens to render can answer for the
     /// table's columns.
     fn heading_row(screen: &str) -> &str {
@@ -868,7 +872,7 @@ mod installed {
             .find(|line| line.contains("HEALTH"))
             .unwrap_or_else(|| panic!("no heading row in\n{screen}"));
         let row = row.strip_prefix('▕').unwrap_or(row);
-        row.split('│').next().unwrap_or(row)
+        row.rsplit_once('│').map_or(row, |(table, _)| table)
     }
 
     /// The content column a heading starts at, counted in characters because

@@ -365,6 +365,65 @@ pub(crate) fn rule(width: u16) -> Line<'static> {
     Line::from(Span::styled("─".repeat(usize::from(width)), theme::rule()))
 }
 
+/// The vertical rule between one grid column and the next, with the cell of
+/// clearance that follows it. The clearance *before* the rule is the trailing
+/// space the column's own padding already guarantees, so a boundary reads
+/// ` │ ` while the rule pays for two cells.
+///
+/// One glyph for every rule weight: the prototype thins its grid rules with
+/// alpha (`rgba(41, 52, 64, .55)`, spec/tui-prototype.html:243) against the
+/// stronger pane lines, a distinction a terminal cell cannot carry, so both
+/// take the one rule tone — a recorded departure rather than a new
+/// near-duplicate colour.
+fn grid_rule() -> Span<'static> {
+    Span::styled("│ ", theme::rule())
+}
+
+/// A horizontal grid rule that carries the column verticals through itself:
+/// `─` ink with `junction` at each of `junctions`' columns, so the `│` a
+/// text row draws does not read as broken wherever a rule row crosses it.
+/// The prototype's cell borders run the grid's full height
+/// (`.grid-head > span`, `.data-row > span`, spec/tui-prototype.html:243);
+/// the junction is that continuity in box-drawing — `┬` where the columns
+/// begin, `┼` where they continue, `┴` where they end. With no junctions
+/// the row is plain rule ink.
+pub(crate) fn grid_rule_row(width: u16, junctions: &[usize], junction: char) -> Line<'static> {
+    let row: String = (0..usize::from(width))
+        .map(|x| {
+            if junctions.contains(&x) {
+                junction
+            } else {
+                '─'
+            }
+        })
+        .collect();
+    Line::from(Span::styled(row, theme::rule()))
+}
+
+/// A grid row's cells, joined by [`grid_rule`]s when the grid is ruled and
+/// left flush against one another when it is not.
+///
+/// Each cell arrives already padded to its column's width and styled as its
+/// content demands; this only decides what stands between them. The rules
+/// carry no background of their own, so a selection band laid over the whole
+/// row shows through behind them, the way the prototype's tint goes under
+/// its cell borders (`.data-row.selected`, spec/tui-prototype.html:258).
+///
+/// Alignment is cell-exact for everything the caller padded by cell width;
+/// a tone glyph a terminal renders double-width (see [`tone_glyph`]) pushes
+/// that row's later rules one cell off the heading's, a best-effort bound
+/// the grid inherits rather than resolves.
+pub(crate) fn grid_cells(cells: Vec<Span<'static>>, ruled: bool) -> Vec<Span<'static>> {
+    let mut spans = Vec::with_capacity(cells.len() * 2);
+    for (index, cell) in cells.into_iter().enumerate() {
+        if ruled && index > 0 {
+            spans.push(grid_rule());
+        }
+        spans.push(cell);
+    }
+    spans
+}
+
 /// A horizontal rule drawn along the bottom edge of its row, the way the
 /// navigation strip draws its border.
 ///
