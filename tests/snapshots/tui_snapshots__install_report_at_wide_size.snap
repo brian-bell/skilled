@@ -7,15 +7,15 @@ expression: "normalize_install_screen(&temporary, render(&app, 120, 40))"
 ▕ ◆┌ Install result ─────────────────────────────────────────────────────────────────────────────── already applied ┐d ▏
 ▕▁▁│                                                                                                                │▁▁▏
 ▕  │  Skill: portable                                                                                               │  ▏
-▕ 1│  Links to: [CANONICAL]                 /src/skills/portable                                                      │  ▏
+▕ 1│  Links to: [CANONICAL]                 /src/skills/portable                                                    │  ▏
 ▕▁▁│                                                                                                                │▁▁▏
 ▕Re│  Steps                                                                                                         │  ▏
 ▕──│  ✓ Claude Code: link created                                                                                   │─ ▏
-▕▌ │      [TEMP]                    /home/.claude/skills/portable                                                   │  ▏
+▕▌ │      [TEMP]                      /home/.claude/skills/portable                                                 │  ▏
 ▕▌ │  ✓ Codex: link created                                                                                         │─ ▏
-▕▌ │      [TEMP]                    /home/.agents/skills/portable                                                   │  ▏
-▕  │  ✓ OpenCode: link created                                                                                      │  ▏
-▕  │      [TEMP]                    /home/.config/opencode/skills/portable                                          │  ▏
+▕▌ │      [TEMP]                      /home/.agents/skills/portable                                                 │  ▏
+▕  │  ✓ OpenCode: link created                                                                                      │c ▏
+▕  │      [TEMP]                      /home/.config/opencode/skills/portable                                        │  ▏
 ▕  │                                                                                                                │  ▏
 ▕  │  Verification                                                                                                  │  ▏
 ▕  │  ✓ every link written was observed again and matches this plan                                                 │  ▏

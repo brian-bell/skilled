@@ -15,11 +15,11 @@ expression: "normalize_inventory(&temporary, render(&app, 120, 40))"
 ▕▌ × critical install.dangling_symlink          dangling           Claude Code │ ───────────────────────────────────── ▏
 ▕  × critical variant.duplicate_for_agent       review             Claude Code │ install.dangling_symlink              ▏
 ▕  × critical variant.duplicate_for_agent       review             OpenCode    │ × critical                            ▏
-▕  ! warning  variant.duplicate_for_agent       review             Codex       │ Agent: Claude Code                    ▏
-▕  ! warning  variant.foreign_opencode_exposure exposed            OpenCode    │ OBSERVED                              ▏
-▕  - info     variant.benign_alias              shared             OpenCode    │ ───────────────────────────────────── ▏
-▕                                                                              │ the link target does not exist        ▏
-▕                                                                              │ CONSEQUENCE                           ▏
+▕  × critical variant.duplicate_for_agent       review             OpenCode    │ Agent: Claude Code                    ▏
+▕  ! warning  variant.duplicate_for_agent       review             Codex       │ OBSERVED                              ▏
+▕  ! warning  variant.incompatible_for_opencode excluded           OpenCode    │ ───────────────────────────────────── ▏
+▕  ! warning  variant.foreign_opencode_exposure exposed            OpenCode    │ the link target does not exist        ▏
+▕  - info     variant.benign_alias              shared             OpenCode    │ CONSEQUENCE                           ▏
 ▕                                                                              │ ───────────────────────────────────── ▏
 ▕                                                                              │ The agent finds a link with nothing   ▏
 ▕                                                                              │ behind it, so the skill does not      ▏

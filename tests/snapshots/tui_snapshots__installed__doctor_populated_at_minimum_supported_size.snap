@@ -10,11 +10,11 @@ expression: screen
 ▌ × critical install.dangling_symlink          dangling             Claude Code
   × critical variant.duplicate_for_agent       review               Claude Code
   × critical variant.duplicate_for_agent       review               OpenCode
+  × critical variant.duplicate_for_agent       review               OpenCode
   ! warning  variant.duplicate_for_agent       review               Codex
+  ! warning  variant.incompatible_for_opencode excluded             OpenCode
   ! warning  variant.foreign_opencode_exposure exposed              OpenCode
   - info     variant.benign_alias              shared               OpenCode
-
-
 
 
 
