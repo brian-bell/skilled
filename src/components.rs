@@ -343,25 +343,37 @@ pub(crate) fn list_row_lines(
 
 /// A pane heading with a subtitle that quantifies what the pane contains, and
 /// whose active state remains visible without colour.
+///
+/// The marker column stays as indent when the pane is not focused, the same
+/// way [`list_row_lines`] keeps it for unselected entries: the heading holds
+/// one column as focus moves, and an unfocused pane keeps its left padding
+/// rather than sitting flush against the pane edge.
 pub(crate) fn focused_pane_header(heading: &str, subtitle: &str, focused: bool) -> Line<'static> {
-    let mut spans = Vec::new();
-    if focused {
-        spans.push(Span::styled(
-            format!("{FOCUS_MARKER} "),
+    Line::from(vec![
+        Span::styled(
+            if focused { FOCUS_MARKER } else { " " },
             theme::focus_marker(),
-        ));
-    }
-    spans.push(Span::styled(heading.to_owned(), theme::pane_heading()));
-    spans.push(Span::styled(
-        format!("  {subtitle}"),
-        theme::pane_subtitle(),
-    ));
-    Line::from(spans)
+        ),
+        Span::raw(" "),
+        Span::styled(heading.to_owned(), theme::pane_heading()),
+        Span::styled(format!("  {subtitle}"), theme::pane_subtitle()),
+    ])
 }
 
 /// A horizontal rule spanning a region.
 pub(crate) fn rule(width: u16) -> Line<'static> {
     Line::from(Span::styled("─".repeat(usize::from(width)), theme::rule()))
+}
+
+/// A horizontal rule drawn along the bottom edge of its row, the way the
+/// navigation strip draws its border.
+///
+/// `─` ink sits at the vertical centre of the cell, half a row lower than
+/// the border it stands for; where a border closes a block whose clearance
+/// must read symmetric — a padded pane header — the eighth-block keeps the
+/// ink a whole row beneath the content, matching the blank row above it.
+pub(crate) fn underline(width: u16) -> Line<'static> {
+    Line::from(Span::styled("▁".repeat(usize::from(width)), theme::rule()))
 }
 
 /// A terminal-readable segmented progress line.
@@ -553,20 +565,22 @@ mod tests {
         };
 
         assert_eq!(text(&active), "▌ Repositories  2 registered");
-        assert_eq!(text(&inactive), "Repositories  2 registered");
+        // The marker column stays as indent, so the heading holds its column
+        // as focus moves.
+        assert_eq!(text(&inactive), "  Repositories  2 registered");
         assert_ne!(text(&active), text(&inactive));
     }
 
     /// A caller bounding a subtitle to its pane has to know what the header
     /// spends around it. That arithmetic lives here, so it is stated here:
-    /// a two-cell marker only when focused, and a two-cell gap always.
+    /// a two-cell marker column and a two-cell gap, focused or not.
     #[test]
-    fn a_pane_header_spends_a_marker_when_focused_and_a_gap_of_two_always() {
-        for (focused, marker) in [(false, 0), (true, 2)] {
+    fn a_pane_header_spends_a_marker_column_and_a_gap_of_two_always() {
+        for focused in [false, true] {
             for (heading, subtitle) in [("Repositories", "2 registered"), ("あ", "")] {
                 assert_eq!(
                     focused_pane_header(heading, subtitle, focused).width(),
-                    marker + Span::raw(heading).width() + 2 + Span::raw(subtitle).width(),
+                    2 + Span::raw(heading).width() + 2 + Span::raw(subtitle).width(),
                     "{heading:?} {subtitle:?} focused={focused}"
                 );
             }

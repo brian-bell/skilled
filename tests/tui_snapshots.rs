@@ -958,7 +958,7 @@ mod installed {
 
         let screen = normalize_inventory(&temporary, render(&app, 80, 24));
         assert!(
-            screen.contains("! 11 more lines below — j/k to scroll"),
+            screen.contains("! 12 more lines below — j/k to scroll"),
             "{screen}"
         );
         insta::assert_snapshot!(screen);
@@ -970,7 +970,7 @@ mod installed {
         app.update(Action::MoveInventoryPane(1));
         let beside = normalize_inventory(&temporary, render(&app, 102, 28));
         assert!(
-            beside.contains("! 9 more lines below — Tab, then j/k"),
+            beside.contains("! 10 more lines below — Tab, then j/k"),
             "{beside}"
         );
 
@@ -982,7 +982,7 @@ mod installed {
         app.update(Action::BeginInventoryFilter);
         assert!(app.inventory_filter_active());
         let narrow = normalize_inventory(&temporary, render(&app, 102, 28));
-        assert!(narrow.contains("! 9 more lines"), "{narrow}");
+        assert!(narrow.contains("! 10 more lines"), "{narrow}");
         assert!(!narrow.contains("widen or lengthen"), "{narrow}");
         assert!(!narrow.contains("more lines below"), "{narrow}");
     }
@@ -998,7 +998,7 @@ mod installed {
         scroll_detail_to_the_end(&mut app, 80, 24);
 
         let screen = normalize_inventory(&temporary, render(&app, 80, 24));
-        assert!(screen.contains("! 11 lines above"), "{screen}");
+        assert!(screen.contains("! 12 lines above"), "{screen}");
         assert!(!screen.contains("more lines below"), "{screen}");
         insta::assert_snapshot!(screen);
     }

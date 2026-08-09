@@ -9,7 +9,7 @@ expression: "normalize_install_screen(&temporary, render(&app, 120, 40))"
 ▕  │  Skill: portable                                                                                               │  ▏
 ▕ 1│  Links to: [CANONICAL]                 /src/skills/portable                                                    │  ▏
 ▕▁▁│                                                                                                                │▁▁▏
-▕Re│  Steps                                                                                                         │  ▏
+▕  │  Steps                                                                                                         │  ▏
 ▕──│  × Claude Code: skill root created, but the link was not: Permission denied (os error 13)                      │─ ▏
 ▕▌ │      [TEMP]                      /home/.claude/skills/portable                                                 │  ▏
 ▕▌ │  U Codex: not attempted, because an earlier step stopped the run                                               │─ ▏

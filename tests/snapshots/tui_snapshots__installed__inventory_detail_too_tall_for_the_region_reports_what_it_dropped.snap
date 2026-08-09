@@ -4,8 +4,9 @@ expression: screen
 ---
  ◆ skilled  global                                ● ready · 1 source registered
  1 Inventory ·3 │ 2 Sources ·1   │ Updates (soon) │ 4 Doctor ·3    │
+
  ▌ Details  alpha
- ──────────────────────────────────────────────────────────────────────────────
+ ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁
  SKILL
  ──────────────────────────────────────────────────────────────────────────────
  alpha
@@ -23,6 +24,5 @@ expression: screen
  Validation: ✓ valid as alpha
  CODEX  ✓ healthy
  ──────────────────────────────────────────────────────────────────────────────
- Path: ~/.agents/skills/alpha
- ! 11 more lines below — j/k to scroll
+ ! 12 more lines below — j/k to scroll
  Tab/Shift-Tab Region   j/k Scroll   2 Sources   4 Doctor   q Quit   Esc Back …

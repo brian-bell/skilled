@@ -9,7 +9,7 @@ expression: "normalize_install_screen(&temporary, render(&app, 120, 40))"
 ▕  │  Skill: portable                                                                                               │  ▏
 ▕ 1│  From: src · skills                                                                                            │  ▏
 ▕▁▁│  Links to: [CANONICAL]                 /src/skills/portable                                                    │▁▁▏
-▕Re│                                                                                                                │  ▏
+▕  │                                                                                                                │  ▏
 ▕──│  Targets                                                                                                       │─ ▏
 ▕▌ │  ✓ Claude Code: create the skill root, then the link                                                           │  ▏
 ▕▌ │      [TEMP]                      /home/.claude/skills/portable                                                 │─ ▏
