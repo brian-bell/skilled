@@ -310,6 +310,43 @@ fn a_target_that_changed_since_the_preview_stops_the_run_where_it_stands() {
     assert_eq!(receipts[0].agent(), AgentKind::ClaudeCode);
 }
 
+/// A plan to create an agent root does not authorize writing inside a root that
+/// another process established while the preview was open. The physical root
+/// is left untouched, and the operation stops before its first write.
+#[test]
+fn a_root_that_appeared_since_the_preview_is_refused() {
+    let fixture = Fixture::new();
+    let repository = fixture.source("library", &["portable"]);
+    let mut app = fixture.registered(&repository);
+    fixture.create_root_parents();
+    focus_first_variant(&mut app);
+
+    dispatch(&mut app, Action::BeginInstall);
+    let root = fixture.create_root(AgentKind::ClaudeCode);
+    let witness = root.join("belongs-to-someone-else");
+    fs::write(&witness, "untouched").expect("mark the externally created root");
+    dispatch(&mut app, Action::ConfirmInstall);
+
+    let Some(InstallPrompt::Report(outcome)) = app.pending_install() else {
+        panic!("a report follows the refused apply");
+    };
+    assert_eq!(outcome.status(), InstallStatus::NotApplied);
+    assert!(matches!(
+        outcome
+            .step(AgentKind::ClaudeCode)
+            .map(|step| step.outcome()),
+        Some(StepOutcome::Failed(reason)) if reason.contains("root changed")
+    ));
+    assert_eq!(
+        fs::read_to_string(&witness).expect("the external root is untouched"),
+        "untouched"
+    );
+    for (_, root) in ROOTS {
+        assert!(!fixture.home().join(root).join("portable").exists());
+    }
+    assert!(app.receipts().expect("receipts").is_empty());
+}
+
 /// A plan whose targets are all already installed has nothing to write, and
 /// says so rather than reporting an install it did not perform.
 #[test]

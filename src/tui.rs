@@ -16,8 +16,8 @@ use crate::{
         InstalledSkillObservation, InventoryRow, RootScan, RootStatus, RowProvenance, RowVerdict,
     },
     operations::{
-        ExcludedReason, InstallOutcome, InstallPlan, InstallPrompt, InstallStatus, InstallTarget,
-        StepOutcome, TargetDisposition,
+        AppliedStep, ExcludedReason, InstallOutcome, InstallPlan, InstallPrompt, InstallStatus,
+        InstallTarget, StepOutcome, TargetDisposition,
     },
     resolution::{OpenCodeEntry, OpenCodeResolution, UnknownCause},
     source::{
@@ -4011,6 +4011,39 @@ fn excluded_reason(reason: &ExcludedReason) -> (String, Option<String>) {
     }
 }
 
+/// What one applied step did, and how strongly the report says it.
+///
+/// A step's reason carries paths and operating-system error text, which is
+/// outside Skilled's control and escaped like everything else that comes from
+/// there.
+fn install_step_verdict(outcome: &StepOutcome) -> (Tone, String) {
+    match outcome {
+        StepOutcome::Created => (Tone::Healthy, "link created".to_owned()),
+        StepOutcome::CreatedUnrecorded(error) => (
+            Tone::Warning,
+            format!(
+                "link created, but Skilled could not record owning it: {}",
+                terminal_safe(error)
+            ),
+        ),
+        StepOutcome::RootCreatedLinkFailed(error) => (
+            Tone::Critical,
+            format!(
+                "skill root created, but the link was not: {}",
+                terminal_safe(error)
+            ),
+        ),
+        StepOutcome::Failed(reason) => (
+            Tone::Critical,
+            format!("not written — {}", terminal_safe(reason)),
+        ),
+        StepOutcome::Unattempted => (
+            Tone::Unmanaged,
+            "not attempted, because an earlier step stopped the run".to_owned(),
+        ),
+    }
+}
+
 fn install_report_lines(outcome: &InstallOutcome) -> Vec<Line<'static>> {
     let plan = outcome.plan();
     let mut lines = vec![
@@ -4029,27 +4062,7 @@ fn install_report_lines(outcome: &InstallOutcome) -> Vec<Line<'static>> {
         lines.push(Line::from("Nothing was written."));
     }
     for step in outcome.applied().steps() {
-        let (tone, verdict) = match step.outcome() {
-            StepOutcome::Created => (Tone::Healthy, "link created".to_owned()),
-            // A step's reason carries paths and operating-system error text,
-            // which is outside Skilled's control and escaped like everything
-            // else that comes from there.
-            StepOutcome::CreatedUnrecorded(error) => (
-                Tone::Warning,
-                format!(
-                    "link created, but Skilled could not record owning it: {}",
-                    terminal_safe(error)
-                ),
-            ),
-            StepOutcome::Failed(reason) => (
-                Tone::Critical,
-                format!("not written — {}", terminal_safe(reason)),
-            ),
-            StepOutcome::Unattempted => (
-                Tone::Unmanaged,
-                "not attempted, because an earlier step stopped the run".to_owned(),
-            ),
-        };
+        let (tone, verdict) = install_step_verdict(step.outcome());
         lines.push(Line::from(components::badge(
             tone,
             &format!("{}: {verdict}", step.agent().display_name()),
@@ -4095,12 +4108,11 @@ fn install_report_lines(outcome: &InstallOutcome) -> Vec<Line<'static>> {
     // Only where something was written: there is nothing to say about undoing
     // an operation that wrote nothing.
     if outcome.status() != InstallStatus::Installed
-        && outcome.applied().steps().iter().any(|step| {
-            !matches!(
-                step.outcome(),
-                StepOutcome::Failed(_) | StepOutcome::Unattempted
-            )
-        })
+        && outcome
+            .applied()
+            .steps()
+            .iter()
+            .any(AppliedStep::changed_filesystem)
     {
         lines.push(Line::default());
         lines.push(Line::from(
@@ -5210,6 +5222,19 @@ mod tests {
             .collect::<String>()
             .trim_end()
             .to_owned()
+    }
+
+    #[test]
+    fn a_residual_root_is_a_critical_partial_write_in_the_install_report() {
+        let (tone, verdict) = install_step_verdict(&StepOutcome::RootCreatedLinkFailed(
+            "permission denied".to_owned(),
+        ));
+
+        assert_eq!(tone, Tone::Critical);
+        assert_eq!(
+            verdict,
+            "skill root created, but the link was not: permission denied"
+        );
     }
 
     /// A subtitle that does not fit sheds its trailing ` · ` clauses whole
