@@ -1155,6 +1155,10 @@ pub enum StepOutcome {
     /// does not own something it put on disk. Stated rather than hidden: the
     /// link is real, and a later repair will not recognise it.
     CreatedUnrecorded(String),
+    /// The skill root was created, but the link could not be. The empty root is
+    /// deliberately left in place, so this is a partial write rather than a
+    /// failed step that changed nothing.
+    RootCreatedLinkFailed(String),
     /// Nothing was written to this target, and why.
     Failed(String),
     /// The run stopped before reaching this target.
@@ -1182,10 +1186,19 @@ impl AppliedStep {
         &self.outcome
     }
 
-    fn wrote(&self) -> bool {
+    fn wrote_link(&self) -> bool {
         matches!(
             self.outcome,
             StepOutcome::Created | StepOutcome::CreatedUnrecorded(_)
+        )
+    }
+
+    pub(crate) fn changed_filesystem(&self) -> bool {
+        matches!(
+            self.outcome,
+            StepOutcome::Created
+                | StepOutcome::CreatedUnrecorded(_)
+                | StepOutcome::RootCreatedLinkFailed(_)
         )
     }
 }
@@ -1360,32 +1373,35 @@ impl InstallOutcome {
     /// manage to write turned out to be, and calling it a verification failure
     /// would name the smaller of the two problems.
     pub fn status(&self) -> InstallStatus {
-        if self.applied.steps.is_empty() {
-            return InstallStatus::NothingToDo;
-        }
-        if !self.applied.steps.iter().all(AppliedStep::wrote) {
-            return if self.applied.steps.iter().any(AppliedStep::wrote) {
-                InstallStatus::PartiallyApplied
-            } else {
-                InstallStatus::NotApplied
-            };
-        }
-        // Ownership is settled before the postcondition. A link Skilled cannot
-        // record owning is the more consequential of the two: verification can
-        // be run again, and a receipt that was never written is gone.
-        if self
-            .applied
-            .steps
-            .iter()
-            .any(|step| matches!(step.outcome, StepOutcome::CreatedUnrecorded(_)))
-        {
-            return InstallStatus::InstalledUnrecorded;
-        }
-        if !self.verification.is_verified() {
-            return InstallStatus::VerificationFailed;
-        }
-        InstallStatus::Installed
+        install_status(&self.applied, &self.verification)
     }
+}
+
+fn install_status(applied: &ApplyReport, verification: &VerifyReport) -> InstallStatus {
+    if applied.steps.is_empty() {
+        return InstallStatus::NothingToDo;
+    }
+    if !applied.steps.iter().all(AppliedStep::wrote_link) {
+        return if applied.steps.iter().any(AppliedStep::changed_filesystem) {
+            InstallStatus::PartiallyApplied
+        } else {
+            InstallStatus::NotApplied
+        };
+    }
+    // Ownership is settled before the postcondition. A link Skilled cannot
+    // record owning is the more consequential of the two: verification can
+    // be run again, and a receipt that was never written is gone.
+    if applied
+        .steps
+        .iter()
+        .any(|step| matches!(step.outcome, StepOutcome::CreatedUnrecorded(_)))
+    {
+        return InstallStatus::InstalledUnrecorded;
+    }
+    if !verification.is_verified() {
+        return InstallStatus::VerificationFailed;
+    }
+    InstallStatus::Installed
 }
 
 /// What the install flow is showing, and therefore what it will accept.
@@ -1524,14 +1540,8 @@ fn apply_target(
         return StepOutcome::Failed(format!("{reason}, so nothing was written"));
     }
     let root_now = probe_root(root, home);
-    match (&target.disposition, &root_now) {
-        // A root that has appeared since the plan was made is the root the plan
-        // was going to create. The step it named is simply already done, and the
-        // entry guard above still decides whether the link may be written.
-        (
-            TargetDisposition::CreateLink | TargetDisposition::CreateRootAndLink,
-            RootProbe::Present,
-        ) => {}
+    let root_created = match (&target.disposition, &root_now) {
+        (TargetDisposition::CreateLink, RootProbe::Present) => false,
         (
             TargetDisposition::CreateRootAndLink,
             RootProbe::Missing {
@@ -1546,6 +1556,7 @@ fn apply_target(
                     "the skill root could not be created: {error}"
                 ));
             }
+            true
         }
         _ => {
             return StepOutcome::Failed(
@@ -1554,19 +1565,15 @@ fn apply_target(
                     .to_owned(),
             );
         }
-    }
+    };
     if let Err(error) = create_directory_symlink(plan.source_dir(), &target.link_path) {
-        // A root created a moment ago is left where it is. It is an empty
-        // directory at a documented path, which is what an agent with no global
-        // skills has anyway, and removing it would be an unrequested write on
-        // top of one that already failed.
-        let root_note = match target.disposition {
-            TargetDisposition::CreateRootAndLink => {
-                " (the skill root was created and is left in place)"
-            }
-            _ => "",
+        return if root_created {
+            // The empty documented root is left in place. Removing it would be
+            // an unrequested second write after the operation already failed.
+            StepOutcome::RootCreatedLinkFailed(error.to_string())
+        } else {
+            StepOutcome::Failed(format!("the link could not be created: {error}"))
         };
-        return StepOutcome::Failed(format!("the link could not be created: {error}{root_note}"));
     }
     match store.record_receipt(&receipt) {
         Ok(()) => StepOutcome::Created,
@@ -1654,7 +1661,7 @@ pub fn verify_install(
     let mut withheld = Vec::new();
     let mut opencode_native = false;
     let row = snapshot.row(plan.skill_name());
-    for step in applied.steps.iter().filter(|step| step.wrote()) {
+    for step in applied.steps.iter().filter(|step| step.wrote_link()) {
         // A root the scan could not read says nothing about the link in it.
         // The scan is bounded and can exhaust its budget over a large registry,
         // and a root can become unreadable between the write and the rescan;
@@ -1733,7 +1740,7 @@ pub fn verify_install(
     // skill, or seeing an edition it cannot use, is the arrangement the plan
     // described and warned about, not a broken one.
     if !opencode_native
-        && applied.steps.iter().any(AppliedStep::wrote)
+        && applied.steps.iter().any(AppliedStep::wrote_link)
         && let Some(observed) = row.and_then(InventoryRow::opencode_resolution)
     {
         // Checked against what the plan said, not against what Skilled would
@@ -1941,5 +1948,32 @@ impl Receipt {
 
     pub fn variant_relative_path(&self) -> Option<&Path> {
         self.variant_relative_path.as_deref()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Creating only the root is still a filesystem mutation. It is not a
+    /// written link for verification, but it makes a failed step a partial
+    /// apply rather than a truthful `NotApplied` outcome.
+    #[test]
+    fn a_root_created_before_link_failure_is_a_partial_write() {
+        let applied = ApplyReport {
+            steps: vec![AppliedStep {
+                agent: AgentKind::ClaudeCode,
+                link_path: PathBuf::from("/home/example/.claude/skills/portable"),
+                outcome: StepOutcome::RootCreatedLinkFailed("permission denied".to_owned()),
+            }],
+        };
+        let verification = VerifyReport::default();
+
+        assert_eq!(
+            install_status(&applied, &verification),
+            InstallStatus::PartiallyApplied
+        );
+        assert!(applied.steps[0].changed_filesystem());
+        assert!(!applied.steps[0].wrote_link());
     }
 }

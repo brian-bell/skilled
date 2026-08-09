@@ -21,8 +21,8 @@ use crate::{
     app::PlanRequestFailure,
     components::terminal_safe,
     operations::{
-        ExcludedReason, InstallOutcome, InstallPlan, InstallStatus, InstallTarget, LocateFailure,
-        StepOutcome, TargetDisposition, locate_variant,
+        AppliedStep, ExcludedReason, InstallOutcome, InstallPlan, InstallStatus, InstallTarget,
+        LocateFailure, StepOutcome, TargetDisposition, locate_variant,
     },
 };
 
@@ -453,22 +453,34 @@ fn target_verdict(target: &InstallTarget, plan_is_blocked: bool) -> String {
     }
 }
 
+/// What one applied step did, as one line of the command's report.
+///
+/// A step's reason carries paths and operating-system error text, which is
+/// outside Skilled's control and escaped like everything else that comes from
+/// there.
+fn install_step_verdict(outcome: &StepOutcome) -> String {
+    match outcome {
+        StepOutcome::Created => "link created".to_owned(),
+        StepOutcome::CreatedUnrecorded(error) => {
+            format!(
+                "link created, but Skilled could not record owning it: {}",
+                safe(error)
+            )
+        }
+        StepOutcome::RootCreatedLinkFailed(error) => {
+            format!("skill root created, but the link was not: {}", safe(error))
+        }
+        StepOutcome::Failed(reason) => format!("not written — {}", safe(reason)),
+        StepOutcome::Unattempted => {
+            "not attempted, because an earlier step stopped the run".to_owned()
+        }
+    }
+}
+
 fn write_report(output: &mut dyn Write, outcome: &InstallOutcome) -> std::io::Result<()> {
     writeln!(output)?;
     for step in outcome.applied().steps() {
-        let verdict = match step.outcome() {
-            StepOutcome::Created => "link created".to_owned(),
-            StepOutcome::CreatedUnrecorded(error) => {
-                format!(
-                    "link created, but Skilled could not record owning it: {}",
-                    safe(error)
-                )
-            }
-            StepOutcome::Failed(reason) => format!("not written — {}", safe(reason)),
-            StepOutcome::Unattempted => {
-                "not attempted, because an earlier step stopped the run".to_owned()
-            }
-        };
+        let verdict = install_step_verdict(step.outcome());
         writeln!(output, "  {:<12} {verdict}", step.agent().display_name())?;
         writeln!(
             output,
@@ -508,12 +520,11 @@ fn write_report(output: &mut dyn Write, outcome: &InstallOutcome) -> std::io::Re
     // Only where something was written: there is nothing to say about undoing
     // an operation that wrote nothing.
     if outcome.status() != InstallStatus::Installed
-        && outcome.applied().steps().iter().any(|step| {
-            !matches!(
-                step.outcome(),
-                StepOutcome::Failed(_) | StepOutcome::Unattempted
-            )
-        })
+        && outcome
+            .applied()
+            .steps()
+            .iter()
+            .any(AppliedStep::changed_filesystem)
     {
         writeln!(
             output,
@@ -522,4 +533,19 @@ fn write_report(output: &mut dyn Write, outcome: &InstallOutcome) -> std::io::Re
         )?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_residual_root_is_stated_in_the_command_report() {
+        assert_eq!(
+            install_step_verdict(&StepOutcome::RootCreatedLinkFailed(
+                "permission denied".to_owned()
+            )),
+            "skill root created, but the link was not: permission denied"
+        );
+    }
 }
