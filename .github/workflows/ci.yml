@@ -73,3 +73,22 @@ jobs:
 
       - name: cargo build --release
         run: cargo build --release
+
+  package:
+    name: Release package (Rust 1.97)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Install minimum supported Rust
+        uses: dtolnay/rust-toolchain@1.97
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Package the clean checkout
+        run: cargo package --locked
+
+      - name: Install and smoke-test the exact package
+        run: cargo test --test release_package -- --ignored
