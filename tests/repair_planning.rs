@@ -691,6 +691,59 @@ fn a_repair_source_relocated_after_preview_is_refused_without_modifying_the_link
 }
 
 #[test]
+fn a_root_that_becomes_unreadable_after_preview_is_refused_without_modifying_the_link() {
+    let fixture = Fixture::new();
+    let common = fixture.source("common", "skills", "portable");
+    let mut app = fixture.registered(&common);
+    fixture.create_root_parents();
+    fixture.install(&mut app);
+    let specific = fixture.source("specific", ".agents/skills", "portable");
+    let preview = app
+        .preview_source(&specific)
+        .expect("preview specific source");
+    app.confirm_source(preview)
+        .expect("register specific source");
+    let link = fixture.root(AgentKind::Codex).join("portable");
+    let old_target = fs::read_link(&link).unwrap();
+
+    dispatch(&mut app, Action::OpenDoctor);
+    let finding = app
+        .doctor_findings()
+        .iter()
+        .position(|entry| {
+            entry.agent() == AgentKind::Codex
+                && entry.finding().code() == "install.wrong_managed_target"
+        })
+        .expect("Codex repairable finding");
+    dispatch(
+        &mut app,
+        Action::MoveDoctorSelection(i8::try_from(finding).unwrap()),
+    );
+    dispatch(&mut app, Action::BeginRepair);
+    assert!(matches!(
+        app.pending_repair(),
+        Some(RepairPrompt::Preview(plan)) if plan.is_executable()
+    ));
+
+    let root = fixture.root(AgentKind::Codex);
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o300)).expect("seal root listing");
+    app.note_detail_max_scroll(Some(0));
+    dispatch(&mut app, Action::ConfirmRepair);
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).expect("restore root");
+
+    let Some(RepairPrompt::Report(outcome)) = app.pending_repair() else {
+        panic!("repair should report its guarded refusal");
+    };
+    assert_eq!(outcome.status(), RepairStatus::NotApplied);
+    assert!(matches!(
+        outcome.applied().step().map(|step| step.outcome()),
+        Some(RepairStepOutcome::Failed(reason))
+            if reason.contains("skill root changed after the plan was shown")
+    ));
+    assert_eq!(fs::read_link(&link).unwrap(), old_target);
+}
+
+#[test]
 fn a_repointed_link_is_not_owned_by_a_path_only_receipt() {
     let fixture = Fixture::new();
     let repository = fixture.source("library", "skills", "portable");

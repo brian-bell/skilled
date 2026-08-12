@@ -1874,8 +1874,9 @@ fn slot_disposition(
                     code,
                     FindingSeverity::Critical,
                     format!(
-                        "{what}: it points at {}. Skilled does not repair or replace an existing \
-                         entry, so this target is left exactly as it is",
+                        "{what}: it points at {}. Install never replaces an existing entry. A \
+                         proven Skilled-owned dangling or incorrect link can be handled by the \
+                         separate repair operation; this install target is left exactly as it is",
                         target.display()
                     ),
                 ),
@@ -2569,7 +2570,8 @@ fn apply_repair_target(plan: &RepairPlan, store: &Store, home: &Path) -> RepairS
 }
 
 fn repair_destination_unchanged(plan: &RepairPlan, root: &Path, home: &Path) -> Result<(), String> {
-    if probe_root(root, home) != RootProbe::Present {
+    let root_probe = probe_root(root, home);
+    if probe_repair_root(&root_probe, root) != RootProbe::Present {
         return Err(
             "the agent's skill root changed after the plan was shown, so nothing was written"
                 .to_owned(),
