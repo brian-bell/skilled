@@ -23,7 +23,8 @@ use crate::{
     agents::detection_at,
     inventory::{
         Finding, FindingSeverity, InstallationHealth, InstallationObject,
-        InstalledSkillObservation, InventoryRow, InventorySnapshot, Provenance, RootStatus,
+        InstalledSkillObservation, InventoryRow, InventorySnapshot, MAX_ROOT_CHILDREN, Provenance,
+        RootStatus,
     },
     resolution::{
         CandidateSelection, OpenCodeResolution, RootSighting, SightedEntry, UnknownCause,
@@ -320,9 +321,13 @@ pub fn probe_repair(
     agent: AgentKind,
     home: &Path,
 ) -> RepairProbe {
-    let targets = agents
-        .each_ref()
-        .map(|detection| probe_target(detection, skill_name, home));
+    let targets = agents.each_ref().map(|detection| {
+        let mut target = probe_target(detection, skill_name, home);
+        if detection.selected() {
+            target.root = probe_repair_root(&target.root, detection.root());
+        }
+        target
+    });
     let target_entries = agents.each_ref().map(|detection| {
         if detection.selected() {
             probe_repair_entry(&targets[detection.kind().index()].link_path)
@@ -345,6 +350,34 @@ pub fn probe_repair(
         target_entries,
         sources,
     }
+}
+
+/// Establish that repair can inspect the whole root it may write inside.
+///
+/// A known child can remain searchable and replaceable when directory read
+/// permission is absent. Treating metadata alone as a readable root would then
+/// allow a write whose mandatory inventory rescan is already known to be
+/// unable to verify it. Iterating the directory also mirrors the inventory's
+/// child bound, so repair does not call a partial view complete.
+fn probe_repair_root(root_probe: &RootProbe, root: &Path) -> RootProbe {
+    if !matches!(root_probe, RootProbe::Present) {
+        return root_probe.clone();
+    }
+    let entries = match fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(error) => return RootProbe::Unreadable(error.to_string()),
+    };
+    for (index, entry) in entries.enumerate() {
+        if index == MAX_ROOT_CHILDREN {
+            return RootProbe::Unreadable(format!(
+                "the skill root holds more than {MAX_ROOT_CHILDREN} entries"
+            ));
+        }
+        if let Err(error) = entry {
+            return RootProbe::Unreadable(error.to_string());
+        }
+    }
+    RootProbe::Present
 }
 
 fn probe_repair_entry(link_path: &Path) -> RepairEntryProbe {

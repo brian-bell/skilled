@@ -4,6 +4,7 @@
 use std::{
     fs,
     io::{self, BufRead, Cursor, Read},
+    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     process::Command,
 };
@@ -211,6 +212,48 @@ fn a_removed_old_link_is_a_partial_apply_exit() {
         cli::exit_code_for_repair(RepairStatus::PartiallyApplied),
         ExitCodeKind::PartialApply
     );
+}
+
+#[test]
+fn repair_refuses_a_target_root_that_cannot_be_enumerated() {
+    let fixture = Fixture::new();
+    let common = fixture.source("common", "skills", "portable");
+    let mut app = fixture.registered(&common);
+    fixture.create_root_parents();
+    fixture.install(&mut app);
+    let specific = fixture.source("specific", ".agents/skills", "portable");
+    let preview = app
+        .preview_source(&specific)
+        .expect("preview specific source");
+    app.confirm_source(preview)
+        .expect("register specific source");
+    let link = fixture.root(AgentKind::Codex).join("portable");
+    let old_target = fs::read_link(&link).unwrap();
+    drop(app);
+
+    let root = fixture.root(AgentKind::Codex);
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o300)).expect("seal root listing");
+    let mut input = Cursor::new(Vec::<u8>::new());
+    let mut output = Vec::new();
+    let code = cli::run(
+        &[
+            "repair".to_owned(),
+            "--yes".to_owned(),
+            "--skill".to_owned(),
+            "portable".to_owned(),
+            "--agent".to_owned(),
+            "codex".to_owned(),
+        ],
+        fixture.environment(),
+        &mut input,
+        &mut output,
+    );
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).expect("restore root");
+    let output = String::from_utf8(output).unwrap();
+
+    assert_eq!(code, ExitCodeKind::Blocked, "{output}");
+    assert!(output.contains("install.unreadable_root"), "{output}");
+    assert_eq!(fs::read_link(&link).unwrap(), old_target);
 }
 
 #[test]
