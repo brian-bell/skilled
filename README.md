@@ -7,7 +7,8 @@ Rust with Ratatui and Crossterm.
 The project is early in version-one development. The current build establishes
 the setup, terminal, source-registration, and read-only inspection foundation,
 and installs a registered skill across the agents that can use it. It does not
-yet repair, update, or uninstall.
+yet repair, update, or uninstall. Version 0.2.0 has a reproducible Cargo package
+and release smoke gate, but no external distribution has been published.
 
 ## Design references
 
@@ -138,6 +139,9 @@ yet repair, update, or uninstall.
   columns or more, plus a recoverable notice for smaller terminals.
 - Terminal restoration on normal exit, startup failure, panic unwinding, and
   the Ctrl-C key path used in raw mode.
+- A non-interactive `skilled --version` path and a Cargo release package that is
+  built and smoke-tested from a clean checkout on macOS and Ubuntu without
+  touching real application or agent state.
 
 Repair, update, remote fetching, and uninstall are still future work.
 Registration, inventory, and Doctor remain read-only: they catalog local
@@ -155,6 +159,7 @@ documented skill root above it when that root's own parent already exists.
 
 ```bash
 cargo run
+cargo run -- --version
 ```
 
 On first launch, use Enter to move through all seven setup steps; Summary labels
@@ -244,12 +249,17 @@ cargo build --release
 cargo test --all-targets
 cargo fmt --check
 cargo clippy --all-targets --all-features -- -D warnings
+cargo package --locked
+cargo test --test release_package -- --ignored
 ```
 
 Tests use temporary homes and repositories; they do not inspect or mutate real
 agent skill directories. Ratatui behavior is covered two ways: text snapshots
 under `tests/snapshots/` and cell-level style assertions in
-`tests/tui_shell.rs`.
+`tests/tui_shell.rs`. The release-package gate requires a clean checkout,
+installs the exact package with a fresh Cargo home, starts the installed TUI in
+a pseudo-terminal, and verifies that a future SQLite schema is refused without
+modification.
 
 ## Architecture
 
