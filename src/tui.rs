@@ -1760,10 +1760,12 @@ fn doctor_subtitle(app: &SkilledApp, listed: usize) -> String {
         // `doctor_empty_state` states them, so the pane header and the body
         // beneath it lead with the same reason.
         None if inventory.unreadable_roots().next().is_some() => "not fully read".to_owned(),
-        None if degraded && listed > 0 => format!("{listed} listed · metadata unavailable"),
-        None if degraded => "metadata unavailable".to_owned(),
         None if !read_a_root(inventory) && listed > 0 => format!("{listed} listed · no root read"),
         None if !read_a_root(inventory) => "no root read".to_owned(),
+        // Behind every answer the roots have, for the same reason the empty
+        // state puts it last: this one is already on screen in the banner.
+        None if degraded && listed > 0 => format!("{listed} listed · metadata unavailable"),
+        None if degraded => "metadata unavailable".to_owned(),
         None if listed > 0 => format!("{listed} listed · a source could not be read"),
         None => "a source could not be read".to_owned(),
     }
@@ -1864,15 +1866,6 @@ fn doctor_empty_state(app: &SkilledApp) -> (&'static str, String, String) {
     // completion flag can hold a registry that was read whole — saying it
     // cannot be claimed complete would be untrue of the very thing this
     // sentence names.
-    if app.metadata_failure().is_some() && !inventory.registry_is_complete() {
-        return (
-            "·",
-            "Application metadata is unavailable".to_owned(),
-            "Skilled kept the read-only scan and diagnosis available, but it cannot claim the \
-             registry is complete or perform writes in this session."
-                .to_owned(),
-        );
-    }
     // Nothing was read, so nothing may be said about what is installed. The
     // roots were all accounted for — that is why no count was withheld for
     // them — but accounting for a root that is absent is not reading one.
@@ -1883,6 +1876,15 @@ fn doctor_empty_state(app: &SkilledApp) -> (&'static str, String, String) {
             "Skilled looked for the documented global skill root of each selected \
              agent and found none of them, so it read nothing to report on. It \
              did not create one."
+                .to_owned(),
+        );
+    }
+    if app.metadata_failure().is_some() && !inventory.registry_is_complete() {
+        return (
+            "·",
+            "Application metadata is unavailable".to_owned(),
+            "Skilled kept the read-only scan and diagnosis available, but it cannot claim the \
+             registry is complete or perform writes in this session."
                 .to_owned(),
         );
     }

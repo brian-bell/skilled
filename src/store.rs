@@ -818,9 +818,8 @@ fn valid_backup_component(name: &str) -> bool {
 /// is the check: SQLite accepts an *empty* file for `VACUUM INTO`, so a bare
 /// absence test would let a zero-byte file that appeared after it be written
 /// into rather than refused. `O_CREAT | O_EXCL` also refuses a symbolic link,
-/// so the reserved object is the pathname's own regular file. No file is
-/// replaced or removed except the one this call created, if populating it
-/// fails.
+/// so the reserved object is the pathname's own regular file, created for the
+/// owner alone. No file is ever replaced or removed.
 fn backup_database(
     connection: &Connection,
     database_path: &Path,
@@ -866,22 +865,26 @@ fn backup_database_with(
             .to_str()
             .ok_or_else(|| Error::UnrepresentablePath(candidate.clone()))?
             .to_owned();
-        match fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&candidate)
-        {
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        // A backup holds every registered repository path and ownership
+        // receipt the database holds. `VACUUM INTO` does not narrow the mode
+        // of a file it finds, so the reservation is where the mode is set, and
+        // it is set to the owner alone rather than to whatever the umask
+        // happens to leave.
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        match options.open(&candidate) {
             Ok(reserved) => drop(reserved),
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(error) => return Err(error.into()),
         }
-        // The reservation is this call's own, so removing it on failure takes
-        // back only what this call put there and leaves the directory as the
-        // migration found it.
-        if let Err(error) = connection.execute("VACUUM INTO ?1", params![candidate_text]) {
-            let _ = fs::remove_file(&candidate);
-            return Err(error.into());
-        }
+        // A failed population leaves the reservation where it is. Removing it
+        // would mean unlinking a pathname this call no longer holds open — and
+        // so, if anything replaced it in between, unlinking something Skilled
+        // did not create. An unused empty file is the cheaper of the two, and
+        // the only one consistent with never unlinking.
+        connection.execute("VACUUM INTO ?1", params![candidate_text])?;
         return Ok(candidate);
     }
     Err(Error::Io(std::io::Error::new(
@@ -1096,6 +1099,30 @@ mod migration_tests {
             0
         );
         assert!(fs::metadata(&backup).expect("read backup").len() > 0);
+    }
+
+    /// A backup carries every repository path and ownership receipt the
+    /// database carries, so it is not left at whatever the umask allows.
+    #[cfg(unix)]
+    #[test]
+    fn a_backup_is_readable_by_its_owner_alone() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temporary = tempfile::tempdir().expect("temporary data directory");
+        let database = temporary.path().join("skilled.sqlite3");
+        let connection = Connection::open(&database).expect("create database");
+        connection
+            .execute_batch("CREATE TABLE original (value TEXT); INSERT INTO original VALUES ('r');")
+            .expect("create database contents");
+
+        let backup = backup_database_with(&connection, &database, 0, |_| "owner.backup".to_owned())
+            .expect("create backup");
+
+        let mode = fs::metadata(&backup)
+            .expect("read backup metadata")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600, "backup mode {:o}", mode & 0o777);
     }
 
     fn backup_files(directory: &Path) -> Vec<PathBuf> {

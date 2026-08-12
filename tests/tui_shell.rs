@@ -1195,6 +1195,34 @@ fn a_degraded_session_lets_a_surviving_filter_speak_for_its_own_empty_table() {
     assert!(rendered.contains("metadata unavailable"), "{rendered}");
 }
 
+/// Roots that are all absent are a complete answer about the roots, and the
+/// only one Doctor gives about them. A degraded session repeats its banner
+/// rather than replacing that answer with it.
+#[test]
+fn degraded_doctor_still_reports_that_no_root_exists() {
+    let temporary = tempfile::tempdir().expect("temporary application directory");
+    let home = temporary.path().join("home");
+    let data = temporary.path().join("data");
+    fs::create_dir_all(&home).expect("create a home with no agent root in it");
+    fs::create_dir_all(&data).expect("create established data directory");
+    let mut app =
+        SkilledApp::open(AppEnvironment::new(&home, &data, "")).expect("open degraded application");
+    assert!(app.metadata_failure().is_some());
+
+    let update = app.update(Action::OpenDoctor);
+    app.perform_effects(update.effects())
+        .expect("scan for Doctor");
+    let rendered = text(&buffer(&app, 120, 40));
+
+    assert!(
+        rendered.contains("No agent skill root exists yet"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("no root read"), "{rendered}");
+    // The failure keeps its banner rather than the subtitle and the body.
+    assert!(rendered.contains("metadata unavailable"), "{rendered}");
+}
+
 /// The metadata units recover independently, so a session degraded by a
 /// malformed completion flag can still hold a registry that was read whole.
 /// Doctor states the verdict that survived rather than withholding it, and
