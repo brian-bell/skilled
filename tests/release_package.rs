@@ -15,7 +15,7 @@ fn the_exact_cargo_package_installs_and_honors_the_release_contract() {
     let package_target = temporary.path().join("package-target");
     let package = run(
         Command::new(env!("CARGO"))
-            .args(["package", "--locked", "--allow-dirty", "--target-dir"])
+            .args(["package", "--locked", "--target-dir"])
             .arg(&package_target)
             .current_dir(env!("CARGO_MANIFEST_DIR")),
         "package the checkout",
