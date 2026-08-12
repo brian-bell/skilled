@@ -10,7 +10,8 @@ Skilled is an early Rust 2024 / Ratatui terminal application for inspecting
 and managing global coding-agent skills. First-run setup, local Git source
 registration, Sources browsing, a read-only installation inventory, OpenCode
 effective resolution across its documented roots, a read-only Doctor findings
-view, and installation — previewed, confirmed, and verified — are implemented.
+view, installation — previewed, confirmed, and verified — and the testable
+0.2.0 Cargo release identity are implemented.
 
 Installation is the only filesystem mutation Skilled performs, and it is
 narrow on purpose: it creates one directory symbolic link per agent, and
@@ -36,9 +37,12 @@ Requires stable Rust 1.97 or newer.
 
 ```bash
 cargo run
+cargo run -- --version
 cargo run -- install --source <id-or-path> --skill <name> --agents claude-code
 cargo build --release
 cargo test --all-targets
+cargo package --locked
+cargo test --test release_package -- --ignored
 cargo fmt --check
 cargo clippy --all-targets --all-features -- -D warnings
 ```
@@ -85,8 +89,9 @@ signal needs both, because colour alone is not an acceptable cue.
   paths, plus the session identity (user, host, operating system) gathered
   once at startup — every segment optional, omitted rather than invented, and
   injected by tests so they never read the real environment.
-- `src/main.rs`: no arguments runs the interactive application; anything else is
-  a command, reported through an exit status.
+- `src/main.rs`: `--version` reports the package identity before process
+  environment discovery; no arguments runs the interactive application, and
+  anything else is a command reported through an exit status.
 
 ## Invariants
 
