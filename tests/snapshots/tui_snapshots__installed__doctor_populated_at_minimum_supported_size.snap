@@ -3,7 +3,7 @@ source: tests/tui_snapshots.rs
 expression: screen
 ---
  ◆ skilled  global                               ● ready · 3 sources registered
- 1 Inventory ·5 │ 2 Sources ·3   │ Updates (soon) │ 4 Doctor ·8    │
+ 1 Inventory ·5 │ 2 Sources ·3   │ 3 Updates      │ 4 Doctor ·8    │
 ▌ Doctor  8 findings
 ────────────────────────────────────────────────────────────────────────────────
   SEVERITY   FINDING                           SKILL                AGENT

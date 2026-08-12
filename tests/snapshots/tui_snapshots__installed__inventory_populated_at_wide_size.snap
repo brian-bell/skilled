@@ -7,7 +7,7 @@ expression: "normalize_inventory(&temporary, render(&app, 120, 40))"
 ▕ ◆ skilled  global                                                                                                    ▏
 ▕▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▏
 ▕                │                │                │                │                                                  ▏
-▕ 1 Inventory ·3 │ 2 Sources ·1   │ Updates (soon) │ 4 Doctor ·3    │                    ● ready · 1 source registered ▏
+▕ 1 Inventory ·3 │ 2 Sources ·1   │ 3 Updates      │ 4 Doctor ·3    │                    ● ready · 1 source registered ▏
 ▕▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁│▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁│▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁│▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁│▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▏
 ▕                                                                              │                                       ▏
 ▕▌ Global inventory  3 skills                                                  │   Details  alpha                      ▏

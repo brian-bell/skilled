@@ -1,4 +1,4 @@
-//! The `skilled install` and `skilled repair` commands.
+//! The `skilled install`, `skilled repair`, and `skilled update` commands.
 //!
 //! One narrow surface, parsed by hand. Spec 16 asks for a handful of flags and
 //! distinguishable exit statuses, and adding a production dependency for that
@@ -25,6 +25,7 @@ use crate::{
         LocateFailure, RepairDisposition, RepairOutcome, RepairPlan, RepairStatus,
         RepairStepOutcome, StepOutcome, TargetDisposition, locate_variant,
     },
+    updates::RepositoryUpdatePlan,
 };
 
 /// How the command ended.
@@ -66,17 +67,21 @@ const USAGE: &str = "\
 usage: skilled install --source <id-or-path> --skill <name> \
 [--agents claude-code,codex,opencode] [--yes]
        skilled repair --skill <name> --agent <agent> [--yes]
+       skilled update --source <id-or-path> [--yes]
 
   --source   a registered source, by the identifier Skilled gave it or by its
              checkout path
   --skill    the skill directory name to install
   --agents   which agents to install for; defaults to every configured agent
   --yes      skip the confirmation. Install requires --source, --skill, and
-             --agents explicitly; repair requires --skill and --agent. Every
-             safety check still runs.
+             --agents explicitly; repair requires --skill and --agent; update
+             requires --source. Every safety check still runs.
 
 Repair re-resolves the named skill from the live registry. It replaces only a
 symbolic link whose recorded target exactly matches a Skilled receipt.
+
+Update checks the registered checkout for new upstream commits and applies
+them only as a fast-forward of the exact revision it previewed.
 
 Run skilled with no arguments for the interactive application.";
 
@@ -93,7 +98,7 @@ pub fn run(
     output: &mut dyn Write,
 ) -> ExitCodeKind {
     let request = match parse(arguments) {
-        Ok(parsed @ (Parsed::Install(_) | Parsed::Repair(_))) => parsed,
+        Ok(parsed @ (Parsed::Install(_) | Parsed::Repair(_) | Parsed::Update(_))) => parsed,
         Ok(Parsed::Usage) => {
             let _ = writeln!(output, "{USAGE}");
             return ExitCodeKind::Success;
@@ -103,6 +108,7 @@ pub fn run(
     let result = match request {
         Parsed::Install(request) => execute_install(&request, environment, input, output),
         Parsed::Repair(request) => execute_repair(&request, environment, input, output),
+        Parsed::Update(request) => execute_update(&request, environment, input, output),
         Parsed::Usage => unreachable!(),
     };
     match result {
@@ -172,9 +178,15 @@ struct RepairRequest {
     assume_yes: bool,
 }
 
+struct UpdateRequest {
+    source: String,
+    assume_yes: bool,
+}
+
 enum Parsed {
     Install(InstallRequest),
     Repair(RepairRequest),
+    Update(UpdateRequest),
     Usage,
 }
 
@@ -183,6 +195,7 @@ fn parse(arguments: &[String]) -> Result<Parsed, String> {
     match arguments.next().map(String::as_str) {
         Some("install") => parse_install(arguments),
         Some("repair") => parse_repair(arguments),
+        Some("update") => parse_update(arguments),
         Some("--help" | "-h" | "help") => Ok(Parsed::Usage),
         Some(other) => Err(format!("unknown command {other}")),
         None => Err("no command was given".to_owned()),
@@ -274,6 +287,33 @@ fn parse_repair<'a>(mut arguments: impl Iterator<Item = &'a String>) -> Result<P
     Ok(Parsed::Repair(RepairRequest {
         skill: skill.ok_or("--skill is required")?,
         agent: agent.ok_or("--agent is required")?,
+        assume_yes,
+    }))
+}
+
+fn parse_update<'a>(mut arguments: impl Iterator<Item = &'a String>) -> Result<Parsed, String> {
+    let mut source = None;
+    let mut assume_yes = false;
+    while let Some(flag) = arguments.next() {
+        let mut value = |flag: &str| match arguments.next() {
+            Some(value) if !value.starts_with('-') => Ok(value.clone()),
+            _ => Err(format!("{flag} needs a value")),
+        };
+        match flag.as_str() {
+            "--source" => source = Some(value("--source")?),
+            // An install flag on an update request is a request nobody wrote,
+            // and naming the command it belongs to says so plainly.
+            "--skill" | "--agents" => return Err(format!("{flag} is only valid for install")),
+            "--yes" => assume_yes = true,
+            "--help" | "-h" => return Ok(Parsed::Usage),
+            other => return Err(format!("unknown option {other}")),
+        }
+    }
+    // `--source` is required with or without `--yes`, so the fail-closed rule
+    // install states has nothing left to add here: an update names the one
+    // checkout it acts on or it is not a request.
+    Ok(Parsed::Update(UpdateRequest {
+        source: source.ok_or("--source is required")?,
         assume_yes,
     }))
 }
@@ -448,6 +488,167 @@ fn execute_repair(
     let outcome = app.apply_repair_plan(&plan);
     write_repair_report(output, &outcome).map_err(|error| error.to_string())?;
     Ok(exit_code_for_repair(outcome.status()))
+}
+
+fn execute_update(
+    request: &UpdateRequest,
+    environment: AppEnvironment,
+    input: &mut dyn BufRead,
+    output: &mut dyn Write,
+) -> Result<ExitCodeKind, String> {
+    let mut app = SkilledApp::open(environment).map_err(|error| error.to_string())?;
+    let Some(source_id) = resolve_source(&app, &request.source) else {
+        return Ok(refuse(
+            output,
+            &format!("no registered source matches {}", request.source),
+        ));
+    };
+    if let Some(error) = app
+        .sources()
+        .iter()
+        .find(|source| source.id() == source_id)
+        .and_then(|source| source.source_error())
+    {
+        return Ok(refuse(
+            output,
+            &format!("the registered source cannot be read: {error}"),
+        ));
+    }
+    let plan = app.plan_repository_update_for(source_id)?;
+    write_repository_update_plan(output, &plan).map_err(|error| error.to_string())?;
+    if plan.is_blocked() {
+        let _ = writeln!(output, "\nBlocked: nothing was written.");
+        return Ok(ExitCodeKind::Blocked);
+    }
+    if plan.current_revision() == plan.target_revision() {
+        let _ = writeln!(output, "\nNothing to do.");
+        return Ok(ExitCodeKind::Success);
+    }
+    if !request.assume_yes && !confirmed(input, output)? {
+        let _ = writeln!(output, "Cancelled. Nothing was written.");
+        return Ok(ExitCodeKind::Success);
+    }
+    let outcome = app.apply_repository_plan(&plan);
+    let apply_failed = outcome.apply_error.is_some();
+    let bookkeeping_failed = outcome.bookkeeping_error.is_some();
+    let verification = match outcome.verification {
+        Some(report) => report,
+        None => {
+            if let Some(error) = outcome.apply_error.as_deref() {
+                let _ = writeln!(output, "Fast-forward failed: {}", safe(&error));
+            } else {
+                let _ = writeln!(output, "Fast-forward completed.");
+            }
+            if let Some(error) = outcome.bookkeeping_error.as_deref() {
+                let _ = writeln!(output, "Post-attempt state unavailable: {}", safe(&error));
+            }
+            return Ok(ExitCodeKind::PartialApply);
+        }
+    };
+    if let Some(error) = outcome.apply_error.as_deref() {
+        let _ = writeln!(output, "Fast-forward command failed: {}", safe(&error));
+    } else {
+        let _ = writeln!(output, "Fast-forward completed.");
+    }
+    if let Some(error) = outcome.bookkeeping_error.as_deref() {
+        let _ = writeln!(
+            output,
+            "Post-attempt state was not cached: {}",
+            safe(&error)
+        );
+    }
+    if !verification.is_verified() {
+        for failure in verification.failures() {
+            let _ = writeln!(output, "Not verified: {}", safe(failure));
+        }
+        return Ok(if apply_failed {
+            ExitCodeKind::PartialApply
+        } else {
+            ExitCodeKind::VerificationFailed
+        });
+    }
+    if verification.is_complete() {
+        let _ = writeln!(output, "Verified: HEAD is the previewed revision.");
+    } else {
+        let _ = writeln!(output, "Verified as far as it could be.");
+        for withheld in verification.withheld() {
+            let _ = writeln!(output, "Not established: {}", safe(withheld));
+        }
+    }
+    Ok(if bookkeeping_failed || apply_failed {
+        ExitCodeKind::PartialApply
+    } else {
+        ExitCodeKind::Success
+    })
+}
+
+fn write_repository_update_plan(
+    output: &mut dyn Write,
+    plan: &RepositoryUpdatePlan,
+) -> std::io::Result<()> {
+    writeln!(output, "Update {}", safe(plan.source_label()))?;
+    writeln!(output, "  path {}", safe(&plan.path().display()))?;
+    writeln!(output, "  branch {}", safe(plan.current_reference()))?;
+    writeln!(output, "  current {}", safe(plan.current_revision()))?;
+    writeln!(output, "  target  {}", safe(plan.target_revision()))?;
+    writeln!(
+        output,
+        "  {} commits · {} changed files",
+        plan.commits().len(),
+        plan.changed_files().len()
+    )?;
+    writeln!(
+        output,
+        "  affected installations: {}",
+        plan.affected()
+            .incomplete_reason
+            .as_deref()
+            .map_or("complete".to_owned(), |reason| format!(
+                "partial — {reason}"
+            ),)
+    )?;
+    for name in &plan.affected().updated {
+        writeln!(output, "    updated in place · {}", safe(name))?;
+    }
+    for name in &plan.affected().removed {
+        writeln!(output, "    removed · {}", safe(name))?;
+    }
+    for name in &plan.affected().added {
+        writeln!(output, "    added upstream, not installed · {}", safe(name))?;
+    }
+    for (old, new) in &plan.affected().renamed {
+        writeln!(output, "    renamed · {} -> {}", safe(old), safe(new))?;
+    }
+    for commit in plan.commits() {
+        writeln!(output, "    commit · {}", safe(commit))?;
+    }
+    for path in plan.changed_files() {
+        if let Some(old) = path.renamed_from() {
+            writeln!(
+                output,
+                "    renamed · {} -> {}",
+                safe(&old.display()),
+                safe(&path.path().display())
+            )?;
+        } else {
+            writeln!(
+                output,
+                "    {:?} · {}",
+                path.kind(),
+                safe(&path.path().display())
+            )?;
+        }
+    }
+    for finding in plan.findings() {
+        writeln!(
+            output,
+            "  blocked: {} — {}",
+            finding.code(),
+            safe(finding.evidence())
+        )?;
+    }
+    writeln!(output, "  {}", plan.hooks_disclosure())?;
+    Ok(())
 }
 
 /// A source named by the identifier the registry gave it, or by the path its

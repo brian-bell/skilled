@@ -10,19 +10,21 @@ Skilled is an early Rust 2024 / Ratatui terminal application for inspecting
 and managing global coding-agent skills. First-run setup, local Git source
 registration, Sources browsing, a read-only installation inventory, OpenCode
 effective resolution across its documented roots, a read-only Doctor findings
-view, installation, and receipt-backed repair of incorrect or dangling links —
-each previewed, confirmed, rescanned, and verified — are implemented.
+view, installation, receipt-backed repair of incorrect or dangling links, and
+explicit repository update checks with guarded fast-forwards — each previewed,
+confirmed, rescanned, and verified — are implemented.
 
 Filesystem mutation stays narrow. Installation creates one directory symbolic
 link per agent and may create the documented skill root when its own parent
 already exists; every occupied install path is a refusal. Repair replaces one
 observed symbolic link only when its raw target is byte-identical to the newest
 matching ownership receipt and the live registry supplies a safe replacement.
-It never recreates an absent link or root. Updates, uninstall, adoption of
-unproven links, and every network operation remain unimplemented: do not turn
-their placeholders into behavior unless the active Beads issue places that
-work in scope, and do not display a count, finding, status, or key hint the code
-cannot currently produce.
+It never recreates an absent link or root. Updates perform network access only
+after an explicit check and write only through the guarded repository
+fast-forward. Uninstall and adoption of unproven links remain unimplemented: do
+not turn their placeholders into behavior unless the active Beads issue places
+that work in scope, and do not display a count, finding, status, or key hint the
+code cannot currently produce.
 
 [GitHub issue #3](https://github.com/brian-bell/skilled/issues/3) is the
 product and technical source of truth. The tracked `spec/tui-prototype.html`
@@ -34,6 +36,8 @@ changing before overriding a bound, style, or phrase it documents.
 ## Build and Test
 
 Requires stable Rust 1.97 or newer.
+Repository updates require Git 2.33 or newer and, for SSH remotes, OpenSSH 8.4
+or newer.
 
 ```bash
 cargo run
@@ -58,6 +62,10 @@ signal needs both, because colour alone is not an acceptable cue.
   conventions and non-executing detection belong here.
 - `src/source.rs`: local Git source inspection, catalog discovery, and skill
   candidate validation.
+- `src/git.rs`: typed no-shell Git boundary for repository inspection, fetch,
+  and the sole fast-forward write.
+- `src/updates.rs`: repository update probing, classification, planning,
+  guarded apply, and three-answer verification.
 - `src/inventory.rs`: read-only scan of the native agent skill roots; owns the
   finding codes, the state vocabulary, and the count-or-phrase verdict.
 - `src/operations.rs`: sibling install and repair pipelines. Their probes are
@@ -65,9 +73,9 @@ signal needs both, because colour alone is not an acceptable cue.
   observations, their guarded executors re-read immediately before writing,
   and their verifiers check a fresh scan against the confirmed plan. The module
   reuses `inventory::Finding` for the spec 18.2 collision codes.
-- `src/cli.rs`: the hand-parsed `skilled install` and `skilled repair` surfaces
-  over the same planners, guards, rescans, and verification the TUI runs, with
-  distinguishable exit statuses.
+- `src/cli.rs`: the hand-parsed `skilled install`, `skilled repair`, and
+  `skilled update` surfaces over the same planners, guards, rescans, and
+  verification the TUI runs, with distinguishable exit statuses.
 - `src/resolution.rs`: pure per-agent variant selection and OpenCode effective
   resolution; decides which registered variant an agent resolves a name to and
   what OpenCode would load, over data the caller already holds. It states no
@@ -130,7 +138,7 @@ signal needs both, because colour alone is not an acceptable cue.
   blocks whole: one blocked target and nothing is written anywhere. Every
   target's absolute path is stated unabbreviated — the `~` spelling the rest of
   the application uses would soften the thing being agreed to.
-- Skilled writes only inside a root it established. A skill root, or any
+- Installation writes only inside a root it established. A skill root, or any
   directory between it and the home directory, that is a symbolic link is
   refused rather than followed: the path the preview stated has to be the path
   the write lands on. Install retains a fail-if-exists pathname window between
@@ -138,6 +146,15 @@ signal needs both, because colour alone is not an acceptable cue.
   window between its final guard and `rename`: another object arriving there
   could be replaced. That data-loss risk is documented on `apply_repair` and
   tracked separately.
+- Repository updates write through Git only inside the canonical checkout the
+  user registered. They begin only after an explicit check, fast-forward to the
+  exact previewed object, and never reset, rebase, stash, commit, or push.
+- Cached update findings exist only after an explicit check. A changed `HEAD`
+  or changed known dirtiness supersedes the cached verdict; opening Updates is
+  therefore a metadata-only operation and never performs network access.
+- Repository update verification keeps the same three answers as installation
+  verification. The confirmation gate covers the complete plan statement;
+  the untruncated changed-file listing is non-gating evidence below it.
 - Text from the filesystem — names, paths, link targets, operating-system error
   messages — is escaped through `components::terminal_safe` before it reaches a
   terminal, on every surface. The screens and `skilled install` write to the

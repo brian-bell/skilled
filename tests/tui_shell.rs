@@ -718,19 +718,14 @@ fn navigation_separates_active_reachable_and_unavailable_destinations() {
     assert_eq!(reachable.fg, Some(Color::Rgb(0x84, 0x91, 0xa1)));
     assert!(!reachable.add_modifier.contains(Modifier::BOLD));
 
-    // A view without an implementation is visibly unavailable rather than
-    // absent, and offers no shortcut, because 3 is unmapped everywhere.
-    assert!(navigation.contains("Updates (soon)"), "{navigation}");
-    assert!(!navigation.contains("3 Updates"), "{navigation}");
+    assert!(navigation.contains("3 Updates"), "{navigation}");
+    assert!(!navigation.contains("Updates (soon)"), "{navigation}");
     // Doctor is implemented, so it carries its route like any other.
     assert!(navigation.contains(" 4 Doctor"), "{navigation}");
     assert!(!navigation.contains("Doctor (soon)"), "{navigation}");
 
-    // One de-emphasis mechanism, plus the word "(soon)" for anyone who cannot
-    // perceive it.
-    let unavailable = style_at(&screen, "Updates");
-    assert_eq!(unavailable.fg, Some(Color::Rgb(0x53, 0x61, 0x71)));
-    assert!(!unavailable.add_modifier.contains(Modifier::DIM));
+    let updates = style_at(&screen, "3 Updates");
+    assert_eq!(updates.fg, Some(Color::Rgb(0x84, 0x91, 0xa1)));
 }
 
 #[test]
@@ -2003,20 +1998,9 @@ fn navigation_withholds_a_count_it_could_not_observe() {
         // The registry is not the filesystem: it is still fully known.
         assert!(navigation.contains(" 2 Sources ·0 "), "{navigation}");
 
-        // A destination this release cannot open counts nothing, and says so
-        // by rendering nothing rather than by a placeholder that reads as an
-        // empty measurement. The '·' lead-in is reserved for real counts, so
-        // an unavailable tab may not borrow it either.
-        for unavailable in ["Updates (soon)"] {
-            match after(&navigation, unavailable) {
-                None => assert!(navigation.ends_with(unavailable), "{navigation}"),
-                Some(next) => {
-                    assert!(!next.is_ascii_digit(), "{unavailable}: {navigation}");
-                    assert_ne!(next, '—', "{unavailable}: {navigation}");
-                    assert_ne!(next, '·', "{unavailable}: {navigation}");
-                }
-            }
-        }
+        // No complete set of explicit checks exists, so Updates withholds its
+        // count while keeping the route available.
+        assert_eq!(after(&navigation, "Updates"), Some(' '), "{navigation}");
         // Doctor lists findings observed from the same roots, so it withholds
         // its count in exactly the states the Inventory withholds its own.
         // Only its cell's padding may follow its title.
@@ -2304,7 +2288,7 @@ fn navigation_count_digit_cannot_read_as_a_route_key() {
     // on the left and the next tab's amber count on the right, each padded to
     // its own boxed cell.
     assert!(
-        navigation.contains(" 1 Inventory ·1 │ 2 Sources ·3   │ Updates (soon)"),
+        navigation.contains(" 1 Inventory ·1 │ 2 Sources ·3   │ 3 Updates"),
         "{navigation}"
     );
     // The bare-digit form is the collision itself, so its absence is the
@@ -2337,6 +2321,7 @@ fn navigation_count_digit_cannot_read_as_a_route_key() {
             .is_some_and(|rest| {
                 rest.starts_with("Inventory")
                     || rest.starts_with("Sources")
+                    || rest.starts_with("Updates")
                     || rest.starts_with("Doctor")
             });
         // `start` is the byte index of the run's first digit; after the
@@ -2357,19 +2342,10 @@ fn navigation_count_digit_cannot_read_as_a_route_key() {
     assert_eq!(dot_style.fg, Some(AMBER));
     assert!(!dot_style.add_modifier.contains(Modifier::BOLD));
 
-    // No count may leak onto an unavailable tab: the gap between
-    // 'Updates (soon)' and the entry after it must not start with '·'.
-    if let Some(after_updates) = navigation
-        .find("Updates (soon)")
-        .map(|position| position + "Updates (soon)".len())
-    {
-        let tail = &navigation[after_updates..];
-        let before_next = tail.find("4 Doctor").unwrap_or(tail.len());
-        assert!(
-            !tail[..before_next].contains('·'),
-            "'·' leaked onto an unavailable tab: {navigation}"
-        );
-    }
+    // An unchecked registry has no honest Updates total to state.
+    let tail = navigation.split_once("3 Updates").expect("Updates route").1;
+    let before_next = tail.find("4 Doctor").unwrap_or(tail.len());
+    assert!(!tail[..before_next].contains('·'), "{navigation}");
 
     // The lead-in survives the underline on an active tab.
     app.update(Action::OpenSources);
@@ -4077,6 +4053,28 @@ fn sources_keep_offscreen_repository_selection_visible() {
     let rendered = text(&buffer(&app, 80, 24));
 
     assert_eq!(app.focused_source(), 23);
+    assert!(rendered.contains("▌ source-23"), "{rendered}");
+    assert!(!rendered.contains("source-00"), "{rendered}");
+}
+
+#[test]
+fn updates_keep_offscreen_repository_selection_visible() {
+    let harness = Harness::new();
+    let mut app = harness.completed_setup();
+    for index in 0..24 {
+        let repository = harness.directory.path().join(format!("source-{index:02}"));
+        create_source_fixture(&repository);
+        let preview = app.preview_source(&repository).expect("preview source");
+        app.confirm_source(preview).expect("register source");
+    }
+    app.update(Action::OpenUpdates);
+    for _ in 0..23 {
+        app.update(Action::MoveUpdatesSelection(1));
+    }
+
+    let rendered = text(&buffer(&app, 80, 24));
+
+    assert_eq!(app.focused_update(), 23);
     assert!(rendered.contains("▌ source-23"), "{rendered}");
     assert!(!rendered.contains("source-00"), "{rendered}");
 }

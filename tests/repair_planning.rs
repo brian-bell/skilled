@@ -177,7 +177,7 @@ fn the_tui_refreshes_registered_sources_before_planning_a_repair() {
         .doctor_findings()
         .iter()
         .position(|entry| {
-            entry.agent() == AgentKind::Codex
+            entry.agent() == Some(AgentKind::Codex)
                 && entry.finding().code() == "install.wrong_managed_target"
         })
         .expect("Codex repairable finding");
@@ -711,7 +711,7 @@ fn a_root_that_becomes_unreadable_after_preview_is_refused_without_modifying_the
         .doctor_findings()
         .iter()
         .position(|entry| {
-            entry.agent() == AgentKind::Codex
+            entry.agent() == Some(AgentKind::Codex)
                 && entry.finding().code() == "install.wrong_managed_target"
         })
         .expect("Codex repairable finding");
@@ -764,7 +764,7 @@ fn a_link_that_becomes_unresolvable_after_preview_is_refused_without_replacement
         .doctor_findings()
         .iter()
         .position(|entry| {
-            entry.agent() == AgentKind::Codex
+            entry.agent() == Some(AgentKind::Codex)
                 && entry.finding().code() == "install.wrong_managed_target"
         })
         .expect("Codex repairable finding");

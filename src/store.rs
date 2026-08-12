@@ -4,7 +4,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
 use crate::{
     AgentKind, Error, Result,
@@ -13,10 +13,36 @@ use crate::{
         CatalogClassification, CatalogProposal, Compatibility, InspectedSource, RegisteredSource,
         SourcePreview, contains_revision, inspect_local_source,
     },
+    updates::{CachedUpdateCheck, RepositoryUpdateVerdict},
     validation::InspectionBudget,
 };
 
-const SCHEMA_VERSION: i64 = 6;
+const SCHEMA_VERSION: i64 = 9;
+const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+const UPDATE_CHECK_UPSERT: &str = "INSERT INTO source_update_checks
+        (source_id, checked_at, local_revision, local_reference, upstream_ref,
+         upstream_revision, merge_base, ahead, behind, dirty, dirty_known, verdict, detail)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+     ON CONFLICT(source_id) DO UPDATE SET
+        checked_at=excluded.checked_at, local_revision=excluded.local_revision,
+        local_reference=excluded.local_reference, upstream_ref=excluded.upstream_ref,
+        upstream_revision=excluded.upstream_revision,
+        merge_base=excluded.merge_base, ahead=excluded.ahead, behind=excluded.behind,
+        dirty=excluded.dirty, dirty_known=excluded.dirty_known,
+        verdict=excluded.verdict, detail=excluded.detail
+     WHERE excluded.checked_at >= source_update_checks.checked_at";
+const UPDATE_CHECK_UPSERT_IF_NEWER: &str = "INSERT INTO source_update_checks
+        (source_id, checked_at, local_revision, local_reference, upstream_ref,
+         upstream_revision, merge_base, ahead, behind, dirty, dirty_known, verdict, detail)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+     ON CONFLICT(source_id) DO UPDATE SET
+        checked_at=excluded.checked_at, local_revision=excluded.local_revision,
+        local_reference=excluded.local_reference, upstream_ref=excluded.upstream_ref,
+        upstream_revision=excluded.upstream_revision,
+        merge_base=excluded.merge_base, ahead=excluded.ahead, behind=excluded.behind,
+        dirty=excluded.dirty, dirty_known=excluded.dirty_known,
+        verdict=excluded.verdict, detail=excluded.detail
+     WHERE excluded.checked_at > source_update_checks.checked_at";
 
 pub(crate) struct Store {
     connection: Connection,
@@ -26,7 +52,9 @@ impl Store {
     pub(crate) fn open(data_dir: &Path) -> Result<Self> {
         fs::create_dir_all(data_dir)?;
         let mut connection = Connection::open(data_dir.join("skilled.sqlite3"))?;
+        connection.busy_timeout(BUSY_TIMEOUT)?;
         migrate(&mut connection)?;
+        let _: String = connection.query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))?;
         connection.execute_batch("PRAGMA foreign_keys = ON;")?;
         Ok(Self { connection })
     }
@@ -72,7 +100,9 @@ impl Store {
     }
 
     pub(crate) fn complete_setup(&mut self, selections: [bool; 3]) -> Result<()> {
-        let transaction = self.connection.transaction()?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
         for (agent, selected) in AGENT_IDENTIFIERS.into_iter().zip(selections) {
             transaction.execute(
                 "INSERT INTO configured_agents (agent, selected) VALUES (?1, ?2)
@@ -212,11 +242,18 @@ impl Store {
             .and_then(|name| name.to_str())
             .ok_or_else(|| Error::InvalidSourcePath(source.git_top_level().to_path_buf()))?;
         let scanned_at = current_timestamp();
-        let transaction = self.connection.transaction()?;
+        let repository_identity = source
+            .repository_identity()
+            .map(|identity| identity.storage_key())
+            .transpose()?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
         transaction.execute(
             "INSERT INTO source_repositories
-                (label, canonical_path, remote_url, branch, head_revision, dirty, dirty_known, last_scan_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                (label, canonical_path, remote_url, branch, head_revision, dirty, dirty_known,
+                 last_scan_at, repository_identity)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
              ON CONFLICT(canonical_path) DO UPDATE SET
                 label = excluded.label,
                 remote_url = excluded.remote_url,
@@ -224,7 +261,8 @@ impl Store {
                 head_revision = excluded.head_revision,
                 dirty = excluded.dirty,
                 dirty_known = excluded.dirty_known,
-                last_scan_at = excluded.last_scan_at",
+                last_scan_at = excluded.last_scan_at,
+                repository_identity = excluded.repository_identity",
             params![
                 label,
                 canonical_path,
@@ -234,6 +272,7 @@ impl Store {
                 source.dirty().unwrap_or(false),
                 source.dirty().is_some(),
                 scanned_at,
+                repository_identity,
             ],
         )?;
         let source_id: i64 = transaction.query_row(
@@ -270,9 +309,96 @@ impl Store {
         Ok(())
     }
 
+    pub(crate) fn update_checks(&self) -> Result<Vec<CachedUpdateCheck>> {
+        let mut statement = self.connection.prepare(
+            "SELECT source_id, checked_at, local_revision, local_reference, upstream_ref,
+                    upstream_revision, merge_base, ahead, behind, dirty, dirty_known, verdict, detail
+             FROM source_update_checks ORDER BY source_id",
+        )?;
+        let rows = statement.query_map([], |row| {
+            let verdict: String = row.get(11)?;
+            let verdict = RepositoryUpdateVerdict::parse(&verdict).ok_or_else(|| {
+                rusqlite::Error::InvalidColumnType(
+                    11,
+                    "verdict".into(),
+                    rusqlite::types::Type::Text,
+                )
+            })?;
+            let ahead: i64 = row.get(7)?;
+            let behind: i64 = row.get(8)?;
+            Ok(CachedUpdateCheck {
+                source_id: row.get(0)?,
+                checked_at: row.get(1)?,
+                local_revision: row.get(2)?,
+                local_reference: row.get(3)?,
+                upstream_ref: row.get(4)?,
+                upstream_revision: row.get(5)?,
+                merge_base: row.get(6)?,
+                ahead: ahead as usize,
+                behind: behind as usize,
+                dirty: row.get(9)?,
+                dirty_known: row.get(10)?,
+                verdict,
+                detail: row.get(12)?,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    pub(crate) fn record_update_check(&self, check: &CachedUpdateCheck) -> Result<()> {
+        self.connection.execute(
+            UPDATE_CHECK_UPSERT,
+            params![
+                check.source_id,
+                check.checked_at,
+                check.local_revision,
+                check.local_reference,
+                check.upstream_ref,
+                check.upstream_revision,
+                check.merge_base,
+                check.ahead as i64,
+                check.behind as i64,
+                check.dirty,
+                check.dirty_known,
+                check.verdict.as_str(),
+                check.detail,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub(crate) fn record_update_checks(&mut self, checks: &[CachedUpdateCheck]) -> Result<()> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        for check in checks {
+            transaction.execute(
+                UPDATE_CHECK_UPSERT_IF_NEWER,
+                params![
+                    check.source_id,
+                    check.checked_at,
+                    check.local_revision,
+                    check.local_reference,
+                    check.upstream_ref,
+                    check.upstream_revision,
+                    check.merge_base,
+                    check.ahead as i64,
+                    check.behind as i64,
+                    check.dirty,
+                    check.dirty_known,
+                    check.verdict.as_str(),
+                    check.detail,
+                ],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
     pub(crate) fn registered_sources(&self) -> Result<Vec<RegisteredSource>> {
         let mut statement = self.connection.prepare(
-            "SELECT id, label, canonical_path, remote_url, branch, head_revision, dirty, dirty_known, last_scan_at
+            "SELECT id, label, canonical_path, remote_url, branch, head_revision, dirty, dirty_known,
+                    last_scan_at, repository_identity
              FROM source_repositories ORDER BY label, canonical_path",
         )?;
         let rows = statement.query_map([], |row| {
@@ -286,13 +412,25 @@ impl Store {
                 row.get::<_, bool>(6)?,
                 row.get::<_, bool>(7)?,
                 row.get::<_, i64>(8)?,
+                row.get::<_, Option<String>>(9)?,
             ))
         })?;
         let stored = rows.collect::<std::result::Result<Vec<_>, _>>()?;
         drop(statement);
 
         let mut sources = Vec::with_capacity(stored.len());
-        for (id, label, path, remote_url, branch, head, dirty, dirty_known, last_scan_at) in stored
+        for (
+            id,
+            label,
+            path,
+            remote_url,
+            branch,
+            head,
+            dirty,
+            dirty_known,
+            last_scan_at,
+            stored_repository_identity,
+        ) in stored
         {
             let git_top_level = PathBuf::from(path);
             let stored_inspected = InspectedSource::from_stored(
@@ -312,6 +450,21 @@ impl Store {
                     )),
                     last_scan_at,
                 ),
+                Ok(current)
+                    if stored_repository_identity.as_deref()
+                        != current
+                            .repository_identity()
+                            .map(|identity| identity.storage_key())
+                            .transpose()?
+                            .as_deref()
+                        && stored_repository_identity.is_some() =>
+                {
+                    (
+                        stored_inspected.clone(),
+                        Some("source path now contains a different Git checkout".to_owned()),
+                        last_scan_at,
+                    )
+                }
                 Ok(current) => match contains_revision(&git_top_level, stored_inspected.head()) {
                     Ok(true) => {
                         let refreshed_at = current_timestamp();
@@ -322,8 +475,9 @@ impl Store {
                                 head_revision = ?3,
                                 dirty = ?4,
                                 dirty_known = ?5,
-                                last_scan_at = ?6
-                             WHERE id = ?7",
+                                last_scan_at = ?6,
+                                repository_identity = COALESCE(repository_identity, ?7)
+                             WHERE id = ?8",
                             params![
                                 current.remote_url(),
                                 current.branch(),
@@ -331,6 +485,10 @@ impl Store {
                                 current.dirty().unwrap_or(false),
                                 current.dirty().is_some(),
                                 refreshed_at,
+                                current
+                                    .repository_identity()
+                                    .map(|identity| identity.storage_key())
+                                    .transpose()?,
                                 id,
                             ],
                         )?;
@@ -470,10 +628,63 @@ mod tests {
             Err(Error::UnrepresentablePath(path)) if path == link_path
         ));
     }
+
+    #[test]
+    fn a_stale_batch_cannot_replace_a_newer_update_check() {
+        let temporary = tempfile::tempdir().expect("temporary data directory");
+        let mut store = Store::open(temporary.path()).expect("open store");
+        store
+            .connection
+            .execute(
+                "INSERT INTO source_repositories
+                    (id, label, canonical_path, head_revision, dirty, dirty_known, last_scan_at)
+                 VALUES (1, 'source', '/source', 'head', 0, 1, 0)",
+                [],
+            )
+            .expect("source fixture");
+        let check = |checked_at, detail: &str| CachedUpdateCheck {
+            source_id: 1,
+            checked_at,
+            local_revision: "head".into(),
+            local_reference: Some("refs/heads/main".into()),
+            upstream_ref: None,
+            upstream_revision: None,
+            merge_base: None,
+            ahead: 0,
+            behind: 0,
+            dirty: false,
+            dirty_known: true,
+            verdict: RepositoryUpdateVerdict::Blocked,
+            detail: detail.into(),
+        };
+        store
+            .record_update_check(&check(20, "newer"))
+            .expect("newer check");
+        store
+            .record_update_checks(&[check(10, "older"), check(20, "same generation")])
+            .expect("stale batch");
+
+        let checks = store.update_checks().expect("stored checks");
+        assert_eq!(checks[0].checked_at, 20);
+        assert_eq!(checks[0].detail, "newer");
+        store
+            .record_update_check(&check(10, "older single"))
+            .expect("stale single check");
+        assert_eq!(
+            store.update_checks().expect("checks after stale single")[0].detail,
+            "newer"
+        );
+    }
 }
 
 fn migrate(connection: &mut Connection) -> Result<()> {
-    let current_version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    // Version discovery and every migration share one write transaction. A
+    // second process therefore reads the version only after any first opener
+    // has finished upgrading, rather than acting on a value observed before
+    // it waited for the migration lock.
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let current_version: i64 =
+        transaction.query_row("PRAGMA user_version", [], |row| row.get(0))?;
     if current_version > SCHEMA_VERSION {
         return Err(crate::Error::UnsupportedSchema {
             found: current_version,
@@ -482,7 +693,6 @@ fn migrate(connection: &mut Connection) -> Result<()> {
     }
 
     if current_version < 1 {
-        let transaction = connection.transaction()?;
         transaction.execute_batch(
             "CREATE TABLE IF NOT EXISTS settings (
                 key TEXT PRIMARY KEY NOT NULL,
@@ -490,10 +700,8 @@ fn migrate(connection: &mut Connection) -> Result<()> {
              );
              PRAGMA user_version = 1;",
         )?;
-        transaction.commit()?;
     }
     if current_version < 2 {
-        let transaction = connection.transaction()?;
         transaction.execute_batch(
             "CREATE TABLE configured_agents (
                 agent TEXT PRIMARY KEY NOT NULL,
@@ -501,10 +709,8 @@ fn migrate(connection: &mut Connection) -> Result<()> {
              );
              PRAGMA user_version = 2;",
         )?;
-        transaction.commit()?;
     }
     if current_version < 3 {
-        let transaction = connection.transaction()?;
         transaction.execute_batch(
             "CREATE TABLE source_repositories (
                 id INTEGER PRIMARY KEY,
@@ -528,19 +734,15 @@ fn migrate(connection: &mut Connection) -> Result<()> {
              );
              PRAGMA user_version = 3;",
         )?;
-        transaction.commit()?;
     }
     if current_version < 4 {
-        let transaction = connection.transaction()?;
         transaction.execute_batch(
             "ALTER TABLE source_repositories ADD COLUMN
                 dirty_known INTEGER NOT NULL DEFAULT 1 CHECK (dirty_known IN (0, 1));
              PRAGMA user_version = 4;",
         )?;
-        transaction.commit()?;
     }
     if current_version < 5 {
-        let transaction = connection.transaction()?;
         // `source_id` deliberately carries no foreign key: a receipt is spec 7
         // ownership evidence for a link Skilled put on disk, and forgetting the
         // source it came from must not erase the record of what is out there.
@@ -567,10 +769,8 @@ fn migrate(connection: &mut Connection) -> Result<()> {
              );
              PRAGMA user_version = 5;",
         )?;
-        transaction.commit()?;
     }
     if current_version < 6 {
-        let transaction = connection.transaction()?;
         // SQLite cannot alter either a CHECK or UNIQUE constraint in place.
         // Rebuilding inside this transaction preserves every existing receipt,
         // including its id: ordering by `(created_at, id)` is the public
@@ -599,7 +799,38 @@ fn migrate(connection: &mut Connection) -> Result<()> {
              ALTER TABLE operation_receipts_v6 RENAME TO operation_receipts;
              PRAGMA user_version = 6;",
         )?;
-        transaction.commit()?;
     }
+    if current_version < 7 {
+        transaction.execute_batch(
+            "CREATE TABLE source_update_checks (
+                source_id INTEGER PRIMARY KEY REFERENCES source_repositories(id) ON DELETE CASCADE,
+                checked_at INTEGER NOT NULL,
+                local_revision TEXT NOT NULL,
+                upstream_ref TEXT,
+                upstream_revision TEXT,
+                merge_base TEXT,
+                ahead INTEGER NOT NULL CHECK (ahead >= 0),
+                behind INTEGER NOT NULL CHECK (behind >= 0),
+                dirty INTEGER NOT NULL CHECK (dirty IN (0, 1)),
+                dirty_known INTEGER NOT NULL CHECK (dirty_known IN (0, 1)),
+                verdict TEXT NOT NULL CHECK (verdict IN ('up_to_date', 'ahead', 'available', 'blocked')),
+                detail TEXT NOT NULL
+             );
+             PRAGMA user_version = 7;",
+        )?;
+    }
+    if current_version < 8 {
+        transaction.execute_batch(
+            "ALTER TABLE source_update_checks ADD COLUMN local_reference TEXT;
+             PRAGMA user_version = 8;",
+        )?;
+    }
+    if current_version < 9 {
+        transaction.execute_batch(
+            "ALTER TABLE source_repositories ADD COLUMN repository_identity TEXT;
+             PRAGMA user_version = 9;",
+        )?;
+    }
+    transaction.commit()?;
     Ok(())
 }
