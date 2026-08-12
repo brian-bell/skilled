@@ -146,6 +146,13 @@ pub fn locate_variant(
 /// link, which is the difference between "Skilled already installed this" and
 /// "something else is standing here".
 #[derive(Clone, Debug, Eq, PartialEq)]
+enum SymlinkTargetProbe {
+    Missing,
+    Resolved,
+    Unreadable(String),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 enum EntryProbe {
     /// Nothing occupies the slot.
     Absent,
@@ -153,7 +160,7 @@ enum EntryProbe {
     Symlink {
         target: PathBuf,
         canonical: Option<PathBuf>,
-        resolves_to_directory: bool,
+        target_state: SymlinkTargetProbe,
     },
     /// A physical directory, and where it resolves to. The resolved path
     /// matters even here: another root may reach the very same directory
@@ -444,10 +451,15 @@ fn probe_entry(link_path: &Path) -> EntryProbe {
             Ok(target) => target,
             Err(error) => return EntryProbe::Unreadable(error.to_string()),
         };
+        let target_state = match fs::metadata(link_path) {
+            Ok(_) => SymlinkTargetProbe::Resolved,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => SymlinkTargetProbe::Missing,
+            Err(error) => SymlinkTargetProbe::Unreadable(error.to_string()),
+        };
         return EntryProbe::Symlink {
             target,
             canonical: link_path.canonicalize().ok(),
-            resolves_to_directory: fs::metadata(link_path).is_ok_and(|metadata| metadata.is_dir()),
+            target_state,
         };
     }
     if file_type.is_dir() {
@@ -932,7 +944,7 @@ fn uninstall_disposition(slot: &TargetProbe, receipts: &[&Receipt]) -> Uninstall
         },
         EntryProbe::Symlink {
             target,
-            resolves_to_directory,
+            target_state,
             ..
         } => {
             let matching_receipts: Vec<Receipt> = receipts
@@ -941,9 +953,19 @@ fn uninstall_disposition(slot: &TargetProbe, receipts: &[&Receipt]) -> Uninstall
                 .map(|receipt| (*receipt).clone())
                 .collect();
             if !matching_receipts.is_empty() {
+                let resolves = match target_state {
+                    SymlinkTargetProbe::Resolved => true,
+                    SymlinkTargetProbe::Missing => false,
+                    SymlinkTargetProbe::Unreadable(reason) => {
+                        return uninstall_blocked(
+                            "uninstall.unreadable_target",
+                            format!("the recorded link target could not be read: {reason}"),
+                        );
+                    }
+                };
                 UninstallDisposition::RemoveLink {
                     link_target: target.clone(),
-                    resolves: *resolves_to_directory,
+                    resolves,
                     receipts: matching_receipts,
                 }
             } else {
@@ -2826,6 +2848,40 @@ pub(crate) fn apply_forget(plan: &ForgetPlan, store: &mut Store) -> ForgetApply 
             "the source's receipt set changed after the preview was shown".to_owned(),
         );
     }
+    match mutation.source_is_registered(plan.source.id()) {
+        Ok(false) if current.is_empty() => {
+            return match mutation.commit() {
+                Ok(()) => ForgetApply::NothingToDo,
+                Err(error) => {
+                    ForgetApply::Failed(format!("the metadata transaction failed: {error}"))
+                }
+            };
+        }
+        Ok(false) => {
+            return ForgetApply::Failed(
+                "the source disappeared while ownership receipts still remain".to_owned(),
+            );
+        }
+        Ok(true) => {}
+        Err(error) => {
+            return ForgetApply::Failed(format!(
+                "the source metadata could not be re-read: {error}"
+            ));
+        }
+    }
+    match mutation.source_matches(&plan.source) {
+        Ok(true) => {}
+        Ok(false) => {
+            return ForgetApply::Failed(
+                "the source or catalog metadata changed after the preview was shown".to_owned(),
+            );
+        }
+        Err(error) => {
+            return ForgetApply::Failed(format!(
+                "the source and catalog metadata could not be re-read: {error}"
+            ));
+        }
+    }
     let reprobe = probe_forget(&plan.source, &current);
     if reprobe
         .observations
@@ -3283,6 +3339,40 @@ mod tests {
             UninstallStatus::VerificationFailed
         );
         assert_eq!(store.receipts().expect("retained receipt"), vec![receipt]);
+    }
+
+    #[test]
+    fn an_unreadable_receipted_target_blocks_uninstall_planning() {
+        let link = PathBuf::from("/home/example/.claude/skills/portable");
+        let target = PathBuf::from("/source/skills/portable");
+        let slot = TargetProbe {
+            agent: AgentKind::ClaudeCode,
+            link_path: link.clone(),
+            root: RootProbe::Present,
+            entry: EntryProbe::Symlink {
+                target: target.clone(),
+                canonical: None,
+                target_state: SymlinkTargetProbe::Unreadable("permission denied".to_owned()),
+            },
+            content: SlotContent::Unknown,
+        };
+        let receipt = Receipt::new(
+            AgentKind::ClaudeCode,
+            "portable".to_owned(),
+            link,
+            target,
+            None,
+            None,
+            None,
+        );
+
+        let disposition = uninstall_disposition(&slot, &[&receipt]);
+
+        let UninstallDisposition::Blocked { finding } = disposition else {
+            panic!("an unreadable target must block uninstall")
+        };
+        assert_eq!(finding.code(), "uninstall.unreadable_target");
+        assert!(finding.evidence().contains("permission denied"));
     }
 
     #[test]

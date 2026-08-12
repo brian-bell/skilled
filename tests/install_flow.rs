@@ -20,7 +20,7 @@ use skilled::{
     Action, AgentKind, AppEnvironment, SkilledApp,
     inventory::{Finding, FindingSeverity, InstallationHealth},
     operations::{
-        ForgetPrompt, ForgetStatus, ForgetVerification, InstallPrompt, InstallStatus,
+        ForgetApply, ForgetPrompt, ForgetStatus, ForgetVerification, InstallPrompt, InstallStatus,
         OpenCodeOutlook, OperationPrompt, Postcondition, StepOutcome, TargetDisposition,
         UninstallDisposition, UninstallPrompt, UninstallStatus, VerifyFailure, VerifyWithheld,
         verify_install,
@@ -309,6 +309,43 @@ fn a_stale_forget_preview_cannot_delete_a_later_sources_reused_row() {
         reopened.sources()[0].git_top_level(),
         replacement.canonicalize().expect("replacement path")
     );
+}
+
+#[test]
+fn a_stale_forget_preview_cannot_delete_changed_source_catalog_metadata() {
+    let fixture = Fixture::new();
+    let repository = fixture.source("library", &["portable"]);
+    let mut stale = fixture.registered(&repository);
+    dispatch(&mut stale, Action::OpenSources);
+    dispatch(&mut stale, Action::BeginForgetSource);
+
+    write_skill(&repository.join(".claude/skills/special"), "special");
+    let mut current = fixture.app();
+    let preview = current
+        .preview_source(&repository)
+        .expect("preview changed registration");
+    current
+        .confirm_source(preview)
+        .expect("replace the stored catalog metadata");
+    assert_eq!(current.sources()[0].catalogs().len(), 2);
+
+    dispatch(&mut stale, Action::ConfirmOperation);
+
+    let Some(OperationPrompt::Forget(ForgetPrompt::Report(outcome))) = stale.pending_operation()
+    else {
+        panic!("forget report expected");
+    };
+    assert_eq!(outcome.status(), ForgetStatus::NotForgotten);
+    let ForgetApply::Failed(reason) = outcome.applied() else {
+        panic!("the stale forget must fail")
+    };
+    assert!(
+        reason.contains("source or catalog metadata changed"),
+        "{reason}"
+    );
+    let reopened = fixture.app();
+    assert_eq!(reopened.sources().len(), 1);
+    assert_eq!(reopened.sources()[0].catalogs().len(), 2);
 }
 
 #[test]

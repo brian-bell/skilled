@@ -399,6 +399,81 @@ impl Mutation<'_> {
             .map_err(Into::into)
     }
 
+    /// Recheck the complete stored registration represented by a Forget plan.
+    /// Candidate scans are not metadata and are intentionally excluded; every
+    /// source-row and catalog-root field the store persists is compared while
+    /// the mutation guard prevents a concurrent registration update.
+    pub(crate) fn source_matches(&self, expected: &RegisteredSource) -> Result<bool> {
+        let current = self
+            .transaction
+            .query_row(
+                "SELECT label, canonical_path, remote_url, branch, head_revision,
+                        dirty, dirty_known, last_scan_at
+                 FROM source_repositories WHERE id = ?1",
+                params![expected.id()],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, bool>(5)?,
+                        row.get::<_, bool>(6)?,
+                        row.get::<_, i64>(7)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let expected_dirty = expected.dirty();
+        let expected_source = (
+            expected.label().to_owned(),
+            path_text(expected.git_top_level())?,
+            expected.remote_url().map(str::to_owned),
+            expected.branch().map(str::to_owned),
+            expected.head().to_owned(),
+            expected_dirty.unwrap_or(false),
+            expected_dirty.is_some(),
+            expected.last_scan_at(),
+        );
+        if current.as_ref() != Some(&expected_source) {
+            return Ok(false);
+        }
+
+        let mut statement = self.transaction.prepare(
+            "SELECT relative_path, classification, claude_code, codex, opencode
+             FROM catalog_roots WHERE source_id = ?1 ORDER BY relative_path",
+        )?;
+        let rows = statement.query_map(params![expected.id()], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, bool>(2)?,
+                row.get::<_, bool>(3)?,
+                row.get::<_, bool>(4)?,
+            ))
+        })?;
+        let current_catalogs = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+        let mut expected_catalogs = expected
+            .catalogs()
+            .iter()
+            .map(|catalog| {
+                Ok((
+                    path_text(catalog.relative_path())?,
+                    match catalog.classification() {
+                        CatalogClassification::Common => "common".to_owned(),
+                        CatalogClassification::AgentSpecific => "agent-specific".to_owned(),
+                    },
+                    catalog.compatibility().claude_code(),
+                    catalog.compatibility().codex(),
+                    catalog.compatibility().opencode(),
+                ))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        expected_catalogs.sort_by(|left, right| left.0.cmp(&right.0));
+        Ok(current_catalogs == expected_catalogs)
+    }
+
     /// Delete exactly the ownership facts whose link was positively verified
     /// gone while this guard prevents a concurrent receipt writer from
     /// committing a replacement fact before the deletion.
