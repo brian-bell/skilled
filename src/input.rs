@@ -64,6 +64,20 @@ pub fn action_for_app_key(app: &SkilledApp, key: KeyEvent) -> Option<Action> {
             _ => action,
         };
     }
+    if app.pending_repair().is_some() {
+        let action = match key.code {
+            KeyCode::Enter => Some(Action::ConfirmRepair),
+            KeyCode::Esc => Some(Action::DismissRepair),
+            KeyCode::Up | KeyCode::Char('k') => Some(Action::ScrollDetail(-1)),
+            KeyCode::Down | KeyCode::Char('j') => Some(Action::ScrollDetail(1)),
+            _ => None,
+        };
+        return match (key.kind, action) {
+            (KeyEventKind::Repeat, Some(Action::ScrollDetail(_))) => action,
+            (KeyEventKind::Repeat, _) => None,
+            _ => action,
+        };
+    }
     if app.pending_source().is_some() {
         let action = match key.code {
             KeyCode::Enter => Some(Action::ConfirmPendingSource),
@@ -91,6 +105,12 @@ pub fn action_for_app_key(app: &SkilledApp, key: KeyEvent) -> Option<Action> {
         && key.code == KeyCode::Char('i')
     {
         return Some(Action::BeginInstall);
+    }
+    if app.can_repair_selection()
+        && key.kind == KeyEventKind::Press
+        && key.code == KeyCode::Char('r')
+    {
+        return Some(Action::BeginRepair);
     }
     // The keys that move a workspace's selection move its detail region's
     // window once that region has focus. The translation happens here rather than in

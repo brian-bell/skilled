@@ -3,10 +3,11 @@ use std::path::{Path, PathBuf};
 use crate::{
     AgentDetection, AgentKind, AppEnvironment, Result, SessionIdentity,
     agents::{detect_agents, detection_at},
-    inventory::{DoctorEntry, InventoryRow, InventorySnapshot, scan_installations},
+    inventory::{DoctorEntry, InventoryRow, InventorySnapshot, doctor_order, scan_installations},
     operations::{
-        InstallOutcome, InstallPlan, InstallPrompt, Receipt, apply_install, plan_install,
-        probe_install, verify_install,
+        InstallOutcome, InstallPlan, InstallPrompt, Receipt, RepairOfferStatus, RepairOutcome,
+        RepairOverlay, RepairPlan, RepairPrompt, apply_install, apply_repair, plan_install,
+        plan_repair, probe_install, probe_repair, verify_install, verify_repair,
     },
     resolution::VariantRef,
     source::{
@@ -163,6 +164,10 @@ pub enum Action {
     BeginInstall,
     ConfirmInstall,
     DismissInstall,
+    /// Plan repairing the selected Doctor observation. Planning is read-only.
+    BeginRepair,
+    ConfirmRepair,
+    DismissRepair,
     RerunSetup,
     Quit,
 }
@@ -198,6 +203,10 @@ pub enum Effect {
     PlanInstall,
     /// Create the links the shown preview calls work, then rescan and verify.
     ApplyInstall,
+    /// Read the machine and build a repair preview for the selected finding.
+    PlanRepair,
+    /// Replace the link in the shown repair preview, then rescan and verify.
+    ApplyRepair,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -381,6 +390,8 @@ pub struct SkilledApp {
     focused_source: usize,
     focused_variant: usize,
     inventory: InventorySnapshot,
+    /// Receipt-aware offers and findings recomputed with every inventory scan.
+    repair_overlay: RepairOverlay,
     /// Indices into `inventory.rows()` that the filter admits.
     ///
     /// Recomputed whenever the snapshot or the query changes rather than on
@@ -416,6 +427,8 @@ pub struct SkilledApp {
     /// catalog confirmation do: a preview is a question, and a stray navigation
     /// key must not answer it.
     pending_install: Option<InstallPrompt>,
+    /// The repair dialog, mutually exclusive with the install dialog.
+    pending_repair: Option<RepairPrompt>,
     help_context: Option<View>,
 }
 
@@ -444,6 +457,10 @@ impl SkilledApp {
         } else {
             InventorySnapshot::not_scanned(&agents)
         };
+        let repair_overlay = match store.receipts() {
+            Ok(receipts) => RepairOverlay::build(&inventory, &receipts, &sources, &agents),
+            Err(error) => RepairOverlay::receipts_unread(error.to_string()),
+        };
         let mut app = Self {
             view,
             store,
@@ -460,6 +477,7 @@ impl SkilledApp {
             focused_source: 0,
             focused_variant: 0,
             inventory,
+            repair_overlay,
             filtered_installations: Vec::new(),
             inventory_pane: InventoryPane::Skills,
             focused_installation: 0,
@@ -471,6 +489,7 @@ impl SkilledApp {
             doctor_pane: DoctorPane::Findings,
             focused_finding: 0,
             pending_install: None,
+            pending_repair: None,
             help_context: None,
         };
         app.refilter_installations();
@@ -555,6 +574,26 @@ impl SkilledApp {
         self.pending_install.as_ref()
     }
 
+    pub fn pending_repair(&self) -> Option<&RepairPrompt> {
+        self.pending_repair.as_ref()
+    }
+
+    pub fn can_repair_selection(&self) -> bool {
+        self.view == View::Doctor
+            && self
+                .selected_finding()
+                .and_then(|entry| entry.observation())
+                .is_some_and(|observation| self.repair_overlay.is_offered(observation.path()))
+    }
+
+    pub fn repair_offer(&self, path: &Path) -> RepairOfferStatus {
+        self.repair_overlay.offer(path)
+    }
+
+    pub fn repair_overlay_finding(&self, path: &Path) -> Option<&crate::inventory::Finding> {
+        self.repair_overlay.finding_at(path)
+    }
+
     /// Whether the focused row is one the install flow would act on.
     ///
     /// The variants pane and the detail region beside it both stand on a row;
@@ -613,11 +652,28 @@ impl SkilledApp {
 
     /// Every finding the last scan holds, in the order Doctor lists them.
     ///
-    /// Materialised on demand rather than cached: the snapshot is the only
-    /// state behind it, so a list held beside the snapshot could disagree with
-    /// it after a rescan.
+    /// Materialised on demand from the snapshot and its receipt-aware overlay.
+    /// The overlay is recomputed wherever the snapshot is replaced, so the two
+    /// accounts cannot drift across a rescan.
     pub fn doctor_findings(&self) -> Vec<DoctorEntry<'_>> {
-        self.inventory.doctor_findings().collect()
+        let mut entries: Vec<_> = self.inventory.doctor_findings().collect();
+        entries.extend(self.repair_overlay.findings().iter().filter_map(|overlay| {
+            let (skill_name, observation) = self.inventory.observation_at(overlay.path())?;
+            Some(DoctorEntry::from_observation(
+                skill_name,
+                overlay.finding(),
+                observation,
+            ))
+        }));
+        entries.sort_by_key(|entry| {
+            (
+                doctor_order(entry.finding().code()),
+                std::cmp::Reverse(entry.finding().severity()),
+                entry.skill_name(),
+                entry.agent().index(),
+            )
+        });
+        entries
     }
 
     pub fn selected_finding(&self) -> Option<DoctorEntry<'_>> {
@@ -629,7 +685,18 @@ impl SkilledApp {
     /// The key-hint bar and the navigation row ask this on every frame of every
     /// view, so neither may pay for the sort that presenting them costs.
     pub fn finding_count(&self) -> usize {
-        self.inventory.finding_count()
+        self.inventory.finding_count() + self.repair_overlay.finding_count()
+    }
+
+    pub fn stated_finding_count(&self) -> Option<usize> {
+        (self.repair_overlay.receipts_readable())
+            .then(|| self.inventory.stated_finding_count())
+            .flatten()
+            .map(|_| self.finding_count())
+    }
+
+    pub fn repair_receipts_readable(&self) -> bool {
+        self.repair_overlay.receipts_readable()
     }
 
     pub fn inventory_pane(&self) -> InventoryPane {
@@ -751,6 +818,23 @@ impl SkilledApp {
                 }
                 // A dialog taller than the terminal is still one the reader has
                 // to be able to read all of before agreeing to it.
+                Action::ScrollDetail(delta) => {
+                    self.scroll_detail(delta);
+                    UpdateResult::continuing(Vec::new())
+                }
+                _ => UpdateResult::continuing(Vec::new()),
+            };
+        }
+
+        if self.pending_repair.is_some() {
+            return match action {
+                Action::Quit => UpdateResult::quit(),
+                Action::ConfirmRepair => UpdateResult::continuing(self.confirm_repair()),
+                Action::DismissRepair => {
+                    self.pending_repair = None;
+                    self.reset_detail_scroll();
+                    UpdateResult::continuing(Vec::new())
+                }
                 Action::ScrollDetail(delta) => {
                     self.scroll_detail(delta);
                     UpdateResult::continuing(Vec::new())
@@ -993,7 +1077,7 @@ impl SkilledApp {
             | Action::DeleteInventoryFilterCharacter
             | Action::SubmitInventoryFilter => Vec::new(),
             Action::BeginInstall => {
-                if self.can_install_selection() {
+                if self.pending_repair.is_none() && self.can_install_selection() {
                     vec![Effect::PlanInstall]
                 } else {
                     Vec::new()
@@ -1002,6 +1086,14 @@ impl SkilledApp {
             // Reachable only with no prompt open, where there is nothing to
             // confirm and nothing to dismiss.
             Action::ConfirmInstall | Action::DismissInstall => Vec::new(),
+            Action::BeginRepair => {
+                if self.pending_install.is_none() && self.can_repair_selection() {
+                    vec![Effect::PlanRepair]
+                } else {
+                    Vec::new()
+                }
+            }
+            Action::ConfirmRepair | Action::DismissRepair => Vec::new(),
             Action::RerunSetup => self.rerun_setup(),
             Action::Quit => return UpdateResult::quit(),
         };
@@ -1078,6 +1170,11 @@ impl SkilledApp {
                     self.reset_detail_scroll();
                 }
                 Effect::ApplyInstall => self.apply_pending_install(),
+                Effect::PlanRepair => {
+                    self.pending_repair = Some(self.build_repair_preview());
+                    self.reset_detail_scroll();
+                }
+                Effect::ApplyRepair => self.apply_pending_repair(),
             }
         }
         Ok(())
@@ -1091,7 +1188,7 @@ impl SkilledApp {
     fn confirm_install(&mut self) -> Vec<Effect> {
         match &self.pending_install {
             Some(InstallPrompt::Preview(plan))
-                if plan.is_executable() && self.install_preview_fully_seen() =>
+                if plan.is_executable() && self.preview_fully_seen() =>
             {
                 vec![Effect::ApplyInstall]
             }
@@ -1107,8 +1204,40 @@ impl SkilledApp {
     /// a fact about the terminal the reader is looking at rather than about the
     /// plan; a preview that always fitted is fully seen at rest, which is why
     /// the ordinary case costs no keystrokes at all.
-    pub fn install_preview_fully_seen(&self) -> bool {
+    pub fn preview_fully_seen(&self) -> bool {
         self.detail_measured && self.detail_scroll >= self.detail_max_scroll
+    }
+
+    /// Compatibility name retained for the install-specific callers and tests.
+    pub fn install_preview_fully_seen(&self) -> bool {
+        self.preview_fully_seen()
+    }
+
+    fn confirm_repair(&mut self) -> Vec<Effect> {
+        match &self.pending_repair {
+            Some(RepairPrompt::Preview(plan))
+                if plan.is_executable() && self.preview_fully_seen() =>
+            {
+                vec![Effect::ApplyRepair]
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    fn build_repair_preview(&self) -> RepairPrompt {
+        let Some(entry) = self.selected_finding() else {
+            return RepairPrompt::Failed("no Doctor finding is selected".to_owned());
+        };
+        let Some(observation) = entry.observation() else {
+            return RepairPrompt::Failed(
+                "the selected finding concerns the registry rather than an installed link"
+                    .to_owned(),
+            );
+        };
+        match self.plan_repair_for(observation.name(), observation.agent()) {
+            Ok(plan) => RepairPrompt::Preview(plan),
+            Err(failure) => RepairPrompt::Failed(failure.message().to_owned()),
+        }
     }
 
     /// Read the machine and decide what installing the focused variant would
@@ -1164,6 +1293,28 @@ impl SkilledApp {
         .map_err(|failure| PlanRequestFailure::Unplannable(failure.to_string()))
     }
 
+    /// Build the same single-target repair plan used by Doctor and the CLI.
+    pub(crate) fn plan_repair_for(
+        &self,
+        skill_name: &str,
+        agent: AgentKind,
+    ) -> std::result::Result<RepairPlan, PlanRequestFailure> {
+        let receipts = self.store.receipts().map_err(|error| {
+            PlanRequestFailure::Metadata(format!(
+                "the ownership receipts could not be read, so Skilled cannot prove this link is its own: {error}"
+            ))
+        })?;
+        let probe = probe_repair(&self.agents, &self.sources, skill_name, agent, self.home());
+        Ok(plan_repair(
+            &self.agents,
+            &self.sources,
+            skill_name,
+            agent,
+            &probe,
+            &receipts,
+        ))
+    }
+
     /// Apply a plan, restate the inventory, and check the plan against it.
     ///
     /// The same three steps [`Effect::ApplyInstall`] performs, in the same
@@ -1173,6 +1324,13 @@ impl SkilledApp {
         self.rescan_installations();
         let verification = verify_install(plan, &applied, &self.inventory);
         InstallOutcome::new(plan.clone(), applied, verification)
+    }
+
+    pub(crate) fn apply_repair_plan(&mut self, plan: &RepairPlan) -> RepairOutcome {
+        let applied = apply_repair(plan, &self.store, &self.environment.home_dir);
+        self.rescan_installations();
+        let verification = verify_repair(plan, &applied, &self.inventory);
+        RepairOutcome::new(plan.clone(), applied, verification)
     }
 
     /// Apply the shown preview, then restate the inventory and check the plan
@@ -1191,12 +1349,27 @@ impl SkilledApp {
         self.reset_detail_scroll();
     }
 
+    fn apply_pending_repair(&mut self) {
+        let Some(RepairPrompt::Preview(plan)) = self.pending_repair.take() else {
+            return;
+        };
+        let outcome = self.apply_repair_plan(&plan);
+        self.pending_repair = Some(RepairPrompt::Report(outcome));
+        self.reset_detail_scroll();
+    }
+
     /// Replace the inventory with a fresh read-only pass over the native roots.
     ///
     /// This is the only place installation scanning happens; the reducer stays
     /// free of filesystem work.
     fn rescan_installations(&mut self) {
         self.inventory = scan_installations(&self.agents, &self.sources);
+        self.repair_overlay = match self.store.receipts() {
+            Ok(receipts) => {
+                RepairOverlay::build(&self.inventory, &receipts, &self.sources, &self.agents)
+            }
+            Err(error) => RepairOverlay::receipts_unread(error.to_string()),
+        };
         self.refilter_installations();
         // The findings behind the selection are gone with the snapshot, so the
         // selection is pulled back onto the list that replaced them.
@@ -1264,6 +1437,7 @@ impl SkilledApp {
         self.view = View::Doctor;
         self.doctor_pane = DoctorPane::Findings;
         self.inventory = InventorySnapshot::not_scanned(&self.agents);
+        self.repair_overlay = RepairOverlay::default();
         self.filtered_installations.clear();
         self.reset_detail_scroll();
         vec![Effect::ScanInstallations]
@@ -1281,6 +1455,7 @@ impl SkilledApp {
         // reaches a user today; the reset is what keeps the reducer honest at
         // every instant should that ever change.
         self.inventory = InventorySnapshot::not_scanned(&self.agents);
+        self.repair_overlay = RepairOverlay::default();
         // The gap snapshot holds no rows, so the only consistent filtered
         // list is empty whatever the query. Clearing it directly — rather
         // than refiltering — leaves the focused row alone: the scan that
@@ -1352,7 +1527,7 @@ impl SkilledApp {
         // A modal dialog is drawn over whatever screen is behind it and takes
         // the keyboard with it, so while one is open it is the window the
         // movement keys move.
-        if self.pending_install.is_some() {
+        if self.pending_install.is_some() || self.pending_repair.is_some() {
             return true;
         }
         match self.view {

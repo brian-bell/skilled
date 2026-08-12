@@ -1,17 +1,17 @@
-//! Install planning and its guarded execution.
+//! Install and repair planning, guarded execution, and verification.
 //!
 //! Spec 17.2 reserves this module for pure plan builders and guarded executors,
 //! and the split is kept literally: [`probe_install`] is the only read of the
 //! machine, [`plan_install`] decides everything over the value it returns, and
-//! nothing here writes until [`apply_install`] is called with a plan the user
-//! has confirmed.
+//! nothing here writes until [`apply_install`] or [`apply_repair`] is called
+//! with a plan the user has confirmed.
 //!
 //! Two rules shape the whole module. A plan blocks whole rather than in part —
 //! if any target is blocked, nothing is written anywhere, because spec 15 asks
 //! Skilled to stop before writing when it already knows a step would fail. And
-//! nothing is ever replaced: this release creates links and creates them only,
-//! so every occupied slot is a refusal rather than an overwrite, and repair is
-//! a later slice's work.
+//! install never replaces an occupied slot. Repair is a separate single-target
+//! pipeline and replaces only a symbolic link whose raw target still matches a
+//! Skilled ownership receipt exactly.
 
 use std::{
     fs, io,
@@ -239,6 +239,37 @@ pub struct InstallProbe {
     targets: [TargetProbe; 3],
 }
 
+/// The final component of a repair target, preserving why a link could not be
+/// resolved. Install only needs to know whether a target resolves; repair must
+/// distinguish a genuinely dangling link from one that is merely unreachable.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum RepairEntryProbe {
+    Absent,
+    Symlink {
+        target: PathBuf,
+        resolution: Result<PathBuf, (io::ErrorKind, String)>,
+    },
+    Directory,
+    NotADirectory,
+    Unreadable(String),
+    NotRead,
+}
+
+/// One read of every filesystem fact a single-target repair depends on.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RepairProbe {
+    target_agent: AgentKind,
+    targets: [TargetProbe; 3],
+    target_entry: RepairEntryProbe,
+    sources: Vec<(VariantRef, Result<SourceProbe, String>)>,
+}
+
+impl RepairProbe {
+    pub fn target(&self, agent: AgentKind) -> &TargetProbe {
+        &self.targets[agent.index()]
+    }
+}
+
 /// The registered checkout identity and variant directory observed together.
 ///
 /// The revision distinguishes a registered checkout from another repository
@@ -274,6 +305,66 @@ pub fn probe_install(
         targets: agents
             .each_ref()
             .map(|agent| probe_target(agent, variant.skill_name(), home)),
+    }
+}
+
+/// Read the machine once for a repair of one name in one agent's native root.
+///
+/// All three roots are read even though only one may be written: OpenCode reads
+/// the other agents' roots, so predicting its effective resolution requires the
+/// same complete sighting set as install planning.
+pub fn probe_repair(
+    agents: &[AgentDetection; 3],
+    sources: &[RegisteredSource],
+    skill_name: &str,
+    agent: AgentKind,
+    home: &Path,
+) -> RepairProbe {
+    let targets = agents
+        .each_ref()
+        .map(|detection| probe_target(detection, skill_name, home));
+    let target_entry = if detection_at(agents, agent).selected() {
+        probe_repair_entry(&targets[agent.index()].link_path)
+    } else {
+        RepairEntryProbe::NotRead
+    };
+    let sources = variants_by_name(sources)
+        .remove(skill_name)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|variant| {
+            let source = probe_source(sources, &variant);
+            (variant, source)
+        })
+        .collect();
+    RepairProbe {
+        target_agent: agent,
+        targets,
+        target_entry,
+        sources,
+    }
+}
+
+fn probe_repair_entry(link_path: &Path) -> RepairEntryProbe {
+    let file_type = match fs::symlink_metadata(link_path) {
+        Ok(metadata) => metadata.file_type(),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return RepairEntryProbe::Absent,
+        Err(error) => return RepairEntryProbe::Unreadable(error.to_string()),
+    };
+    if file_type.is_symlink() {
+        let target = match fs::read_link(link_path) {
+            Ok(target) => target,
+            Err(error) => return RepairEntryProbe::Unreadable(error.to_string()),
+        };
+        let resolution = link_path
+            .canonicalize()
+            .map_err(|error| (error.kind(), error.to_string()));
+        return RepairEntryProbe::Symlink { target, resolution };
+    }
+    if file_type.is_dir() {
+        RepairEntryProbe::Directory
+    } else {
+        RepairEntryProbe::NotADirectory
     }
 }
 
@@ -648,6 +739,588 @@ impl InstallPlan {
     /// and the preview says which of the two it is.
     pub fn is_executable(&self) -> bool {
         !self.is_blocked() && self.targets.iter().any(InstallTarget::is_work)
+    }
+}
+
+/// What a repair plan will do with its one target.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RepairDisposition {
+    /// Replace the proven link. `dangling` says whether the old target was
+    /// absent, as distinct from resolving to the wrong registered variant.
+    ReplaceLink { dangling: bool },
+    /// The link already resolves to the variant the registry selects today.
+    NothingToRepair,
+    /// A precondition is not proven. A blocked plan is inert.
+    Blocked { finding: Finding },
+}
+
+/// One immutable, single-target repair statement.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RepairPlan {
+    agent: AgentKind,
+    skill_name: String,
+    link_path: PathBuf,
+    recorded_target: PathBuf,
+    current_target: PathBuf,
+    variant: Option<VariantRef>,
+    source_checkout: Option<PathBuf>,
+    source_revision: Option<String>,
+    source_dir: Option<PathBuf>,
+    old_source_label: Option<String>,
+    new_source_label: Option<String>,
+    source_changed: bool,
+    disposition: RepairDisposition,
+    warnings: Vec<String>,
+    opencode_outlook: Option<OpenCodeOutlook>,
+}
+
+impl RepairPlan {
+    pub fn agent(&self) -> AgentKind {
+        self.agent
+    }
+
+    pub fn skill_name(&self) -> &str {
+        &self.skill_name
+    }
+
+    pub fn link_path(&self) -> &Path {
+        &self.link_path
+    }
+
+    /// The old target as an absolute path for consent surfaces.
+    pub fn current_target(&self) -> &Path {
+        &self.current_target
+    }
+
+    /// The exact spelling recorded in the link and receipt, for the apply
+    /// guard. It may differ from `current_target` only for legacy relative
+    /// receipts.
+    fn recorded_target(&self) -> &Path {
+        &self.recorded_target
+    }
+
+    pub fn new_target(&self) -> Option<&Path> {
+        self.source_dir.as_deref()
+    }
+
+    pub fn variant(&self) -> Option<&VariantRef> {
+        self.variant.as_ref()
+    }
+
+    pub fn old_source_label(&self) -> Option<&str> {
+        self.old_source_label.as_deref()
+    }
+
+    pub fn new_source_label(&self) -> Option<&str> {
+        self.new_source_label.as_deref()
+    }
+
+    pub fn source_changed(&self) -> bool {
+        self.source_changed
+    }
+
+    pub fn disposition(&self) -> &RepairDisposition {
+        &self.disposition
+    }
+
+    pub fn warnings(&self) -> &[String] {
+        &self.warnings
+    }
+
+    pub fn opencode_outlook(&self) -> Option<&OpenCodeOutlook> {
+        self.opencode_outlook.as_ref()
+    }
+
+    pub fn blocking_finding(&self) -> Option<&Finding> {
+        match &self.disposition {
+            RepairDisposition::Blocked { finding } => Some(finding),
+            _ => None,
+        }
+    }
+
+    pub fn is_executable(&self) -> bool {
+        matches!(self.disposition, RepairDisposition::ReplaceLink { .. })
+    }
+}
+
+/// The newest receipt that proves ownership of the observed link.
+///
+/// A path-only receipt is insufficient: receipts outlive links, so a third
+/// party can remove and recreate one at the same path. Byte-identical target
+/// spelling is the evidence that the object still names what Skilled recorded.
+pub fn receipt_for<'a>(
+    receipts: &'a [Receipt],
+    agent: AgentKind,
+    link_path: &Path,
+    observed_target: &Path,
+) -> Option<&'a Receipt> {
+    receipts.iter().rev().find(|receipt| {
+        receipt.agent() == agent
+            && receipt.link_path() == link_path
+            && receipt.link_target() == observed_target
+    })
+}
+
+/// Decide what repairing one observed link would do.
+///
+/// Pure over the probe, registry, and receipts. Every refusal is represented in
+/// the returned inert plan so preview and scripted surfaces can state the exact
+/// path and evidence without touching the filesystem.
+pub fn plan_repair(
+    _agents: &[AgentDetection; 3],
+    sources: &[RegisteredSource],
+    skill_name: &str,
+    agent: AgentKind,
+    probe: &RepairProbe,
+    receipts: &[Receipt],
+) -> RepairPlan {
+    debug_assert_eq!(probe.target_agent, agent);
+    let target = probe.target(agent);
+    let mut plan = empty_repair_plan(agent, skill_name, target.link_path.clone());
+
+    if let Some(finding) = repair_root_finding(&target.root) {
+        plan.disposition = RepairDisposition::Blocked { finding };
+        return plan;
+    }
+
+    let (observed_target, current_resolution) = match &probe.target_entry {
+        RepairEntryProbe::Absent => {
+            plan.disposition = blocked_repair(
+                "repair.nothing_to_replace",
+                "there is no symbolic link at this path to replace",
+            );
+            return plan;
+        }
+        RepairEntryProbe::Directory | RepairEntryProbe::NotADirectory => {
+            plan.disposition = blocked_repair(
+                "install.physical_path_collision",
+                "a physical file or directory occupies this path; Skilled never overwrites one",
+            );
+            return plan;
+        }
+        RepairEntryProbe::Unreadable(reason) => {
+            plan.disposition = blocked_repair(
+                "install.unreadable_entry",
+                format!("the entry could not be read: {reason}"),
+            );
+            return plan;
+        }
+        RepairEntryProbe::NotRead => {
+            plan.disposition = blocked_repair(
+                "install.unreadable_root",
+                "Skilled did not read this agent's skill root",
+            );
+            return plan;
+        }
+        RepairEntryProbe::Symlink {
+            target: observed,
+            resolution,
+        } => {
+            if matches!(resolution, Err((kind, _)) if *kind != io::ErrorKind::NotFound) {
+                let reason = match resolution {
+                    Err((_, reason)) => reason,
+                    Ok(_) => unreachable!(),
+                };
+                plan.recorded_target = observed.clone();
+                plan.current_target = absolute_link_target(&target.link_path, observed);
+                plan.disposition = blocked_repair(
+                    "install.unresolvable_symlink",
+                    format!("the symbolic link could not be resolved: {reason}"),
+                );
+                return plan;
+            }
+            (observed.clone(), resolution.clone())
+        }
+    };
+    plan.recorded_target = observed_target.clone();
+    plan.current_target = absolute_link_target(&target.link_path, &observed_target);
+
+    let Some(receipt) = receipt_for(receipts, agent, &target.link_path, &observed_target) else {
+        plan.disposition = blocked_repair(
+            "repair.unproven_link",
+            "Skilled holds no receipt matching the symbolic link that is there, so it cannot prove it created this object",
+        );
+        return plan;
+    };
+    plan.old_source_label = receipt.source_id().and_then(|source_id| {
+        sources
+            .iter()
+            .find(|source| source.id() == source_id)
+            .map(|source| source.label().to_owned())
+    });
+
+    if repair_registry_incomplete(sources, receipt.source_id()) {
+        plan.disposition = blocked_repair(
+            "repair.registry_incomplete",
+            "a registered source or included catalog that could change the selected target could not be read",
+        );
+        return plan;
+    }
+
+    let competing = variants_by_name(sources)
+        .remove(receipt.skill_name())
+        .unwrap_or_default();
+    let variant = match narrow(&competing, agent) {
+        CandidateSelection::Selected(variant) => variant,
+        CandidateSelection::Duplicate(variants) => {
+            plan.disposition = RepairDisposition::Blocked {
+                finding: duplicate_finding(receipt.skill_name(), &variants),
+            };
+            return plan;
+        }
+        CandidateSelection::NoCandidate => {
+            plan.disposition = blocked_repair(
+                "repair.variant_unavailable",
+                format!(
+                    "no registered source currently offers a usable variant named {} for this agent",
+                    receipt.skill_name()
+                ),
+            );
+            return plan;
+        }
+    };
+    let source = match probe
+        .sources
+        .iter()
+        .find(|(candidate, _)| candidate == &variant)
+        .map(|(_, source)| source)
+    {
+        Some(Ok(source)) => source,
+        Some(Err(reason)) => {
+            plan.disposition = blocked_repair(
+                "repair.variant_unavailable",
+                format!("the selected variant is not currently usable: {reason}"),
+            );
+            return plan;
+        }
+        None => {
+            plan.disposition = blocked_repair(
+                "repair.variant_unavailable",
+                "the selected variant was not present when the filesystem was probed",
+            );
+            return plan;
+        }
+    };
+
+    plan.skill_name = receipt.skill_name().to_owned();
+    plan.new_source_label = Some(variant.source_label().to_owned());
+    plan.source_changed = receipt
+        .source_id()
+        .is_some_and(|source_id| source_id != variant.source_id());
+    plan.source_checkout = Some(source.checkout.clone());
+    plan.source_revision = Some(source.revision.clone());
+    plan.source_dir = Some(source.directory.clone());
+    plan.variant = Some(variant.clone());
+    plan.disposition = match current_resolution {
+        Ok(current) if current == source.directory => RepairDisposition::NothingToRepair,
+        Ok(_) => RepairDisposition::ReplaceLink { dangling: false },
+        Err((io::ErrorKind::NotFound, _)) => RepairDisposition::ReplaceLink { dangling: true },
+        Err(_) => unreachable!("non-NotFound resolution failures returned above"),
+    };
+
+    let predicted = resolve_opencode(repair_sightings(
+        probe,
+        agent,
+        &variant,
+        &source.directory,
+        true,
+    ));
+    plan.opencode_outlook = Some(OpenCodeOutlook::of(&predicted));
+    if agent == AgentKind::OpenCode
+        && plan.is_executable()
+        && matches!(predicted, OpenCodeResolution::Conflict { .. })
+    {
+        plan.disposition = blocked_repair(
+            "install.opencode_conflict",
+            format!(
+                "OpenCode would not resolve {} to this link: the roots it reads would hold more than one directory under that name",
+                plan.skill_name
+            ),
+        );
+    } else if let OpenCodeResolution::Incomplete { roots } = &predicted {
+        plan.warnings.push(format!(
+            "what OpenCode would resolve {} to cannot be established: {}",
+            plan.skill_name,
+            unknown_roots(roots)
+        ));
+    }
+    plan
+}
+
+fn empty_repair_plan(agent: AgentKind, skill_name: &str, link_path: PathBuf) -> RepairPlan {
+    RepairPlan {
+        agent,
+        skill_name: skill_name.to_owned(),
+        link_path,
+        recorded_target: PathBuf::new(),
+        current_target: PathBuf::new(),
+        variant: None,
+        source_checkout: None,
+        source_revision: None,
+        source_dir: None,
+        old_source_label: None,
+        new_source_label: None,
+        source_changed: false,
+        disposition: RepairDisposition::Blocked {
+            finding: Finding::new(
+                "repair.variant_unavailable",
+                FindingSeverity::Critical,
+                "no repair target was established".to_owned(),
+            ),
+        },
+        warnings: Vec::new(),
+        opencode_outlook: None,
+    }
+}
+
+fn blocked_repair(code: &'static str, evidence: impl Into<String>) -> RepairDisposition {
+    RepairDisposition::Blocked {
+        finding: Finding::new(code, FindingSeverity::Critical, evidence.into()),
+    }
+}
+
+fn repair_root_finding(root: &RootProbe) -> Option<Finding> {
+    match root {
+        RootProbe::Present => None,
+        RootProbe::Missing { .. } => Some(Finding::new(
+            "repair.nothing_to_replace",
+            FindingSeverity::Critical,
+            "the agent's skill root is absent, so there is no symbolic link to replace".to_owned(),
+        )),
+        RootProbe::Unreadable(reason) => Some(Finding::new(
+            "install.unreadable_root",
+            FindingSeverity::Critical,
+            format!("the agent's skill root could not be read: {reason}"),
+        )),
+        RootProbe::Redirected { via } => Some(Finding::new(
+            "install.redirected_root",
+            FindingSeverity::Critical,
+            format!(
+                "{} is a symbolic link, so replacing a link below it could write somewhere other than the path shown",
+                via.display()
+            ),
+        )),
+        RootProbe::NotRead => Some(Finding::new(
+            "install.unreadable_root",
+            FindingSeverity::Critical,
+            "Skilled did not read this agent's skill root".to_owned(),
+        )),
+    }
+}
+
+fn absolute_link_target(link_path: &Path, target: &Path) -> PathBuf {
+    if target.is_absolute() {
+        target.to_path_buf()
+    } else {
+        link_path.parent().unwrap_or(link_path).join(target)
+    }
+}
+
+fn repair_registry_incomplete(sources: &[RegisteredSource], own_source_id: Option<i64>) -> bool {
+    sources.iter().any(|source| {
+        if source.source_error().is_some() {
+            return Some(source.id()) != own_source_id;
+        }
+        source
+            .catalogs()
+            .iter()
+            .any(|catalog| catalog.included() && catalog.scan_error().is_some())
+    })
+}
+
+fn repair_sightings(
+    probe: &RepairProbe,
+    repaired_agent: AgentKind,
+    variant: &VariantRef,
+    source_dir: &Path,
+    planned: bool,
+) -> [RootSighting; 3] {
+    AgentKind::ALL.map(|agent| {
+        let slot = probe.target(agent);
+        if matches!(
+            slot.root,
+            RootProbe::Unreadable(_) | RootProbe::NotRead | RootProbe::Redirected { .. }
+        ) {
+            return RootSighting::Unread;
+        }
+        if agent == repaired_agent && planned {
+            return RootSighting::Offers(SightedEntry::new(
+                slot.link_path.clone(),
+                source_dir.to_path_buf(),
+                Some(variant.clone()),
+            ));
+        }
+        match &slot.content {
+            SlotContent::At(canonical) => RootSighting::Offers(SightedEntry::new(
+                slot.link_path.clone(),
+                canonical.clone(),
+                (canonical == source_dir).then(|| variant.clone()),
+            )),
+            SlotContent::Nowhere => RootSighting::NothingToLoad,
+            SlotContent::Unknown => RootSighting::Unknown,
+        }
+    })
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RepairOfferStatus {
+    Offered,
+    NotOffered { reason: String },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RepairOffer {
+    path: PathBuf,
+    status: RepairOfferStatus,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct OverlayFinding {
+    path: PathBuf,
+    finding: Finding,
+}
+
+impl OverlayFinding {
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+    pub(crate) fn finding(&self) -> &Finding {
+        &self.finding
+    }
+}
+
+/// Receipt-aware facts held beside, never inside, the receipt-blind inventory.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct RepairOverlay {
+    offers: Vec<RepairOffer>,
+    findings: Vec<OverlayFinding>,
+    receipts_error: Option<String>,
+}
+
+impl RepairOverlay {
+    pub fn build(
+        snapshot: &InventorySnapshot,
+        receipts: &[Receipt],
+        sources: &[RegisteredSource],
+        _agents: &[AgentDetection; 3],
+    ) -> Self {
+        let by_name = variants_by_name(sources);
+        let mut overlay = Self::default();
+        for row in snapshot.rows() {
+            for observation in row.observations() {
+                let InstallationObject::Symlink { target } = observation.object() else {
+                    continue;
+                };
+                let matching =
+                    receipt_for(receipts, observation.agent(), observation.path(), target);
+                let status = match matching {
+                    None => RepairOfferStatus::NotOffered {
+                        reason: "Skilled holds no receipt matching the link that is there"
+                            .to_owned(),
+                    },
+                    Some(_receipt)
+                        if observation.findings().iter().any(|finding| {
+                            finding.code() == "install.unresolvable_symlink"
+                        }) => RepairOfferStatus::NotOffered {
+                            reason: "the link is unreachable for a reason other than absence"
+                                .to_owned(),
+                        },
+                    Some(receipt) if repair_registry_incomplete(sources, receipt.source_id()) => {
+                        RepairOfferStatus::NotOffered {
+                            reason: "the registry is incomplete, so the correct target cannot be selected safely"
+                                .to_owned(),
+                        }
+                    }
+                    Some(receipt) => match by_name
+                        .get(receipt.skill_name())
+                        .map_or(CandidateSelection::NoCandidate, |variants| {
+                            narrow(variants, observation.agent())
+                        }) {
+                        CandidateSelection::Selected(_) => RepairOfferStatus::Offered,
+                        CandidateSelection::Duplicate(_) => RepairOfferStatus::NotOffered {
+                            reason: "more than one registered variant answers for this agent"
+                                .to_owned(),
+                        },
+                        CandidateSelection::NoCandidate => RepairOfferStatus::NotOffered {
+                            reason: "no usable registered variant is available for this agent"
+                                .to_owned(),
+                        },
+                    },
+                };
+
+                if matches!(status, RepairOfferStatus::Offered)
+                    && observation.findings().is_empty()
+                    && let Some(current) = observation.resolution()
+                    && let Some(CandidateSelection::Selected(selected)) = by_name
+                        .get(row.name())
+                        .map(|variants| narrow(variants, observation.agent()))
+                    && (selected.source_id(), selected.variant_relative_path())
+                        != (current.source_id(), current.variant_relative_path())
+                {
+                    overlay.findings.push(OverlayFinding {
+                        path: observation.path().to_path_buf(),
+                        finding: Finding::new(
+                            "install.wrong_managed_target",
+                            FindingSeverity::Warning,
+                            format!(
+                                "this link resolves to {}, but the registry now selects {} for this agent",
+                                current.evidence_label(),
+                                selected.evidence_label()
+                            ),
+                        ),
+                    });
+                }
+                overlay.offers.push(RepairOffer {
+                    path: observation.path().to_path_buf(),
+                    status,
+                });
+            }
+        }
+        overlay
+    }
+
+    pub fn receipts_unread(reason: String) -> Self {
+        Self {
+            receipts_error: Some(reason),
+            ..Self::default()
+        }
+    }
+
+    pub fn offer(&self, path: &Path) -> RepairOfferStatus {
+        if let Some(reason) = &self.receipts_error {
+            return RepairOfferStatus::NotOffered {
+                reason: format!("the ownership receipts could not be read: {reason}"),
+            };
+        }
+        self.offers
+            .iter()
+            .find(|offer| offer.path == path)
+            .map_or_else(
+                || RepairOfferStatus::NotOffered {
+                    reason: "this finding does not concern a repairable symbolic link".to_owned(),
+                },
+                |offer| offer.status.clone(),
+            )
+    }
+
+    pub fn is_offered(&self, path: &Path) -> bool {
+        matches!(self.offer(path), RepairOfferStatus::Offered)
+    }
+
+    pub(crate) fn findings(&self) -> &[OverlayFinding] {
+        &self.findings
+    }
+    pub fn finding_at(&self, path: &Path) -> Option<&Finding> {
+        self.findings
+            .iter()
+            .find(|finding| finding.path == path)
+            .map(|finding| &finding.finding)
+    }
+    pub fn finding_count(&self) -> usize {
+        self.findings.len()
+    }
+    pub fn receipts_readable(&self) -> bool {
+        self.receipts_error.is_none()
     }
 }
 
@@ -1503,7 +2176,8 @@ fn apply_target(
     }
     // The variant directory is checked too. A checkout moved or removed between
     // the preview and the confirmation would otherwise leave Skilled owning a
-    // link it created that resolves to nothing, in a release with no repair.
+    // link it created that resolves to nothing; install still refuses every
+    // occupied slot, while repair is a separate explicitly confirmed action.
     match plan.source_dir().canonicalize() {
         Ok(resolved)
             if resolved == plan.source_dir()
@@ -1523,6 +2197,7 @@ fn apply_target(
         ));
     }
     let receipt = Receipt {
+        operation: ReceiptOperation::Install,
         agent: target.agent,
         skill_name: plan.skill_name().to_owned(),
         link_path: target.link_path.clone(),
@@ -1632,6 +2307,327 @@ fn create_directory_symlink(_target: &Path, _link_path: &Path) -> io::Result<()>
         io::ErrorKind::Unsupported,
         "Skilled installs skills as directory symbolic links, which this platform does not offer",
     ))
+}
+
+/// What happened when the single repair target was applied.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RepairStepOutcome {
+    Repaired,
+    RepairedUnrecorded(String),
+    Failed(String),
+}
+
+impl RepairStepOutcome {
+    fn wrote_link(&self) -> bool {
+        matches!(self, Self::Repaired | Self::RepairedUnrecorded(_))
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RepairAppliedStep {
+    agent: AgentKind,
+    link_path: PathBuf,
+    outcome: RepairStepOutcome,
+}
+
+impl RepairAppliedStep {
+    pub fn agent(&self) -> AgentKind {
+        self.agent
+    }
+
+    pub fn link_path(&self) -> &Path {
+        &self.link_path
+    }
+
+    pub fn outcome(&self) -> &RepairStepOutcome {
+        &self.outcome
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct RepairApplyReport {
+    step: Option<RepairAppliedStep>,
+}
+
+impl RepairApplyReport {
+    pub fn step(&self) -> Option<&RepairAppliedStep> {
+        self.step.as_ref()
+    }
+}
+
+/// Replace the one proven link after re-establishing every preview guard.
+///
+/// Unix creates a sibling temporary link and renames it over the destination.
+/// `rename(2)` is atomic within one directory, so readers never observe the
+/// installation path absent. A pathname race remains after the last guard:
+/// unlike install's fail-if-exists race, rename can unlink a file or stranger's
+/// link that arrives in that window. Closing it requires handle-relative APIs
+/// the standard library does not expose; this data-loss window is tracked as a
+/// follow-up and is stated here rather than hidden.
+///
+/// Windows cannot atomically rename over an existing directory symlink. Its
+/// fallback removes the directory link with `remove_dir` and creates the new
+/// one, and is therefore explicitly non-atomic.
+pub(crate) fn apply_repair(plan: &RepairPlan, store: &Store, home: &Path) -> RepairApplyReport {
+    if !plan.is_executable() {
+        return RepairApplyReport::default();
+    }
+    let outcome = apply_repair_target(plan, store, home);
+    RepairApplyReport {
+        step: Some(RepairAppliedStep {
+            agent: plan.agent,
+            link_path: plan.link_path.clone(),
+            outcome,
+        }),
+    }
+}
+
+fn apply_repair_target(plan: &RepairPlan, store: &Store, home: &Path) -> RepairStepOutcome {
+    let Some(root) = plan.link_path.parent() else {
+        return RepairStepOutcome::Failed("the target has no parent directory".to_owned());
+    };
+    if probe_root(root, home) != RootProbe::Present {
+        return RepairStepOutcome::Failed(
+            "the agent's skill root changed after the plan was shown, so nothing was written"
+                .to_owned(),
+        );
+    }
+    match probe_repair_entry(&plan.link_path) {
+        RepairEntryProbe::Symlink { target, .. } if target == plan.recorded_target() => {}
+        _ => {
+            return RepairStepOutcome::Failed(
+                "the entry changed after the plan was shown, so nothing was written".to_owned(),
+            );
+        }
+    }
+    let (Some(source_dir), Some(source_checkout), Some(source_revision), Some(variant)) = (
+        plan.source_dir.as_deref(),
+        plan.source_checkout.as_deref(),
+        plan.source_revision.as_deref(),
+        plan.variant.as_ref(),
+    ) else {
+        return RepairStepOutcome::Failed("the plan carries no repair source".to_owned());
+    };
+    match source_dir.canonicalize() {
+        Ok(resolved)
+            if resolved == source_dir
+                && fs::metadata(&resolved).is_ok_and(|metadata| metadata.is_dir()) => {}
+        _ => {
+            return RepairStepOutcome::Failed(format!(
+                "{} is no longer the directory the plan resolved, so nothing was written",
+                source_dir.display()
+            ));
+        }
+    }
+    let mut budget = InspectionBudget::source_scan();
+    if let Err(error) = validate_portable_skill_with_budget(source_dir, &mut budget) {
+        return RepairStepOutcome::Failed(format!(
+            "{} no longer validates as a portable skill, so nothing was written: {error}",
+            source_dir.display()
+        ));
+    }
+    let receipt = Receipt {
+        operation: ReceiptOperation::Repair,
+        agent: plan.agent,
+        skill_name: plan.skill_name.clone(),
+        link_path: plan.link_path.clone(),
+        link_target: source_dir.to_path_buf(),
+        source_id: Some(variant.source_id()),
+        catalog_relative_path: Some(variant.catalog_relative_path().to_path_buf()),
+        variant_relative_path: Some(variant.variant_relative_path().to_path_buf()),
+    };
+    if let Err(error) = store.ensure_receipt_recordable(&receipt) {
+        return RepairStepOutcome::Failed(format!(
+            "the ownership receipt cannot record this target, so nothing was written: {error}"
+        ));
+    }
+    if let Err(reason) = verified_checkout(source_checkout, source_revision) {
+        return RepairStepOutcome::Failed(format!("{reason}, so nothing was written"));
+    }
+    if let Err(error) = replace_directory_symlink(source_dir, &plan.link_path) {
+        return RepairStepOutcome::Failed(format!("the link could not be replaced: {error}"));
+    }
+    match store.record_receipt(&receipt) {
+        Ok(()) => RepairStepOutcome::Repaired,
+        Err(error) => RepairStepOutcome::RepairedUnrecorded(error.to_string()),
+    }
+}
+
+#[cfg(unix)]
+fn replace_directory_symlink(target: &Path, link_path: &Path) -> io::Result<()> {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let parent = link_path
+        .parent()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "target has no parent"))?;
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let temporary = parent.join(format!(".skilled-repair-{}-{nonce}", std::process::id()));
+    create_directory_symlink(target, &temporary)?;
+    if let Err(error) = fs::rename(&temporary, link_path) {
+        let _ = fs::remove_file(&temporary);
+        return Err(error);
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn replace_directory_symlink(target: &Path, link_path: &Path) -> io::Result<()> {
+    fs::remove_dir(link_path)?;
+    create_directory_symlink(target, link_path)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn replace_directory_symlink(_target: &Path, _link_path: &Path) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "this platform does not support Skilled's directory-link repair",
+    ))
+}
+
+/// Check a repaired link and its OpenCode outlook against a fresh scan.
+pub fn verify_repair(
+    plan: &RepairPlan,
+    applied: &RepairApplyReport,
+    snapshot: &InventorySnapshot,
+) -> VerifyReport {
+    let mut failures = Vec::new();
+    let mut withheld = Vec::new();
+    let Some(step) = applied
+        .step
+        .as_ref()
+        .filter(|step| step.outcome.wrote_link())
+    else {
+        return VerifyReport { failures, withheld };
+    };
+    if let Some(reason) = unscanned(snapshot.root(step.agent).status()) {
+        withheld.push(VerifyWithheld {
+            agent: step.agent,
+            reason,
+            required: true,
+        });
+        return VerifyReport { failures, withheld };
+    }
+    let row = snapshot.row(plan.skill_name());
+    let Some(observed) = row.and_then(|row| row.observation(step.agent)) else {
+        failures.push(VerifyFailure {
+            agent: step.agent,
+            observed: "the scan taken afterwards found nothing at this path".to_owned(),
+        });
+        return VerifyReport { failures, withheld };
+    };
+    let Some(variant) = plan.variant() else {
+        failures.push(VerifyFailure {
+            agent: step.agent,
+            observed: "the repair plan carried no registered variant identity".to_owned(),
+        });
+        return VerifyReport { failures, withheld };
+    };
+    match mismatch_variant(variant, observed) {
+        Checked::Held => {}
+        Checked::Failed(observed) => failures.push(VerifyFailure {
+            agent: step.agent,
+            observed,
+        }),
+        Checked::Withheld(reason) => withheld.push(VerifyWithheld {
+            agent: step.agent,
+            reason,
+            required: true,
+        }),
+    }
+    if failures.is_empty() && !withheld.iter().any(VerifyWithheld::blocks_success) {
+        match row.and_then(InventoryRow::opencode_resolution) {
+            Some(OpenCodeResolution::Incomplete { roots }) => withheld.push(VerifyWithheld {
+                agent: AgentKind::OpenCode,
+                reason: format!(
+                    "what OpenCode resolves the name to could not be established: {}",
+                    unknown_roots(roots)
+                ),
+                required: step.agent == AgentKind::OpenCode,
+            }),
+            Some(resolution) => {
+                let actual = OpenCodeOutlook::of(resolution);
+                if plan
+                    .opencode_outlook()
+                    .is_some_and(|expected| expected != &actual)
+                {
+                    failures.push(VerifyFailure {
+                        agent: AgentKind::OpenCode,
+                        observed: format!(
+                            "this was not what the plan described: {}",
+                            observed_summary(resolution)
+                        ),
+                    });
+                }
+            }
+            None => {}
+        }
+    }
+    VerifyReport { failures, withheld }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RepairStatus {
+    NothingToRepair,
+    Repaired,
+    NotApplied,
+    RepairedUnrecorded,
+    VerificationFailed,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RepairOutcome {
+    plan: RepairPlan,
+    applied: RepairApplyReport,
+    verification: VerifyReport,
+}
+
+impl RepairOutcome {
+    pub(crate) fn new(
+        plan: RepairPlan,
+        applied: RepairApplyReport,
+        verification: VerifyReport,
+    ) -> Self {
+        Self {
+            plan,
+            applied,
+            verification,
+        }
+    }
+
+    pub fn plan(&self) -> &RepairPlan {
+        &self.plan
+    }
+    pub fn applied(&self) -> &RepairApplyReport {
+        &self.applied
+    }
+    pub fn verification(&self) -> &VerifyReport {
+        &self.verification
+    }
+
+    pub fn status(&self) -> RepairStatus {
+        match self.applied.step.as_ref().map(|step| &step.outcome) {
+            None if matches!(self.plan.disposition, RepairDisposition::NothingToRepair) => {
+                RepairStatus::NothingToRepair
+            }
+            None => RepairStatus::NotApplied,
+            Some(RepairStepOutcome::Failed(_)) => RepairStatus::NotApplied,
+            Some(RepairStepOutcome::RepairedUnrecorded(_)) => RepairStatus::RepairedUnrecorded,
+            Some(RepairStepOutcome::Repaired) if !self.verification.is_verified() => {
+                RepairStatus::VerificationFailed
+            }
+            Some(RepairStepOutcome::Repaired) => RepairStatus::Repaired,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RepairPrompt {
+    Preview(RepairPlan),
+    Report(RepairOutcome),
+    Failed(String),
 }
 
 /// Check every link the apply wrote against the plan that called for it.
@@ -1827,6 +2823,10 @@ enum Checked {
 
 /// Compare the fresh observation against the plan that called for it.
 fn mismatch(plan: &InstallPlan, observed: &InstalledSkillObservation) -> Checked {
+    mismatch_variant(plan.variant(), observed)
+}
+
+fn mismatch_variant(variant: &VariantRef, observed: &InstalledSkillObservation) -> Checked {
     let InstallationObject::Symlink { .. } = observed.object() else {
         return Checked::Failed(format!(
             "what is there is {}, not a symbolic link",
@@ -1834,7 +2834,7 @@ fn mismatch(plan: &InstallPlan, observed: &InstalledSkillObservation) -> Checked
         ));
     };
     match observed.resolution() {
-        Some(resolution) if resolution == plan.variant() => {}
+        Some(resolution) if resolution == variant => {}
         Some(resolution) => {
             return Checked::Failed(format!(
                 "it resolves to {} instead",
@@ -1884,6 +2884,32 @@ fn mismatch(plan: &InstallPlan, observed: &InstalledSkillObservation) -> Checked
     }
 }
 
+/// Which guarded operation created the link described by a receipt.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReceiptOperation {
+    Install,
+    Repair,
+}
+
+impl ReceiptOperation {
+    pub(crate) fn identifier(self) -> &'static str {
+        match self {
+            Self::Install => "install",
+            Self::Repair => "repair",
+        }
+    }
+
+    pub(crate) fn from_identifier(identifier: &str) -> crate::Result<Self> {
+        match identifier {
+            "install" => Ok(Self::Install),
+            "repair" => Ok(Self::Repair),
+            other => Err(crate::Error::InvalidStoredReceiptOperation(
+                other.to_owned(),
+            )),
+        }
+    }
+}
+
 /// Evidence that Skilled created one particular link.
 ///
 /// Spec 7: a receipt is a record of ownership and never an instruction. Nothing
@@ -1892,6 +2918,7 @@ fn mismatch(plan: &InstallPlan, observed: &InstalledSkillObservation) -> Checked
 /// down from one it found.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Receipt {
+    operation: ReceiptOperation,
     agent: AgentKind,
     skill_name: String,
     link_path: PathBuf,
@@ -1902,7 +2929,9 @@ pub struct Receipt {
 }
 
 impl Receipt {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
+        operation: ReceiptOperation,
         agent: AgentKind,
         skill_name: String,
         link_path: PathBuf,
@@ -1912,6 +2941,7 @@ impl Receipt {
         variant_relative_path: Option<PathBuf>,
     ) -> Self {
         Self {
+            operation,
             agent,
             skill_name,
             link_path,
@@ -1920,6 +2950,10 @@ impl Receipt {
             catalog_relative_path,
             variant_relative_path,
         }
+    }
+
+    pub fn operation(&self) -> ReceiptOperation {
+        self.operation
     }
 
     pub fn agent(&self) -> AgentKind {

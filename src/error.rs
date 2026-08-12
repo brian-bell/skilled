@@ -26,6 +26,8 @@ pub enum Error {
     UnrepresentablePath(PathBuf),
     #[error("stored ownership receipt names an unknown agent: {0}")]
     InvalidStoredAgent(String),
+    #[error("stored ownership receipt names an unknown operation: {0}")]
+    InvalidStoredReceiptOperation(String),
     #[error("stored catalog path must be repository-relative: {0:?}")]
     UnsafeCatalogPath(PathBuf),
     #[error("stored catalog root must not be a symbolic link: {0:?}")]
