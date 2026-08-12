@@ -20,8 +20,8 @@ expression: "normalize_install_screen(&temporary, render(&app, 120, 40))"
 ▕  │  Verification                                                                                                  │  ▏
 ▕  │  ✓ every link written was observed again and matches this plan                                                 │  ▏
 ▕  │                                                                                                                │  ▏
-▕  │  Skilled does not undo what it wrote. Nothing above was removed, and no repair exists in this release.         │─ ▏
-▕  │                                                                                                                │n ▏
+▕  │  Skilled does not undo what it wrote. Nothing above was removed. Repair only replaces a still-present link     │─ ▏
+▕  │  whose ownership can be proven.                                                                                │n ▏
 ▕  │                                                                                                                │  ▏
 ▕  │                                                                                                                │  ▏
 ▕  │                                                                                                                │─ ▏

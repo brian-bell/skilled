@@ -8,7 +8,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::{
     AgentKind, Error, Result,
-    operations::Receipt,
+    operations::{Receipt, ReceiptOperation},
     source::{
         CatalogClassification, CatalogProposal, Compatibility, InspectedSource, RegisteredSource,
         SourcePreview, contains_revision, inspect_local_source,
@@ -16,7 +16,7 @@ use crate::{
     validation::InspectionBudget,
 };
 
-const SCHEMA_VERSION: i64 = 5;
+const SCHEMA_VERSION: i64 = 6;
 
 pub(crate) struct Store {
     connection: Connection,
@@ -125,10 +125,11 @@ impl Store {
             "INSERT INTO operation_receipts
                 (created_at, operation, agent, skill_name, link_path, link_target,
                  source_id, catalog_relative_path, variant_relative_path)
-             VALUES (?1, 'install', ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
              ON CONFLICT DO NOTHING",
             params![
                 current_timestamp(),
+                receipt.operation().identifier(),
                 agent_identifier(receipt.agent()),
                 receipt.skill_name(),
                 stored_path(receipt.link_path())?,
@@ -149,13 +150,16 @@ impl Store {
 
     /// Every ownership receipt, oldest first.
     ///
+    /// The last element is the most recent. `id` is the stable tiebreaker for
+    /// receipts written in the same whole second, and migrations preserve it.
+    ///
     /// A row naming an agent this build does not know is an error rather than a
     /// row to skip: a receipt Skilled cannot read is ownership it would go on to
     /// deny, and denying it would let the next plan treat its own link as a
     /// stranger's.
     pub(crate) fn receipts(&self) -> Result<Vec<Receipt>> {
         let mut statement = self.connection.prepare(
-            "SELECT agent, skill_name, link_path, link_target, source_id,
+            "SELECT operation, agent, skill_name, link_path, link_target, source_id,
                     catalog_relative_path, variant_relative_path
              FROM operation_receipts ORDER BY created_at, id",
         )?;
@@ -165,15 +169,17 @@ impl Store {
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
                 row.get::<_, String>(3)?,
-                row.get::<_, Option<i64>>(4)?,
-                row.get::<_, Option<String>>(5)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, Option<i64>>(5)?,
                 row.get::<_, Option<String>>(6)?,
+                row.get::<_, Option<String>>(7)?,
             ))
         })?;
         rows.collect::<std::result::Result<Vec<_>, _>>()?
             .into_iter()
             .map(
                 |(
+                    operation,
                     agent,
                     skill_name,
                     link_path,
@@ -183,6 +189,7 @@ impl Store {
                     variant_relative_path,
                 )| {
                     Ok(Receipt::new(
+                        ReceiptOperation::from_identifier(&operation)?,
                         agent_kind(&agent)?,
                         skill_name,
                         PathBuf::from(link_path),
@@ -446,6 +453,7 @@ mod tests {
         let store = Store::open(temporary.path()).expect("open store");
         let link_path = PathBuf::from(OsString::from_vec(b"link-\xff".to_vec()));
         let receipt = Receipt::new(
+            ReceiptOperation::Install,
             AgentKind::ClaudeCode,
             "portable".to_owned(),
             link_path.clone(),
@@ -558,6 +566,38 @@ fn migrate(connection: &mut Connection) -> Result<()> {
                 UNIQUE (agent, link_path, link_target, created_at)
              );
              PRAGMA user_version = 5;",
+        )?;
+        transaction.commit()?;
+    }
+    if current_version < 6 {
+        let transaction = connection.transaction()?;
+        // SQLite cannot alter either a CHECK or UNIQUE constraint in place.
+        // Rebuilding inside this transaction preserves every existing receipt,
+        // including its id: ordering by `(created_at, id)` is the public
+        // oldest-to-newest contract used by ownership matching.
+        transaction.execute_batch(
+            "CREATE TABLE operation_receipts_v6 (
+                id INTEGER PRIMARY KEY,
+                created_at INTEGER NOT NULL,
+                operation TEXT NOT NULL CHECK (operation IN ('install', 'repair')),
+                agent TEXT NOT NULL,
+                skill_name TEXT NOT NULL,
+                link_path TEXT NOT NULL,
+                link_target TEXT NOT NULL,
+                source_id INTEGER,
+                catalog_relative_path TEXT,
+                variant_relative_path TEXT,
+                UNIQUE (operation, agent, link_path, link_target, created_at)
+             );
+             INSERT INTO operation_receipts_v6
+                (id, created_at, operation, agent, skill_name, link_path, link_target,
+                 source_id, catalog_relative_path, variant_relative_path)
+             SELECT id, created_at, operation, agent, skill_name, link_path, link_target,
+                    source_id, catalog_relative_path, variant_relative_path
+             FROM operation_receipts;
+             DROP TABLE operation_receipts;
+             ALTER TABLE operation_receipts_v6 RENAME TO operation_receipts;
+             PRAGMA user_version = 6;",
         )?;
         transaction.commit()?;
     }

@@ -29,9 +29,9 @@ expression: "normalize_inventory(&temporary, render(&app, 120, 40))"
 ▕                                                                              │ Path: ~/.claude/skills/dangling       ▏
 ▕                                                                              │ Object: symbolic link                 ▏
 ▕                                                                              │ Target: ~/gone                        ▏
-▕                                                                              │ Repair: not offered in this release   ▏
-▕                                                                              │                                       ▏
-▕                                                                              │                                       ▏
+▕                                                                              │ Repair: not offered: Skilled holds no ▏
+▕                                                                              │ receipt matching the link that is     ▏
+▕                                                                              │ there                                 ▏
 ▕                                                                              │                                       ▏
 ▕                                                                              │                                       ▏
 ▕                                                                              │                                       ▏

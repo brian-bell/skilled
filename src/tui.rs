@@ -18,7 +18,8 @@ use crate::{
     },
     operations::{
         AppliedStep, ExcludedReason, InstallOutcome, InstallPlan, InstallPrompt, InstallStatus,
-        InstallTarget, StepOutcome, TargetDisposition,
+        InstallTarget, RepairDisposition, RepairOfferStatus, RepairOutcome, RepairPlan,
+        RepairPrompt, RepairStatus, RepairStepOutcome, StepOutcome, TargetDisposition,
     },
     resolution::{OpenCodeEntry, OpenCodeResolution, UnknownCause},
     source::{
@@ -132,15 +133,24 @@ pub fn render(frame: &mut Frame<'_>, app: &SkilledApp) -> RenderFeedback {
             detail_extent,
             install_preview_fully_seen(app, detail_extent),
         );
+    } else if let Some(prompt) = app.pending_repair() {
+        render_repair_prompt(
+            frame,
+            area,
+            prompt,
+            app.detail_scroll(),
+            detail_extent,
+            preview_fully_seen(app, detail_extent),
+        );
     } else if app.source_path_input_active() {
         render_source_path_entry(frame, area, app);
     } else if app.pending_source().is_some() && app.view() == View::Sources {
         render_catalog_confirmation(frame, area, app);
     }
     if let Some(context) = app.help_context() {
-        render_help(frame, area, context, app, detail_extent);
+        render_help(frame, area, context, app, &findings, detail_extent);
     }
-    render_footer(frame, key_hints, app, detail_extent);
+    render_footer(frame, key_hints, app, &findings, detail_extent);
     RenderFeedback {
         detail_max_scroll: detail_extent,
     }
@@ -269,6 +279,7 @@ fn session_status_on_nav_row(app: &SkilledApp, area: Rect) -> bool {
 /// help modal that can sit over any of them.
 fn overlay_open(app: &SkilledApp) -> bool {
     app.pending_install().is_some()
+        || app.pending_repair().is_some()
         || app.source_path_input_active()
         || (app.pending_source().is_some() && app.view() == View::Sources)
         || app.help_context().is_some()
@@ -685,7 +696,7 @@ impl Destination {
             Self::Sources => Some(app.sources().len()),
             // Findings are observations of the same roots the inventory reads,
             // so the same verdict decides whether either may be stated.
-            Self::Doctor => app.inventory().stated_finding_count(),
+            Self::Doctor => app.stated_finding_count(),
             Self::Updates => None,
         }
     }
@@ -1688,7 +1699,7 @@ fn doctor_subtitle(app: &SkilledApp, listed: usize) -> String {
     // none of it was read at all. Registry-side findings exist without any
     // root being read, so the second is reachable with a non-empty list and
     // must be settled before the list's own size is spoken about.
-    match inventory.stated_finding_count() {
+    match app.stated_finding_count() {
         Some(0) => "nothing to report".to_owned(),
         Some(1) => "1 finding".to_owned(),
         Some(findings) => format!("{findings} findings"),
@@ -1701,6 +1712,15 @@ fn doctor_subtitle(app: &SkilledApp, listed: usize) -> String {
         None if inventory.unreadable_roots().next().is_some() => "not fully read".to_owned(),
         None if !read_a_root(inventory) && listed > 0 => format!("{listed} listed · no root read"),
         None if !read_a_root(inventory) => "no root read".to_owned(),
+        None if inventory.registry_is_complete()
+            && !app.repair_receipts_readable()
+            && listed > 0 =>
+        {
+            format!("{listed} listed · receipts could not be read")
+        }
+        None if inventory.registry_is_complete() && !app.repair_receipts_readable() => {
+            "receipts could not be read".to_owned()
+        }
         None if listed > 0 => format!("{listed} listed · a source could not be read"),
         None => "a source could not be read".to_owned(),
     }
@@ -1816,6 +1836,14 @@ fn doctor_empty_state(app: &SkilledApp) -> (&'static str, String, String) {
                 .to_owned(),
         );
     }
+    if !app.repair_receipts_readable() {
+        return (
+            "·",
+            "Ownership receipts could not be read".to_owned(),
+            "The installation roots and registry were read, but Skilled cannot state repairability or a complete finding count without its ownership evidence."
+                .to_owned(),
+        );
+    }
     (
         "✓",
         "Nothing to report".to_owned(),
@@ -1863,13 +1891,18 @@ fn render_doctor_detail(
     render_detail_window(
         frame,
         body,
-        doctor_detail_lines(entry, app.home(), body.width),
+        doctor_detail_lines(app, entry, body.width),
         app.detail_scroll(),
         rows_below_advice(app),
     );
 }
 
-fn doctor_detail_lines(entry: &DoctorEntry<'_>, home: &Path, width: u16) -> Vec<Line<'static>> {
+fn doctor_detail_lines(
+    app: &SkilledApp,
+    entry: &DoctorEntry<'_>,
+    width: u16,
+) -> Vec<Line<'static>> {
+    let home = app.home();
     let severity = entry.finding().severity();
     let mut lines = Vec::new();
     push_detail_section(&mut lines, "FINDING", width);
@@ -1929,12 +1962,18 @@ fn doctor_detail_lines(entry: &DoctorEntry<'_>, home: &Path, width: u16) -> Vec<
         );
     }
 
-    // Spec 9.5 asks every finding to say whether the application can repair it.
-    // None of them can here, and saying so plainly is what keeps the absence of
-    // a repair key from reading as an oversight. One field rather than a
-    // section: the answer is the same for every finding, and a region this
-    // narrow cannot spend four rows on a constant.
-    lines.push(detail_field("Repair", "not offered in this release"));
+    let repair = entry.observation().map_or_else(
+        || "not offered: this finding does not concern one installed link".to_owned(),
+        |observation| match app.repair_offer(observation.path()) {
+            RepairOfferStatus::Offered => {
+                "offered: Skilled holds an exact matching receipt; press r to preview".to_owned()
+            }
+            RepairOfferStatus::NotOffered { reason } => {
+                format!("not offered: {}", terminal_safe(&reason))
+            }
+        },
+    );
+    lines.push(detail_field("Repair", &repair));
     lines
 }
 
@@ -1962,6 +2001,9 @@ fn finding_consequence(entry: &DoctorEntry<'_>) -> &'static str {
         }
         "install.dangling_symlink" => {
             "The agent finds a link with nothing behind it, so the skill does not load."
+        }
+        "install.wrong_managed_target" => {
+            "The skill loads, but this agent now selects a different registered variant under the same name."
         }
         "install.unresolvable_symlink" | "install.unreadable_entry" => {
             "Skilled could not follow what is installed here, so what the agent loads \
@@ -2214,7 +2256,20 @@ fn render_inventory_detail(
     // exist, so content that does not fit is reported as missing rather than
     // dropped off the bottom without a trace — and, where the region has the
     // keyboard, reached by scrolling rather than only reported.
-    let lines = inventory_detail_lines(row, app.inventory().roots(), app.home(), body.width);
+    let overlay_findings = row
+        .observations()
+        .filter_map(|observation| {
+            app.repair_overlay_finding(observation.path())
+                .map(|finding| (observation.agent(), finding))
+        })
+        .collect::<Vec<_>>();
+    let lines = inventory_detail_lines(
+        row,
+        app.inventory().roots(),
+        app.home(),
+        body.width,
+        &overlay_findings,
+    );
     render_detail_window(
         frame,
         body,
@@ -2456,6 +2511,17 @@ fn detail_scroll_extent(
             .sum();
         return Some(rows.saturating_sub(usize::from(body.height)));
     }
+    if let Some(prompt) = app.pending_repair() {
+        let body = install_prompt_regions(area, 0).body;
+        if body.width == 0 {
+            return None;
+        }
+        let rows: usize = repair_prompt_lines(prompt, body.width)
+            .iter()
+            .map(|line| wrapped_line_count(line, body.width))
+            .sum();
+        return Some(rows.saturating_sub(usize::from(body.height)));
+    }
     let (primary, detail) = viewport::workspace_regions(workspace);
     // `padded` mirrors what each view's scaffold draws: the Inventory's
     // panes carry the header clearance, the Doctor's do not.
@@ -2476,9 +2542,22 @@ fn detail_scroll_extent(
             let Some(row) = app.selected_installation() else {
                 return Some(0);
             };
+            let overlay_findings = row
+                .observations()
+                .filter_map(|observation| {
+                    app.repair_overlay_finding(observation.path())
+                        .map(|finding| (observation.agent(), finding))
+                })
+                .collect::<Vec<_>>();
             (
                 body,
-                inventory_detail_lines(row, app.inventory().roots(), app.home(), body.width),
+                inventory_detail_lines(
+                    row,
+                    app.inventory().roots(),
+                    app.home(),
+                    body.width,
+                    &overlay_findings,
+                ),
             )
         }
         View::Doctor => {
@@ -2489,7 +2568,7 @@ fn detail_scroll_extent(
             let Some(entry) = findings.get(app.focused_finding()) else {
                 return Some(0);
             };
-            (body, doctor_detail_lines(entry, app.home(), body.width))
+            (body, doctor_detail_lines(app, entry, body.width))
         }
         _ => return None,
     };
@@ -2595,6 +2674,7 @@ fn inventory_detail_lines(
     roots: &[RootScan; 3],
     home: &Path,
     width: u16,
+    overlay_findings: &[(AgentKind, &Finding)],
 ) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     // Kicker, then the skill's own name as the title, then its health: the
@@ -2676,6 +2756,12 @@ fn inventory_detail_lines(
                 observation.health().label(),
             ),
             width,
+        );
+        lines.extend(
+            overlay_findings
+                .iter()
+                .filter(|(agent, _)| *agent == observation.agent())
+                .flat_map(|(_, finding)| finding_lines(finding, width)),
         );
         lines.extend(observation_lines(
             observation,
@@ -4452,6 +4538,235 @@ fn install_prompt_lines(prompt: &InstallPrompt, home: &Path, width: u16) -> Vec<
     }
 }
 
+fn render_repair_prompt(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    prompt: &RepairPrompt,
+    scroll: usize,
+    extent: Option<usize>,
+    fully_seen: bool,
+) {
+    let popup = install_prompt_popup(area);
+    frame.render_widget(Clear, popup);
+    let (title, scope) = match prompt {
+        RepairPrompt::Preview(_) | RepairPrompt::Failed(_) => {
+            ("Repair skill", "nothing written yet")
+        }
+        RepairPrompt::Report(_) => ("Repair result", "already applied"),
+    };
+    let actions = repair_prompt_actions(prompt, fully_seen);
+    let regions = install_prompt_regions(area, u16::try_from(actions.width()).unwrap_or(u16::MAX));
+    frame.render_widget(components::dialog_frame(title, scope), popup);
+    frame.render_widget(
+        Paragraph::new(repair_prompt_lines(prompt, regions.body.width))
+            .wrap(Wrap { trim: false })
+            .scroll((u16::try_from(scroll).unwrap_or(u16::MAX), 0)),
+        regions.body,
+    );
+    frame.render_widget(
+        Paragraph::new(components::rule(regions.divider.width)),
+        regions.divider,
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            repair_prompt_status(prompt, scroll, extent),
+            theme::key_label(),
+        ))),
+        regions.status,
+    );
+    frame.render_widget(Paragraph::new(actions.right_aligned()), regions.actions);
+}
+
+fn repair_prompt_actions(prompt: &RepairPrompt, fully_seen: bool) -> Line<'static> {
+    let confirm =
+        fully_seen && matches!(prompt, RepairPrompt::Preview(plan) if plan.is_executable());
+    let mut spans = Vec::new();
+    if confirm {
+        spans.extend([
+            Span::styled("Enter", theme::key_cap()),
+            Span::raw(" "),
+            Span::styled("Repair", theme::key_label()),
+            Span::raw("   "),
+        ]);
+    }
+    spans.extend([
+        Span::styled("Esc", theme::key_cap()),
+        Span::raw(" "),
+        Span::styled(if confirm { "Cancel" } else { "Close" }, theme::key_label()),
+    ]);
+    Line::from(spans)
+}
+
+fn repair_prompt_status(prompt: &RepairPrompt, scroll: usize, extent: Option<usize>) -> String {
+    let verdict = match prompt {
+        RepairPrompt::Preview(plan) if plan.blocking_finding().is_some() => {
+            "Blocked — nothing will be written".to_owned()
+        }
+        RepairPrompt::Preview(plan) if plan.is_executable() => "1 link to replace".to_owned(),
+        RepairPrompt::Preview(_) => "Nothing to repair".to_owned(),
+        RepairPrompt::Report(outcome) => match outcome.status() {
+            RepairStatus::NothingToRepair => "Nothing was written".to_owned(),
+            RepairStatus::Repaired if outcome.verification().is_complete() => {
+                "Repaired and verified".to_owned()
+            }
+            RepairStatus::Repaired => "Repaired · not fully verified".to_owned(),
+            RepairStatus::NotApplied => "Nothing was written".to_owned(),
+            RepairStatus::PartiallyApplied => "Partly applied · manual recovery needed".to_owned(),
+            RepairStatus::RepairedUnrecorded => {
+                "Repaired, but not recorded as Skilled's".to_owned()
+            }
+            RepairStatus::VerificationFailed => "Repaired, but not verified".to_owned(),
+        },
+        RepairPrompt::Failed(_) => "No plan was made".to_owned(),
+    };
+    match extent {
+        Some(extent) if extent > 0 => {
+            let where_to = match (scroll > 0, scroll < extent) {
+                (true, true) => "more above and below",
+                (true, false) => "more above",
+                _ => "more below",
+            };
+            format!("{verdict} · {where_to}")
+        }
+        _ => verdict,
+    }
+}
+
+fn repair_prompt_lines(prompt: &RepairPrompt, _width: u16) -> Vec<Line<'static>> {
+    match prompt {
+        RepairPrompt::Failed(message) => vec![Line::from(components::badge(
+            Tone::Critical,
+            &terminal_safe(message),
+        ))],
+        RepairPrompt::Preview(plan) => repair_plan_lines(plan),
+        RepairPrompt::Report(outcome) => repair_report_lines(outcome),
+    }
+}
+
+fn repair_plan_lines(plan: &RepairPlan) -> Vec<Line<'static>> {
+    let mut lines = vec![
+        Line::styled(
+            format!(
+                "Skill: {} · {}",
+                terminal_safe(plan.skill_name()),
+                plan.agent().display_name()
+            ),
+            theme::section_title(),
+        ),
+        Line::from(format!(
+            "Link: {}",
+            terminal_safe(&plan.link_path().display().to_string())
+        )),
+    ];
+    if !plan.current_target().as_os_str().is_empty() {
+        lines.push(Line::from(format!(
+            "Old target: {}",
+            terminal_safe(&plan.current_target().display().to_string())
+        )));
+    }
+    if let Some(target) = plan.new_target() {
+        lines.push(Line::from(format!(
+            "New target: {}",
+            terminal_safe(&target.display().to_string())
+        )));
+    }
+    if let Some(label) = plan.old_source_label() {
+        lines.push(Line::from(format!(
+            "Recorded source: {}",
+            terminal_safe(label)
+        )));
+    } else {
+        lines.push(Line::from("Recorded source: unavailable in this receipt"));
+    }
+    if let Some(label) = plan.new_source_label() {
+        lines.push(Line::from(format!(
+            "Selected source: {}",
+            terminal_safe(label)
+        )));
+    }
+    if plan.source_changed() {
+        lines.push(Line::from(components::badge(
+            Tone::Warning,
+            "The registry now selects a different source.",
+        )));
+    }
+    if let Some(outlook) = plan.opencode_outlook() {
+        lines.push(Line::from(format!(
+            "OpenCode after repair: {}",
+            terminal_safe(&outlook.preview_summary())
+        )));
+    }
+    match plan.disposition() {
+        RepairDisposition::ReplaceLink { dangling: true } => lines.push(Line::from(
+            "Action: atomically replace the dangling symbolic link where supported",
+        )),
+        RepairDisposition::ReplaceLink { dangling: false } => lines.push(Line::from(
+            "Action: atomically replace the incorrect symbolic link where supported",
+        )),
+        RepairDisposition::NothingToRepair => {
+            lines.push(Line::from("Action: nothing; this link is already correct"))
+        }
+        RepairDisposition::Blocked { finding } => lines.push(Line::from(components::badge(
+            Tone::Critical,
+            &format!("{} — {}", finding.code(), terminal_safe(finding.evidence())),
+        ))),
+    }
+    for warning in plan.warnings() {
+        lines.push(Line::from(components::badge(
+            Tone::Warning,
+            &terminal_safe(warning),
+        )));
+    }
+    lines
+}
+
+fn repair_report_lines(outcome: &RepairOutcome) -> Vec<Line<'static>> {
+    let mut lines = vec![Line::styled(
+        format!("Result: {:?}", outcome.status()),
+        theme::section_title(),
+    )];
+    if let Some(step) = outcome.applied().step() {
+        let text = match step.outcome() {
+            RepairStepOutcome::Repaired => "link replaced and receipt recorded".to_owned(),
+            RepairStepOutcome::RepairedUnrecorded(error) => format!(
+                "link replaced, but its receipt failed: {}",
+                terminal_safe(error)
+            ),
+            RepairStepOutcome::RemovedUnreplaced(error) => format!(
+                "original link removed without replacement: {}",
+                terminal_safe(error)
+            ),
+            RepairStepOutcome::ResidualTemporary { path, error } => format!(
+                "temporary link left at {}: {}",
+                terminal_safe(&path.display().to_string()),
+                terminal_safe(error)
+            ),
+            RepairStepOutcome::Failed(reason) => {
+                format!("nothing written: {}", terminal_safe(reason))
+            }
+        };
+        lines.push(Line::from(text));
+        lines.push(Line::from(terminal_safe(
+            &step.link_path().display().to_string(),
+        )));
+    }
+    for withheld in outcome.verification().withheld() {
+        lines.push(Line::from(format!(
+            "Not established: {} — {}",
+            withheld.agent().display_name(),
+            terminal_safe(withheld.reason())
+        )));
+    }
+    for failure in outcome.verification().failures() {
+        lines.push(Line::from(format!(
+            "Not verified: {} — {}",
+            failure.agent().display_name(),
+            terminal_safe(failure.observed())
+        )));
+    }
+    lines
+}
+
 fn install_plan_lines(plan: &InstallPlan, home: &Path, width: u16) -> Vec<Line<'static>> {
     let blocked = plan.is_blocked();
     let mut lines = vec![
@@ -4728,8 +5043,8 @@ fn install_report_lines(outcome: &InstallOutcome) -> Vec<Line<'static>> {
     {
         lines.push(Line::default());
         lines.push(Line::from(
-            "Skilled does not undo what it wrote. Nothing above was removed, and no repair \
-             exists in this release.",
+            "Skilled does not undo what it wrote. Nothing above was removed. Repair only \
+             replaces a still-present link whose ownership can be proven.",
         ));
     }
     lines
@@ -5143,6 +5458,7 @@ fn render_help(
     area: Rect,
     context: View,
     app: &SkilledApp,
+    findings: &[DoctorEntry<'_>],
     detail_extent: Option<usize>,
 ) {
     let viewport = viewport::classify(area);
@@ -5156,7 +5472,7 @@ fn render_help(
     let block = components::dialog_frame("Keyboard reference", &scope);
     let regions = components::dialog_regions(block.inner(popup), 11);
     frame.render_widget(block, popup);
-    let commands = help_commands(context, app, detail_extent);
+    let commands = help_commands(context, app, findings, detail_extent);
     match viewport {
         viewport::Viewport::Compact => {
             let mut lines = vec![
@@ -5245,6 +5561,7 @@ struct HelpCommand {
 fn help_commands(
     context: View,
     app: &SkilledApp,
+    findings: &[DoctorEntry<'_>],
     detail_extent: Option<usize>,
 ) -> Vec<HelpCommand> {
     match context {
@@ -5463,6 +5780,13 @@ fn help_commands(
                     description: "show everything observed about the finding",
                 });
             }
+            if doctor_can_repair_selection(app, findings) {
+                commands.push(HelpCommand {
+                    key: "r",
+                    label: "Repair",
+                    description: "preview replacing this proven Skilled-owned link",
+                });
+            }
             commands.extend([
                 HelpCommand {
                     key: "1",
@@ -5526,6 +5850,7 @@ fn render_footer(
     frame: &mut Frame<'_>,
     area: Rect,
     app: &SkilledApp,
+    findings: &[DoctorEntry<'_>],
     detail_extent: Option<usize>,
 ) {
     // The band reaches the full width, so the row reads as chrome rather than
@@ -5542,7 +5867,7 @@ fn render_footer(
     };
     frame.render_widget(
         Paragraph::new(components::key_hint_line(
-            &key_hints(app, detail_extent),
+            &key_hints(app, findings, detail_extent),
             hints.width,
         ))
         .style(theme::chrome()),
@@ -5554,7 +5879,7 @@ fn render_footer(
 ///
 /// This mirrors [`crate::input`]. A hint that is not backed by a key mapping is
 /// a promise the application cannot keep, so unimplemented commands —
-/// installation, updates, repair, uninstall, and forget — are absent by
+/// updates, uninstall, and forget — are absent by
 /// construction.
 ///
 /// The row is budgeted, and every context declares its routes before `?` and
@@ -5568,7 +5893,11 @@ fn render_footer(
 /// navigation row above already shows every route beside its own key digit,
 /// so a route shed from this row is still on screen, while `i` appears nowhere
 /// else and acts on the very row the user is standing on.
-fn key_hints(app: &SkilledApp, detail_extent: Option<usize>) -> Vec<KeyHint> {
+fn key_hints(
+    app: &SkilledApp,
+    findings: &[DoctorEntry<'_>],
+    detail_extent: Option<usize>,
+) -> Vec<KeyHint> {
     if app.help_context().is_some() {
         return vec![
             KeyHint::essential("Esc", "Close"),
@@ -5592,6 +5921,22 @@ fn key_hints(app: &SkilledApp, detail_extent: Option<usize>) -> Vec<KeyHint> {
             && matches!(prompt, InstallPrompt::Preview(plan) if plan.is_executable())
         {
             hints.push(KeyHint::essential("Enter", "Install"));
+            hints.push(KeyHint::essential("Esc", "Cancel"));
+        } else {
+            hints.push(KeyHint::essential("Esc", "Close"));
+        }
+        hints.push(KeyHint::new("Ctrl-C", "Quit"));
+        return hints;
+    }
+    if let Some(prompt) = app.pending_repair() {
+        let mut hints = Vec::new();
+        if detail_extent.is_some_and(|extent| extent > 0) {
+            hints.push(KeyHint::essential("j/k", "Scroll"));
+        }
+        if preview_fully_seen(app, detail_extent)
+            && matches!(prompt, RepairPrompt::Preview(plan) if plan.is_executable())
+        {
+            hints.push(KeyHint::essential("Enter", "Repair"));
             hints.push(KeyHint::essential("Esc", "Cancel"));
         } else {
             hints.push(KeyHint::essential("Esc", "Close"));
@@ -5710,6 +6055,9 @@ fn key_hints(app: &SkilledApp, detail_extent: Option<usize>) -> Vec<KeyHint> {
             if doctor_can_advance(app) {
                 hints.push(KeyHint::essential("Enter", "Open"));
             }
+            if doctor_can_repair_selection(app, findings) {
+                hints.push(KeyHint::new("r", "Repair"));
+            }
             hints.extend([
                 KeyHint::new("1", "Inventory"),
                 KeyHint::new("2", "Sources"),
@@ -5727,10 +6075,25 @@ fn key_hints(app: &SkilledApp, detail_extent: Option<usize>) -> Vec<KeyHint> {
     }
 }
 
+/// Whether the Doctor row selected in this frame offers repair.
+///
+/// `render` has already paid to merge and order the findings. Reusing that
+/// slice keeps the detail, help, and key bar on the same row without another
+/// full allocation and sort.
+fn doctor_can_repair_selection(app: &SkilledApp, findings: &[DoctorEntry<'_>]) -> bool {
+    findings
+        .get(app.focused_finding())
+        .is_some_and(|entry| app.can_repair_finding(entry))
+}
+
 /// Whether every row of the open preview has been on screen, as this frame
 /// measures it.
-fn install_preview_fully_seen(app: &SkilledApp, detail_extent: Option<usize>) -> bool {
+fn preview_fully_seen(app: &SkilledApp, detail_extent: Option<usize>) -> bool {
     detail_extent.is_none_or(|extent| app.detail_scroll() >= extent)
+}
+
+fn install_preview_fully_seen(app: &SkilledApp, detail_extent: Option<usize>) -> bool {
+    preview_fully_seen(app, detail_extent)
 }
 
 /// Enter only drills in, so it advertises itself only where it can.
