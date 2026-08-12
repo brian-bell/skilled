@@ -75,8 +75,12 @@ jobs:
         run: cargo build --release
 
   package:
-    name: Release package (Rust 1.97)
-    runs-on: ubuntu-latest
+    name: Release package (Rust 1.97, ${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
