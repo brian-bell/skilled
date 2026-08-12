@@ -1,4 +1,4 @@
-//! The `skilled install` command.
+//! The `skilled install` and `skilled repair` commands.
 //!
 //! One narrow surface, parsed by hand. Spec 16 asks for a handful of flags and
 //! distinguishable exit statuses, and adding a production dependency for that
@@ -22,7 +22,8 @@ use crate::{
     components::terminal_safe,
     operations::{
         AppliedStep, ExcludedReason, InstallOutcome, InstallPlan, InstallStatus, InstallTarget,
-        LocateFailure, StepOutcome, TargetDisposition, UninstallDisposition, UninstallOutcome,
+        LocateFailure, RepairDisposition, RepairOutcome, RepairPlan, RepairStatus,
+        RepairStepOutcome, StepOutcome, TargetDisposition, UninstallDisposition, UninstallOutcome,
         UninstallPlan, UninstallStatus, locate_variant,
     },
 };
@@ -66,13 +67,18 @@ const USAGE: &str = "\
 usage: skilled install --source <id-or-path> --skill <name> \
 [--agents claude-code,codex,opencode] [--yes]
        skilled uninstall --skill <name> --agent <agent> [--yes]
+       skilled repair --skill <name> --agent <agent> [--yes]
 
   --source   a registered source, by the identifier Skilled gave it or by its
              checkout path
   --skill    the skill directory name to install
   --agents   which agents to install for; defaults to every configured agent
-  --yes      skip the confirmation. Requires --source, --skill, and --agents to
-             be given explicitly; every safety check still runs.
+  --yes      skip the confirmation. Install requires --source, --skill, and
+             --agents explicitly; repair requires --skill and --agent. Every
+             safety check still runs.
+
+Repair re-resolves the named skill from the live registry. It replaces only a
+symbolic link whose recorded target exactly matches a Skilled receipt.
 
 Uninstall removes only an exact matching Skilled-managed link. Its --agent is
 singular and every receipt, object-type, target, containment, and verification
@@ -97,8 +103,9 @@ pub fn run(
         Err(message) => return refuse(output, &message),
     };
     let result = match parsed {
-        Parsed::Install(request) => execute(&request, environment, input, output),
+        Parsed::Install(request) => execute_install(&request, environment, input, output),
         Parsed::Uninstall(request) => execute_uninstall(&request, environment, input, output),
+        Parsed::Repair(request) => execute_repair(&request, environment, input, output),
         Parsed::Usage => {
             let _ = writeln!(output, "{USAGE}");
             return ExitCodeKind::Success;
@@ -157,6 +164,17 @@ pub fn exit_code_for_uninstall(status: UninstallStatus) -> ExitCodeKind {
     }
 }
 
+pub fn exit_code_for_repair(status: RepairStatus) -> ExitCodeKind {
+    match status {
+        RepairStatus::NothingToRepair | RepairStatus::Repaired => ExitCodeKind::Success,
+        RepairStatus::NotApplied => ExitCodeKind::Blocked,
+        RepairStatus::PartiallyApplied | RepairStatus::RepairedUnrecorded => {
+            ExitCodeKind::PartialApply
+        }
+        RepairStatus::VerificationFailed => ExitCodeKind::VerificationFailed,
+    }
+}
+
 fn refuse(output: &mut dyn Write, message: &str) -> ExitCodeKind {
     let _ = writeln!(output, "skilled: {}\n\n{USAGE}", safe(message));
     ExitCodeKind::InvalidRequest
@@ -176,9 +194,16 @@ struct UninstallRequest {
     assume_yes: bool,
 }
 
+struct RepairRequest {
+    skill: String,
+    agent: AgentKind,
+    assume_yes: bool,
+}
+
 enum Parsed {
     Install(InstallRequest),
     Uninstall(UninstallRequest),
+    Repair(RepairRequest),
     Usage,
 }
 
@@ -187,6 +212,7 @@ fn parse(arguments: &[String]) -> Result<Parsed, String> {
     let command = match arguments.next().map(String::as_str) {
         Some("install") => "install",
         Some("uninstall") => "uninstall",
+        Some("repair") => "repair",
         Some("--help" | "-h" | "help") => return Ok(Parsed::Usage),
         Some(other) => return Err(format!("unknown command {other}")),
         None => return Err("no command was given".to_owned()),
@@ -219,16 +245,34 @@ fn parse(arguments: &[String]) -> Result<Parsed, String> {
     // every part of what would have been shown has to have been stated. Spec 15
     // asks for the confirmation to be the only thing it removes, and a target
     // set Skilled chose is not a target set the user agreed to.
-    if assume_yes && command == "install" {
-        for (flag, given) in [
-            ("--source", source.is_some()),
-            ("--skill", skill.is_some()),
-            ("--agents", agents.is_some()),
-        ] {
+    if assume_yes {
+        let required: &[(&str, bool)] = match command {
+            "install" => &[
+                ("--source", source.is_some()),
+                ("--skill", skill.is_some()),
+                ("--agents", agents.is_some()),
+            ],
+            // Uninstall and repair name one skill and one agent, and both are
+            // required with or without `--yes`; stating the requirement here
+            // keeps the unattended refusal about the flag that is missing.
+            _ => &[("--skill", skill.is_some()), ("--agent", agent.is_some())],
+        };
+        for (flag, given) in required {
             if !given {
                 return Err(format!("--yes requires {flag} to be given explicitly"));
             }
         }
+    }
+
+    if command == "repair" {
+        if source.is_some() || agents.is_some() {
+            return Err("repair takes --agent, not --source or --agents".to_owned());
+        }
+        return Ok(Parsed::Repair(RepairRequest {
+            skill: skill.ok_or("--skill is required")?,
+            agent: agent.ok_or("--agent is required")?,
+            assume_yes,
+        }));
     }
 
     if command == "uninstall" {
@@ -300,7 +344,7 @@ fn agent_identifier(agent: AgentKind) -> &'static str {
     }
 }
 
-fn execute(
+fn execute_install(
     request: &InstallRequest,
     environment: AppEnvironment,
     input: &mut dyn BufRead,
@@ -562,6 +606,41 @@ fn write_uninstall_report(
     )
 }
 
+fn execute_repair(
+    request: &RepairRequest,
+    environment: AppEnvironment,
+    input: &mut dyn BufRead,
+    output: &mut dyn Write,
+) -> Result<ExitCodeKind, String> {
+    let mut app = SkilledApp::open(environment).map_err(|error| error.to_string())?;
+    let plan = match app.plan_repair_for(&request.skill, request.agent) {
+        Ok(plan) => plan,
+        Err(PlanRequestFailure::Unplannable(message)) => return Ok(refuse(output, &message)),
+        Err(PlanRequestFailure::Metadata(message)) => return Err(message),
+    };
+    write_repair_plan(output, &plan).map_err(|error| error.to_string())?;
+    if let Some(finding) = plan.blocking_finding() {
+        let _ = writeln!(
+            output,
+            "\nBlocked: nothing was written. {} — {}",
+            finding.code(),
+            safe(finding.evidence())
+        );
+        return Ok(ExitCodeKind::Blocked);
+    }
+    if matches!(plan.disposition(), RepairDisposition::NothingToRepair) {
+        let _ = writeln!(output, "\nNothing to repair.");
+        return Ok(ExitCodeKind::Success);
+    }
+    if !request.assume_yes && !confirmed(input, output)? {
+        let _ = writeln!(output, "Cancelled. Nothing was written.");
+        return Ok(ExitCodeKind::Success);
+    }
+    let outcome = app.apply_repair_plan(&plan);
+    write_repair_report(output, &outcome).map_err(|error| error.to_string())?;
+    Ok(exit_code_for_repair(outcome.status()))
+}
+
 /// A source named by the identifier the registry gave it, or by the path its
 /// checkout sits at.
 ///
@@ -633,6 +712,123 @@ fn write_plan(output: &mut dyn Write, plan: &InstallPlan, home: &Path) -> std::i
     }
     for warning in plan.warnings() {
         writeln!(output, "\n  warning: {}", safe(warning))?;
+    }
+    Ok(())
+}
+
+fn write_repair_plan(output: &mut dyn Write, plan: &RepairPlan) -> std::io::Result<()> {
+    writeln!(
+        output,
+        "Repair {} for {}",
+        safe(plan.skill_name()),
+        plan.agent().display_name()
+    )?;
+    writeln!(output, "  link {}", safe(&plan.link_path().display()))?;
+    if !plan.current_target().as_os_str().is_empty() {
+        writeln!(output, "  old  {}", safe(&plan.current_target().display()))?;
+    }
+    if let Some(target) = plan.new_target() {
+        writeln!(output, "  new  {}", safe(&target.display()))?;
+    }
+    if let Some(label) = plan.old_source_label() {
+        writeln!(output, "  recorded source {}", safe(label))?;
+    } else {
+        writeln!(output, "  recorded source unavailable in this receipt")?;
+    }
+    if let Some(label) = plan.new_source_label() {
+        writeln!(output, "  selected source {}", safe(label))?;
+    }
+    if plan.source_changed() {
+        writeln!(
+            output,
+            "  source changed: the registry now selects a different source"
+        )?;
+    }
+    if let Some(outlook) = plan.opencode_outlook() {
+        writeln!(
+            output,
+            "  OpenCode after repair: {}",
+            safe(&outlook.preview_summary())
+        )?;
+    }
+    match plan.disposition() {
+        RepairDisposition::ReplaceLink { dangling: true } => {
+            writeln!(output, "  replace dangling link")?
+        }
+        RepairDisposition::ReplaceLink { dangling: false } => {
+            writeln!(output, "  replace incorrect link")?
+        }
+        RepairDisposition::NothingToRepair => {
+            writeln!(output, "  already resolves to the selected target")?
+        }
+        RepairDisposition::Blocked { finding } => writeln!(
+            output,
+            "  blocked: {} — {}",
+            finding.code(),
+            safe(finding.evidence())
+        )?,
+    }
+    for warning in plan.warnings() {
+        writeln!(output, "  warning: {}", safe(warning))?;
+    }
+    Ok(())
+}
+
+fn write_repair_report(output: &mut dyn Write, outcome: &RepairOutcome) -> std::io::Result<()> {
+    writeln!(output)?;
+    if let Some(step) = outcome.applied().step() {
+        let verdict = match step.outcome() {
+            RepairStepOutcome::Repaired => "link replaced and receipt recorded".to_owned(),
+            RepairStepOutcome::RepairedUnrecorded(error) => format!(
+                "link replaced, but Skilled could not record owning it: {}",
+                safe(error)
+            ),
+            RepairStepOutcome::RemovedUnreplaced(error) => {
+                format!(
+                    "original link removed without replacement — {}",
+                    safe(error)
+                )
+            }
+            RepairStepOutcome::ResidualTemporary { path, error } => format!(
+                "temporary link left at {} — {}",
+                safe(&path.display()),
+                safe(error)
+            ),
+            RepairStepOutcome::Failed(reason) => format!("not written — {}", safe(reason)),
+        };
+        writeln!(output, "  {:<12} {verdict}", step.agent().display_name())?;
+        writeln!(
+            output,
+            "               {}",
+            safe(&step.link_path().display())
+        )?;
+    }
+    if outcome.verification().is_complete() {
+        writeln!(
+            output,
+            "\nVerified: the repaired link was observed again and matches this plan."
+        )?;
+    } else if outcome.verification().is_verified() {
+        writeln!(
+            output,
+            "\nVerified as far as it could be: the repaired link was observed again."
+        )?;
+    }
+    for withheld in outcome.verification().withheld() {
+        writeln!(
+            output,
+            "Not established: {} — {}",
+            withheld.agent().display_name(),
+            safe(withheld.reason())
+        )?;
+    }
+    for failure in outcome.verification().failures() {
+        writeln!(
+            output,
+            "Not verified: {} — {}",
+            failure.agent().display_name(),
+            safe(failure.observed())
+        )?;
     }
     Ok(())
 }
@@ -752,7 +948,8 @@ fn write_report(output: &mut dyn Write, outcome: &InstallOutcome) -> std::io::Re
         writeln!(
             output,
             "Skilled does not undo a partial install automatically; uninstall is a separate \
-             confirmed operation, and no repair exists in this release."
+             confirmed operation, and repair only replaces a still-present link whose \
+             ownership can be proven."
         )?;
     }
     Ok(())

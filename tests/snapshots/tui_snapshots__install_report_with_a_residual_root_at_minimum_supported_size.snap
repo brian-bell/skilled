@@ -1,6 +1,5 @@
 ---
 source: tests/tui_snapshots.rs
-assertion_line: 1653
 expression: "normalize_install_screen(&temporary, render(&app, 80, 24))"
 ---
  ◆ skilled  global                                ● ready · 1 source registered

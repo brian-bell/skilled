@@ -228,8 +228,8 @@ fn a_dangling_symlink_blocks_rather_than_being_replaced() {
         unreachable!("just asserted");
     };
     assert!(
-        finding.evidence().contains("does not repair or replace"),
-        "the evidence says no repair exists: {}",
+        finding.evidence().contains("separate repair operation"),
+        "the install refusal should point to eligible repair: {}",
         finding.evidence()
     );
 }
