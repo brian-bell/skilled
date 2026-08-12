@@ -398,6 +398,20 @@ fn malformed_requests_are_refused_with_usage() {
     for arguments in [
         vec!["uninstall", "--skill", "portable"],
         vec![
+            "uninstall",
+            "--skill",
+            "../outside",
+            "--agent",
+            "claude-code",
+        ],
+        vec![
+            "uninstall",
+            "--skill",
+            "/tmp/outside",
+            "--agent",
+            "claude-code",
+        ],
+        vec![
             "install",
             "--yes",
             "--source",

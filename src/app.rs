@@ -19,6 +19,7 @@ use crate::{
         revalidate_source_preview,
     },
     store::Store,
+    validation::valid_skill_name,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1268,6 +1269,12 @@ impl SkilledApp {
         skill_name: &str,
         requested: [bool; 3],
     ) -> std::result::Result<UninstallPlan, PlanRequestFailure> {
+        if !valid_skill_name(skill_name) {
+            return Err(PlanRequestFailure::Unplannable(
+                "the uninstall skill name must be 1-64 lowercase ASCII letters or digits with single hyphen separators"
+                    .to_owned(),
+            ));
+        }
         let receipts = self.store.receipts().map_err(|error| {
             PlanRequestFailure::Metadata(format!(
                 "the ownership receipts could not be read, so Skilled cannot tell its own links from anyone else's: {error}"

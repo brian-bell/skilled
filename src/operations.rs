@@ -19,7 +19,7 @@ use std::{
 
 use crate::{
     AgentDetection, AgentKind,
-    agents::detection_at,
+    agents::{adapter, detection_at},
     inventory::{
         Finding, FindingSeverity, InstallationHealth, InstallationObject,
         InstalledSkillObservation, InventoryRow, InventorySnapshot, Provenance, RootStatus,
@@ -30,7 +30,10 @@ use crate::{
     },
     source::{RegisteredSource, SkillValidation, contains_revision},
     store::Store,
-    validation::{InspectionBudget, PortableValidationError, validate_portable_skill_with_budget},
+    validation::{
+        InspectionBudget, PortableValidationError, valid_skill_name,
+        validate_portable_skill_with_budget,
+    },
 };
 
 /// Why an install request could not be turned into a plan at all.
@@ -335,7 +338,23 @@ fn probe_source(sources: &[RegisteredSource], variant: &VariantRef) -> Result<So
 /// Skilled to leave alone stays unread, so nothing in it can decide anything —
 /// not this agent's own target, and not what the plan says about OpenCode.
 fn probe_target(agent: &AgentDetection, skill_name: &str, home: &Path) -> TargetProbe {
-    let link_path = agent.root().join(skill_name);
+    let safe_name = valid_skill_name(skill_name);
+    let link_path = if safe_name {
+        agent.root().join(skill_name)
+    } else {
+        agent.root().to_path_buf()
+    };
+    if !safe_name || link_path.parent() != Some(agent.root()) {
+        return TargetProbe {
+            agent: agent.kind(),
+            link_path,
+            root: RootProbe::NotRead,
+            entry: EntryProbe::Unreadable(
+                "the skill name is not one safe path component".to_owned(),
+            ),
+            content: SlotContent::Unknown,
+        };
+    }
     if !agent.selected() {
         return TargetProbe {
             agent: agent.kind(),
@@ -2144,22 +2163,20 @@ fn apply_uninstall_target(
     let Some(root) = target.link_path.parent() else {
         return StepOutcome::Failed("the target has no parent directory".to_owned());
     };
+    let documented_root = home.join(adapter(target.agent).native_skill_root());
+    if root != documented_root {
+        return StepOutcome::Failed(
+            "the target is not beneath the agent's exact documented skill root".to_owned(),
+        );
+    }
     if probe_root(root, home) != RootProbe::Present {
         return StepOutcome::Failed(
             "the agent's skill root changed after the plan was shown, so nothing was removed"
                 .to_owned(),
         );
     }
-    match probe_entry(&target.link_path) {
-        EntryProbe::Symlink {
-            target: current, ..
-        } if current == *link_target => {}
-        EntryProbe::Symlink { .. } => {
-            return StepOutcome::Failed(
-                "the link target changed after the plan was shown, so nothing was removed"
-                    .to_owned(),
-            );
-        }
+    match fs::symlink_metadata(&target.link_path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {}
         _ => return StepOutcome::Failed(
             "the path is no longer the symbolic link the plan described, so nothing was removed"
                 .to_owned(),
@@ -2182,6 +2199,20 @@ fn apply_uninstall_target(
             "the matching ownership receipt disappeared after the plan was shown, so nothing was removed"
                 .to_owned(),
         );
+    }
+    match fs::read_link(&target.link_path) {
+        Ok(current) if current == *link_target => {}
+        Ok(_) => {
+            return StepOutcome::Failed(
+                "the link target changed after the plan was shown, so nothing was removed"
+                    .to_owned(),
+            );
+        }
+        Err(error) => {
+            return StepOutcome::Failed(format!(
+                "the symbolic link target could not be re-read, so nothing was removed: {error}"
+            ));
+        }
     }
     match remove_directory_symlink(&target.link_path) {
         Ok(()) => StepOutcome::Removed,

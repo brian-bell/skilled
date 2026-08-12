@@ -410,6 +410,12 @@ fn execute_uninstall(
     input: &mut dyn BufRead,
     output: &mut dyn Write,
 ) -> Result<ExitCodeKind, String> {
+    if !crate::validation::valid_skill_name(&request.skill) {
+        return Ok(refuse(
+            output,
+            "the uninstall skill name must be 1-64 lowercase ASCII letters or digits with single hyphen separators",
+        ));
+    }
     let mut app = SkilledApp::open(environment).map_err(|error| error.to_string())?;
     let mut requested = [false; 3];
     requested[request.agent.index()] = true;
