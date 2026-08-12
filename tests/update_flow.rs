@@ -2069,6 +2069,44 @@ fn a_repository_finding_states_its_consequence_in_doctor() {
         .perform_effects(&[Effect::CheckUpdates])
         .expect("start check");
     finish_update_check(&mut fixture.app);
+    {
+        let source = &fixture.app.sources()[0];
+        let checks = fixture.app.update_checks();
+        eprintln!("DIAG git status --porcelain=v1:");
+        eprintln!("{}", git(&fixture.clone, &["status", "--porcelain=v1"]));
+        eprintln!(
+            "DIAG source: head={} branch={:?} dirty={:?} error={:?}",
+            source.head(),
+            source.branch(),
+            source.dirty(),
+            source.source_error()
+        );
+        for check in checks {
+            eprintln!(
+                "DIAG check: revision={} reference={:?} dirty={} dirty_known={} verdict={:?} superseded={} findings={:?}",
+                check.local_revision,
+                check.local_reference,
+                check.dirty,
+                check.dirty_known,
+                check.verdict,
+                check.superseded_by(source),
+                check
+                    .findings()
+                    .iter()
+                    .map(|finding| finding.code().to_owned())
+                    .collect::<Vec<_>>()
+            );
+        }
+        eprintln!(
+            "DIAG doctor: {:?}",
+            fixture
+                .app
+                .doctor_findings()
+                .iter()
+                .map(|entry| entry.finding().code().to_owned())
+                .collect::<Vec<_>>()
+        );
+    }
     assert!(
         fixture
             .app
