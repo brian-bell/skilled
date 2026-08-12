@@ -4732,6 +4732,11 @@ fn repair_report_lines(outcome: &RepairOutcome) -> Vec<Line<'static>> {
                 "original link removed without replacement: {}",
                 terminal_safe(error)
             ),
+            RepairStepOutcome::ResidualTemporary { path, error } => format!(
+                "temporary link left at {}: {}",
+                terminal_safe(&path.display().to_string()),
+                terminal_safe(error)
+            ),
             RepairStepOutcome::Failed(reason) => {
                 format!("nothing written: {}", terminal_safe(reason))
             }

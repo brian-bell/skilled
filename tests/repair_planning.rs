@@ -138,6 +138,75 @@ fn a_removed_old_link_is_a_partial_apply_exit() {
 }
 
 #[test]
+fn an_opencode_only_repair_withholds_compatibility_roots_without_failing() {
+    let fixture = Fixture::new();
+    let common = fixture.source("common", "skills", "portable");
+    let mut app = fixture.registered_with(&common, [false, false, true]);
+    fixture.create_root_parents();
+    fixture.install(&mut app);
+    let specific = fixture.source("opencode-specific", ".config/opencode/skills", "portable");
+    let preview = app
+        .preview_source(&specific)
+        .expect("preview OpenCode source");
+    app.confirm_source(preview)
+        .expect("register OpenCode source");
+
+    dispatch(&mut app, Action::OpenDoctor);
+    dispatch(&mut app, Action::BeginRepair);
+    assert!(matches!(
+        app.pending_repair(),
+        Some(RepairPrompt::Preview(plan)) if plan.agent() == AgentKind::OpenCode
+    ));
+    app.note_detail_max_scroll(Some(0));
+    dispatch(&mut app, Action::ConfirmRepair);
+
+    let Some(RepairPrompt::Report(outcome)) = app.pending_repair() else {
+        panic!("repair should report its result");
+    };
+    assert_eq!(outcome.status(), RepairStatus::Repaired);
+    assert!(outcome.verification().is_verified());
+    assert!(!outcome.verification().is_complete());
+    assert_eq!(outcome.verification().withheld().len(), 1);
+    assert_eq!(
+        outcome.verification().withheld()[0].agent(),
+        AgentKind::OpenCode
+    );
+}
+
+#[test]
+fn a_codex_repair_with_opencode_deselected_withholds_the_ancillary_check() {
+    let fixture = Fixture::new();
+    let common = fixture.source("common", "skills", "portable");
+    let mut app = fixture.registered_with(&common, [false, true, false]);
+    fixture.create_root_parents();
+    fixture.install(&mut app);
+    let specific = fixture.source("codex-specific", ".agents/skills", "portable");
+    let preview = app.preview_source(&specific).expect("preview Codex source");
+    app.confirm_source(preview).expect("register Codex source");
+
+    dispatch(&mut app, Action::OpenDoctor);
+    dispatch(&mut app, Action::BeginRepair);
+    assert!(matches!(
+        app.pending_repair(),
+        Some(RepairPrompt::Preview(plan)) if plan.agent() == AgentKind::Codex
+    ));
+    app.note_detail_max_scroll(Some(0));
+    dispatch(&mut app, Action::ConfirmRepair);
+
+    let Some(RepairPrompt::Report(outcome)) = app.pending_repair() else {
+        panic!("repair should report its result");
+    };
+    assert_eq!(outcome.status(), RepairStatus::Repaired);
+    assert!(outcome.verification().is_verified());
+    assert!(!outcome.verification().is_complete());
+    assert_eq!(outcome.verification().withheld().len(), 1);
+    assert_eq!(
+        outcome.verification().withheld()[0].agent(),
+        AgentKind::OpenCode
+    );
+}
+
+#[test]
 fn inventory_details_render_every_owned_incorrect_link_finding_by_agent() {
     let fixture = Fixture::new();
     let common = fixture.source("common", "skills", "portable");
@@ -709,10 +778,25 @@ impl Fixture {
         AppEnvironment::new(self.home(), self.directory.path().join("data"), "")
     }
     fn registered(&self, repository: &Path) -> SkilledApp {
+        self.registered_with(repository, [true; 3])
+    }
+    fn registered_with(&self, repository: &Path, selections: [bool; 3]) -> SkilledApp {
         let mut app = self.app();
         let preview = app.preview_source(repository).unwrap();
         app.confirm_source(preview).unwrap();
-        for _ in 0..7 {
+        dispatch(&mut app, Action::Continue);
+        for (index, selected) in selections.into_iter().enumerate() {
+            if !selected {
+                for _ in 0..index {
+                    dispatch(&mut app, Action::MoveSelection(1));
+                }
+                dispatch(&mut app, Action::ToggleSelection);
+                for _ in 0..index {
+                    dispatch(&mut app, Action::MoveSelection(-1));
+                }
+            }
+        }
+        for _ in 0..6 {
             dispatch(&mut app, Action::Continue);
         }
         app

@@ -591,6 +591,11 @@ fn write_repair_report(output: &mut dyn Write, outcome: &RepairOutcome) -> std::
                     safe(error)
                 )
             }
+            RepairStepOutcome::ResidualTemporary { path, error } => format!(
+                "temporary link left at {} — {}",
+                safe(&path.display()),
+                safe(error)
+            ),
             RepairStepOutcome::Failed(reason) => format!("not written — {}", safe(reason)),
         };
         writeln!(output, "  {:<12} {verdict}", step.agent().display_name())?;

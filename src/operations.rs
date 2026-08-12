@@ -2333,6 +2333,13 @@ pub enum RepairStepOutcome {
     /// and creation then failed. Skilled did not install a replacement; the
     /// path may be absent or occupied by an object that raced with creation.
     RemovedUnreplaced(String),
+    /// Unix could not remove the sibling temporary link after its atomic rename
+    /// failed. The original installation remains, but this additional link is a
+    /// residual write that must be reported with its exact path.
+    ResidualTemporary {
+        path: PathBuf,
+        error: String,
+    },
     Failed(String),
 }
 
@@ -2474,6 +2481,17 @@ fn apply_repair_target(plan: &RepairPlan, store: &Store, home: &Path) -> RepairS
             ReplaceLinkError::RemovedOldLink(error) => {
                 RepairStepOutcome::RemovedUnreplaced(error.to_string())
             }
+            #[cfg(unix)]
+            ReplaceLinkError::ResidualTemporary {
+                path,
+                rename_error,
+                cleanup_error,
+            } => RepairStepOutcome::ResidualTemporary {
+                path,
+                error: format!(
+                    "the replacement rename failed ({rename_error}), then cleanup failed: {cleanup_error}"
+                ),
+            },
         };
     }
     match store.record_receipt(&receipt) {
@@ -2499,8 +2517,14 @@ fn replace_directory_symlink(target: &Path, link_path: &Path) -> Result<(), Repl
     let temporary = parent.join(format!(".skilled-repair-{}-{nonce}", std::process::id()));
     create_directory_symlink(target, &temporary).map_err(ReplaceLinkError::Unchanged)?;
     if let Err(error) = fs::rename(&temporary, link_path) {
-        let _ = fs::remove_file(&temporary);
-        return Err(ReplaceLinkError::Unchanged(error));
+        return match fs::remove_file(&temporary) {
+            Ok(()) => Err(ReplaceLinkError::Unchanged(error)),
+            Err(cleanup_error) => Err(ReplaceLinkError::ResidualTemporary {
+                path: temporary,
+                rename_error: error,
+                cleanup_error,
+            }),
+        };
     }
     Ok(())
 }
@@ -2526,6 +2550,14 @@ enum ReplaceLinkError {
     /// The proven old link was removed before replacement creation failed.
     #[cfg(windows)]
     RemovedOldLink(io::Error),
+    /// The replacement rename failed and its sibling temporary link could not
+    /// be removed, leaving an additional filesystem entry behind.
+    #[cfg(unix)]
+    ResidualTemporary {
+        path: PathBuf,
+        rename_error: io::Error,
+        cleanup_error: io::Error,
+    },
 }
 
 /// Check a repaired link and its OpenCode outlook against a fresh scan.
@@ -2543,6 +2575,17 @@ pub fn verify_repair(
         let reason = match &step.outcome {
             RepairStepOutcome::RemovedUnreplaced(_) => {
                 "the original link was removed but no replacement was written, so there was no repaired link to verify"
+            }
+            RepairStepOutcome::ResidualTemporary { path, .. } => {
+                withheld.push(VerifyWithheld {
+                    agent: step.agent,
+                    reason: format!(
+                        "the failed repair left a temporary link at {}",
+                        path.display()
+                    ),
+                    required: true,
+                });
+                return VerifyReport { failures, withheld };
             }
             _ => "the repair was not applied, so there was no repaired link to verify",
         };
@@ -2596,7 +2639,7 @@ pub fn verify_repair(
                     "what OpenCode resolves the name to could not be established: {}",
                     unknown_roots(roots)
                 ),
-                required: step.agent == AgentKind::OpenCode,
+                required: false,
             }),
             Some(resolution) => {
                 let actual = OpenCodeOutlook::of(resolution);
@@ -2613,6 +2656,12 @@ pub fn verify_repair(
                     });
                 }
             }
+            None if plan.opencode_outlook().is_some() => withheld.push(VerifyWithheld {
+                agent: AgentKind::OpenCode,
+                reason: "the fresh scan produced no OpenCode resolution, so that ancillary postcondition was not checked"
+                    .to_owned(),
+                required: false,
+            }),
             None => {}
         }
     }
@@ -2667,6 +2716,7 @@ impl RepairOutcome {
             None => RepairStatus::NotApplied,
             Some(RepairStepOutcome::Failed(_)) => RepairStatus::NotApplied,
             Some(RepairStepOutcome::RemovedUnreplaced(_)) => RepairStatus::PartiallyApplied,
+            Some(RepairStepOutcome::ResidualTemporary { .. }) => RepairStatus::PartiallyApplied,
             Some(RepairStepOutcome::RepairedUnrecorded(_)) => RepairStatus::RepairedUnrecorded,
             Some(RepairStepOutcome::Repaired) if !self.verification.is_verified() => {
                 RepairStatus::VerificationFailed
@@ -3080,6 +3130,31 @@ mod tests {
                 agent: AgentKind::Codex,
                 link_path: plan.link_path.clone(),
                 outcome: RepairStepOutcome::RemovedUnreplaced("permission denied".to_owned()),
+            }),
+        };
+        let outcome = RepairOutcome::new(plan, applied, VerifyReport::default());
+
+        assert_eq!(outcome.status(), RepairStatus::PartiallyApplied);
+    }
+
+    /// A failed cleanup after a failed atomic rename leaves an agent-visible
+    /// temporary link behind, so it is a partial mutation too.
+    #[test]
+    fn a_residual_temporary_link_is_a_partial_repair() {
+        let mut plan = empty_repair_plan(
+            AgentKind::Codex,
+            "portable",
+            PathBuf::from("/home/example/.agents/skills/portable"),
+        );
+        plan.disposition = RepairDisposition::ReplaceLink { dangling: false };
+        let applied = RepairApplyReport {
+            step: Some(RepairAppliedStep {
+                agent: AgentKind::Codex,
+                link_path: plan.link_path.clone(),
+                outcome: RepairStepOutcome::ResidualTemporary {
+                    path: PathBuf::from("/home/example/.agents/skills/.skilled-repair-123-456"),
+                    error: "permission denied".to_owned(),
+                },
             }),
         };
         let outcome = RepairOutcome::new(plan, applied, VerifyReport::default());
