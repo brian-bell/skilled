@@ -845,14 +845,22 @@ fn valid_backup_component(name: &str) -> bool {
 /// so the reserved object is the pathname's own regular file, created for the
 /// owner alone. No file is ever replaced or removed.
 ///
-/// One pathname window survives it: the reservation is closed before `VACUUM
-/// INTO` reopens the name, so anything able to write the application-data
-/// directory could unlink the reservation and leave another empty file for
-/// SQLite to populate. Closing it means a destination SQLite holds open —
-/// the backup API rather than `VACUUM INTO`, which is a different mechanism
-/// rather than a tightening of this one. It is the same class of window as
-/// `skilled-cb2`, against a directory only this user's account should be able
-/// to write, and it is tracked as `skilled-2k3.24`.
+/// One pathname window survives it, and it survives on purpose. The
+/// reservation is closed before `VACUUM INTO` reopens the name, so anything
+/// able to write the application-data directory could unlink the reservation
+/// and leave another empty file for SQLite to populate — losing both the
+/// no-overwrite rule and the owner-only mode. Holding the reservation open
+/// does not close it: SQLite has no open-by-descriptor, so every mechanism
+/// that could write this backup opens by pathname, `sqlite3_backup` included
+/// — its destination is a `Connection`, and a `Connection` is opened by name.
+/// The window is a property of the API rather than of this call.
+///
+/// What actually bounds it is the directory. An attacker who can write the
+/// application-data directory can already read, replace, or delete the
+/// database this backup is a copy of, so there is no privacy here left for
+/// the backup to lose that they do not already have. It is the same class of
+/// window as `skilled-cb2`, and narrowing it further is tracked as
+/// `skilled-2k3.24`.
 fn backup_database(
     connection: &Connection,
     database_path: &Path,
