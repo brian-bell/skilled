@@ -1105,21 +1105,26 @@ fn degraded_registry_failure_states_that_the_scan_scope_was_retained() {
     drop(connection);
 
     let app = SkilledApp::open(harness.environment()).expect("open degraded application");
-    let rendered = text(&buffer(&app, 120, 40));
+    // Compact, so the banner wraps within one pane: a wide screen interleaves
+    // the detail region's rows between the wrapped halves of every sentence.
+    let rendered = text(&buffer(&app, 80, 24));
+    // A sentence the banner wraps is still that sentence, and where it breaks
+    // is the paragraph's business rather than this test's.
+    let unwrapped = unwrapped_text(&rendered);
 
     // The scan scope is the banner's to state, and it states the retained one
     // rather than the wider scope of a session that lost its selection.
     assert!(
-        rendered.contains("The agent selection was retained"),
+        unwrapped.contains("The agent selection was retained"),
         "{rendered}"
     );
     assert!(
-        !rendered.contains("all detected roots were scanned"),
+        !unwrapped.contains("all detected roots were scanned"),
         "{rendered}"
     );
     // The body keeps what the scan observed instead of repeating the banner.
     assert!(
-        rendered.contains("No agent skill root exists yet"),
+        unwrapped.contains("No agent skill root exists yet"),
         "{rendered}"
     );
 }
@@ -1229,6 +1234,50 @@ fn a_degraded_no_agent_session_is_not_sent_to_a_setup_it_cannot_rerun() {
     let doctor = text(&buffer(&app, 120, 40));
     assert!(doctor.contains("No agent is configured"), "{doctor}");
     assert!(!doctor.contains("Rerun setup from"), "{doctor}");
+}
+
+/// The banner carries a path and an operating-system message from outside
+/// Skilled, neither of any length it controls. Unbounded, a long enough
+/// application-data path wraps until the header takes the pane and hides the
+/// very inventory the degraded mode exists to keep showing.
+#[test]
+fn a_long_metadata_failure_path_cannot_crowd_out_the_inventory_it_explains() {
+    let temporary = tempfile::tempdir().expect("temporary application directory");
+    let home = temporary.path().join("home");
+    let skill = home.join(".claude/skills/portable");
+    fs::create_dir_all(&skill).expect("create degraded skill fixture");
+    fs::write(
+        skill.join("SKILL.md"),
+        "---\nname: portable\ndescription: Portable fixture\n---\n",
+    )
+    .expect("write degraded skill fixture");
+    // An application-data path long enough to wrap the banner many times over.
+    let mut data = temporary.path().to_path_buf();
+    for _ in 0..12 {
+        data.push("an-extremely-long-application-data-path-component");
+    }
+    fs::create_dir_all(&data).expect("create established data directory");
+    let mut app =
+        SkilledApp::open(AppEnvironment::new(&home, &data, "")).expect("open degraded application");
+    assert!(app.metadata_failure().is_some());
+
+    let inventory = text(&buffer(&app, 80, 24));
+    assert!(inventory.contains("metadata unavailable"), "{inventory}");
+    // The table the whole mode exists to keep showing still has both its
+    // heading and the row beneath it, rather than a header that ate the pane.
+    assert!(inventory.contains("SKILL"), "{inventory}");
+    assert!(inventory.contains("portable"), "{inventory}");
+    // Two of the path's twelve components reach the banner; the rest are cut.
+    assert!(inventory.contains("..."), "{inventory}");
+
+    let update = app.update(Action::OpenDoctor);
+    app.perform_effects(update.effects())
+        .expect("scan for Doctor");
+    let doctor = text(&buffer(&app, 80, 24));
+    assert!(doctor.contains("metadata unavailable"), "{doctor}");
+    assert!(doctor.contains("..."), "{doctor}");
+    // Doctor's own list survives the same banner.
+    assert!(doctor.contains("SEVERITY"), "{doctor}");
 }
 
 /// Roots that are all absent are the only thing the scan learned, and the
@@ -5728,6 +5777,12 @@ fn text(buffer: &Buffer) -> String {
         .map(|y| row_text(buffer, y))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// The screen with every run of whitespace collapsed to one space, so a
+/// sentence may be asserted without asserting where the paragraph wraps it.
+fn unwrapped_text(rendered: &str) -> String {
+    rendered.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// Whether this buffer was drawn with the window frame, which claims the

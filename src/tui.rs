@@ -1165,7 +1165,7 @@ fn render_inventory_skills(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp, 
             )),
         ])
     }));
-    if let Some(line) = metadata_failure_line(app) {
+    if let Some(line) = metadata_failure_line(app, area.width) {
         header_lines.push(line);
     }
 
@@ -1701,7 +1701,7 @@ fn render_doctor_findings(
     app: &SkilledApp,
     findings: &[DoctorEntry<'_>],
 ) {
-    let body = if let Some(line) = metadata_failure_line(app) {
+    let body = if let Some(line) = metadata_failure_line(app, area.width) {
         render_pane_scaffold_with_status(
             frame,
             area,
@@ -2202,7 +2202,22 @@ fn render_pane_scaffold_with_status(
     body
 }
 
-fn metadata_failure_line(app: &SkilledApp) -> Option<Line<'static>> {
+/// The banner a degraded session carries above whatever it managed to read.
+///
+/// The path and the operating-system cause both come from outside Skilled and
+/// have no length either it or the user controls. Unbounded, a long enough
+/// application-data path wraps until the header takes the pane and hides the
+/// read-only inventory this whole mode exists to keep showing.
+///
+/// They are bounded apart, two rows each, because they fail differently. A
+/// path loses its middle, where a deep tree says least and both ends name the
+/// file; a cause is a sentence and loses its end. Bounding the two together
+/// would spend the whole budget on a long path and cut the reason off
+/// entirely, which is the half the user can act on. Two rows is past the
+/// length either reaches in practice — the bound is there to stop a
+/// pathological one, not to shorten an ordinary one. The scope sentence is
+/// Skilled's own and known short, so it is stated whole.
+fn metadata_failure_line(app: &SkilledApp, width: u16) -> Option<Line<'static>> {
     let failure = app.metadata_failure()?;
     let scope = if app.scan_scope_known() {
         "The agent selection was retained; selected roots were scanned read-only. \
@@ -2211,12 +2226,15 @@ fn metadata_failure_line(app: &SkilledApp) -> Option<Line<'static>> {
         "The agent selection could not be read; all detected roots were scanned read-only. \
          Writes are refused."
     };
+    let badge = components::badge(Tone::Critical, "metadata unavailable");
+    let budget = usize::from(width)
+        .saturating_mul(2)
+        .saturating_sub(badge.width() + 2);
+    let path = terminal_safe_bounded_middle(&failure.database_path().display().to_string(), budget);
+    let cause = terminal_safe_bounded_start(failure.cause(), budget);
     Some(Line::from(vec![
-        components::badge(Tone::Critical, "metadata unavailable"),
-        Span::raw(format!(
-            ": {}. {scope}",
-            components::metadata_failure_text(failure)
-        )),
+        badge,
+        Span::raw(format!(": {path}: {cause}. {scope}")),
     ]))
 }
 

@@ -137,10 +137,11 @@ fn corrupt_metadata_is_unchanged_and_installed_content_has_unverified_provenance
 /// a current schema leaves migration with nothing to write, so every startup
 /// read succeeds on a store that can never be written to. The session has to
 /// find that out at open rather than after an install has already linked
-/// something it cannot receipt.
+/// something it cannot receipt — and, having found it out, must keep every
+/// value the store was still perfectly able to give it.
 #[cfg(unix)]
 #[test]
-fn a_write_protected_database_opens_read_only_rather_than_ready() {
+fn a_write_protected_database_is_read_whole_and_written_to_never() {
     use std::os::unix::fs::PermissionsExt;
 
     let temporary = tempfile::tempdir().expect("temporary application directory");
@@ -153,8 +154,20 @@ fn a_write_protected_database_opens_read_only_rather_than_ready() {
         "---\nname: portable\ndescription: portable fixture\n---\n",
     )
     .expect("write temporary skill");
+    let hidden = home.join(".codex/skills/deselected");
+    fs::create_dir_all(&hidden).expect("create deselected skill root");
+    fs::write(
+        hidden.join("SKILL.md"),
+        "---\nname: deselected\ndescription: must not be scanned\n---\n",
+    )
+    .expect("write deselected skill");
     complete_setup(&home, &data);
     let database = data.join("skilled.sqlite3");
+    let connection = rusqlite::Connection::open(&database).expect("open metadata database");
+    connection
+        .execute_batch("UPDATE configured_agents SET selected = (agent = 'claude-code');")
+        .expect("narrow the persisted agent selection");
+    drop(connection);
     let original = fs::read(&database).expect("read metadata database");
     fs::set_permissions(&database, fs::Permissions::from_mode(0o444))
         .expect("write-protect metadata database");
@@ -165,15 +178,17 @@ fn a_write_protected_database_opens_read_only_rather_than_ready() {
     assert_eq!(app.view(), View::Inventory);
     assert!(!app.can_add_source());
     assert!(!app.can_rerun_setup());
-    assert_eq!(
-        app.registry_availability(),
-        RegistryAvailability::Unavailable
-    );
     let failure = app.metadata_failure().expect("metadata failure");
     assert_eq!(failure.database_path(), database);
     assert!(failure.cause().contains("read-only"), "{}", failure.cause());
-    // The inventory is still an observation of the filesystem, so it is stated.
+    // Refusing a write is not a reason to discard what was read. The stored
+    // selection still decides the scan scope, and the registry still counts.
+    assert!(app.agent(AgentKind::ClaudeCode).selected());
+    assert!(!app.agent(AgentKind::Codex).selected());
+    assert!(!app.agent(AgentKind::OpenCode).selected());
+    assert_eq!(app.registry_availability(), RegistryAvailability::Readable);
     assert!(app.inventory().row("portable").is_some());
+    assert!(app.inventory().row("deselected").is_none());
     assert_eq!(fs::read(&database).expect("reread database"), original);
 }
 

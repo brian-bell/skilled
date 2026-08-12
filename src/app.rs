@@ -424,6 +424,14 @@ fn open_metadata(data_dir: &Path) -> MetadataStartup {
                 .or_else(|| agent_selections.as_ref().err().map(ToString::to_string))
                 .or_else(|| inconsistent_setup.as_ref().map(ToString::to_string))
                 .or_else(|| sources.as_ref().err().map(ToString::to_string))
+                // Last, so a value that is actually invalid leads: a store
+                // that opened read-only is a reason this session cannot
+                // write, not a reason to distrust anything it just read.
+                .or_else(|| {
+                    store
+                        .read_only()
+                        .then(|| Error::ReadOnlyMetadata.to_string())
+                })
                 .map(|error| MetadataFailure::new(database_path, error.to_string()));
             let registry_availability = if sources.is_ok() {
                 RegistryAvailability::Readable

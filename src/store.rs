@@ -21,6 +21,7 @@ const SCHEMA_VERSION: i64 = 5;
 pub(crate) struct Store {
     connection: Connection,
     database_path: PathBuf,
+    read_only: bool,
     #[cfg(test)]
     fail_next: std::cell::RefCell<Option<MetadataOperation>>,
 }
@@ -119,9 +120,14 @@ impl Store {
         // failure surfaces where it happens — `StepOutcome::CreatedUnrecorded`
         // states a link whose receipt could not be written rather than hiding
         // it. Tracked as `skilled-2k3.22`.
-        if connection.is_readonly(rusqlite::MAIN_DB)? {
-            return Err(Error::ReadOnlyMetadata);
-        }
+        //
+        // Recorded rather than raised. A store that cannot be written can
+        // still be read, and every value it holds — the agent selection, the
+        // registered sources — is one the read-only session is better off
+        // knowing. `app::open_metadata` reads them and then takes this as one
+        // more reason the session is degraded, alongside the values it found
+        // invalid, so nothing readable is discarded to refuse a write.
+        let read_only = connection.is_readonly(rusqlite::MAIN_DB)?;
         // Schema before semantics, deliberately. `app::open_metadata` is what
         // reads stored values and can declare the store unavailable, and it
         // reads them through the current schema — so a supported older
@@ -138,6 +144,7 @@ impl Store {
         Ok(Self {
             connection,
             database_path,
+            read_only,
             #[cfg(test)]
             fail_next: std::cell::RefCell::new(None),
         })
@@ -145,6 +152,12 @@ impl Store {
 
     pub(crate) fn database_path(&self) -> &Path {
         &self.database_path
+    }
+
+    /// Whether SQLite opened the database read-only despite being asked for
+    /// write access, which no write on this connection can recover from.
+    pub(crate) fn read_only(&self) -> bool {
+        self.read_only
     }
 
     pub(crate) fn setup_complete(&self) -> Result<bool> {
