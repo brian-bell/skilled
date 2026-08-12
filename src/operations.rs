@@ -663,6 +663,21 @@ impl OpenCodeOutlook {
             OpenCodeResolution::Incomplete { .. } => Self::Unknown,
         }
     }
+
+    /// A consent-surface account of what OpenCode is expected to do after the
+    /// plan. Paths remain absolute here and are terminal-escaped by the caller.
+    pub fn preview_summary(&self) -> String {
+        match self {
+            Self::Selected { winner } => format!("load {}", winner.display()),
+            Self::Exposure { winner } => format!(
+                "see {} without a variant Skilled can claim is usable",
+                winner.display()
+            ),
+            Self::Conflict => "conflict".to_owned(),
+            Self::Nothing => "load nothing under this name".to_owned(),
+            Self::Unknown => "could not be established".to_owned(),
+        }
+    }
 }
 
 /// One immutable statement of everything an install would do.
@@ -1011,6 +1026,7 @@ pub fn plan_repair(
     plan.source_revision = Some(source.revision.clone());
     plan.source_dir = Some(source.directory.clone());
     plan.variant = Some(variant.clone());
+    plan.warnings = plan_warnings(sources, &variant);
     plan.disposition = match current_resolution {
         Ok(current) if current == source.directory => RepairDisposition::NothingToRepair,
         Ok(_) => RepairDisposition::ReplaceLink { dangling: false },

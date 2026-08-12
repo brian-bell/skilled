@@ -4611,9 +4611,7 @@ fn repair_prompt_status(prompt: &RepairPrompt, scroll: usize, extent: Option<usi
             }
             RepairStatus::Repaired => "Repaired · not fully verified".to_owned(),
             RepairStatus::NotApplied => "Nothing was written".to_owned(),
-            RepairStatus::PartiallyApplied => {
-                "Original link removed · repair incomplete".to_owned()
-            }
+            RepairStatus::PartiallyApplied => "Partly applied · manual recovery needed".to_owned(),
             RepairStatus::RepairedUnrecorded => {
                 "Repaired, but not recorded as Skilled's".to_owned()
             }
@@ -4690,6 +4688,12 @@ fn repair_plan_lines(plan: &RepairPlan) -> Vec<Line<'static>> {
         lines.push(Line::from(components::badge(
             Tone::Warning,
             "The registry now selects a different source.",
+        )));
+    }
+    if let Some(outlook) = plan.opencode_outlook() {
+        lines.push(Line::from(format!(
+            "OpenCode after repair: {}",
+            terminal_safe(&outlook.preview_summary())
         )));
     }
     match plan.disposition() {

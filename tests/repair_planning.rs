@@ -30,6 +30,11 @@ fn an_owned_healthy_link_is_replanned_to_the_agent_specific_variant_selected_tod
     let link = fixture.root(AgentKind::Codex).join("portable");
 
     let specific = fixture.source("specific", ".agents/skills", "portable");
+    fs::write(
+        specific.join(".agents/skills/portable/SKILL.md"),
+        "---\nname: portable\ndescription: dirty repair target\n---\n# portable\n",
+    )
+    .expect("dirty the selected repair source");
     let preview = app
         .preview_source(&specific)
         .expect("preview specific source");
@@ -76,6 +81,12 @@ fn an_owned_healthy_link_is_replanned_to_the_agent_specific_variant_selected_tod
         )),
         "the consent surface must state the conflict this Codex repair would create: {plan:?}"
     );
+    assert!(
+        plan.warnings()
+            .iter()
+            .any(|warning| warning.contains("uncommitted changes")),
+        "repair should carry the same dirty-checkout warning as install: {plan:?}"
+    );
     assert_eq!(fs::read_link(&link).unwrap(), old_target, "a plan is inert");
     let overlay = app
         .doctor_findings()
@@ -104,6 +115,11 @@ fn an_owned_healthy_link_is_replanned_to_the_agent_specific_variant_selected_tod
         preview.contains("OpenCode would have more than one directory to choose between"),
         "{preview}"
     );
+    assert!(
+        preview.contains("OpenCode after repair: conflict"),
+        "{preview}"
+    );
+    assert!(preview.contains("uncommitted changes"), "{preview}");
 
     drop(app);
     let mut input = Cursor::new(Vec::<u8>::new());
@@ -127,6 +143,11 @@ fn an_owned_healthy_link_is_replanned_to_the_agent_specific_variant_selected_tod
         output.contains("OpenCode would have more than one directory to choose between"),
         "{output}"
     );
+    assert!(
+        output.contains("OpenCode after repair: conflict"),
+        "{output}"
+    );
+    assert!(output.contains("uncommitted changes"), "{output}");
 }
 
 #[test]

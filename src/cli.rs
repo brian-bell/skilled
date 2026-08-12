@@ -553,6 +553,13 @@ fn write_repair_plan(output: &mut dyn Write, plan: &RepairPlan) -> std::io::Resu
             "  source changed: the registry now selects a different source"
         )?;
     }
+    if let Some(outlook) = plan.opencode_outlook() {
+        writeln!(
+            output,
+            "  OpenCode after repair: {}",
+            safe(&outlook.preview_summary())
+        )?;
+    }
     match plan.disposition() {
         RepairDisposition::ReplaceLink { dangling: true } => {
             writeln!(output, "  replace dangling link")?
