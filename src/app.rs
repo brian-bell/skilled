@@ -373,6 +373,27 @@ enum Metadata {
     Unavailable(MetadataFailure),
 }
 
+/// Why a source did not become registered.
+///
+/// The two answers lead to different sessions, so they are not one type. A
+/// store that failed leaves nothing further writable and degrades the session
+/// for good; a request the store refused leaves the metadata exactly as usable
+/// as it was, and belongs to the flow that made it — the same place a failed
+/// revalidation is already reported.
+enum RegistrationFailure {
+    Request(Error),
+    Metadata(MetadataFailure),
+}
+
+/// Whether an error names the request rather than the store behind it.
+///
+/// A checkout path this build cannot represent in the metadata is a fact about
+/// the path: it is refused before anything is written, and refusing it says
+/// nothing about whether the next path could be registered.
+fn is_source_request_error(error: &Error) -> bool {
+    matches!(error, Error::InvalidSourcePath(_))
+}
+
 struct MetadataStartup {
     metadata: Metadata,
     setup_complete: Option<bool>,
@@ -825,9 +846,13 @@ impl SkilledApp {
 
     pub fn confirm_source(&mut self, preview: SourcePreview) -> Result<()> {
         let preview = revalidate_source_preview(&preview)?;
-        if let Err(failure) = self.register_and_refresh_source(&preview) {
-            self.degrade(failure.clone());
-            return Err(Error::MetadataUnavailable(failure));
+        match self.register_and_refresh_source(&preview) {
+            Ok(()) => {}
+            Err(RegistrationFailure::Request(error)) => return Err(error),
+            Err(RegistrationFailure::Metadata(failure)) => {
+                self.degrade(failure.clone());
+                return Err(Error::MetadataUnavailable(failure));
+            }
         }
         self.focus_registered_source(preview.inspected().git_top_level());
         self.rescan_installations();
@@ -837,7 +862,7 @@ impl SkilledApp {
     fn register_and_refresh_source(
         &mut self,
         preview: &SourcePreview,
-    ) -> std::result::Result<(), MetadataFailure> {
+    ) -> std::result::Result<(), RegistrationFailure> {
         let (result, committed) = match &mut self.metadata {
             Metadata::Ready(store) => {
                 let database_path = store.database_path().to_path_buf();
@@ -848,13 +873,22 @@ impl SkilledApp {
                         }),
                         true,
                     ),
+                    // A refusal of the request is not a failure of the store.
+                    // Nothing was committed, the metadata is exactly as usable
+                    // as it was, and the flow keeps the error so another path
+                    // can be offered.
+                    Err(error) if is_source_request_error(&error) => {
+                        return Err(RegistrationFailure::Request(error));
+                    }
                     Err(error) => (
                         Err(MetadataFailure::new(database_path, error.to_string())),
                         false,
                     ),
                 }
             }
-            Metadata::Unavailable(failure) => return Err(failure.clone()),
+            Metadata::Unavailable(failure) => {
+                return Err(RegistrationFailure::Metadata(failure.clone()));
+            }
         };
         match result {
             Ok(sources) => {
@@ -865,13 +899,17 @@ impl SkilledApp {
                 if committed {
                     self.registry_availability = RegistryAvailability::Unavailable;
                 }
-                Err(failure)
+                Err(RegistrationFailure::Metadata(failure))
             }
         }
     }
 
     /// Enter the session's fail-closed read-only state while retaining data
     /// that was read successfully before the failure.
+    ///
+    /// Reached only from a failure of the metadata store itself. Degrading is
+    /// irreversible for the session, so a recoverable refusal of one request
+    /// must never take this route.
     fn degrade(&mut self, failure: MetadataFailure) {
         self.set_degraded(failure);
         self.rescan_installations();
@@ -1248,9 +1286,19 @@ impl SkilledApp {
                             continue;
                         }
                     };
-                    if let Err(failure) = self.register_and_refresh_source(&preview) {
-                        self.degrade(failure);
-                        continue;
+                    match self.register_and_refresh_source(&preview) {
+                        Ok(()) => {}
+                        // Reported where a failed revalidation is reported, and
+                        // for the same reason: the checkout was refused, not
+                        // the store, so the flow stays open for another path.
+                        Err(RegistrationFailure::Request(error)) => {
+                            self.source_error = Some(error.to_string());
+                            continue;
+                        }
+                        Err(RegistrationFailure::Metadata(failure)) => {
+                            self.degrade(failure);
+                            continue;
+                        }
                     }
                     self.focus_registered_source(preview.inspected().git_top_level());
                     self.pending_source = None;
@@ -1908,5 +1956,57 @@ mod tests {
         assert!(!app.agent(AgentKind::Codex).selected());
         assert!(!app.agent(AgentKind::OpenCode).selected());
         assert!(app.inventory().row("deselected").is_none());
+    }
+
+    /// The store refusing one checkout path is not the store failing. Degrading
+    /// is irreversible for the session, so a request it declines has to leave
+    /// the next request — and every other write — still available.
+    #[test]
+    fn a_refused_checkout_path_does_not_degrade_the_session() {
+        let temporary = tempfile::tempdir().expect("temporary application directory");
+        let home = temporary.path().join("home");
+        let repository = temporary.path().join("source");
+        fs::create_dir_all(repository.join("skills/portable")).expect("create source fixture");
+        fs::write(
+            repository.join("skills/portable/SKILL.md"),
+            "---\nname: portable\ndescription: portable fixture\n---\n",
+        )
+        .expect("write source fixture");
+        git(&repository, &["init", "--quiet"]);
+        git(&repository, &["config", "user.name", "Test Author"]);
+        git(&repository, &["config", "user.email", "test@example.com"]);
+        git(&repository, &["add", "."]);
+        git(&repository, &["commit", "--quiet", "-m", "fixture"]);
+
+        let mut app = SkilledApp::open(AppEnvironment::new(
+            &home,
+            temporary.path().join("data"),
+            "",
+        ))
+        .expect("open application");
+        for _ in 0..7 {
+            let update = app.update(Action::Continue);
+            app.perform_effects(update.effects())
+                .expect("complete setup");
+        }
+        let preview = app.preview_source(&repository).expect("preview source");
+        app.fail_metadata_next(crate::store::MetadataOperation::RefuseSourceRequest);
+
+        let refusal = app
+            .confirm_source(preview)
+            .expect_err("the checkout path is refused");
+
+        assert!(matches!(refusal, Error::InvalidSourcePath(_)));
+        assert!(app.metadata_failure().is_none(), "the session degraded");
+        assert!(app.can_add_source());
+        assert!(app.can_rerun_setup());
+        assert!(app.sources().is_empty());
+
+        // The store was never the problem, so the next request still lands.
+        let preview = app
+            .preview_source(&repository)
+            .expect("preview source again");
+        app.confirm_source(preview).expect("register the source");
+        assert_eq!(app.sources().len(), 1);
     }
 }

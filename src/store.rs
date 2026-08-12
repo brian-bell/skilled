@@ -31,6 +31,9 @@ pub(crate) enum MetadataOperation {
     CompleteSetup,
     ResetSetup,
     RegisterSource,
+    /// A request the store refuses before writing anything — a checkout path
+    /// it cannot represent — as opposed to a failure of the store itself.
+    RefuseSourceRequest,
     ReadSources,
     ReadReceipts,
     RecordReceipt,
@@ -99,6 +102,15 @@ impl Store {
         // record a receipt — the link would be created before the write that
         // cannot happen was ever attempted. Asked at open, it is a metadata
         // failure like any other, and the session degrades to read-only.
+        //
+        // This answers for the database file, not for the journal and WAL
+        // sidecars SQLite creates beside it: a writable file in a directory
+        // that denies creation still opens read-write and fails at the first
+        // transaction. Proving that needs a real write, which is the one thing
+        // a read-only startup must not do, so it stays unproven here and the
+        // failure surfaces where it happens — `StepOutcome::CreatedUnrecorded`
+        // states a link whose receipt could not be written rather than hiding
+        // it. Tracked as `skilled-2k3.22`.
         if connection.is_readonly(rusqlite::MAIN_DB)? {
             return Err(Error::ReadOnlyMetadata);
         }
@@ -334,6 +346,8 @@ impl Store {
     pub(crate) fn register_source(&mut self, preview: &SourcePreview) -> Result<()> {
         #[cfg(test)]
         self.fail_if(MetadataOperation::RegisterSource)?;
+        #[cfg(test)]
+        self.fail_if(MetadataOperation::RefuseSourceRequest)?;
         let source = preview.inspected();
         let canonical_path = path_text(source.git_top_level())?;
         let label = source
@@ -558,7 +572,12 @@ impl Store {
             return Ok(());
         }
         self.fail_next.borrow_mut().take();
-        Err(Error::Database(rusqlite::Error::InvalidQuery))
+        Err(match operation {
+            MetadataOperation::RefuseSourceRequest => {
+                Error::InvalidSourcePath(self.database_path.clone())
+            }
+            _ => Error::Database(rusqlite::Error::InvalidQuery),
+        })
     }
 }
 
