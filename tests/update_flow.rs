@@ -561,6 +561,55 @@ fn filter_ambiguous_worktree_changes_are_reported_as_unknown_not_dirty() {
     }));
 }
 
+/// A check that could not tell whether the worktree is dirty says so, rather
+/// than adopting the registered source's last answer. A configured filter
+/// driver is enough to reach this — machines with Git LFS installed configure
+/// one globally, so every worktree modification on them is filter-ambiguous —
+/// and a check that claimed the source's cleanliness would be superseded by the
+/// next read of that source, silently removing its blocked finding from Doctor.
+#[test]
+fn a_check_that_cannot_tell_whether_the_worktree_is_dirty_records_that_it_cannot() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut fixture = fixture();
+    let filter = fixture._temporary.path().join("uppercase-filter");
+    std::fs::write(&filter, "#!/bin/sh\ntr '[:lower:]' '[:upper:]'\n").expect("filter fixture");
+    let mut permissions = std::fs::metadata(&filter)
+        .expect("filter metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&filter, permissions).expect("executable filter");
+    git(
+        &fixture.clone,
+        &["config", "filter.upper.clean", filter.to_str().unwrap()],
+    );
+    git(&fixture.clone, &["config", "filter.upper.required", "true"]);
+    std::fs::write(fixture.clone.join(".gitattributes"), "* filter=upper\n").expect("attributes");
+    commit(&fixture.clone, "filter every path");
+    push_update(&fixture, "skills/demo/new.txt");
+    std::fs::write(fixture.clone.join("skills/demo/old.txt"), "local edit\n").expect("local edit");
+
+    fixture
+        .app
+        .perform_effects(&[Effect::CheckUpdates])
+        .expect("start check");
+    finish_update_check(&mut fixture.app);
+
+    let check = &fixture.app.update_checks()[0];
+    assert!(
+        !check.dirty_known,
+        "a withheld dirtiness verdict is not a claim about cleanliness"
+    );
+    assert!(!check.superseded_by(&fixture.app.sources()[0]));
+    assert!(
+        fixture
+            .app
+            .doctor_findings()
+            .iter()
+            .any(|entry| entry.finding().code() == "source.dirty")
+    );
+}
+
 fn finish_update_check(app: &mut SkilledApp) {
     let deadline = Instant::now() + Duration::from_secs(5);
     while app.update_check_in_flight() && Instant::now() < deadline {
@@ -2069,44 +2118,6 @@ fn a_repository_finding_states_its_consequence_in_doctor() {
         .perform_effects(&[Effect::CheckUpdates])
         .expect("start check");
     finish_update_check(&mut fixture.app);
-    {
-        let source = &fixture.app.sources()[0];
-        let checks = fixture.app.update_checks();
-        eprintln!("DIAG git status --porcelain=v1:");
-        eprintln!("{}", git(&fixture.clone, &["status", "--porcelain=v1"]));
-        eprintln!(
-            "DIAG source: head={} branch={:?} dirty={:?} error={:?}",
-            source.head(),
-            source.branch(),
-            source.dirty(),
-            source.source_error()
-        );
-        for check in checks {
-            eprintln!(
-                "DIAG check: revision={} reference={:?} dirty={} dirty_known={} verdict={:?} superseded={} findings={:?}",
-                check.local_revision,
-                check.local_reference,
-                check.dirty,
-                check.dirty_known,
-                check.verdict,
-                check.superseded_by(source),
-                check
-                    .findings()
-                    .iter()
-                    .map(|finding| finding.code().to_owned())
-                    .collect::<Vec<_>>()
-            );
-        }
-        eprintln!(
-            "DIAG doctor: {:?}",
-            fixture
-                .app
-                .doctor_findings()
-                .iter()
-                .map(|entry| entry.finding().code().to_owned())
-                .collect::<Vec<_>>()
-        );
-    }
     assert!(
         fixture
             .app

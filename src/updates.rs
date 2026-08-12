@@ -182,6 +182,14 @@ pub(crate) fn cached_update_check(
             state.worktree_dirty_known.then_some(false)
         }
     });
+    // A check that read the worktree and could not tell whether it is dirty —
+    // a configured filter driver makes ` M` ambiguous, and a cancellable check
+    // will not run the second Git process that would settle it — records that
+    // it does not know. Borrowing the registered source's last value instead
+    // would state a cleanliness this check never observed, and the very next
+    // read of the source would then supersede the check for disagreeing with
+    // it, taking the blocked finding out of Doctor on the way.
+    let dirtiness_withheld = probe.worktree.is_some() && observed_dirty.is_none();
     CachedUpdateCheck {
         source_id: source.id(),
         checked_at,
@@ -207,8 +215,8 @@ pub(crate) fn cached_update_check(
         merge_base: probe.merge_base.clone(),
         ahead: probe.ahead,
         behind: probe.behind,
-        dirty: observed_dirty.or_else(|| source.dirty()).unwrap_or(false),
-        dirty_known: observed_dirty.is_some() || source.dirty().is_some(),
+        dirty: !dirtiness_withheld && observed_dirty.or_else(|| source.dirty()).unwrap_or(false),
+        dirty_known: !dirtiness_withheld && (observed_dirty.is_some() || source.dirty().is_some()),
         verdict,
         detail,
     }
