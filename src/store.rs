@@ -4,7 +4,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 
 use crate::{
     AgentKind, Error, Result,
@@ -22,6 +22,17 @@ pub(crate) struct Store {
     connection: Connection,
 }
 
+/// One cross-process metadata mutation guard.
+///
+/// `BEGIN IMMEDIATE` reserves SQLite's single-writer slot before the caller
+/// touches the filesystem. Every install target, uninstall finalization, and
+/// Forget Source apply uses this guard, so a process cannot make a link active
+/// while another process is deciding whether its ownership metadata is safe to
+/// delete. Dropping the guard rolls the transaction back.
+pub(crate) struct Mutation<'store> {
+    transaction: Transaction<'store>,
+}
+
 impl Store {
     pub(crate) fn open(data_dir: &Path) -> Result<Self> {
         fs::create_dir_all(data_dir)?;
@@ -29,6 +40,14 @@ impl Store {
         migrate(&mut connection)?;
         connection.execute_batch("PRAGMA foreign_keys = ON;")?;
         Ok(Self { connection })
+    }
+
+    pub(crate) fn begin_mutation(&mut self) -> Result<Mutation<'_>> {
+        Ok(Mutation {
+            transaction: self
+                .connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)?,
+        })
     }
 
     pub(crate) fn setup_complete(&self) -> Result<bool> {
@@ -91,78 +110,11 @@ impl Store {
 
     /// Check every path against the representation the receipt table stores.
     ///
-    /// The install guard calls this before creating anything, then
-    /// [`Self::record_receipt`] repeats it so no caller can bypass the table's
-    /// contract and turn a path conversion into a post-write surprise.
+    /// The install guard calls this before acquiring its mutation transaction,
+    /// then [`Mutation::record_receipt`] repeats it so no caller can bypass the
+    /// table's contract and turn a path conversion into a post-write surprise.
     pub(crate) fn ensure_receipt_recordable(&self, receipt: &Receipt) -> Result<()> {
-        stored_path(receipt.link_path())?;
-        stored_path(receipt.link_target())?;
-        receipt
-            .catalog_relative_path()
-            .map(stored_path)
-            .transpose()?;
-        receipt
-            .variant_relative_path()
-            .map(stored_path)
-            .transpose()?;
-        Ok(())
-    }
-
-    /// Record that Skilled created one particular link.
-    ///
-    /// One statement, and therefore its own transaction: the receipt is written
-    /// the moment the link exists, so a crash between two targets still leaves
-    /// the store describing exactly what is on disk.
-    ///
-    /// A receipt identical to one already recorded is left alone rather than
-    /// refused. Timestamps are whole seconds, so a link removed and put back
-    /// inside one second would otherwise fail its insert and leave Skilled
-    /// reporting that it does not own something it just created — when the
-    /// receipt it needs is already there.
-    pub(crate) fn record_receipt(&self, receipt: &Receipt) -> Result<()> {
-        self.ensure_receipt_recordable(receipt)?;
-        self.connection.execute(
-            "INSERT INTO operation_receipts
-                (created_at, operation, agent, skill_name, link_path, link_target,
-                 source_id, catalog_relative_path, variant_relative_path)
-             VALUES (?1, 'install', ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-             ON CONFLICT DO NOTHING",
-            params![
-                current_timestamp(),
-                agent_identifier(receipt.agent()),
-                receipt.skill_name(),
-                stored_path(receipt.link_path())?,
-                stored_path(receipt.link_target())?,
-                receipt.source_id(),
-                receipt
-                    .catalog_relative_path()
-                    .map(stored_path)
-                    .transpose()?,
-                receipt
-                    .variant_relative_path()
-                    .map(stored_path)
-                    .transpose()?,
-            ],
-        )?;
-        Ok(())
-    }
-
-    /// Delete exactly the ownership facts whose link was positively verified gone.
-    pub(crate) fn delete_receipts_for_link(
-        &self,
-        agent: AgentKind,
-        link_path: &Path,
-        link_target: &Path,
-    ) -> Result<usize> {
-        Ok(self.connection.execute(
-            "DELETE FROM operation_receipts
-             WHERE agent = ?1 AND link_path = ?2 AND link_target = ?3",
-            params![
-                agent_identifier(agent),
-                stored_path(link_path)?,
-                stored_path(link_target)?,
-            ],
-        )?)
+        ensure_receipt_recordable(receipt)
     }
 
     /// Every ownership receipt, oldest first.
@@ -172,65 +124,7 @@ impl Store {
     /// deny, and denying it would let the next plan treat its own link as a
     /// stranger's.
     pub(crate) fn receipts(&self) -> Result<Vec<Receipt>> {
-        let mut statement = self.connection.prepare(
-            "SELECT agent, skill_name, link_path, link_target, source_id,
-                    catalog_relative_path, variant_relative_path
-             FROM operation_receipts ORDER BY created_at, id",
-        )?;
-        let rows = statement.query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, Option<i64>>(4)?,
-                row.get::<_, Option<String>>(5)?,
-                row.get::<_, Option<String>>(6)?,
-            ))
-        })?;
-        rows.collect::<std::result::Result<Vec<_>, _>>()?
-            .into_iter()
-            .map(
-                |(
-                    agent,
-                    skill_name,
-                    link_path,
-                    link_target,
-                    source_id,
-                    catalog_relative_path,
-                    variant_relative_path,
-                )| {
-                    Ok(Receipt::new(
-                        agent_kind(&agent)?,
-                        skill_name,
-                        PathBuf::from(link_path),
-                        PathBuf::from(link_target),
-                        source_id,
-                        catalog_relative_path.map(PathBuf::from),
-                        variant_relative_path.map(PathBuf::from),
-                    ))
-                },
-            )
-            .collect()
-    }
-
-    /// Forget one source's private metadata in one transaction.
-    ///
-    /// Receipts stay foreign-key-free so this deletion is never an implicit
-    /// cascade: the caller first proves every described link inactive, then
-    /// explicitly removes those receipts before the source/catalog cascade.
-    pub(crate) fn forget_source(&mut self, source_id: i64) -> Result<usize> {
-        let transaction = self.connection.transaction()?;
-        transaction.execute(
-            "DELETE FROM operation_receipts WHERE source_id = ?1",
-            params![source_id],
-        )?;
-        let deleted = transaction.execute(
-            "DELETE FROM source_repositories WHERE id = ?1",
-            params![source_id],
-        )?;
-        transaction.commit()?;
-        Ok(deleted)
+        receipts_on(&self.connection)
     }
 
     /// Required postconditions for forgetting: source, catalogs, and receipts absent.
@@ -456,6 +350,159 @@ impl Store {
     }
 }
 
+impl Mutation<'_> {
+    /// Record ownership in the transaction that already covers link creation.
+    ///
+    /// A receipt identical to one already recorded is left alone rather than
+    /// refused. Timestamps are whole seconds, so a link removed and put back
+    /// inside one second would otherwise fail its insert and leave Skilled
+    /// reporting that it does not own something it just created — when the
+    /// receipt it needs is already there.
+    pub(crate) fn record_receipt(&self, receipt: &Receipt) -> Result<()> {
+        record_receipt_on(&self.transaction, receipt)
+    }
+
+    pub(crate) fn receipts(&self) -> Result<Vec<Receipt>> {
+        receipts_on(&self.transaction)
+    }
+
+    /// Recheck that a stale install plan still names registered metadata while
+    /// holding the same guard that will cover its link and receipt writes.
+    pub(crate) fn source_is_registered(&self, source_id: i64) -> Result<bool> {
+        self.transaction
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM source_repositories WHERE id = ?1
+                 )",
+                params![source_id],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
+    }
+
+    /// Delete exactly the ownership facts whose link was positively verified
+    /// gone while this guard prevents a concurrent receipt writer from
+    /// committing a replacement fact before the deletion.
+    pub(crate) fn delete_receipts_for_link(
+        &self,
+        agent: AgentKind,
+        link_path: &Path,
+        link_target: &Path,
+    ) -> Result<usize> {
+        Ok(self.transaction.execute(
+            "DELETE FROM operation_receipts
+             WHERE agent = ?1 AND link_path = ?2 AND link_target = ?3",
+            params![
+                agent_identifier(agent),
+                stored_path(link_path)?,
+                stored_path(link_target)?,
+            ],
+        )?)
+    }
+
+    /// Remove one source's private metadata inside the guard that already
+    /// covered the caller's exact receipt-set check and filesystem reprobe.
+    pub(crate) fn forget_source(&self, source_id: i64) -> Result<usize> {
+        self.transaction.execute(
+            "DELETE FROM operation_receipts WHERE source_id = ?1",
+            params![source_id],
+        )?;
+        Ok(self.transaction.execute(
+            "DELETE FROM source_repositories WHERE id = ?1",
+            params![source_id],
+        )?)
+    }
+
+    pub(crate) fn commit(self) -> Result<()> {
+        self.transaction.commit().map_err(Into::into)
+    }
+}
+
+fn ensure_receipt_recordable(receipt: &Receipt) -> Result<()> {
+    stored_path(receipt.link_path())?;
+    stored_path(receipt.link_target())?;
+    receipt
+        .catalog_relative_path()
+        .map(stored_path)
+        .transpose()?;
+    receipt
+        .variant_relative_path()
+        .map(stored_path)
+        .transpose()?;
+    Ok(())
+}
+
+fn record_receipt_on(connection: &Connection, receipt: &Receipt) -> Result<()> {
+    ensure_receipt_recordable(receipt)?;
+    connection.execute(
+        "INSERT INTO operation_receipts
+            (created_at, operation, agent, skill_name, link_path, link_target,
+             source_id, catalog_relative_path, variant_relative_path)
+         VALUES (?1, 'install', ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+         ON CONFLICT DO NOTHING",
+        params![
+            current_timestamp(),
+            agent_identifier(receipt.agent()),
+            receipt.skill_name(),
+            stored_path(receipt.link_path())?,
+            stored_path(receipt.link_target())?,
+            receipt.source_id(),
+            receipt
+                .catalog_relative_path()
+                .map(stored_path)
+                .transpose()?,
+            receipt
+                .variant_relative_path()
+                .map(stored_path)
+                .transpose()?,
+        ],
+    )?;
+    Ok(())
+}
+
+fn receipts_on(connection: &Connection) -> Result<Vec<Receipt>> {
+    let mut statement = connection.prepare(
+        "SELECT agent, skill_name, link_path, link_target, source_id,
+                catalog_relative_path, variant_relative_path
+         FROM operation_receipts ORDER BY created_at, id",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, Option<i64>>(4)?,
+            row.get::<_, Option<String>>(5)?,
+            row.get::<_, Option<String>>(6)?,
+        ))
+    })?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()?
+        .into_iter()
+        .map(
+            |(
+                agent,
+                skill_name,
+                link_path,
+                link_target,
+                source_id,
+                catalog_relative_path,
+                variant_relative_path,
+            )| {
+                Ok(Receipt::new(
+                    agent_kind(&agent)?,
+                    skill_name,
+                    PathBuf::from(link_path),
+                    PathBuf::from(link_target),
+                    source_id,
+                    catalog_relative_path.map(PathBuf::from),
+                    variant_relative_path.map(PathBuf::from),
+                ))
+            },
+        )
+        .collect()
+}
+
 fn path_text(path: &Path) -> Result<String> {
     path.to_str()
         .map(str::to_owned)
@@ -518,6 +565,25 @@ mod tests {
             result,
             Err(Error::UnrepresentablePath(path)) if path == link_path
         ));
+    }
+
+    #[test]
+    fn mutation_guards_serialize_independent_store_connections() {
+        let temporary = tempfile::tempdir().expect("temporary data directory");
+        let mut first = Store::open(temporary.path()).expect("first store");
+        let mut second = Store::open(temporary.path()).expect("second store");
+
+        let guard = first.begin_mutation().expect("first mutation guard");
+        assert!(
+            second.begin_mutation().is_err(),
+            "a second writer must not enter while the first can touch the filesystem"
+        );
+
+        drop(guard);
+        let guard = second
+            .begin_mutation()
+            .expect("guard becomes available after rollback");
+        guard.commit().expect("commit empty guard");
     }
 }
 

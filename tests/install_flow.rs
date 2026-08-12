@@ -15,6 +15,7 @@ use std::{
 #[cfg(target_os = "linux")]
 use std::{ffi::OsString, os::unix::ffi::OsStringExt};
 
+use rusqlite::{Connection, TransactionBehavior};
 use skilled::{
     Action, AgentKind, AppEnvironment, SkilledApp,
     inventory::{Finding, FindingSeverity, InstallationHealth},
@@ -312,6 +313,80 @@ fn a_confirmed_plan_links_every_agent_records_receipts_and_verifies_itself() {
         !fixture.an_agent_was_launched(),
         "no agent executable may be launched"
     );
+}
+
+/// A second Skilled process may already be changing the same metadata. The
+/// install must acquire that mutation guard before it creates a link, because
+/// failing to record ownership after the write would strand the installation.
+#[test]
+fn an_install_that_cannot_acquire_the_metadata_guard_writes_nothing() {
+    let fixture = Fixture::new();
+    let repository = fixture.source("library", &["portable"]);
+    let mut app = fixture.registered(&repository);
+    fixture.create_root_parents();
+    focus_first_variant(&mut app);
+    dispatch(&mut app, Action::BeginInstall);
+
+    let mut blocker = Connection::open(fixture.path().join("data/skilled.sqlite3"))
+        .expect("second metadata connection");
+    let _guard = blocker
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .expect("hold the metadata mutation guard");
+
+    dispatch(&mut app, Action::ConfirmOperation);
+
+    let Some(InstallPrompt::Report(outcome)) = app.pending_install() else {
+        panic!("install report expected: {:?}", app.pending_install());
+    };
+    assert_eq!(outcome.status(), InstallStatus::NotApplied);
+    for (agent, root) in ROOTS {
+        assert!(
+            !fixture.home().join(root).join("portable").exists(),
+            "{agent:?} was written before the metadata guard was acquired"
+        );
+    }
+}
+
+/// A preview can outlive the source registration it was built from. A later
+/// confirmation must recheck that registration under the same mutation guard
+/// used for the link and receipt, rather than recreating active state after a
+/// concurrent Forget Source has completed.
+#[test]
+fn a_stale_install_preview_cannot_recreate_a_forgotten_sources_link() {
+    let fixture = Fixture::new();
+    let repository = fixture.source("library", &["portable"]);
+    let mut installing = fixture.registered(&repository);
+    fixture.create_root_parents();
+    focus_first_variant(&mut installing);
+    dispatch(&mut installing, Action::BeginInstall);
+
+    let mut forgetting = fixture.app();
+    dispatch(&mut forgetting, Action::OpenSources);
+    dispatch(&mut forgetting, Action::BeginForgetSource);
+    dispatch(&mut forgetting, Action::ConfirmOperation);
+    let Some(OperationPrompt::Forget(ForgetPrompt::Report(forgotten))) =
+        forgetting.pending_operation()
+    else {
+        panic!("forget report expected");
+    };
+    assert_eq!(forgotten.status(), ForgetStatus::Forgotten);
+
+    dispatch(&mut installing, Action::ConfirmOperation);
+
+    let Some(InstallPrompt::Report(outcome)) = installing.pending_install() else {
+        panic!(
+            "install report expected: {:?}",
+            installing.pending_install()
+        );
+    };
+    assert_eq!(outcome.status(), InstallStatus::NotApplied);
+    for (agent, root) in ROOTS {
+        assert!(
+            !fixture.home().join(root).join("portable").exists(),
+            "{agent:?} recreated a link after its source was forgotten"
+        );
+    }
+    assert!(installing.receipts().expect("receipts").is_empty());
 }
 
 /// A catalog that explicitly excludes OpenCode is still installable for the

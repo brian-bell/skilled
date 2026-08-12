@@ -141,12 +141,18 @@ pub fn exit_code_for(status: InstallStatus) -> ExitCodeKind {
     }
 }
 
+/// A verified unlink is successful even when its now-inert ownership receipt
+/// could not be cleaned up. The report still states that metadata failure, but
+/// exit four would falsely describe completed filesystem work as partial and
+/// invite a retry of a link removal that has already happened.
 pub fn exit_code_for_uninstall(status: UninstallStatus) -> ExitCodeKind {
     match status {
-        UninstallStatus::Uninstalled | UninstallStatus::NothingToDo => ExitCodeKind::Success,
-        UninstallStatus::PartiallyApplied
-        | UninstallStatus::NotApplied
-        | UninstallStatus::UninstalledUnrecorded => ExitCodeKind::PartialApply,
+        UninstallStatus::Uninstalled
+        | UninstallStatus::NothingToDo
+        | UninstallStatus::UninstalledUnrecorded => ExitCodeKind::Success,
+        UninstallStatus::PartiallyApplied | UninstallStatus::NotApplied => {
+            ExitCodeKind::PartialApply
+        }
         UninstallStatus::VerificationFailed => ExitCodeKind::VerificationFailed,
     }
 }

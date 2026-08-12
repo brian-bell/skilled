@@ -1847,7 +1847,7 @@ pub enum OperationPrompt {
 /// write on top of an operation that already went wrong. Spec 19 permits
 /// same-operation rollback and does not require it; the report says exactly
 /// what exists.
-pub(crate) fn apply_install(plan: &InstallPlan, store: &Store, home: &Path) -> ApplyReport {
+pub(crate) fn apply_install(plan: &InstallPlan, store: &mut Store, home: &Path) -> ApplyReport {
     let mut steps: Vec<AppliedStep> = Vec::new();
     if plan.is_blocked() {
         // Both callers refuse a blocked plan before reaching this, so arriving
@@ -1880,7 +1880,7 @@ pub(crate) fn apply_install(plan: &InstallPlan, store: &Store, home: &Path) -> A
 fn apply_target(
     plan: &InstallPlan,
     target: &InstallTarget,
-    store: &Store,
+    store: &mut Store,
     home: &Path,
 ) -> StepOutcome {
     let root = match target.link_path.parent() {
@@ -1930,6 +1930,28 @@ fn apply_target(
             "the ownership receipt cannot record this target, so nothing was written: {error}"
         ));
     }
+    let mutation = match store.begin_mutation() {
+        Ok(mutation) => mutation,
+        Err(error) => {
+            return StepOutcome::Failed(format!(
+                "the metadata mutation guard could not be acquired, so nothing was written: {error}"
+            ));
+        }
+    };
+    match mutation.source_is_registered(plan.variant.source_id()) {
+        Ok(true) => {}
+        Ok(false) => {
+            return StepOutcome::Failed(
+                "the source was forgotten after the plan was shown, so nothing was written"
+                    .to_owned(),
+            );
+        }
+        Err(error) => {
+            return StepOutcome::Failed(format!(
+                "the source registration could not be re-read, so nothing was written: {error}"
+            ));
+        }
+    }
     if let Err(reason) = recheck_source_identity(plan) {
         return StepOutcome::Failed(format!("{reason}, so nothing was written"));
     }
@@ -1969,7 +1991,10 @@ fn apply_target(
             StepOutcome::Failed(format!("the link could not be created: {error}"))
         };
     }
-    match store.record_receipt(&receipt) {
+    if let Err(error) = mutation.record_receipt(&receipt) {
+        return StepOutcome::CreatedUnrecorded(error.to_string());
+    }
+    match mutation.commit() {
         Ok(()) => StepOutcome::Created,
         Err(error) => StepOutcome::CreatedUnrecorded(error.to_string()),
     }
@@ -2338,11 +2363,16 @@ impl FinalizeReport {
 }
 
 /// Delete receipts only after a positive LinkGone pass authorizes it.
+///
+/// Content survival remains an independently reported postcondition, but it
+/// cannot make an already-gone link's inert receipt useful again. The final
+/// link-path recheck and receipt deletion share one metadata mutation guard,
+/// so another Skilled process cannot commit a replacement receipt in between.
 pub(crate) fn finalize_uninstall(
     plan: &UninstallPlan,
     applied: &ApplyReport,
     verification: &VerifyReport,
-    store: &Store,
+    store: &mut Store,
 ) -> FinalizeReport {
     let mut report = FinalizeReport::default();
     for step in applied.steps.iter().filter(|step| step.removed_link()) {
@@ -2355,39 +2385,18 @@ pub(crate) fn finalize_uninstall(
         let UninstallDisposition::RemoveLink { link_target, .. } = target.disposition() else {
             continue;
         };
-        if matches!(
-            target.disposition(),
-            UninstallDisposition::RemoveLink { resolves: true, .. }
-        ) {
-            if !verification_holds(verification, step.agent, Postcondition::ContentSurvived) {
+        let mutation = match store.begin_mutation() {
+            Ok(mutation) => mutation,
+            Err(error) => {
                 report.failures.push(FinalizeFailure {
                     agent: step.agent,
-                    reason: "the ownership receipt was retained because canonical content survival was not positively verified"
-                        .to_owned(),
+                    reason: format!(
+                        "the ownership receipt was retained because the metadata mutation guard could not be acquired: {error}"
+                    ),
                 });
                 continue;
             }
-            match fs::metadata(link_target) {
-                Ok(metadata) if metadata.is_dir() => {}
-                Ok(_) => {
-                    report.failures.push(FinalizeFailure {
-                        agent: step.agent,
-                        reason: "the ownership receipt was retained because the recorded target is no longer a directory"
-                            .to_owned(),
-                    });
-                    continue;
-                }
-                Err(error) => {
-                    report.failures.push(FinalizeFailure {
-                        agent: step.agent,
-                        reason: format!(
-                            "the ownership receipt was retained because the recorded target could not be re-read: {error}"
-                        ),
-                    });
-                    continue;
-                }
-            }
-        }
+        };
         match exact_link_is_inactive(step.link_path(), link_target) {
             Ok(true) => {}
             Ok(false) => {
@@ -2409,8 +2418,15 @@ pub(crate) fn finalize_uninstall(
             }
         }
         if let Err(error) =
-            store.delete_receipts_for_link(step.agent, step.link_path(), link_target)
+            mutation.delete_receipts_for_link(step.agent, step.link_path(), link_target)
         {
+            report.failures.push(FinalizeFailure {
+                agent: step.agent,
+                reason: error.to_string(),
+            });
+            continue;
+        }
+        if let Err(error) = mutation.commit() {
             report.failures.push(FinalizeFailure {
                 agent: step.agent,
                 reason: error.to_string(),
@@ -2726,17 +2742,29 @@ impl ForgetOutcome {
 }
 
 /// Recheck the exact receipt multiset and every link immediately before deletion.
+///
+/// The mutation guard begins before both checks and stays held through the
+/// transaction commit. Install acquires the same guard before touching a link,
+/// so no other Skilled process can make a receipt active inside this window.
 pub(crate) fn apply_forget(plan: &ForgetPlan, store: &mut Store) -> ForgetApply {
     if plan.is_blocked() {
         debug_assert!(false, "a blocked plan reached apply_forget");
         return ForgetApply::Failed("the plan is blocked".to_owned());
     }
+    let mutation = match store.begin_mutation() {
+        Ok(mutation) => mutation,
+        Err(error) => {
+            return ForgetApply::Failed(format!(
+                "the metadata mutation guard could not be acquired: {error}"
+            ));
+        }
+    };
     let expected: Vec<Receipt> = plan
         .receipts
         .iter()
         .map(|item| item.receipt.clone())
         .collect();
-    let current = match store.receipts() {
+    let current = match mutation.receipts() {
         Ok(receipts) => receipts
             .into_iter()
             .filter(|receipt| receipt.source_id == Some(plan.source.id()))
@@ -2762,10 +2790,19 @@ pub(crate) fn apply_forget(plan: &ForgetPlan, store: &mut Store) -> ForgetApply 
             "a receipted path is active or unreadable now, so no metadata was removed".to_owned(),
         );
     }
-    match store.forget_source(plan.source.id()) {
-        Ok(0) => ForgetApply::NothingToDo,
-        Ok(_) => ForgetApply::Forgotten,
-        Err(error) => ForgetApply::Failed(format!("the metadata transaction failed: {error}")),
+    let deleted = match mutation.forget_source(plan.source.id()) {
+        Ok(deleted) => deleted,
+        Err(error) => {
+            return ForgetApply::Failed(format!("the metadata transaction failed: {error}"));
+        }
+    };
+    if let Err(error) = mutation.commit() {
+        return ForgetApply::Failed(format!("the metadata transaction failed: {error}"));
+    }
+    if deleted == 0 {
+        ForgetApply::NothingToDo
+    } else {
+        ForgetApply::Forgotten
     }
 }
 
@@ -3166,7 +3203,7 @@ mod tests {
         fs::create_dir_all(&target).expect("target directory");
         fs::create_dir_all(link.parent().expect("link root")).expect("link root");
         std::os::unix::fs::symlink(&target, &link).expect("recreated managed link");
-        let store = Store::open(&fixture.path().join("data")).expect("metadata store");
+        let mut store = Store::open(&fixture.path().join("data")).expect("metadata store");
         let receipt = Receipt::new(
             AgentKind::ClaudeCode,
             "portable".to_owned(),
@@ -3176,7 +3213,7 @@ mod tests {
             None,
             None,
         );
-        store.record_receipt(&receipt).expect("record receipt");
+        record_test_receipt(&mut store, &receipt);
         let (plan, applied) = removable_uninstall(&link, &target, true);
         let verification = VerifyReport {
             held: vec![
@@ -3192,19 +3229,19 @@ mod tests {
             ..VerifyReport::default()
         };
 
-        let finalized = finalize_uninstall(&plan, &applied, &verification, &store);
+        let finalized = finalize_uninstall(&plan, &applied, &verification, &mut store);
 
         assert_eq!(finalized.failures().len(), 1);
         assert_eq!(store.receipts().expect("retained receipt"), vec![receipt]);
     }
 
     #[test]
-    fn receipt_finalization_requires_the_applicable_content_survival_pass() {
+    fn receipt_finalization_depends_only_on_the_positive_link_gone_pass() {
         let fixture = tempfile::tempdir().expect("temporary fixture");
         let target = fixture.path().join("target");
         let link = fixture.path().join("home/.claude/skills/portable");
         fs::create_dir_all(&target).expect("target directory");
-        let store = Store::open(&fixture.path().join("data")).expect("metadata store");
+        let mut store = Store::open(&fixture.path().join("data")).expect("metadata store");
         let receipt = Receipt::new(
             AgentKind::ClaudeCode,
             "portable".to_owned(),
@@ -3214,7 +3251,7 @@ mod tests {
             None,
             None,
         );
-        store.record_receipt(&receipt).expect("record receipt");
+        record_test_receipt(&mut store, &receipt);
         let (plan, applied) = removable_uninstall(&link, &target, true);
         let verification = VerifyReport {
             held: vec![VerifyPass {
@@ -3224,19 +3261,19 @@ mod tests {
             ..VerifyReport::default()
         };
 
-        let finalized = finalize_uninstall(&plan, &applied, &verification, &store);
+        let finalized = finalize_uninstall(&plan, &applied, &verification, &mut store);
 
-        assert_eq!(finalized.failures().len(), 1);
-        assert_eq!(store.receipts().expect("retained receipt"), vec![receipt]);
+        assert!(finalized.failures().is_empty());
+        assert!(store.receipts().expect("receipt removed").is_empty());
     }
 
     #[test]
-    fn receipt_finalization_rechecks_content_after_the_verification_pass() {
+    fn receipt_finalization_does_not_make_ancillary_content_control_cleanup() {
         let fixture = tempfile::tempdir().expect("temporary fixture");
         let target = fixture.path().join("target");
         let link = fixture.path().join("home/.claude/skills/portable");
         fs::create_dir_all(&target).expect("target directory");
-        let store = Store::open(&fixture.path().join("data")).expect("metadata store");
+        let mut store = Store::open(&fixture.path().join("data")).expect("metadata store");
         let receipt = Receipt::new(
             AgentKind::ClaudeCode,
             "portable".to_owned(),
@@ -3246,7 +3283,7 @@ mod tests {
             None,
             None,
         );
-        store.record_receipt(&receipt).expect("record receipt");
+        record_test_receipt(&mut store, &receipt);
         let (plan, applied) = removable_uninstall(&link, &target, true);
         let verification = VerifyReport {
             held: vec![
@@ -3263,10 +3300,10 @@ mod tests {
         };
         fs::remove_dir(&target).expect("content disappears after verification");
 
-        let finalized = finalize_uninstall(&plan, &applied, &verification, &store);
+        let finalized = finalize_uninstall(&plan, &applied, &verification, &mut store);
 
-        assert_eq!(finalized.failures().len(), 1);
-        assert_eq!(store.receipts().expect("retained receipt"), vec![receipt]);
+        assert!(finalized.failures().is_empty());
+        assert!(store.receipts().expect("receipt removed").is_empty());
     }
 
     fn removable_uninstall(
@@ -3296,5 +3333,11 @@ mod tests {
                 }],
             },
         )
+    }
+
+    fn record_test_receipt(store: &mut Store, receipt: &Receipt) {
+        let mutation = store.begin_mutation().expect("receipt mutation guard");
+        mutation.record_receipt(receipt).expect("record receipt");
+        mutation.commit().expect("commit receipt");
     }
 }

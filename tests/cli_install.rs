@@ -137,7 +137,7 @@ fn uninstall_without_a_receipt_is_blocked_and_leaves_the_link_alone() {
 }
 
 #[test]
-fn uninstall_reports_partial_apply_when_receipt_cleanup_fails() {
+fn uninstall_reports_success_when_only_inert_receipt_cleanup_fails() {
     let fixture = Fixture::new();
     let repository = fixture.register("library", &["portable"]);
     let source = repository.display().to_string();
@@ -177,7 +177,7 @@ fn uninstall_reports_partial_apply_when_receipt_cleanup_fails() {
         "claude-code",
     ]);
 
-    assert_eq!(code, ExitCodeKind::PartialApply, "{output}");
+    assert_eq!(code, ExitCodeKind::Success, "{output}");
     assert!(fs::symlink_metadata(&link).is_err(), "{output}");
     assert!(output.contains("Ownership record remains"), "{output}");
     assert_eq!(fixture.app().receipts().expect("receipt retained").len(), 1);
@@ -571,8 +571,8 @@ fn every_outcome_has_its_own_exit_status() {
         (UninstallStatus::NotApplied, ExitCodeKind::PartialApply, 4),
         (
             UninstallStatus::UninstalledUnrecorded,
-            ExitCodeKind::PartialApply,
-            4,
+            ExitCodeKind::Success,
+            0,
         ),
         (
             UninstallStatus::VerificationFailed,

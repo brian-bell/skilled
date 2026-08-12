@@ -1315,7 +1315,7 @@ impl SkilledApp {
     /// The same three steps [`Effect::ApplyInstall`] performs, in the same
     /// order and for the same reason.
     pub(crate) fn apply_plan(&mut self, plan: &InstallPlan) -> InstallOutcome {
-        let applied = apply_install(plan, &self.store, &self.environment.home_dir);
+        let applied = apply_install(plan, &mut self.store, &self.environment.home_dir);
         self.rescan_installations();
         let verification = verify_install(plan, &applied, &self.inventory);
         InstallOutcome::new(plan.clone(), applied, verification)
@@ -1326,7 +1326,7 @@ impl SkilledApp {
         let content = probe_uninstall_content(plan);
         self.rescan_installations();
         let verification = verify_uninstall(plan, &applied, &self.inventory, &content);
-        let finalized = finalize_uninstall(plan, &applied, &verification, &self.store);
+        let finalized = finalize_uninstall(plan, &applied, &verification, &mut self.store);
         self.refresh_receipts();
         UninstallOutcome::new(plan.clone(), applied, verification, finalized)
     }
