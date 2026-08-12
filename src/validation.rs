@@ -162,7 +162,7 @@ pub(crate) fn validate_portable_skill_with_budget(
     let name = frontmatter
         .name
         .ok_or(PortableValidationError::InvalidName)?;
-    if !valid_name(&name) {
+    if !valid_skill_name(&name) {
         return Err(PortableValidationError::InvalidName);
     }
     let directory_name = skill_directory
@@ -189,7 +189,7 @@ pub(crate) fn validate_portable_skill_with_budget(
     })
 }
 
-fn valid_name(name: &str) -> bool {
+pub(crate) fn valid_skill_name(name: &str) -> bool {
     (1..=64).contains(&name.len())
         && name.split('-').all(|segment| {
             !segment.is_empty()

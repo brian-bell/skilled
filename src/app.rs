@@ -3,11 +3,18 @@ use std::path::{Path, PathBuf};
 use crate::{
     AgentDetection, AgentKind, AppEnvironment, Result, SessionIdentity,
     agents::{detect_agents, detection_at},
-    inventory::{DoctorEntry, InventoryRow, InventorySnapshot, doctor_order, scan_installations},
+    inventory::{
+        DoctorEntry, InstallationObject, InventoryRow, InventorySnapshot, doctor_order,
+        scan_installations,
+    },
     operations::{
-        InstallOutcome, InstallPlan, InstallPrompt, Receipt, RepairOfferStatus, RepairOutcome,
-        RepairOverlay, RepairPlan, RepairPrompt, apply_install, apply_repair, plan_install,
-        plan_repair, probe_install, probe_repair, verify_install, verify_repair,
+        ForgetOutcome, ForgetPlan, ForgetPrompt, InstallOutcome, InstallPlan, InstallPrompt,
+        OperationPrompt, Receipt, RepairOfferStatus, RepairOutcome, RepairOverlay, RepairPlan,
+        RepairPrompt, UninstallOutcome, UninstallPlan, UninstallPrompt, apply_forget,
+        apply_install, apply_repair, apply_uninstall, finalize_uninstall, plan_forget,
+        plan_forget_unreadable_receipts, plan_install, plan_repair, plan_uninstall, probe_forget,
+        probe_install, probe_repair, probe_uninstall, probe_uninstall_content, verify_forget,
+        verify_install, verify_repair, verify_uninstall,
     },
     resolution::VariantRef,
     source::{
@@ -15,6 +22,7 @@ use crate::{
         revalidate_source_preview,
     },
     store::Store,
+    validation::valid_skill_name,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -160,10 +168,13 @@ pub enum Action {
     /// Plan installing the focused variant, and show what it would do.
     ///
     /// Nothing is written by this, and nothing is written by anything until
-    /// [`Action::ConfirmInstall`] is applied to the preview it produces.
+    /// [`Action::ConfirmOperation`] is applied to the preview it produces.
     BeginInstall,
-    ConfirmInstall,
-    DismissInstall,
+    /// Plan removal of the focused skill's owned links.
+    BeginUninstall,
+    BeginForgetSource,
+    ConfirmOperation,
+    DismissOperation,
     /// Plan repairing the selected Doctor observation. Planning is read-only.
     BeginRepair,
     ConfirmRepair,
@@ -203,6 +214,10 @@ pub enum Effect {
     PlanInstall,
     /// Create the links the shown preview calls work, then rescan and verify.
     ApplyInstall,
+    PlanUninstall,
+    ApplyUninstall,
+    PlanForgetSource,
+    ApplyForgetSource,
     /// Read the machine and build a repair preview for the selected finding.
     PlanRepair,
     /// Replace the link in the shown repair preview, then rescan and verify.
@@ -421,14 +436,16 @@ pub struct SkilledApp {
     detail_measured: bool,
     doctor_pane: DoctorPane,
     focused_finding: usize,
-    /// The install dialog, when one is open.
+    /// The operation dialog, when one is open.
     ///
     /// While it is set it owns the keyboard, the way the help overlay and the
     /// catalog confirmation do: a preview is a question, and a stray navigation
     /// key must not answer it.
-    pending_install: Option<InstallPrompt>,
-    /// The repair dialog, mutually exclusive with the install dialog.
+    pending_operation: Option<OperationPrompt>,
+    /// The repair dialog, mutually exclusive with the operation dialog.
     pending_repair: Option<RepairPrompt>,
+    /// Last readable ownership snapshot. `None` means Skilled could not tell.
+    cached_receipts: Option<Vec<Receipt>>,
     help_context: Option<View>,
 }
 
@@ -457,8 +474,13 @@ impl SkilledApp {
         } else {
             InventorySnapshot::not_scanned(&agents)
         };
+        let mut cached_receipts = None;
         let repair_overlay = match store.receipts() {
-            Ok(receipts) => RepairOverlay::build(&inventory, &receipts, &sources, &agents),
+            Ok(receipts) => {
+                let overlay = RepairOverlay::build(&inventory, &receipts, &sources, &agents);
+                cached_receipts = Some(receipts);
+                overlay
+            }
             Err(error) => RepairOverlay::receipts_unread(error.to_string()),
         };
         let mut app = Self {
@@ -488,8 +510,9 @@ impl SkilledApp {
             detail_measured: false,
             doctor_pane: DoctorPane::Findings,
             focused_finding: 0,
-            pending_install: None,
+            pending_operation: None,
             pending_repair: None,
+            cached_receipts,
             help_context: None,
         };
         app.refilter_installations();
@@ -570,8 +593,54 @@ impl SkilledApp {
         self.help_context
     }
 
+    pub fn pending_operation(&self) -> Option<&OperationPrompt> {
+        self.pending_operation.as_ref()
+    }
+
+    /// Project the open operation to its install prompt, when it is one.
+    ///
+    /// `None` does not mean no operation dialog is open; callers deciding
+    /// keyboard ownership must use [`Self::pending_operation`].
     pub fn pending_install(&self) -> Option<&InstallPrompt> {
-        self.pending_install.as_ref()
+        match self.pending_operation.as_ref() {
+            Some(OperationPrompt::Install(prompt)) => Some(prompt),
+            Some(OperationPrompt::Uninstall(_) | OperationPrompt::Forget(_)) | None => None,
+        }
+    }
+
+    pub fn cached_receipts(&self) -> Option<&[Receipt]> {
+        self.cached_receipts.as_deref()
+    }
+
+    /// Whether the selected inventory row contains a link Skilled may own.
+    pub fn can_uninstall_selection(&self) -> bool {
+        if self.view != View::Inventory {
+            return false;
+        }
+        let Some(row) = self.selected_installation() else {
+            return false;
+        };
+        AgentKind::ALL.into_iter().any(|agent| {
+            let Some(observation) = row.observation(agent) else {
+                return false;
+            };
+            let InstallationObject::Symlink { target } = observation.object() else {
+                return false;
+            };
+            self.cached_receipts.as_ref().is_none_or(|receipts| {
+                receipts.iter().any(|receipt| {
+                    receipt.agent() == agent
+                        && receipt.link_path() == observation.path()
+                        && receipt.link_target() == target
+                })
+            })
+        })
+    }
+
+    pub fn can_forget_source(&self) -> bool {
+        self.view == View::Sources
+            && self.sources_pane == SourcesPane::Repositories
+            && self.selected_source().is_some()
     }
 
     pub fn pending_repair(&self) -> Option<&RepairPrompt> {
@@ -821,12 +890,12 @@ impl SkilledApp {
         // A preview is a question about writes that have not happened yet, so
         // it owns the keyboard until it is answered: nothing may navigate out
         // from under it, and nothing but a confirmation may confirm it.
-        if self.pending_install.is_some() {
+        if self.pending_operation.is_some() {
             return match action {
                 Action::Quit => UpdateResult::quit(),
-                Action::ConfirmInstall => UpdateResult::continuing(self.confirm_install()),
-                Action::DismissInstall => {
-                    self.pending_install = None;
+                Action::ConfirmOperation => UpdateResult::continuing(self.confirm_operation()),
+                Action::DismissOperation => {
+                    self.pending_operation = None;
                     self.reset_detail_scroll();
                     UpdateResult::continuing(Vec::new())
                 }
@@ -1097,11 +1166,25 @@ impl SkilledApp {
                     Vec::new()
                 }
             }
+            Action::BeginUninstall => {
+                if self.can_uninstall_selection() {
+                    vec![Effect::PlanUninstall]
+                } else {
+                    Vec::new()
+                }
+            }
+            Action::BeginForgetSource => {
+                if self.can_forget_source() {
+                    vec![Effect::PlanForgetSource]
+                } else {
+                    Vec::new()
+                }
+            }
             // Reachable only with no prompt open, where there is nothing to
             // confirm and nothing to dismiss.
-            Action::ConfirmInstall | Action::DismissInstall => Vec::new(),
+            Action::ConfirmOperation | Action::DismissOperation => Vec::new(),
             Action::BeginRepair => {
-                if self.pending_install.is_none() && self.can_repair_selection() {
+                if self.pending_operation.is_none() && self.can_repair_selection() {
                     vec![Effect::PlanRepair]
                 } else {
                     Vec::new()
@@ -1178,12 +1261,25 @@ impl SkilledApp {
                 }
                 Effect::ScanInstallations => self.rescan_installations(),
                 Effect::PlanInstall => {
-                    self.pending_install = Some(self.build_install_preview());
+                    self.pending_operation =
+                        Some(OperationPrompt::Install(self.build_install_preview()));
                     // The window belongs to the content under it, and this is
                     // new content.
                     self.reset_detail_scroll();
                 }
                 Effect::ApplyInstall => self.apply_pending_install(),
+                Effect::PlanUninstall => {
+                    self.pending_operation =
+                        Some(OperationPrompt::Uninstall(self.build_uninstall_preview()));
+                    self.reset_detail_scroll();
+                }
+                Effect::ApplyUninstall => self.apply_pending_uninstall(),
+                Effect::PlanForgetSource => {
+                    self.pending_operation =
+                        Some(OperationPrompt::Forget(self.build_forget_preview()));
+                    self.reset_detail_scroll();
+                }
+                Effect::ApplyForgetSource => self.apply_pending_forget(),
                 Effect::PlanRepair => {
                     self.pending_repair = Some(self.build_repair_preview());
                     self.reset_detail_scroll();
@@ -1199,12 +1295,22 @@ impl SkilledApp {
     ///
     /// A blocked plan and a plan with nothing left to do both stay on screen
     /// rather than turning into a report of an install that never ran.
-    fn confirm_install(&mut self) -> Vec<Effect> {
-        match &self.pending_install {
-            Some(InstallPrompt::Preview(plan))
-                if plan.is_executable() && self.preview_fully_seen() =>
+    fn confirm_operation(&mut self) -> Vec<Effect> {
+        match &self.pending_operation {
+            Some(OperationPrompt::Install(InstallPrompt::Preview(plan)))
+                if plan.is_executable() && self.operation_preview_fully_seen() =>
             {
                 vec![Effect::ApplyInstall]
+            }
+            Some(OperationPrompt::Uninstall(UninstallPrompt::Preview(plan)))
+                if plan.is_executable() && self.operation_preview_fully_seen() =>
+            {
+                vec![Effect::ApplyUninstall]
+            }
+            Some(OperationPrompt::Forget(ForgetPrompt::Preview(plan)))
+                if plan.is_executable() && self.operation_preview_fully_seen() =>
+            {
+                vec![Effect::ApplyForgetSource]
             }
             _ => Vec::new(),
         }
@@ -1218,13 +1324,13 @@ impl SkilledApp {
     /// a fact about the terminal the reader is looking at rather than about the
     /// plan; a preview that always fitted is fully seen at rest, which is why
     /// the ordinary case costs no keystrokes at all.
-    pub fn preview_fully_seen(&self) -> bool {
+    pub fn operation_preview_fully_seen(&self) -> bool {
         self.detail_measured && self.detail_scroll >= self.detail_max_scroll
     }
 
-    /// Compatibility name retained for the install-specific callers and tests.
-    pub fn install_preview_fully_seen(&self) -> bool {
-        self.preview_fully_seen()
+    /// Compatibility name retained for the repair callers and tests.
+    pub fn preview_fully_seen(&self) -> bool {
+        self.operation_preview_fully_seen()
     }
 
     fn confirm_repair(&mut self) -> Vec<Effect> {
@@ -1302,6 +1408,60 @@ impl SkilledApp {
         }
     }
 
+    fn build_uninstall_preview(&self) -> UninstallPrompt {
+        let Some(row) = self.selected_installation() else {
+            return UninstallPrompt::Failed("no installed skill is selected".to_owned());
+        };
+        match self.plan_uninstall_for(row.name(), [true; 3]) {
+            Ok(plan) => UninstallPrompt::Preview(plan),
+            Err(failure) => UninstallPrompt::Failed(failure.message().to_owned()),
+        }
+    }
+
+    fn build_forget_preview(&self) -> ForgetPrompt {
+        let Some(source) = self.selected_source() else {
+            return ForgetPrompt::Failed("no source is selected".to_owned());
+        };
+        let receipts = match self.store.receipts() {
+            Ok(receipts) => receipts,
+            Err(error) => {
+                return ForgetPrompt::Preview(plan_forget_unreadable_receipts(
+                    source,
+                    error.to_string(),
+                ));
+            }
+        };
+        let probe = probe_forget(source, &receipts);
+        ForgetPrompt::Preview(plan_forget(source, &receipts, &probe))
+    }
+
+    /// The one planning path shared by the screen and `skilled uninstall`.
+    pub(crate) fn plan_uninstall_for(
+        &self,
+        skill_name: &str,
+        requested: [bool; 3],
+    ) -> std::result::Result<UninstallPlan, PlanRequestFailure> {
+        if !valid_skill_name(skill_name) {
+            return Err(PlanRequestFailure::Unplannable(
+                "the uninstall skill name must be 1-64 lowercase ASCII letters or digits with single hyphen separators"
+                    .to_owned(),
+            ));
+        }
+        let receipts = self.store.receipts().map_err(|error| {
+            PlanRequestFailure::Metadata(format!(
+                "the ownership receipts could not be read, so Skilled cannot tell its own links from anyone else's: {error}"
+            ))
+        })?;
+        let probe = probe_uninstall(&self.agents, skill_name, self.home());
+        Ok(plan_uninstall(
+            &self.agents,
+            &receipts,
+            skill_name,
+            requested,
+            &probe,
+        ))
+    }
+
     /// Decide what installing one variant would do, for one set of agents.
     ///
     /// The one place planning happens: the Sources flow and `skilled install`
@@ -1357,14 +1517,59 @@ impl SkilledApp {
     /// The same three steps [`Effect::ApplyInstall`] performs, in the same
     /// order and for the same reason.
     pub(crate) fn apply_plan(&mut self, plan: &InstallPlan) -> InstallOutcome {
-        let applied = apply_install(plan, &self.store, &self.environment.home_dir);
+        let applied = apply_install(plan, &mut self.store, &self.environment.home_dir);
         self.rescan_installations();
         let verification = verify_install(plan, &applied, &self.inventory);
         InstallOutcome::new(plan.clone(), applied, verification)
     }
 
+    pub(crate) fn apply_uninstall_plan(&mut self, plan: &UninstallPlan) -> UninstallOutcome {
+        let applied = apply_uninstall(plan, &self.store, &self.environment.home_dir);
+        let content = probe_uninstall_content(plan);
+        self.rescan_installations();
+        let verification = verify_uninstall(plan, &applied, &self.inventory, &content);
+        let finalized = finalize_uninstall(plan, &applied, &verification, &mut self.store);
+        self.refresh_receipts();
+        UninstallOutcome::new(plan.clone(), applied, verification, finalized)
+    }
+
+    pub(crate) fn apply_forget_plan(&mut self, plan: &ForgetPlan) -> ForgetOutcome {
+        let applied = apply_forget(plan, &mut self.store);
+        let verification = match &applied {
+            crate::operations::ForgetApply::Forgotten
+            | crate::operations::ForgetApply::NothingToDo => verify_forget(plan, &self.store),
+            crate::operations::ForgetApply::Failed(_) => {
+                crate::operations::ForgetVerification::Withheld(
+                    "metadata postconditions were not checked because the forget operation did not run"
+                        .to_owned(),
+                )
+            }
+        };
+        if matches!(
+            applied,
+            crate::operations::ForgetApply::Forgotten | crate::operations::ForgetApply::NothingToDo
+        ) {
+            self.sources = match self.store.registered_sources() {
+                Ok(sources) => sources,
+                Err(_) => self
+                    .sources
+                    .iter()
+                    .filter(|source| source.id() != plan.source().id())
+                    .cloned()
+                    .collect(),
+            };
+            self.focused_source = self
+                .focused_source
+                .min(self.sources.len().saturating_sub(1));
+            self.focused_variant = 0;
+            self.rescan_installations();
+        }
+        self.refresh_receipts();
+        ForgetOutcome::new(plan.clone(), applied, verification)
+    }
+
     pub(crate) fn apply_repair_plan(&mut self, plan: &RepairPlan) -> RepairOutcome {
-        let applied = apply_repair(plan, &self.store, &self.environment.home_dir);
+        let applied = apply_repair(plan, &mut self.store, &self.environment.home_dir);
         self.rescan_installations();
         let verification = verify_repair(plan, &applied, &self.inventory);
         RepairOutcome::new(plan.clone(), applied, verification)
@@ -1377,12 +1582,36 @@ impl SkilledApp {
     /// is the evidence verification rests on; and it happens whatever the apply
     /// did, so the inventory left behind describes the machine as it now is.
     fn apply_pending_install(&mut self) {
-        let Some(InstallPrompt::Preview(plan)) = self.pending_install.take() else {
+        let Some(OperationPrompt::Install(InstallPrompt::Preview(plan))) =
+            self.pending_operation.take()
+        else {
             return;
         };
         let outcome = self.apply_plan(&plan);
-        self.pending_install = Some(InstallPrompt::Report(outcome));
+        self.pending_operation = Some(OperationPrompt::Install(InstallPrompt::Report(outcome)));
         // The report is different content from the preview it replaced.
+        self.reset_detail_scroll();
+    }
+
+    fn apply_pending_uninstall(&mut self) {
+        let Some(OperationPrompt::Uninstall(UninstallPrompt::Preview(plan))) =
+            self.pending_operation.take()
+        else {
+            return;
+        };
+        let outcome = self.apply_uninstall_plan(&plan);
+        self.pending_operation = Some(OperationPrompt::Uninstall(UninstallPrompt::Report(outcome)));
+        self.reset_detail_scroll();
+    }
+
+    fn apply_pending_forget(&mut self) {
+        let Some(OperationPrompt::Forget(ForgetPrompt::Preview(plan))) =
+            self.pending_operation.take()
+        else {
+            return;
+        };
+        let outcome = self.apply_forget_plan(&plan);
+        self.pending_operation = Some(OperationPrompt::Forget(ForgetPrompt::Report(outcome)));
         self.reset_detail_scroll();
     }
 
@@ -1401,9 +1630,15 @@ impl SkilledApp {
     /// free of filesystem work.
     fn rescan_installations(&mut self) {
         self.inventory = scan_installations(&self.agents, &self.sources);
+        // One read serves both readers of the receipt table: the overlay needs
+        // to say that it could not be read, and the cache keeps the last
+        // readable answer rather than flattening a failure to empty.
         self.repair_overlay = match self.store.receipts() {
             Ok(receipts) => {
-                RepairOverlay::build(&self.inventory, &receipts, &self.sources, &self.agents)
+                let overlay =
+                    RepairOverlay::build(&self.inventory, &receipts, &self.sources, &self.agents);
+                self.cached_receipts = Some(receipts);
+                overlay
             }
             Err(error) => RepairOverlay::receipts_unread(error.to_string()),
         };
@@ -1412,6 +1647,13 @@ impl SkilledApp {
         // selection is pulled back onto the list that replaced them.
         let last = self.finding_count().saturating_sub(1);
         self.focused_finding = self.focused_finding.min(last);
+    }
+
+    /// Refresh ownership evidence without flattening a failed read to empty.
+    fn refresh_receipts(&mut self) {
+        if let Ok(receipts) = self.store.receipts() {
+            self.cached_receipts = Some(receipts);
+        }
     }
 
     /// Recompute which rows the query admits, and keep the selection on one.
@@ -1564,7 +1806,7 @@ impl SkilledApp {
         // A modal dialog is drawn over whatever screen is behind it and takes
         // the keyboard with it, so while one is open it is the window the
         // movement keys move.
-        if self.pending_install.is_some() || self.pending_repair.is_some() {
+        if self.pending_operation.is_some() || self.pending_repair.is_some() {
             return true;
         }
         match self.view {

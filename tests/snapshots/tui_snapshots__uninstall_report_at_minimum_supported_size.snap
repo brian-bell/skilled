@@ -1,0 +1,29 @@
+---
+source: tests/tui_snapshots.rs
+assertion_line: 1657
+expression: "normalize_install_screen(&temporary, render(&app, 80, 24))"
+---
+ ◆ skilled  global                                ● ready · 1 source registered
+ 1┌ Uninstall result ─────────────────────────────────────── already applied ┐
+  │                                                                          │
+▌ │  Skill: portable                                                         │
+▁▁│  ✓ Claude Code · link removed                                            │▁▁
+  │    [TEMP]                      /home/.claude/skills/portable             │
+  │  ✓ Codex · link removed                                                  │
+  │    [TEMP]                      /home/.agents/skills/portable             │
+  │  ✓ OpenCode · link removed                                               │
+  │    [TEMP]                      /home/.config/opencode/skills/portable    │
+  │                                                                          │
+  │  Source content and agent skill roots were not removed.                  │
+  │                                                                          │
+  │                                                                          │
+  │                                                                          │
+  │                                                                          │
+  │                                                                          │
+  │                                                                          │
+  │                                                                          │
+  │  ──────────────────────────────────────────────────────────────────────  │
+  │  Uninstalled and verified                                     Esc Close  │
+  │                                                                          │
+  └──────────────────────────────────────────────────────────────────────────┘
+ Esc Close   Ctrl-C Quit

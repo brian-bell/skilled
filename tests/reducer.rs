@@ -712,14 +712,14 @@ fn install_is_requested_only_from_a_focused_variant() {
     // The repositories pane stands on a source, not on a variant.
     let update = app.update(Action::BeginInstall);
     assert!(update.effects().is_empty());
-    assert!(app.pending_install().is_none());
+    assert!(app.pending_operation().is_none());
 
     // The variants pane of a catalog holding nothing stands on its `no
     // variants` row, which is a state and not a skill.
     app.update(Action::AdvanceSourcesPane);
     let update = app.update(Action::BeginInstall);
     assert!(update.effects().is_empty());
-    assert!(app.pending_install().is_none());
+    assert!(app.pending_operation().is_none());
     assert!(!app.can_install_selection());
 }
 
@@ -738,10 +738,10 @@ fn dismissing_a_preview_is_effect_free() {
     app.perform_effects(update.effects()).expect("plan install");
     assert!(app.pending_install().is_some());
 
-    let update = app.update(Action::DismissInstall);
+    let update = app.update(Action::DismissOperation);
 
     assert!(update.effects().is_empty());
-    assert!(app.pending_install().is_none());
+    assert!(app.pending_operation().is_none());
     assert!(
         !temporary
             .path()

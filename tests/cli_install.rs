@@ -17,7 +17,7 @@ use std::{
 use skilled::{
     Action, AgentKind, AppEnvironment, SkilledApp,
     cli::{self, ExitCodeKind},
-    operations::InstallStatus,
+    operations::{InstallStatus, UninstallStatus},
 };
 
 const ROOTS: [(AgentKind, &str); 3] = [
@@ -68,6 +68,123 @@ fn yes_installs_after_planning_and_verifying_without_asking() {
         ),
         "{output}"
     );
+}
+
+#[test]
+fn uninstall_yes_removes_only_the_named_managed_link_and_still_verifies() {
+    let fixture = Fixture::new();
+    let repository = fixture.register("library", &["portable"]);
+    let source = repository.display().to_string();
+    let (installed, output) = fixture.run(&[
+        "install",
+        "--yes",
+        "--source",
+        &source,
+        "--skill",
+        "portable",
+        "--agents",
+        "claude-code",
+    ]);
+    assert_eq!(installed, ExitCodeKind::Success, "{output}");
+
+    let link = fixture.home().join(".claude/skills/portable");
+    let (code, output) = fixture.run(&[
+        "uninstall",
+        "--yes",
+        "--skill",
+        "portable",
+        "--agent",
+        "claude-code",
+    ]);
+
+    assert_eq!(code, ExitCodeKind::Success, "{output}");
+    assert!(!output.contains("Proceed?"), "{output}");
+    assert!(fs::symlink_metadata(&link).is_err(), "{output}");
+    assert!(link.parent().expect("root").is_dir(), "root must remain");
+    assert!(repository.join("skills/portable/SKILL.md").is_file());
+    assert!(fixture.app().receipts().expect("receipts").is_empty());
+    assert!(
+        output.contains("receipt source 1 · catalog skills"),
+        "{output}"
+    );
+    assert!(
+        output.contains("Source content and agent skill roots were not removed"),
+        "{output}"
+    );
+}
+
+#[test]
+fn uninstall_without_a_receipt_is_blocked_and_leaves_the_link_alone() {
+    let fixture = Fixture::new();
+    let repository = fixture.register("library", &["portable"]);
+    let root = fixture.home().join(".claude/skills");
+    fs::create_dir_all(&root).expect("root");
+    let link = root.join("portable");
+    std::os::unix::fs::symlink(repository.join("skills/portable"), &link).expect("unmanaged link");
+
+    let (code, output) = fixture.run(&[
+        "uninstall",
+        "--yes",
+        "--skill",
+        "portable",
+        "--agent",
+        "claude-code",
+    ]);
+
+    assert_eq!(code, ExitCodeKind::Blocked, "{output}");
+    assert!(
+        fs::symlink_metadata(&link)
+            .expect("link remains")
+            .file_type()
+            .is_symlink()
+    );
+}
+
+#[test]
+fn uninstall_reports_success_when_only_inert_receipt_cleanup_fails() {
+    let fixture = Fixture::new();
+    let repository = fixture.register("library", &["portable"]);
+    let source = repository.display().to_string();
+    let (installed, output) = fixture.run(&[
+        "install",
+        "--yes",
+        "--source",
+        &source,
+        "--skill",
+        "portable",
+        "--agents",
+        "claude-code",
+    ]);
+    assert_eq!(installed, ExitCodeKind::Success, "{output}");
+
+    let connection =
+        rusqlite::Connection::open(fixture.directory.path().join("data/skilled.sqlite3"))
+            .expect("open the metadata database");
+    connection
+        .execute_batch(
+            "CREATE TRIGGER refuse_receipt_cleanup
+             BEFORE DELETE ON operation_receipts
+             BEGIN
+               SELECT RAISE(ABORT, 'simulated receipt cleanup failure');
+             END;",
+        )
+        .expect("install failing delete trigger");
+    drop(connection);
+
+    let link = fixture.home().join(".claude/skills/portable");
+    let (code, output) = fixture.run(&[
+        "uninstall",
+        "--yes",
+        "--skill",
+        "portable",
+        "--agent",
+        "claude-code",
+    ]);
+
+    assert_eq!(code, ExitCodeKind::Success, "{output}");
+    assert!(fs::symlink_metadata(&link).is_err(), "{output}");
+    assert!(output.contains("Ownership record remains"), "{output}");
+    assert_eq!(fixture.app().receipts().expect("receipt retained").len(), 1);
 }
 
 /// Spec 15: `--yes` is fail-closed. It answers a question the user cannot see,
@@ -281,6 +398,20 @@ fn malformed_requests_are_refused_with_usage() {
     for arguments in [
         vec!["uninstall", "--skill", "portable"],
         vec![
+            "uninstall",
+            "--skill",
+            "../outside",
+            "--agent",
+            "claude-code",
+        ],
+        vec![
+            "uninstall",
+            "--skill",
+            "/tmp/outside",
+            "--agent",
+            "claude-code",
+        ],
+        vec![
             "install",
             "--yes",
             "--source",
@@ -447,6 +578,29 @@ fn every_outcome_has_its_own_exit_status() {
         assert_eq!(cli::exit_code_for(status), expected, "{status:?}");
         assert_eq!(expected.code(), code, "{status:?}");
     }
+    for (status, expected, code) in [
+        (UninstallStatus::Uninstalled, ExitCodeKind::Success, 0),
+        (UninstallStatus::NothingToDo, ExitCodeKind::Success, 0),
+        (
+            UninstallStatus::PartiallyApplied,
+            ExitCodeKind::PartialApply,
+            4,
+        ),
+        (UninstallStatus::NotApplied, ExitCodeKind::PartialApply, 4),
+        (
+            UninstallStatus::UninstalledUnrecorded,
+            ExitCodeKind::Success,
+            0,
+        ),
+        (
+            UninstallStatus::VerificationFailed,
+            ExitCodeKind::VerificationFailed,
+            5,
+        ),
+    ] {
+        assert_eq!(cli::exit_code_for_uninstall(status), expected, "{status:?}");
+        assert_eq!(expected.code(), code, "{status:?}");
+    }
     // The statuses no outcome carries, pinned beside them: a blocked plan never
     // reaches an apply, and an internal failure is not an outcome at all.
     assert_eq!(ExitCodeKind::InvalidRequest.code(), 2);
@@ -477,7 +631,7 @@ fn a_missing_flag_value_is_not_taken_from_the_next_flag() {
 fn unreadable_metadata_is_an_internal_error_rather_than_an_invalid_request() {
     let fixture = Fixture::new();
     let repository = fixture.register("library", &["portable"]);
-    // The schema still says version five, so the table is not recreated.
+    // The schema still says the current version, so the table is not recreated.
     let connection =
         rusqlite::Connection::open(fixture.directory.path().join("data/skilled.sqlite3"))
             .expect("open the metadata database");

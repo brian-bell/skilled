@@ -1623,13 +1623,117 @@ fn install_report_at_minimum_supported_size() {
     // frame measured. This preview fits at the size the report is snapshotted
     // at, so the measurement is that there is nothing left to scroll to.
     app.note_detail_max_scroll(drawn(&app, 120, 40).1.detail_max_scroll());
-    dispatch(&mut app, Action::ConfirmInstall);
+    dispatch(&mut app, Action::ConfirmOperation);
 
     insta::assert_snapshot!(normalize_install_screen(&temporary, render(&app, 80, 24)));
     insta::assert_snapshot!(
         "install_report_at_wide_size",
         normalize_install_screen(&temporary, render(&app, 120, 40))
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn uninstall_preview_and_report_at_supported_sizes() {
+    let (temporary, mut app) = install_fixture();
+    dispatch(&mut app, Action::BeginInstall);
+    app.note_detail_max_scroll(drawn(&app, 120, 40).1.detail_max_scroll());
+    dispatch(&mut app, Action::ConfirmOperation);
+    dispatch(&mut app, Action::DismissOperation);
+    dispatch(&mut app, Action::OpenInventory);
+    dispatch(&mut app, Action::BeginUninstall);
+
+    insta::assert_snapshot!(
+        "uninstall_preview_at_minimum_supported_size",
+        normalize_install_screen(&temporary, render(&app, 80, 24))
+    );
+    insta::assert_snapshot!(
+        "uninstall_preview_at_wide_size",
+        normalize_install_screen(&temporary, render(&app, 120, 40))
+    );
+
+    app.note_detail_max_scroll(drawn(&app, 120, 40).1.detail_max_scroll());
+    dispatch(&mut app, Action::ConfirmOperation);
+    insta::assert_snapshot!(
+        "uninstall_report_at_minimum_supported_size",
+        normalize_install_screen(&temporary, render(&app, 80, 24))
+    );
+    insta::assert_snapshot!(
+        "uninstall_report_at_wide_size",
+        normalize_install_screen(&temporary, render(&app, 120, 40))
+    );
+}
+
+/// A whole-plan block makes otherwise removable targets hypothetical. The
+/// dialog must not tell the user that any removal will occur when confirmation
+/// is unavailable and the executor will write nothing.
+#[cfg(unix)]
+#[test]
+fn blocked_uninstall_preview_states_that_free_targets_would_be_removed() {
+    let (temporary, mut app) = install_fixture();
+    dispatch(&mut app, Action::BeginInstall);
+    app.note_detail_max_scroll(drawn(&app, 120, 40).1.detail_max_scroll());
+    dispatch(&mut app, Action::ConfirmOperation);
+    dispatch(&mut app, Action::DismissOperation);
+    dispatch(&mut app, Action::OpenInventory);
+
+    let codex_link = temporary.path().join("home/.agents/skills/portable");
+    let other_target = temporary.path().join("other/portable");
+    fs::create_dir_all(&other_target).expect("create replacement target");
+    fs::remove_dir_all(temporary.path().join("src/skills/portable"))
+        .expect("make the remaining managed links dangling");
+    fs::remove_file(&codex_link).expect("remove receipted Codex link");
+    std::os::unix::fs::symlink(&other_target, &codex_link)
+        .expect("replace Codex link with another target");
+
+    dispatch(&mut app, Action::BeginUninstall);
+    let screen = normalize_install_screen(&temporary, render(&app, 120, 40));
+
+    assert!(screen.contains("would remove the managed link"), "{screen}");
+    assert!(!screen.contains("· remove the managed link"), "{screen}");
+    assert!(screen.contains("uninstall.wrong_target"), "{screen}");
+    assert!(!screen.contains("will remove"), "{screen}");
+    assert!(!screen.contains("after this uninstall"), "{screen}");
+}
+
+#[cfg(unix)]
+#[test]
+fn forget_source_preview_at_supported_sizes() {
+    let (temporary, mut app) = install_fixture();
+    dispatch(&mut app, Action::OpenInventory);
+    dispatch(&mut app, Action::OpenSources);
+    dispatch(&mut app, Action::BeginForgetSource);
+
+    insta::assert_snapshot!(
+        "forget_source_preview_at_minimum_supported_size",
+        normalize_install_screen(&temporary, render(&app, 80, 24))
+    );
+    insta::assert_snapshot!(
+        "forget_source_preview_at_wide_size",
+        normalize_install_screen(&temporary, render(&app, 120, 40))
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn forget_source_receipt_failure_states_its_blocking_finding() {
+    let (temporary, mut app) = install_fixture();
+    let connection = rusqlite::Connection::open(temporary.path().join("data/skilled.sqlite3"))
+        .expect("second metadata connection");
+    connection
+        .execute_batch("DROP TABLE operation_receipts;")
+        .expect("make receipts unreadable");
+    drop(connection);
+    dispatch(&mut app, Action::OpenInventory);
+    dispatch(&mut app, Action::OpenSources);
+    dispatch(&mut app, Action::BeginForgetSource);
+
+    let rendered = normalize_install_screen(&temporary, render(&app, 120, 40));
+    assert!(
+        rendered.contains("forget.unreadable_receipts"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("no such table"), "{rendered}");
 }
 
 /// A step that created a skill root and then could not write the link into it
@@ -1648,7 +1752,7 @@ fn install_report_with_a_residual_root_at_minimum_supported_size() {
     // The preview is the same one the successful report's test measures, so the
     // measurement is again that there is nothing left to scroll to.
     app.note_detail_max_scroll(drawn(&app, 120, 40).1.detail_max_scroll());
-    dispatch(&mut app, Action::ConfirmInstall);
+    dispatch(&mut app, Action::ConfirmOperation);
 
     insta::assert_snapshot!(normalize_install_screen(&temporary, render(&app, 80, 24)));
     // The narrow screen scrolls, so the note that nothing undoes the residual
