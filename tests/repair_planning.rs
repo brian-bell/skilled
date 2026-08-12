@@ -744,6 +744,62 @@ fn a_root_that_becomes_unreadable_after_preview_is_refused_without_modifying_the
 }
 
 #[test]
+fn a_link_that_becomes_unresolvable_after_preview_is_refused_without_replacement() {
+    let fixture = Fixture::new();
+    let common = fixture.source("common", "skills", "portable");
+    let mut app = fixture.registered(&common);
+    fixture.create_root_parents();
+    fixture.install(&mut app);
+    let specific = fixture.source("specific", ".agents/skills", "portable");
+    let preview = app
+        .preview_source(&specific)
+        .expect("preview specific source");
+    app.confirm_source(preview)
+        .expect("register specific source");
+    let link = fixture.root(AgentKind::Codex).join("portable");
+    let old_target = fs::read_link(&link).unwrap();
+
+    dispatch(&mut app, Action::OpenDoctor);
+    let finding = app
+        .doctor_findings()
+        .iter()
+        .position(|entry| {
+            entry.agent() == AgentKind::Codex
+                && entry.finding().code() == "install.wrong_managed_target"
+        })
+        .expect("Codex repairable finding");
+    dispatch(
+        &mut app,
+        Action::MoveDoctorSelection(i8::try_from(finding).unwrap()),
+    );
+    dispatch(&mut app, Action::BeginRepair);
+    assert!(matches!(
+        app.pending_repair(),
+        Some(RepairPrompt::Preview(plan))
+            if plan.disposition() == &RepairDisposition::ReplaceLink { dangling: false }
+    ));
+
+    // The installed link keeps the exact raw target the receipt proves, while
+    // that target changes from a resolvable directory into an ELOOP. A fresh
+    // plan would refuse this state as unresolvable, so confirmation must too.
+    fs::remove_dir_all(&old_target).unwrap();
+    std::os::unix::fs::symlink(&old_target, &old_target).unwrap();
+    app.note_detail_max_scroll(Some(0));
+    dispatch(&mut app, Action::ConfirmRepair);
+
+    let Some(RepairPrompt::Report(outcome)) = app.pending_repair() else {
+        panic!("repair should report its guarded refusal");
+    };
+    assert_eq!(outcome.status(), RepairStatus::NotApplied);
+    assert!(matches!(
+        outcome.applied().step().map(|step| step.outcome()),
+        Some(RepairStepOutcome::Failed(reason))
+            if reason.contains("entry or its resolution changed")
+    ));
+    assert_eq!(fs::read_link(&link).unwrap(), old_target);
+}
+
+#[test]
 fn a_repointed_link_is_not_owned_by_a_path_only_receipt() {
     let fixture = Fixture::new();
     let repository = fixture.source("library", "skills", "portable");

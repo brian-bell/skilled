@@ -2577,9 +2577,25 @@ fn repair_destination_unchanged(plan: &RepairPlan, root: &Path, home: &Path) -> 
                 .to_owned(),
         );
     }
-    match probe_repair_entry(&plan.link_path) {
-        RepairEntryProbe::Symlink { target, .. } if target == plan.recorded_target() => Ok(()),
-        _ => Err("the entry changed after the plan was shown, so nothing was written".to_owned()),
+    match (probe_repair_entry(&plan.link_path), &plan.disposition) {
+        (
+            RepairEntryProbe::Symlink {
+                target,
+                resolution: Err((io::ErrorKind::NotFound, _)),
+            },
+            RepairDisposition::ReplaceLink { dangling: true },
+        ) if target == plan.recorded_target() => Ok(()),
+        (
+            RepairEntryProbe::Symlink {
+                target,
+                resolution: Ok(_),
+            },
+            RepairDisposition::ReplaceLink { dangling: false },
+        ) if target == plan.recorded_target() => Ok(()),
+        _ => Err(
+            "the entry or its resolution changed after the plan was shown, so nothing was written"
+                .to_owned(),
+        ),
     }
 }
 
