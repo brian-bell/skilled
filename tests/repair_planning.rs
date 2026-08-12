@@ -15,7 +15,7 @@ use skilled::{
     cli::{self, ExitCodeKind},
     operations::{
         ReceiptOperation, RepairDisposition, RepairPrompt, RepairStatus, RepairStepOutcome,
-        plan_repair, probe_repair,
+        plan_repair, probe_repair, verify_repair,
     },
 };
 
@@ -455,6 +455,8 @@ fn a_confirmed_dangling_link_is_atomically_repaired_rescanned_and_receipted() {
     let Some(RepairPrompt::Report(outcome)) = app.pending_repair() else {
         panic!("repair should show a report: {:?}", app.pending_repair());
     };
+    let verified_plan = outcome.plan().clone();
+    let verified_apply = outcome.applied().clone();
     assert_eq!(outcome.status(), RepairStatus::Repaired);
     assert_eq!(
         outcome.applied().step().map(|step| step.outcome()),
@@ -478,6 +480,24 @@ fn a_confirmed_dangling_link_is_atomically_repaired_rescanned_and_receipted() {
                 .to_string_lossy()
                 .starts_with(".skilled-repair-")),
         "no temporary link remains"
+    );
+
+    // Canonical resolution alone is insufficient: a differently spelled raw
+    // target would no longer match the receipt the repair just recorded.
+    dispatch(&mut app, Action::DismissRepair);
+    let alias = fixture.directory.path().join("alias-to-repaired-variant");
+    std::os::unix::fs::symlink(verified_plan.new_target().unwrap(), &alias).unwrap();
+    fs::remove_file(&link).unwrap();
+    std::os::unix::fs::symlink(&alias, &link).unwrap();
+    dispatch(&mut app, Action::OpenInventory);
+    let verification = verify_repair(&verified_plan, &verified_apply, app.inventory());
+    assert!(!verification.is_verified());
+    assert!(
+        verification.failures()[0]
+            .observed()
+            .contains("instead of the planned target"),
+        "{:?}",
+        verification.failures()
     );
 }
 

@@ -2430,19 +2430,8 @@ fn apply_repair_target(plan: &RepairPlan, store: &Store, home: &Path) -> RepairS
     let Some(root) = plan.link_path.parent() else {
         return RepairStepOutcome::Failed("the target has no parent directory".to_owned());
     };
-    if probe_root(root, home) != RootProbe::Present {
-        return RepairStepOutcome::Failed(
-            "the agent's skill root changed after the plan was shown, so nothing was written"
-                .to_owned(),
-        );
-    }
-    match probe_repair_entry(&plan.link_path) {
-        RepairEntryProbe::Symlink { target, .. } if target == plan.recorded_target() => {}
-        _ => {
-            return RepairStepOutcome::Failed(
-                "the entry changed after the plan was shown, so nothing was written".to_owned(),
-            );
-        }
+    if let Err(reason) = repair_destination_unchanged(plan, root, home) {
+        return RepairStepOutcome::Failed(reason);
     }
     let (Some(source_dir), Some(source_checkout), Some(source_revision), Some(variant)) = (
         plan.source_dir.as_deref(),
@@ -2488,6 +2477,12 @@ fn apply_repair_target(plan: &RepairPlan, store: &Store, home: &Path) -> RepairS
     if let Err(reason) = verified_checkout(source_checkout, source_revision) {
         return RepairStepOutcome::Failed(format!("{reason}, so nothing was written"));
     }
+    // Source validation, receipt checks, and Git identity verification can all
+    // take time. Re-establish the destination guards at the mutation boundary
+    // so that only the final syscall window tracked by skilled-2k3.6.1 remains.
+    if let Err(reason) = repair_destination_unchanged(plan, root, home) {
+        return RepairStepOutcome::Failed(reason);
+    }
     if let Err(error) = replace_directory_symlink(source_dir, &plan.link_path) {
         return match error {
             ReplaceLinkError::Unchanged(error) => {
@@ -2513,6 +2508,19 @@ fn apply_repair_target(plan: &RepairPlan, store: &Store, home: &Path) -> RepairS
     match store.record_receipt(&receipt) {
         Ok(()) => RepairStepOutcome::Repaired,
         Err(error) => RepairStepOutcome::RepairedUnrecorded(error.to_string()),
+    }
+}
+
+fn repair_destination_unchanged(plan: &RepairPlan, root: &Path, home: &Path) -> Result<(), String> {
+    if probe_root(root, home) != RootProbe::Present {
+        return Err(
+            "the agent's skill root changed after the plan was shown, so nothing was written"
+                .to_owned(),
+        );
+    }
+    match probe_repair_entry(&plan.link_path) {
+        RepairEntryProbe::Symlink { target, .. } if target == plan.recorded_target() => Ok(()),
+        _ => Err("the entry changed after the plan was shown, so nothing was written".to_owned()),
     }
 }
 
@@ -2635,6 +2643,28 @@ pub fn verify_repair(
         });
         return VerifyReport { failures, withheld };
     };
+    let Some(expected_target) = plan.new_target() else {
+        failures.push(VerifyFailure {
+            agent: step.agent,
+            observed: "the repair plan carried no target path".to_owned(),
+        });
+        return VerifyReport { failures, withheld };
+    };
+    match observed.object() {
+        InstallationObject::Symlink { target } if target == expected_target => {}
+        InstallationObject::Symlink { target } => {
+            failures.push(VerifyFailure {
+                agent: step.agent,
+                observed: format!(
+                    "the symbolic link records {} instead of the planned target {}",
+                    target.display(),
+                    expected_target.display()
+                ),
+            });
+            return VerifyReport { failures, withheld };
+        }
+        _ => {}
+    }
     match mismatch_variant(variant, observed) {
         Checked::Held => {}
         Checked::Failed(observed) => failures.push(VerifyFailure {
