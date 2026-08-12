@@ -260,7 +260,7 @@ enum RepairEntryProbe {
 pub struct RepairProbe {
     target_agent: AgentKind,
     targets: [TargetProbe; 3],
-    target_entry: RepairEntryProbe,
+    target_entries: [RepairEntryProbe; 3],
     sources: Vec<(VariantRef, Result<SourceProbe, String>)>,
 }
 
@@ -323,11 +323,13 @@ pub fn probe_repair(
     let targets = agents
         .each_ref()
         .map(|detection| probe_target(detection, skill_name, home));
-    let target_entry = if detection_at(agents, agent).selected() {
-        probe_repair_entry(&targets[agent.index()].link_path)
-    } else {
-        RepairEntryProbe::NotRead
-    };
+    let target_entries = agents.each_ref().map(|detection| {
+        if detection.selected() {
+            probe_repair_entry(&targets[detection.kind().index()].link_path)
+        } else {
+            RepairEntryProbe::NotRead
+        }
+    });
     let sources = variants_by_name(sources)
         .remove(skill_name)
         .unwrap_or_default()
@@ -340,7 +342,7 @@ pub fn probe_repair(
     RepairProbe {
         target_agent: agent,
         targets,
-        target_entry,
+        target_entries,
         sources,
     }
 }
@@ -898,7 +900,7 @@ pub fn plan_repair(
         return plan;
     }
 
-    let (observed_target, current_resolution) = match &probe.target_entry {
+    let (observed_target, current_resolution) = match &probe.target_entries[agent.index()] {
         RepairEntryProbe::Absent => {
             plan.disposition = blocked_repair(
                 "repair.nothing_to_replace",
@@ -1180,6 +1182,18 @@ fn repair_sightings(
                 source_dir.to_path_buf(),
                 Some(variant.clone()),
             ));
+        }
+        match &probe.target_entries[agent.index()] {
+            RepairEntryProbe::Symlink {
+                resolution: Err((io::ErrorKind::NotFound, _)),
+                ..
+            } => return RootSighting::NothingToLoad,
+            RepairEntryProbe::Symlink {
+                resolution: Err(_), ..
+            }
+            | RepairEntryProbe::Unreadable(_)
+            | RepairEntryProbe::NotRead => return RootSighting::Unknown,
+            _ => {}
         }
         match &slot.content {
             SlotContent::At(canonical) => RootSighting::Offers(SightedEntry::new(

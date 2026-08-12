@@ -271,6 +271,45 @@ fn inventory_details_render_every_owned_incorrect_link_finding_by_agent() {
 }
 
 #[test]
+fn a_non_target_root_resolution_error_withholds_the_opencode_prediction() {
+    let fixture = Fixture::new();
+    let common = fixture.source("common", "skills", "portable");
+    let mut app = fixture.registered(&common);
+    fixture.create_root_parents();
+    fixture.install(&mut app);
+    let specific = fixture.source("codex-specific", ".agents/skills", "portable");
+    let preview = app.preview_source(&specific).expect("preview Codex source");
+    app.confirm_source(preview).expect("register Codex source");
+    let claude_link = fixture.root(AgentKind::ClaudeCode).join("portable");
+    fs::remove_file(&claude_link).unwrap();
+    std::os::unix::fs::symlink(&claude_link, &claude_link).unwrap();
+
+    let probe = probe_repair(
+        app.agents(),
+        app.sources(),
+        "portable",
+        AgentKind::Codex,
+        app.home(),
+    );
+    let plan = plan_repair(
+        app.agents(),
+        app.sources(),
+        "portable",
+        AgentKind::Codex,
+        &probe,
+        &app.receipts().unwrap(),
+    );
+
+    assert!(plan.is_executable(), "{plan:?}");
+    assert!(
+        plan.warnings()
+            .iter()
+            .any(|warning| warning.contains("cannot be established")),
+        "an ELOOP in a root OpenCode reads is unknown, not absent: {plan:?}"
+    );
+}
+
+#[test]
 fn repair_yes_keeps_the_same_guards_and_reports_a_cross_source_repair() {
     let fixture = Fixture::new();
     let repository = fixture.source("library", "skills", "portable");
