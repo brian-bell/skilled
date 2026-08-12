@@ -133,6 +133,50 @@ fn corrupt_metadata_is_unchanged_and_installed_content_has_unverified_provenance
     );
 }
 
+/// SQLite opens a write-protected database read-only rather than failing, and
+/// a current schema leaves migration with nothing to write, so every startup
+/// read succeeds on a store that can never be written to. The session has to
+/// find that out at open rather than after an install has already linked
+/// something it cannot receipt.
+#[cfg(unix)]
+#[test]
+fn a_write_protected_database_opens_read_only_rather_than_ready() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temporary = tempfile::tempdir().expect("temporary application directory");
+    let home = temporary.path().join("home");
+    let data = temporary.path().join("data");
+    let skill = home.join(".claude/skills/portable");
+    fs::create_dir_all(&skill).expect("create temporary skill root");
+    fs::write(
+        skill.join("SKILL.md"),
+        "---\nname: portable\ndescription: portable fixture\n---\n",
+    )
+    .expect("write temporary skill");
+    complete_setup(&home, &data);
+    let database = data.join("skilled.sqlite3");
+    let original = fs::read(&database).expect("read metadata database");
+    fs::set_permissions(&database, fs::Permissions::from_mode(0o444))
+        .expect("write-protect metadata database");
+
+    let app =
+        SkilledApp::open(AppEnvironment::new(&home, &data, "")).expect("open degraded application");
+
+    assert_eq!(app.view(), View::Inventory);
+    assert!(!app.can_add_source());
+    assert!(!app.can_rerun_setup());
+    assert_eq!(
+        app.registry_availability(),
+        RegistryAvailability::Unavailable
+    );
+    let failure = app.metadata_failure().expect("metadata failure");
+    assert_eq!(failure.database_path(), database);
+    assert!(failure.cause().contains("read-only"), "{}", failure.cause());
+    // The inventory is still an observation of the filesystem, so it is stated.
+    assert!(app.inventory().row("portable").is_some());
+    assert_eq!(fs::read(&database).expect("reread database"), original);
+}
+
 #[test]
 fn malformed_setup_completion_forces_degraded_mode() {
     let temporary = tempfile::tempdir().expect("temporary application directory");

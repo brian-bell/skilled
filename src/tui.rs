@@ -3183,17 +3183,26 @@ fn render_source_repositories(frame: &mut Frame<'_>, area: Rect, app: &SkilledAp
     );
 
     if app.sources().is_empty() {
-        let (headline, explanation) = if metadata_unavailable {
-            (
+        // Whether the registry could be read and whether a source may be added
+        // are separate questions, and the empty state has to answer both. A
+        // readable registry still states its zero, but any degraded metadata
+        // unit refuses the key, so naming `a` here would advertise something
+        // `input` deliberately filters.
+        let (headline, explanation) = match (metadata_unavailable, app.can_add_source()) {
+            (true, _) => (
                 "Source registry is unavailable",
                 "Skilled cannot state which sources are registered, and adding one is disabled \
                  for this session.",
-            )
-        } else {
-            (
+            ),
+            (false, false) => (
+                "No sources are registered",
+                "Adding one is disabled for this session because Skilled could not read its own \
+                 metadata.",
+            ),
+            (false, true) => (
                 "No sources are registered",
                 "Press a to register a local Git checkout.",
-            )
+            ),
         };
         frame.render_widget(
             components::empty_state("·", headline, explanation, inner),

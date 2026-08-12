@@ -13,8 +13,8 @@ use std::{
 };
 
 use skilled::{
-    Action, AgentKind, AppEnvironment, InventoryPane, SessionIdentity, SkilledApp,
-    tui::RenderFeedback,
+    Action, AgentKind, AppEnvironment, InventoryPane, RegistryAvailability, SessionIdentity,
+    SkilledApp, tui::RenderFeedback,
 };
 
 #[test]
@@ -1119,6 +1119,33 @@ fn degraded_registry_failure_states_that_the_scan_scope_was_retained() {
         !rendered.contains("all detected roots were scanned"),
         "{rendered}"
     );
+}
+
+/// A readable but empty registry still states its zero, and still must not
+/// name a key this session refuses. The registry being readable is not the
+/// question the empty state asks: whether a source may be added is decided by
+/// the metadata as a whole.
+#[test]
+fn a_readable_empty_registry_offers_no_add_key_while_other_metadata_is_degraded() {
+    let harness = Harness::new();
+    drop(harness.completed_setup());
+    let database = harness.directory.path().join("data/skilled.sqlite3");
+    let connection = rusqlite::Connection::open(database).expect("open metadata database");
+    connection
+        .execute_batch("UPDATE settings SET value = 'sometimes' WHERE key = 'setup_complete';")
+        .expect("corrupt setup completion");
+    drop(connection);
+
+    let mut app = SkilledApp::open(harness.environment()).expect("open degraded application");
+    assert_eq!(app.registry_availability(), RegistryAvailability::Readable);
+    assert!(!app.can_add_source());
+    app.update(Action::OpenSources);
+    let rendered = text(&buffer(&app, 120, 40));
+
+    assert!(rendered.contains("0 registered"), "{rendered}");
+    assert!(rendered.contains("No sources are registered"), "{rendered}");
+    assert!(!rendered.contains("Press a to register"), "{rendered}");
+    assert!(!rendered.contains("a Add source"), "{rendered}");
 }
 
 #[test]

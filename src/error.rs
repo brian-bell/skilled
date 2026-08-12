@@ -40,6 +40,10 @@ pub enum Error {
     Database(#[from] rusqlite::Error),
     #[error("application metadata schema {found} is newer than supported schema {supported}")]
     UnsupportedSchema { found: i64, supported: i64 },
+    #[error(
+        "the application metadata database opened read-only and cannot be written this session"
+    )]
+    ReadOnlyMetadata,
     #[error("stored setup metadata is invalid: {0}")]
     InvalidSetupMetadata(String),
     #[error("stored metadata field {field} holds {value} rather than 0 or 1")]

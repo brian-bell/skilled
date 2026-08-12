@@ -91,6 +91,17 @@ impl Store {
             Err(error) => return Err(error.into()),
         }
         let mut connection = Connection::open_with_flags(&sqlite_database_path, flags)?;
+        // `SQLITE_OPEN_READ_WRITE` is a request, not a guarantee: SQLite opens
+        // a write-protected file read-only and reports success. A database
+        // already at the current schema leaves migration nothing to write and
+        // every startup read then succeeds, so without this the session would
+        // reach `Ready` and offer installation over a store that can never
+        // record a receipt — the link would be created before the write that
+        // cannot happen was ever attempted. Asked at open, it is a metadata
+        // failure like any other, and the session degrades to read-only.
+        if connection.is_readonly(rusqlite::MAIN_DB)? {
+            return Err(Error::ReadOnlyMetadata);
+        }
         migrate(&mut connection, &sqlite_database_path)?;
         connection.execute_batch("PRAGMA foreign_keys = ON;")?;
         Ok(Self {
