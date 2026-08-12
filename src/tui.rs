@@ -148,9 +148,9 @@ pub fn render(frame: &mut Frame<'_>, app: &SkilledApp) -> RenderFeedback {
         render_catalog_confirmation(frame, area, app);
     }
     if let Some(context) = app.help_context() {
-        render_help(frame, area, context, app, detail_extent);
+        render_help(frame, area, context, app, &findings, detail_extent);
     }
-    render_footer(frame, key_hints, app, detail_extent);
+    render_footer(frame, key_hints, app, &findings, detail_extent);
     RenderFeedback {
         detail_max_scroll: detail_extent,
     }
@@ -5458,6 +5458,7 @@ fn render_help(
     area: Rect,
     context: View,
     app: &SkilledApp,
+    findings: &[DoctorEntry<'_>],
     detail_extent: Option<usize>,
 ) {
     let viewport = viewport::classify(area);
@@ -5471,7 +5472,7 @@ fn render_help(
     let block = components::dialog_frame("Keyboard reference", &scope);
     let regions = components::dialog_regions(block.inner(popup), 11);
     frame.render_widget(block, popup);
-    let commands = help_commands(context, app, detail_extent);
+    let commands = help_commands(context, app, findings, detail_extent);
     match viewport {
         viewport::Viewport::Compact => {
             let mut lines = vec![
@@ -5560,6 +5561,7 @@ struct HelpCommand {
 fn help_commands(
     context: View,
     app: &SkilledApp,
+    findings: &[DoctorEntry<'_>],
     detail_extent: Option<usize>,
 ) -> Vec<HelpCommand> {
     match context {
@@ -5778,7 +5780,7 @@ fn help_commands(
                     description: "show everything observed about the finding",
                 });
             }
-            if app.can_repair_selection() {
+            if doctor_can_repair_selection(app, findings) {
                 commands.push(HelpCommand {
                     key: "r",
                     label: "Repair",
@@ -5848,6 +5850,7 @@ fn render_footer(
     frame: &mut Frame<'_>,
     area: Rect,
     app: &SkilledApp,
+    findings: &[DoctorEntry<'_>],
     detail_extent: Option<usize>,
 ) {
     // The band reaches the full width, so the row reads as chrome rather than
@@ -5864,7 +5867,7 @@ fn render_footer(
     };
     frame.render_widget(
         Paragraph::new(components::key_hint_line(
-            &key_hints(app, detail_extent),
+            &key_hints(app, findings, detail_extent),
             hints.width,
         ))
         .style(theme::chrome()),
@@ -5890,7 +5893,11 @@ fn render_footer(
 /// navigation row above already shows every route beside its own key digit,
 /// so a route shed from this row is still on screen, while `i` appears nowhere
 /// else and acts on the very row the user is standing on.
-fn key_hints(app: &SkilledApp, detail_extent: Option<usize>) -> Vec<KeyHint> {
+fn key_hints(
+    app: &SkilledApp,
+    findings: &[DoctorEntry<'_>],
+    detail_extent: Option<usize>,
+) -> Vec<KeyHint> {
     if app.help_context().is_some() {
         return vec![
             KeyHint::essential("Esc", "Close"),
@@ -6048,7 +6055,7 @@ fn key_hints(app: &SkilledApp, detail_extent: Option<usize>) -> Vec<KeyHint> {
             if doctor_can_advance(app) {
                 hints.push(KeyHint::essential("Enter", "Open"));
             }
-            if app.can_repair_selection() {
+            if doctor_can_repair_selection(app, findings) {
                 hints.push(KeyHint::new("r", "Repair"));
             }
             hints.extend([
@@ -6066,6 +6073,17 @@ fn key_hints(app: &SkilledApp, detail_extent: Option<usize>) -> Vec<KeyHint> {
             KeyHint::essential("Esc", "Close"),
         ],
     }
+}
+
+/// Whether the Doctor row selected in this frame offers repair.
+///
+/// `render` has already paid to merge and order the findings. Reusing that
+/// slice keeps the detail, help, and key bar on the same row without another
+/// full allocation and sort.
+fn doctor_can_repair_selection(app: &SkilledApp, findings: &[DoctorEntry<'_>]) -> bool {
+    findings
+        .get(app.focused_finding())
+        .is_some_and(|entry| app.can_repair_finding(entry))
 }
 
 /// Whether every row of the open preview has been on screen, as this frame

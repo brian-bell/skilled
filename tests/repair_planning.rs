@@ -151,6 +151,61 @@ fn an_owned_healthy_link_is_replanned_to_the_agent_specific_variant_selected_tod
 }
 
 #[test]
+fn the_tui_refreshes_registered_sources_before_planning_a_repair() {
+    let fixture = Fixture::new();
+    let common = fixture.source("common", "skills", "portable");
+    let mut app = fixture.registered(&common);
+    fixture.create_root_parents();
+    fixture.install(&mut app);
+
+    let selected = fixture.source("selected", ".agents/skills", "portable");
+    let preview = app
+        .preview_source(&selected)
+        .expect("preview selected source");
+    app.confirm_source(preview)
+        .expect("register selected source");
+    let competitor = fixture.source("competitor", ".agents/skills", "other");
+    let preview = app
+        .preview_source(&competitor)
+        .expect("preview competing source");
+    app.confirm_source(preview)
+        .expect("register competing source");
+
+    dispatch(&mut app, Action::OpenDoctor);
+    let finding = app
+        .doctor_findings()
+        .iter()
+        .position(|entry| {
+            entry.agent() == AgentKind::Codex
+                && entry.finding().code() == "install.wrong_managed_target"
+        })
+        .expect("Codex repairable finding");
+    dispatch(
+        &mut app,
+        Action::MoveDoctorSelection(i8::try_from(finding).unwrap()),
+    );
+    assert!(app.can_repair_selection());
+
+    // This candidate appeared after the source was registered. The Doctor
+    // view still holds its earlier source snapshot when the repair key is
+    // pressed, so planning has to refresh the registry before it chooses.
+    write_skill(&competitor.join(".agents/skills/portable"), "portable");
+    dispatch(&mut app, Action::BeginRepair);
+
+    let Some(RepairPrompt::Preview(plan)) = app.pending_repair() else {
+        panic!(
+            "repair should show the refreshed plan: {:?}",
+            app.pending_repair()
+        );
+    };
+    assert!(!plan.is_executable(), "{plan:?}");
+    assert_eq!(
+        plan.blocking_finding().map(|finding| finding.code()),
+        Some("variant.duplicate_for_agent")
+    );
+}
+
+#[test]
 fn a_removed_old_link_is_a_partial_apply_exit() {
     assert_eq!(
         cli::exit_code_for_repair(RepairStatus::PartiallyApplied),

@@ -579,10 +579,20 @@ impl SkilledApp {
     }
 
     pub fn can_repair_selection(&self) -> bool {
+        self.selected_finding()
+            .as_ref()
+            .is_some_and(|entry| self.can_repair_finding(entry))
+    }
+
+    /// Whether one already-materialised Doctor entry offers repair.
+    ///
+    /// The renderer orders the Doctor list once per frame and uses this form
+    /// for its key hint and help entry. Asking [`Self::can_repair_selection`]
+    /// there would materialise and sort the same bounded list again.
+    pub fn can_repair_finding(&self, entry: &DoctorEntry<'_>) -> bool {
         self.view == View::Doctor
-            && self
-                .selected_finding()
-                .and_then(|entry| entry.observation())
+            && entry
+                .observation()
                 .is_some_and(|observation| self.repair_overlay.is_offered(observation.path()))
     }
 
@@ -1224,7 +1234,10 @@ impl SkilledApp {
         }
     }
 
-    fn build_repair_preview(&self) -> RepairPrompt {
+    fn build_repair_preview(&mut self) -> RepairPrompt {
+        // Capture the requested installation before refreshing: the source
+        // refresh also restates and reorders Doctor, but the key must keep
+        // answering for the row on which the user pressed it.
         let Some(entry) = self.selected_finding() else {
             return RepairPrompt::Failed("no Doctor finding is selected".to_owned());
         };
@@ -1234,7 +1247,27 @@ impl SkilledApp {
                     .to_owned(),
             );
         };
-        match self.plan_repair_for(observation.name(), observation.agent()) {
+        let skill_name = observation.name().to_owned();
+        let agent = observation.agent();
+
+        // RegisteredSource owns the candidates discovered by its last scan.
+        // Repair re-resolves a receipt against what the registry offers now,
+        // so a long-running TUI must refresh those candidates at the planning
+        // boundary. The inventory and receipt overlay are rebuilt from the
+        // same refreshed vector so the preview and its later verification do
+        // not disagree about registry state.
+        let sources = match self.store.registered_sources() {
+            Ok(sources) => sources,
+            Err(error) => {
+                return RepairPrompt::Failed(format!(
+                    "registered sources could not be refreshed before repair: {error}"
+                ));
+            }
+        };
+        self.sources = sources;
+        self.rescan_installations();
+
+        match self.plan_repair_for(&skill_name, agent) {
             Ok(plan) => RepairPrompt::Preview(plan),
             Err(failure) => RepairPrompt::Failed(failure.message().to_owned()),
         }
