@@ -2495,13 +2495,18 @@ pub fn verify_repair(
 ) -> VerifyReport {
     let mut failures = Vec::new();
     let mut withheld = Vec::new();
-    let Some(step) = applied
-        .step
-        .as_ref()
-        .filter(|step| step.outcome.wrote_link())
-    else {
+    let Some(step) = applied.step.as_ref() else {
         return VerifyReport { failures, withheld };
     };
+    if !step.outcome.wrote_link() {
+        withheld.push(VerifyWithheld {
+            agent: step.agent,
+            reason: "the repair was not applied, so there was no repaired link to verify"
+                .to_owned(),
+            required: true,
+        });
+        return VerifyReport { failures, withheld };
+    }
     if let Some(reason) = unscanned(snapshot.root(step.agent).status()) {
         withheld.push(VerifyWithheld {
             agent: step.agent,

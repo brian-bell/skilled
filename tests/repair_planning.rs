@@ -3,7 +3,7 @@
 
 use std::{
     fs,
-    io::Cursor,
+    io::{self, BufRead, Cursor, Read},
     path::{Path, PathBuf},
     process::Command,
 };
@@ -171,6 +171,50 @@ fn repair_yes_requires_both_the_skill_and_single_agent() {
 }
 
 #[test]
+fn a_cli_guard_refusal_does_not_claim_the_repair_was_verified() {
+    let fixture = Fixture::new();
+    let repository = fixture.source("library", "skills", "portable");
+    let mut app = fixture.registered(&repository);
+    fixture.create_root_parents();
+    fixture.install(&mut app);
+    let moved = fixture.directory.path().join("moved-library");
+    fs::rename(&repository, &moved).unwrap();
+    let preview = app.preview_source(&moved).unwrap();
+    app.confirm_source(preview).unwrap();
+    drop(app);
+
+    let moved_again = fixture.directory.path().join("moved-again");
+    let source_to_move = moved.clone();
+    let mut input = MutatingInput::new(b"yes\n", move || {
+        fs::rename(source_to_move, moved_again).unwrap();
+    });
+    let mut output = Vec::new();
+
+    let code = cli::run(
+        &[
+            "repair".to_owned(),
+            "--skill".to_owned(),
+            "portable".to_owned(),
+            "--agent".to_owned(),
+            "codex".to_owned(),
+        ],
+        fixture.environment(),
+        &mut input,
+        &mut output,
+    );
+    let output = String::from_utf8(output).unwrap();
+
+    assert_eq!(code, ExitCodeKind::Blocked, "{output}");
+    assert!(output.contains("not written"), "{output}");
+    assert!(
+        output.contains("there was no repaired link to verify"),
+        "{output}"
+    );
+    assert!(!output.contains("Verified:"), "{output}");
+    assert!(!output.contains("Verified as far"), "{output}");
+}
+
+#[test]
 fn a_confirmed_dangling_link_is_atomically_repaired_rescanned_and_receipted() {
     let fixture = Fixture::new();
     let repository = fixture.source("library", "skills", "portable");
@@ -216,6 +260,19 @@ fn a_confirmed_dangling_link_is_atomically_repaired_rescanned_and_receipted() {
         fs::read_link(&link).unwrap(),
         old_target,
         "confirmation is gated until the full preview has been seen"
+    );
+
+    app.note_detail_max_scroll(Some(0));
+    app.note_detail_max_scroll(None);
+    dispatch(&mut app, Action::ConfirmRepair);
+    assert!(matches!(
+        app.pending_repair(),
+        Some(RepairPrompt::Preview(_))
+    ));
+    assert_eq!(
+        fs::read_link(&link).unwrap(),
+        old_target,
+        "a frame that did not draw the preview invalidates an older measurement"
     );
 
     app.note_detail_max_scroll(Some(0));
@@ -284,6 +341,20 @@ fn a_repair_source_relocated_after_preview_is_refused_without_modifying_the_link
         Some(RepairStepOutcome::Failed(reason))
             if reason.contains("no longer the directory the plan resolved")
     ));
+    assert!(
+        !outcome.verification().is_verified(),
+        "a refused apply did not observe a repaired link"
+    );
+    assert!(
+        !outcome.verification().is_complete(),
+        "a refused apply has no completed repair postcondition"
+    );
+    let report = render_text(&app, 120, 60);
+    assert!(!report.contains("Repaired and verified"), "{report}");
+    assert!(
+        report.contains("there was no repaired link to verify"),
+        "{report}"
+    );
     assert_eq!(fs::read_link(&link).unwrap(), old_target);
     assert_no_repair_temporary(&fixture.root(AgentKind::Codex));
 }
@@ -491,6 +562,44 @@ fn a_redirected_skill_root_is_refused_without_following_it() {
 
 struct Fixture {
     directory: tempfile::TempDir,
+}
+
+struct MutatingInput {
+    input: Cursor<Vec<u8>>,
+    mutation: Option<Box<dyn FnOnce()>>,
+}
+
+impl MutatingInput {
+    fn new(input: &[u8], mutation: impl FnOnce() + 'static) -> Self {
+        Self {
+            input: Cursor::new(input.to_vec()),
+            mutation: Some(Box::new(mutation)),
+        }
+    }
+
+    fn mutate_once(&mut self) {
+        if let Some(mutation) = self.mutation.take() {
+            mutation();
+        }
+    }
+}
+
+impl Read for MutatingInput {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        self.mutate_once();
+        self.input.read(buffer)
+    }
+}
+
+impl BufRead for MutatingInput {
+    fn fill_buf(&mut self) -> io::Result<&[u8]> {
+        self.mutate_once();
+        self.input.fill_buf()
+    }
+
+    fn consume(&mut self, amount: usize) {
+        self.input.consume(amount);
+    }
 }
 
 impl Fixture {
