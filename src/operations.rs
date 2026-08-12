@@ -149,6 +149,7 @@ pub fn locate_variant(
 enum SymlinkTargetProbe {
     Missing,
     Resolved,
+    NotADirectory,
     Unreadable(String),
 }
 
@@ -452,7 +453,8 @@ fn probe_entry(link_path: &Path) -> EntryProbe {
             Err(error) => return EntryProbe::Unreadable(error.to_string()),
         };
         let target_state = match fs::metadata(link_path) {
-            Ok(_) => SymlinkTargetProbe::Resolved,
+            Ok(metadata) if metadata.is_dir() => SymlinkTargetProbe::Resolved,
+            Ok(_) => SymlinkTargetProbe::NotADirectory,
             Err(error) if error.kind() == io::ErrorKind::NotFound => SymlinkTargetProbe::Missing,
             Err(error) => SymlinkTargetProbe::Unreadable(error.to_string()),
         };
@@ -852,17 +854,22 @@ pub fn plan_uninstall(
     }
 
     let mut warnings = Vec::new();
-    for target in &targets {
-        if let UninstallDisposition::RemoveLink {
-            link_target,
-            resolves: false,
-            ..
-        } = &target.disposition
-        {
-            warnings.push(format!(
-                "{} no longer resolves; this release will remove the managed link rather than repair it",
-                link_target.display()
-            ));
+    let blocked = targets
+        .iter()
+        .any(|target| matches!(target.disposition, UninstallDisposition::Blocked { .. }));
+    if !blocked {
+        for target in &targets {
+            if let UninstallDisposition::RemoveLink {
+                link_target,
+                resolves: false,
+                ..
+            } = &target.disposition
+            {
+                warnings.push(format!(
+                    "{} no longer resolves; this release will remove the managed link rather than repair it",
+                    link_target.display()
+                ));
+            }
         }
     }
     let opencode_outlook = detection_at(agents, AgentKind::OpenCode)
@@ -874,7 +881,7 @@ pub fn plan_uninstall(
             let after = UninstallOutlook::of(&resolve_opencode(uninstall_sightings(
                 &targets, probe, true,
             )));
-            if before != after && !matches!(after, UninstallOutlook::Unknown) {
+            if !blocked && before != after && !matches!(after, UninstallOutlook::Unknown) {
                 warnings.push(match &after {
                     UninstallOutlook::Loads { winner } => format!(
                         "after this uninstall, OpenCode would load {}",
@@ -956,6 +963,12 @@ fn uninstall_disposition(slot: &TargetProbe, receipts: &[&Receipt]) -> Uninstall
                 let resolves = match target_state {
                     SymlinkTargetProbe::Resolved => true,
                     SymlinkTargetProbe::Missing => false,
+                    SymlinkTargetProbe::NotADirectory => {
+                        return uninstall_blocked(
+                            "uninstall.target_not_directory",
+                            "the recorded link target is no longer a directory".to_owned(),
+                        );
+                    }
                     SymlinkTargetProbe::Unreadable(reason) => {
                         return uninstall_blocked(
                             "uninstall.unreadable_target",
@@ -3373,6 +3386,39 @@ mod tests {
         };
         assert_eq!(finding.code(), "uninstall.unreadable_target");
         assert!(finding.evidence().contains("permission denied"));
+    }
+
+    #[test]
+    fn a_receipted_target_replaced_by_a_file_blocks_uninstall_planning() {
+        let link = PathBuf::from("/home/example/.claude/skills/portable");
+        let target = PathBuf::from("/source/skills/portable");
+        let slot = TargetProbe {
+            agent: AgentKind::ClaudeCode,
+            link_path: link.clone(),
+            root: RootProbe::Present,
+            entry: EntryProbe::Symlink {
+                target: target.clone(),
+                canonical: Some(target.clone()),
+                target_state: SymlinkTargetProbe::NotADirectory,
+            },
+            content: SlotContent::Nowhere,
+        };
+        let receipt = Receipt::new(
+            AgentKind::ClaudeCode,
+            "portable".to_owned(),
+            link,
+            target,
+            None,
+            None,
+            None,
+        );
+
+        let disposition = uninstall_disposition(&slot, &[&receipt]);
+
+        let UninstallDisposition::Blocked { finding } = disposition else {
+            panic!("a non-directory target must block uninstall")
+        };
+        assert_eq!(finding.code(), "uninstall.target_not_directory");
     }
 
     #[test]

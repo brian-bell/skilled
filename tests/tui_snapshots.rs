@@ -1680,6 +1680,8 @@ fn blocked_uninstall_preview_states_that_free_targets_would_be_removed() {
     let codex_link = temporary.path().join("home/.agents/skills/portable");
     let other_target = temporary.path().join("other/portable");
     fs::create_dir_all(&other_target).expect("create replacement target");
+    fs::remove_dir_all(temporary.path().join("src/skills/portable"))
+        .expect("make the remaining managed links dangling");
     fs::remove_file(&codex_link).expect("remove receipted Codex link");
     std::os::unix::fs::symlink(&other_target, &codex_link)
         .expect("replace Codex link with another target");
@@ -1690,6 +1692,8 @@ fn blocked_uninstall_preview_states_that_free_targets_would_be_removed() {
     assert!(screen.contains("would remove the managed link"), "{screen}");
     assert!(!screen.contains("· remove the managed link"), "{screen}");
     assert!(screen.contains("uninstall.wrong_target"), "{screen}");
+    assert!(!screen.contains("will remove"), "{screen}");
+    assert!(!screen.contains("after this uninstall"), "{screen}");
 }
 
 #[cfg(unix)]
