@@ -1737,22 +1737,18 @@ fn doctor_subtitle(app: &SkilledApp, listed: usize) -> String {
     if inventory.no_agent_configured() {
         return "no root read".to_owned();
     }
-    // The banner above this subtitle already states the metadata failure, so
-    // the subtitle is spent on it only where the roots have nothing more
-    // specific to report. A root that could not be read is Doctor's own
-    // observation and appears nowhere else on this screen.
-    if app.metadata_failure().is_some() && inventory.unreadable_roots().next().is_none() {
-        return if listed > 0 {
-            format!("{listed} listed · metadata unavailable")
-        } else {
-            "metadata unavailable".to_owned()
-        };
-    }
     // A withheld count is withheld for one of two reasons, and they are
     // different answers: part of the requested scope could not be read, or
     // none of it was read at all. Registry-side findings exist without any
     // root being read, so the second is reachable with a non-empty list and
     // must be settled before the list's own size is spoken about.
+    //
+    // The metadata failure is one of the withholding reasons rather than a
+    // reason of its own: the count is the snapshot's to give, and a session
+    // whose registry survived a malformed completion flag can still give one.
+    // The banner above this subtitle states the failure either way, so a
+    // stateable number is never spent on repeating it.
+    let degraded = app.metadata_failure().is_some();
     match inventory.stated_finding_count() {
         Some(0) => "nothing to report".to_owned(),
         Some(1) => "1 finding".to_owned(),
@@ -1764,6 +1760,8 @@ fn doctor_subtitle(app: &SkilledApp, listed: usize) -> String {
         // `doctor_empty_state` states them, so the pane header and the body
         // beneath it lead with the same reason.
         None if inventory.unreadable_roots().next().is_some() => "not fully read".to_owned(),
+        None if degraded && listed > 0 => format!("{listed} listed · metadata unavailable"),
+        None if degraded => "metadata unavailable".to_owned(),
         None if !read_a_root(inventory) && listed > 0 => format!("{listed} listed · no root read"),
         None if !read_a_root(inventory) => "no root read".to_owned(),
         None if listed > 0 => format!("{listed} listed · a source could not be read"),
@@ -1860,7 +1858,13 @@ fn doctor_empty_state(app: &SkilledApp) -> (&'static str, String, String) {
     // the metadata banner already states the failure above this body. A root
     // that could not be read is named nowhere else on this screen, so the
     // degraded session must not take its place.
-    if app.metadata_failure().is_some() {
+    //
+    // And only where the registry was in fact lost with it. `open_metadata`
+    // recovers its units independently, so a session degraded by a malformed
+    // completion flag can hold a registry that was read whole — saying it
+    // cannot be claimed complete would be untrue of the very thing this
+    // sentence names.
+    if app.metadata_failure().is_some() && !inventory.registry_is_complete() {
         return (
             "·",
             "Application metadata is unavailable".to_owned(),

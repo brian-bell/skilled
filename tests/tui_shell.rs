@@ -1195,6 +1195,43 @@ fn a_degraded_session_lets_a_surviving_filter_speak_for_its_own_empty_table() {
     assert!(rendered.contains("metadata unavailable"), "{rendered}");
 }
 
+/// The metadata units recover independently, so a session degraded by a
+/// malformed completion flag can still hold a registry that was read whole.
+/// Doctor states the verdict that survived rather than withholding it, and
+/// never says a complete registry cannot be claimed complete.
+#[test]
+fn degraded_doctor_states_a_verdict_its_recovered_registry_supports() {
+    let harness = Harness::new();
+    drop(harness.completed_setup());
+    fs::create_dir_all(harness.directory.path().join("home/.claude/skills"))
+        .expect("create an empty but readable root");
+    let database = harness.directory.path().join("data/skilled.sqlite3");
+    let connection = rusqlite::Connection::open(database).expect("open metadata database");
+    connection
+        .execute_batch("UPDATE settings SET value = 'sometimes' WHERE key = 'setup_complete';")
+        .expect("corrupt setup completion");
+    drop(connection);
+
+    let mut app = SkilledApp::open(harness.environment()).expect("open degraded application");
+    assert!(app.metadata_failure().is_some());
+    assert!(app.inventory().registry_is_complete());
+    assert_eq!(app.inventory().stated_finding_count(), Some(0));
+
+    let update = app.update(Action::OpenDoctor);
+    app.perform_effects(update.effects())
+        .expect("scan for Doctor");
+    let rendered = text(&buffer(&app, 120, 40));
+
+    assert!(rendered.contains("nothing to report"), "{rendered}");
+    assert!(rendered.contains("Nothing to report"), "{rendered}");
+    assert!(
+        !rendered.contains("cannot claim the registry is complete"),
+        "{rendered}"
+    );
+    // The failure is still stated, by the banner that owns it.
+    assert!(rendered.contains("metadata unavailable"), "{rendered}");
+}
+
 /// Doctor lists what was observed. A root that could not be read is named
 /// nowhere else on that screen, so an unavailable metadata store — which the
 /// banner above already states — must not take its place.

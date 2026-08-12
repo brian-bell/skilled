@@ -88,6 +88,14 @@ impl Store {
                     ));
                 }
             }
+            // `new_data_dir`, and not merely a missing database: a database
+            // gone from an application-data directory Skilled did not just
+            // create is metadata that was there and is not now, and starting a
+            // fresh one over it would silently discard whatever the user still
+            // believes Skilled knows. Degrading names the path instead. The
+            // cost is that a first launch killed between `create_dir_all` and
+            // SQLite's own create leaves an empty directory that degrades
+            // until it is removed; that is the side of the trade to be on.
             Err(error) if error.kind() == std::io::ErrorKind::NotFound && new_data_dir => {
                 flags |= OpenFlags::SQLITE_OPEN_CREATE;
             }
