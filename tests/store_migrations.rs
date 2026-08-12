@@ -24,7 +24,7 @@ fn a_database_from_a_newer_skilled_version_is_rejected_before_use() {
         result,
         Err(Error::UnsupportedSchema {
             found: 99,
-            supported: 5
+            supported: 6
         })
     ));
 }
@@ -39,7 +39,7 @@ fn the_schema_one_past_this_build_is_refused_rather_than_written_through() {
     let connection =
         rusqlite::Connection::open(data_dir.join("skilled.sqlite3")).expect("create database");
     connection
-        .execute_batch("PRAGMA user_version = 6;")
+        .execute_batch("PRAGMA user_version = 7;")
         .expect("set the next schema version");
     drop(connection);
 
@@ -52,8 +52,8 @@ fn the_schema_one_past_this_build_is_refused_rather_than_written_through() {
     assert!(matches!(
         result,
         Err(Error::UnsupportedSchema {
-            found: 6,
-            supported: 5
+            found: 7,
+            supported: 6
         })
     ));
 }
@@ -130,7 +130,7 @@ fn version_four_metadata_gains_receipt_storage_that_outlives_its_source() {
         connection
             .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
             .unwrap(),
-        5
+        6
     );
     connection
         .execute_batch(
@@ -248,7 +248,7 @@ fn version_two_metadata_migrates_to_constrained_source_catalog_storage() {
         connection
             .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
             .unwrap(),
-        5
+        6
     );
     assert_eq!(
         connection

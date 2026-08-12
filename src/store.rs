@@ -16,7 +16,7 @@ use crate::{
     validation::InspectionBudget,
 };
 
-const SCHEMA_VERSION: i64 = 5;
+const SCHEMA_VERSION: i64 = 6;
 
 pub(crate) struct Store {
     connection: Connection,
@@ -157,10 +157,33 @@ impl Store {
             .ok_or_else(|| Error::InvalidSourcePath(source.git_top_level().to_path_buf()))?;
         let scanned_at = current_timestamp();
         let transaction = self.connection.transaction()?;
+        let existing_id = transaction
+            .query_row(
+                "SELECT id FROM source_repositories WHERE canonical_path = ?1",
+                params![canonical_path],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?;
+        let source_id = match existing_id {
+            Some(id) => id,
+            None => {
+                let id = transaction.query_row(
+                    "SELECT next_id FROM source_id_sequence WHERE singleton = 1",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )?;
+                transaction.execute(
+                    "UPDATE source_id_sequence SET next_id = next_id + 1
+                     WHERE singleton = 1",
+                    [],
+                )?;
+                id
+            }
+        };
         transaction.execute(
             "INSERT INTO source_repositories
-                (label, canonical_path, remote_url, branch, head_revision, dirty, dirty_known, last_scan_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                (id, label, canonical_path, remote_url, branch, head_revision, dirty, dirty_known, last_scan_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
              ON CONFLICT(canonical_path) DO UPDATE SET
                 label = excluded.label,
                 remote_url = excluded.remote_url,
@@ -170,6 +193,7 @@ impl Store {
                 dirty_known = excluded.dirty_known,
                 last_scan_at = excluded.last_scan_at",
             params![
+                source_id,
                 label,
                 canonical_path,
                 source.remote_url(),
@@ -179,11 +203,6 @@ impl Store {
                 source.dirty().is_some(),
                 scanned_at,
             ],
-        )?;
-        let source_id: i64 = transaction.query_row(
-            "SELECT id FROM source_repositories WHERE canonical_path = ?1",
-            params![canonical_path],
-            |row| row.get(0),
         )?;
         transaction.execute(
             "DELETE FROM catalog_roots WHERE source_id = ?1",
@@ -681,6 +700,22 @@ fn migrate(connection: &mut Connection) -> Result<()> {
                 UNIQUE (agent, link_path, link_target, created_at)
              );
              PRAGMA user_version = 5;",
+        )?;
+        transaction.commit()?;
+    }
+    if current_version < 6 {
+        let transaction = connection.transaction()?;
+        // Source IDs are durable identities carried by previews and receipts.
+        // SQLite may reuse a deleted INTEGER PRIMARY KEY, so allocate them from
+        // a monotonic sequence that Forget Source never rewinds.
+        transaction.execute_batch(
+            "CREATE TABLE source_id_sequence (
+                singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                next_id INTEGER NOT NULL CHECK (next_id > 0)
+             );
+             INSERT INTO source_id_sequence (singleton, next_id)
+             SELECT 1, COALESCE(MAX(id), 0) + 1 FROM source_repositories;
+             PRAGMA user_version = 6;",
         )?;
         transaction.commit()?;
     }

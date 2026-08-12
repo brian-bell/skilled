@@ -234,6 +234,90 @@ fn forget_that_becomes_active_after_preview_is_not_reported_as_verified() {
     assert_eq!(app.receipts().expect("receipts retained").len(), 3);
 }
 
+#[test]
+fn unreadable_receipts_make_a_blocked_forget_plan_with_the_stable_finding() {
+    let fixture = Fixture::new();
+    let repository = fixture.source("library", &["portable"]);
+    let mut app = fixture.registered(&repository);
+    let connection = Connection::open(fixture.path().join("data/skilled.sqlite3"))
+        .expect("second metadata connection");
+    connection
+        .execute_batch("DROP TABLE operation_receipts;")
+        .expect("make receipts unreadable");
+    drop(connection);
+
+    dispatch(&mut app, Action::OpenSources);
+    dispatch(&mut app, Action::BeginForgetSource);
+
+    let Some(OperationPrompt::Forget(ForgetPrompt::Preview(plan))) = app.pending_operation() else {
+        panic!(
+            "blocked forget preview expected: {:?}",
+            app.pending_operation()
+        );
+    };
+    assert!(plan.is_blocked());
+    assert_eq!(plan.blocking_findings().len(), 1);
+    assert_eq!(
+        plan.blocking_findings()[0].code(),
+        "forget.unreadable_receipts"
+    );
+}
+
+#[test]
+fn a_stale_forget_preview_cannot_delete_a_later_sources_reused_row() {
+    let fixture = Fixture::new();
+    let original = fixture.source("original", &["portable"]);
+    let replacement = fixture.source("replacement", &["other"]);
+    let mut stale = fixture.registered(&original);
+    dispatch(&mut stale, Action::OpenSources);
+    dispatch(&mut stale, Action::BeginForgetSource);
+
+    let mut current = fixture.app();
+    dispatch(&mut current, Action::OpenSources);
+    dispatch(&mut current, Action::BeginForgetSource);
+    dispatch(&mut current, Action::ConfirmOperation);
+    let preview = current
+        .preview_source(&replacement)
+        .expect("preview replacement");
+    current
+        .confirm_source(preview)
+        .expect("register replacement");
+    let replacement_id = current.sources()[0].id();
+
+    dispatch(&mut stale, Action::ConfirmOperation);
+
+    let reopened = fixture.app();
+    assert_eq!(reopened.sources().len(), 1);
+    assert_eq!(reopened.sources()[0].id(), replacement_id);
+    assert_eq!(
+        reopened.sources()[0].git_top_level(),
+        replacement.canonicalize().expect("replacement path")
+    );
+}
+
+#[test]
+fn a_concurrently_absent_source_is_refreshed_out_of_the_current_app() {
+    let fixture = Fixture::new();
+    let repository = fixture.source("library", &["portable"]);
+    let mut stale = fixture.registered(&repository);
+    dispatch(&mut stale, Action::OpenSources);
+    dispatch(&mut stale, Action::BeginForgetSource);
+
+    let mut current = fixture.app();
+    dispatch(&mut current, Action::OpenSources);
+    dispatch(&mut current, Action::BeginForgetSource);
+    dispatch(&mut current, Action::ConfirmOperation);
+
+    dispatch(&mut stale, Action::ConfirmOperation);
+
+    let Some(OperationPrompt::Forget(ForgetPrompt::Report(outcome))) = stale.pending_operation()
+    else {
+        panic!("forget report expected");
+    };
+    assert_eq!(outcome.status(), ForgetStatus::NothingToDo);
+    assert!(stale.sources().is_empty());
+}
+
 /// The acceptance criterion of this slice: one common variant reaches all three
 /// agents as individual directory symbolic links, only after a preview the user
 /// confirmed, with an ownership receipt for each and a verified postcondition.
@@ -370,6 +454,14 @@ fn a_stale_install_preview_cannot_recreate_a_forgotten_sources_link() {
         panic!("forget report expected");
     };
     assert_eq!(forgotten.status(), ForgetStatus::Forgotten);
+    let replacement = fixture.source("replacement", &["other"]);
+    let preview = forgetting
+        .preview_source(&replacement)
+        .expect("preview replacement");
+    forgetting
+        .confirm_source(preview)
+        .expect("register replacement");
+    let replacement_id = forgetting.sources()[0].id();
 
     dispatch(&mut installing, Action::ConfirmOperation);
 
@@ -387,6 +479,12 @@ fn a_stale_install_preview_cannot_recreate_a_forgotten_sources_link() {
         );
     }
     assert!(installing.receipts().expect("receipts").is_empty());
+    let reopened = fixture.app();
+    assert_eq!(reopened.sources()[0].id(), replacement_id);
+    assert_eq!(
+        reopened.sources()[0].git_top_level(),
+        replacement.canonicalize().expect("replacement path")
+    );
 }
 
 /// A catalog that explicitly excludes OpenCode is still installable for the

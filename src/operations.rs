@@ -2681,6 +2681,21 @@ pub fn plan_forget(
     }
 }
 
+/// A receipt-table failure is a safety block, not an absent receipt set.
+pub fn plan_forget_unreadable_receipts(source: &RegisteredSource, reason: String) -> ForgetPlan {
+    ForgetPlan {
+        source: source.clone(),
+        receipts: Vec::new(),
+        blocking_findings: vec![Finding::new(
+            "forget.unreadable_receipts",
+            FindingSeverity::Critical,
+            format!(
+                "ownership receipts could not be read, so Skilled cannot establish that every link is inactive: {reason}"
+            ),
+        )],
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ForgetApply {
     NothingToDo,

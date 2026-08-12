@@ -9,9 +9,9 @@ use crate::{
     operations::{
         ForgetOutcome, ForgetPlan, ForgetPrompt, InstallOutcome, InstallPlan, InstallPrompt,
         OperationPrompt, Receipt, UninstallOutcome, UninstallPlan, UninstallPrompt, apply_forget,
-        apply_install, apply_uninstall, finalize_uninstall, plan_forget, plan_install,
-        plan_uninstall, probe_forget, probe_install, probe_uninstall, probe_uninstall_content,
-        verify_forget, verify_install, verify_uninstall,
+        apply_install, apply_uninstall, finalize_uninstall, plan_forget,
+        plan_forget_unreadable_receipts, plan_install, plan_uninstall, probe_forget, probe_install,
+        probe_uninstall, probe_uninstall_content, verify_forget, verify_install, verify_uninstall,
     },
     resolution::VariantRef,
     source::{
@@ -1252,8 +1252,9 @@ impl SkilledApp {
         let receipts = match self.store.receipts() {
             Ok(receipts) => receipts,
             Err(error) => {
-                return ForgetPrompt::Failed(format!(
-                    "the ownership receipts could not be read, so Skilled cannot establish that every link is inactive: {error}"
+                return ForgetPrompt::Preview(plan_forget_unreadable_receipts(
+                    source,
+                    error.to_string(),
                 ));
             }
         };
@@ -1345,11 +1346,19 @@ impl SkilledApp {
                 )
             }
         };
-        if matches!(applied, crate::operations::ForgetApply::Forgotten) {
-            self.sources = self
-                .store
-                .registered_sources()
-                .unwrap_or_else(|_| self.sources.clone());
+        if matches!(
+            applied,
+            crate::operations::ForgetApply::Forgotten | crate::operations::ForgetApply::NothingToDo
+        ) {
+            self.sources = match self.store.registered_sources() {
+                Ok(sources) => sources,
+                Err(_) => self
+                    .sources
+                    .iter()
+                    .filter(|source| source.id() != plan.source().id())
+                    .cloned()
+                    .collect(),
+            };
             self.focused_source = self
                 .focused_source
                 .min(self.sources.len().saturating_sub(1));

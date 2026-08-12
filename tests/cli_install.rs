@@ -613,7 +613,7 @@ fn a_missing_flag_value_is_not_taken_from_the_next_flag() {
 fn unreadable_metadata_is_an_internal_error_rather_than_an_invalid_request() {
     let fixture = Fixture::new();
     let repository = fixture.register("library", &["portable"]);
-    // The schema still says version five, so the table is not recreated.
+    // The schema still says the current version, so the table is not recreated.
     let connection =
         rusqlite::Connection::open(fixture.directory.path().join("data/skilled.sqlite3"))
             .expect("open the metadata database");
