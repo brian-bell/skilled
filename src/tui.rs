@@ -1282,6 +1282,9 @@ fn inventory_subtitle(app: &SkilledApp, shown: usize) -> String {
     if inventory.no_agent_configured() {
         return "no root read".to_owned();
     }
+    if app.metadata_failure().is_some() && inventory.stated_skill_count() == Some(0) {
+        return "nothing installed · metadata unavailable".to_owned();
+    }
     if !app.inventory_filter().trim().is_empty() {
         return format!("{shown} of {total} listed");
     }
@@ -1535,12 +1538,29 @@ fn inventory_empty_state(app: &SkilledApp) -> (String, String) {
         );
     }
     if app.metadata_failure().is_some() {
-        return (
-            "Application metadata is unavailable".to_owned(),
+        let explanation = if app.scan_scope_known() {
+            "Skilled retained the agent selection and scanned its selected roots read-only. \
+             Registry-backed claims and every write are withheld for this session."
+        } else {
             "Skilled scanned every detected agent root read-only. Registry-backed claims and \
              every write are withheld for this session."
-                .to_owned(),
-        );
+        };
+        let scanned_empty = roots
+            .iter()
+            .any(|root| matches!(root.status(), RootStatus::Scanned { .. }));
+        return if scanned_empty {
+            (
+                "No skills are installed".to_owned(),
+                format!(
+                    "The agent skill roots Skilled read hold no skill directories. {explanation}"
+                ),
+            )
+        } else {
+            (
+                "Application metadata is unavailable".to_owned(),
+                explanation.to_owned(),
+            )
+        };
     }
     // Nothing was looked at, so nothing may be said about what exists — and a
     // surviving filter must not invent installed skills to match against.
@@ -2138,12 +2158,12 @@ fn render_pane_scaffold_with_status(
 
 fn metadata_failure_line(app: &SkilledApp) -> Option<Line<'static>> {
     let failure = app.metadata_failure()?;
-    let scope = if app.registry_availability() == RegistryAvailability::Unavailable {
-        "The agent selection could not be read; all detected roots were scanned read-only. \
+    let scope = if app.scan_scope_known() {
+        "The agent selection was retained; selected roots were scanned read-only. \
          Writes are refused."
     } else {
-        "Metadata became unreadable during this session; the sources and selection shown were \
-         read before that. Writes are refused."
+        "The agent selection could not be read; all detected roots were scanned read-only. \
+         Writes are refused."
     };
     Some(Line::from(vec![
         components::badge(Tone::Critical, "metadata unavailable"),

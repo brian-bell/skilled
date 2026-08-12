@@ -36,12 +36,6 @@ pub(crate) enum MetadataOperation {
     RecordReceipt,
 }
 
-pub(crate) struct StartupState {
-    pub(crate) setup_complete: bool,
-    pub(crate) agent_selections: Option<[bool; 3]>,
-    pub(crate) sources: Vec<RegisteredSource>,
-}
-
 impl Store {
     /// Open only a physical application-data directory and regular database
     /// leaf, without following either checked leaf as a symbolic link.
@@ -111,15 +105,6 @@ impl Store {
         &self.database_path
     }
 
-    /// Read every startup value without refreshing source rows in SQLite.
-    pub(crate) fn load_startup_state_read_only(&self) -> Result<StartupState> {
-        Ok(StartupState {
-            setup_complete: self.setup_complete()?,
-            agent_selections: self.agent_selections()?,
-            sources: self.load_registered_sources(false)?,
-        })
-    }
-
     pub(crate) fn setup_complete(&self) -> Result<bool> {
         let value = self
             .connection
@@ -129,7 +114,13 @@ impl Store {
                 |row| row.get::<_, String>(0),
             )
             .optional()?;
-        Ok(value.as_deref() == Some("true"))
+        match value.as_deref() {
+            None | Some("false") => Ok(false),
+            Some("true") => Ok(true),
+            Some(value) => Err(Error::InvalidSetupMetadata(format!(
+                "setup_complete holds {value:?} rather than true or false"
+            ))),
+        }
     }
 
     pub(crate) fn set_setup_complete(&self, complete: bool) -> Result<()> {
@@ -144,22 +135,33 @@ impl Store {
     }
 
     pub(crate) fn agent_selections(&self) -> Result<Option<[bool; 3]>> {
-        let mut selections = [false; 3];
-        for (index, agent) in AGENT_IDENTIFIERS.iter().enumerate() {
-            let selected = self
-                .connection
-                .query_row(
-                    "SELECT selected FROM configured_agents WHERE agent = ?1",
-                    params![agent],
-                    |row| row.get::<_, bool>(0),
-                )
-                .optional()?;
-            let Some(selected) = selected else {
-                return Ok(None);
-            };
-            selections[index] = selected;
+        let mut statement = self
+            .connection
+            .prepare("SELECT agent, selected FROM configured_agents ORDER BY agent")?;
+        let rows = statement.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })?;
+        let mut selections = [None; 3];
+        let mut count = 0;
+        for row in rows {
+            let (identifier, selected) = row?;
+            let agent = agent_kind(&identifier)?;
+            selections[agent.index()] =
+                Some(stored_boolean("configured_agents.selected", selected)?);
+            count += 1;
         }
-        Ok(Some(selections))
+        if count == 0 {
+            return Ok(None);
+        }
+        if count != AGENT_IDENTIFIERS.len() || selections.iter().any(Option::is_none) {
+            return Err(Error::InvalidSetupMetadata(format!(
+                "configured_agents contains {count} of {} required agents",
+                AGENT_IDENTIFIERS.len()
+            )));
+        }
+        Ok(Some(selections.map(|selected| {
+            selected.expect("every supported agent was checked above")
+        })))
     }
 
     pub(crate) fn complete_setup(&mut self, selections: [bool; 3]) -> Result<()> {
@@ -391,7 +393,7 @@ impl Store {
         self.load_registered_sources(true)
     }
 
-    fn load_registered_sources(&self, refresh: bool) -> Result<Vec<RegisteredSource>> {
+    pub(crate) fn load_registered_sources(&self, refresh: bool) -> Result<Vec<RegisteredSource>> {
         #[cfg(test)]
         self.fail_if(MetadataOperation::ReadSources)?;
         let mut statement = self.connection.prepare(
@@ -406,8 +408,8 @@ impl Store {
                 row.get::<_, Option<String>>(3)?,
                 row.get::<_, Option<String>>(4)?,
                 row.get::<_, String>(5)?,
-                row.get::<_, bool>(6)?,
-                row.get::<_, bool>(7)?,
+                row.get::<_, i64>(6)?,
+                row.get::<_, i64>(7)?,
                 row.get::<_, i64>(8)?,
             ))
         })?;
@@ -417,6 +419,8 @@ impl Store {
         let mut sources = Vec::with_capacity(stored.len());
         for (id, label, path, remote_url, branch, head, dirty, dirty_known, last_scan_at) in stored
         {
+            let dirty = stored_boolean("source_repositories.dirty", dirty)?;
+            let dirty_known = stored_boolean("source_repositories.dirty_known", dirty_known)?;
             let git_top_level = PathBuf::from(path);
             let stored_inspected = InspectedSource::from_stored(
                 git_top_level.clone(),
@@ -485,15 +489,18 @@ impl Store {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
-                    row.get::<_, bool>(2)?,
-                    row.get::<_, bool>(3)?,
-                    row.get::<_, bool>(4)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
                 ))
             })?;
             let mut catalogs = Vec::new();
             let mut budget = InspectionBudget::source_scan();
             for row in catalog_rows {
                 let (relative_path, classification, claude_code, codex, opencode) = row?;
+                let claude_code = stored_boolean("catalog_roots.claude_code", claude_code)?;
+                let codex = stored_boolean("catalog_roots.codex", codex)?;
+                let opencode = stored_boolean("catalog_roots.opencode", opencode)?;
                 let classification = match classification.as_str() {
                     "common" => CatalogClassification::Common,
                     "agent-specific" => CatalogClassification::AgentSpecific,
@@ -577,6 +584,14 @@ fn agent_kind(identifier: &str) -> Result<AgentKind> {
         .into_iter()
         .find(|agent| agent_identifier(*agent) == identifier)
         .ok_or_else(|| Error::InvalidStoredAgent(identifier.to_owned()))
+}
+
+fn stored_boolean(field: &'static str, value: i64) -> Result<bool> {
+    match value {
+        0 => Ok(false),
+        1 => Ok(true),
+        value => Err(Error::InvalidStoredBoolean { field, value }),
+    }
 }
 
 fn current_timestamp() -> i64 {

@@ -15,7 +15,7 @@ use crate::{
         CatalogProposal, RegisteredSource, SkillCandidate, SourcePreview, preview_local_source,
         revalidate_source_preview,
     },
-    store::{StartupState, Store},
+    store::Store,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -375,28 +375,57 @@ enum Metadata {
 
 struct MetadataStartup {
     metadata: Metadata,
-    state: Option<StartupState>,
+    setup_complete: Option<bool>,
+    agent_selections: Option<[bool; 3]>,
+    sources: Vec<RegisteredSource>,
+    registry_availability: RegistryAvailability,
 }
 
 fn open_metadata(data_dir: &Path) -> MetadataStartup {
     let database_path = data_dir.join("skilled.sqlite3");
     match Store::open(data_dir) {
-        Ok(store) => match store.load_startup_state_read_only() {
-            Ok(state) => MetadataStartup {
-                metadata: Metadata::Ready(store),
-                state: Some(state),
-            },
-            Err(error) => MetadataStartup {
-                metadata: Metadata::Unavailable(MetadataFailure::new(
-                    database_path,
-                    error.to_string(),
-                )),
-                state: None,
-            },
-        },
+        Ok(store) => {
+            // Completion, scan scope, and sources are independent recovery
+            // units. One bad value must not discard another that was read.
+            let setup_complete = store.setup_complete();
+            let agent_selections = store.agent_selections();
+            let sources = store.load_registered_sources(false);
+            let inconsistent_setup =
+                matches!((&setup_complete, &agent_selections), (Ok(true), Ok(None))).then(|| {
+                    Error::InvalidSetupMetadata(
+                        "setup_complete is true but configured_agents is empty".to_owned(),
+                    )
+                });
+            let failure = setup_complete
+                .as_ref()
+                .err()
+                .map(ToString::to_string)
+                .or_else(|| agent_selections.as_ref().err().map(ToString::to_string))
+                .or_else(|| inconsistent_setup.as_ref().map(ToString::to_string))
+                .or_else(|| sources.as_ref().err().map(ToString::to_string))
+                .map(|error| MetadataFailure::new(database_path, error.to_string()));
+            let registry_availability = if sources.is_ok() {
+                RegistryAvailability::Readable
+            } else {
+                RegistryAvailability::Unavailable
+            };
+            MetadataStartup {
+                metadata: match failure {
+                    Some(failure) => Metadata::Unavailable(failure),
+                    None => Metadata::Ready(store),
+                },
+                setup_complete: setup_complete.ok(),
+                agent_selections: agent_selections.ok().flatten(),
+                sources: sources.unwrap_or_default(),
+                registry_availability,
+            }
+        }
         Err(error) => MetadataStartup {
             metadata: Metadata::Unavailable(MetadataFailure::new(database_path, error.to_string())),
-            state: None,
+            setup_complete: None,
+            agent_selections: None,
+            sources: Vec::new(),
+            registry_availability: RegistryAvailability::Unavailable,
         },
     }
 }
@@ -405,6 +434,7 @@ pub struct SkilledApp {
     view: View,
     metadata: Metadata,
     registry_availability: RegistryAvailability,
+    scan_scope_known: bool,
     environment: AppEnvironment,
     agents: [AgentDetection; 3],
     focused_agent: usize,
@@ -459,31 +489,21 @@ pub struct SkilledApp {
 impl SkilledApp {
     pub fn open(environment: AppEnvironment) -> Result<Self> {
         let startup = open_metadata(&environment.data_dir);
-        let (view, registry_availability) = match &startup.state {
-            Some(state) if state.setup_complete => {
-                (View::Inventory, RegistryAvailability::Readable)
-            }
-            Some(_) => (
-                View::Setup(SetupStep::Welcome),
-                RegistryAvailability::Readable,
-            ),
-            None => (View::Inventory, RegistryAvailability::Unavailable),
+        let view = match (&startup.metadata, startup.setup_complete) {
+            (Metadata::Ready(_), Some(true)) => View::Inventory,
+            (Metadata::Ready(_), Some(false)) => View::Setup(SetupStep::Welcome),
+            (Metadata::Ready(_), None) => unreachable!("ready metadata has setup completion"),
+            (Metadata::Unavailable(_), _) => View::Inventory,
         };
+        let registry_availability = startup.registry_availability;
         let mut agents = detect_agents(&environment);
-        if let Some(selections) = startup
-            .state
-            .as_ref()
-            .and_then(|state| state.agent_selections)
-        {
+        let agent_selections = startup.agent_selections;
+        if let Some(selections) = agent_selections {
             for (agent, selected) in agents.iter_mut().zip(selections) {
                 agent.set_selected(selected);
             }
         }
-        let sources = startup
-            .state
-            .as_ref()
-            .map(|state| state.sources.clone())
-            .unwrap_or_default();
+        let sources = startup.sources;
         // Setup reads the installation roots at its own step, after the user
         // has chosen which agents Skilled should configure. Reading them
         // before that would look at roots the user may be about to deselect.
@@ -498,6 +518,7 @@ impl SkilledApp {
             view,
             metadata: startup.metadata,
             registry_availability,
+            scan_scope_known: agent_selections.is_some(),
             environment,
             agents,
             focused_agent: 0,
@@ -541,6 +562,10 @@ impl SkilledApp {
 
     pub fn registry_availability(&self) -> RegistryAvailability {
         self.registry_availability
+    }
+
+    pub(crate) fn scan_scope_known(&self) -> bool {
+        self.scan_scope_known
     }
 
     #[cfg(test)]
@@ -1151,6 +1176,10 @@ impl SkilledApp {
         for effect in effects {
             match effect {
                 Effect::PersistSetup { agent_selections } => {
+                    // These are the selections the user just made. They remain
+                    // the scan scope even if persisting them is the operation
+                    // that forces this session into degraded mode.
+                    self.scan_scope_known = true;
                     let result = match &mut self.metadata {
                         Metadata::Ready(store) => {
                             store.complete_setup(*agent_selections).map_err(|error| {
@@ -1653,6 +1682,13 @@ impl SkilledApp {
             return self.register_pending_source();
         }
 
+        if step == SetupStep::DetectAgents {
+            // The user has now chosen the scope this session will scan. It is
+            // truthful even before persistence and survives a later metadata
+            // failure during the remaining setup steps.
+            self.scan_scope_known = true;
+        }
+
         match step.next() {
             Some(next) => {
                 self.view = View::Setup(next);
@@ -1725,7 +1761,19 @@ impl SkilledApp {
 
 #[cfg(test)]
 mod tests {
+    use std::{fs, process::Command};
+
     use super::*;
+
+    fn git(repository: &Path, arguments: &[&str]) {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(repository)
+            .args(arguments)
+            .output()
+            .expect("run git fixture command");
+        assert!(output.status.success(), "git {arguments:?} failed");
+    }
 
     fn describe(row: &SourceRow<'_>) -> String {
         match row {
@@ -1805,9 +1853,60 @@ mod tests {
         assert_eq!(app.view(), View::Inventory);
         assert!(app.metadata_failure().is_some());
         assert_eq!(app.registry_availability(), RegistryAvailability::Readable);
+        assert!(app.scan_scope_known());
         assert!(!app.can_add_source());
         assert!(!app.can_rerun_setup());
         assert!(app.pending_source().is_none());
         assert!(!app.source_path_input_active());
+    }
+
+    #[test]
+    fn a_setup_source_failure_retains_the_current_session_scan_scope() {
+        let temporary = tempfile::tempdir().expect("temporary application directory");
+        let home = temporary.path().join("home");
+        let repository = temporary.path().join("source");
+        fs::create_dir_all(repository.join("skills/portable")).expect("create source fixture");
+        fs::write(
+            repository.join("skills/portable/SKILL.md"),
+            "---\nname: portable\ndescription: portable fixture\n---\n",
+        )
+        .expect("write source fixture");
+        git(&repository, &["init", "--quiet"]);
+        git(&repository, &["config", "user.name", "Test Author"]);
+        git(&repository, &["config", "user.email", "test@example.com"]);
+        git(&repository, &["add", "."]);
+        git(&repository, &["commit", "--quiet", "-m", "fixture"]);
+        let hidden = home.join(".codex/skills/deselected");
+        fs::create_dir_all(&hidden).expect("create deselected root fixture");
+        fs::write(
+            hidden.join("SKILL.md"),
+            "---\nname: deselected\ndescription: must not be scanned\n---\n",
+        )
+        .expect("write deselected skill");
+
+        let mut app = SkilledApp::open(AppEnvironment::new(
+            &home,
+            temporary.path().join("data"),
+            "",
+        ))
+        .expect("open application");
+        app.update(Action::Continue);
+        app.update(Action::MoveSelection(1));
+        app.update(Action::ToggleSelection);
+        app.update(Action::MoveSelection(1));
+        app.update(Action::ToggleSelection);
+        app.update(Action::Continue);
+        let preview = app.preview_source(&repository).expect("preview source");
+        app.fail_metadata_next(crate::store::MetadataOperation::RegisterSource);
+
+        let result = app.confirm_source(preview);
+
+        assert!(matches!(result, Err(Error::MetadataUnavailable(_))));
+        assert_eq!(app.view(), View::Inventory);
+        assert!(app.scan_scope_known());
+        assert!(app.agent(AgentKind::ClaudeCode).selected());
+        assert!(!app.agent(AgentKind::Codex).selected());
+        assert!(!app.agent(AgentKind::OpenCode).selected());
+        assert!(app.inventory().row("deselected").is_none());
     }
 }

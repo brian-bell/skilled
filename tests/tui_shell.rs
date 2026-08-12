@@ -1091,6 +1091,58 @@ fn degraded_chrome_withholds_registry_counts_and_mutation_hints() {
 }
 
 #[test]
+fn degraded_registry_failure_states_that_the_scan_scope_was_retained() {
+    let harness = Harness::new();
+    drop(harness.completed_setup());
+    let database = harness.directory.path().join("data/skilled.sqlite3");
+    let connection = rusqlite::Connection::open(database).expect("open metadata database");
+    connection
+        .execute_batch(
+            "PRAGMA foreign_keys = OFF;
+             DROP TABLE source_repositories;",
+        )
+        .expect("corrupt source registry");
+    drop(connection);
+
+    let app = SkilledApp::open(harness.environment()).expect("open degraded application");
+    let rendered = text(&buffer(&app, 120, 40));
+
+    assert!(
+        rendered.contains("The agent selection was retained"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("retained the agent selection"),
+        "{rendered}"
+    );
+    assert!(
+        !rendered.contains("all detected roots were scanned"),
+        "{rendered}"
+    );
+}
+
+#[test]
+fn degraded_empty_inventory_agrees_on_the_observed_result_and_metadata_state() {
+    let temporary = tempfile::tempdir().expect("temporary application directory");
+    let home = temporary.path().join("home");
+    let data = temporary.path().join("data");
+    fs::create_dir_all(home.join(".claude/skills")).expect("create empty skill root");
+    fs::create_dir_all(&data).expect("create established data directory");
+    let app =
+        SkilledApp::open(AppEnvironment::new(&home, &data, "")).expect("open degraded application");
+
+    let rendered = text(&buffer(&app, 120, 40));
+
+    assert!(
+        rendered.contains("nothing installed · metadata unavailable"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("No skills are installed"), "{rendered}");
+    assert!(rendered.contains("hold no skill directories"), "{rendered}");
+    assert!(rendered.contains("every write"), "{rendered}");
+}
+
+#[test]
 fn navigation_follows_the_active_view() {
     let harness = Harness::new();
     let mut app = harness.completed_setup();
