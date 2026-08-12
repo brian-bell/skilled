@@ -4495,7 +4495,7 @@ fn uninstall_prompt_lines(prompt: &UninstallPrompt) -> Vec<Line<'static>> {
                 let (tone, verdict, evidence) = match target.disposition() {
                     UninstallDisposition::RemoveLink {
                         link_target,
-                        resolves,
+                        target_state,
                         receipts,
                     } => (
                         if blocked {
@@ -4513,11 +4513,7 @@ fn uninstall_prompt_lines(prompt: &UninstallPrompt) -> Vec<Line<'static>> {
                             let mut evidence = vec![format!(
                                 "receipt target: {}{}",
                                 terminal_safe(&link_target.display().to_string()),
-                                if *resolves {
-                                    ""
-                                } else {
-                                    " (no longer resolves)"
-                                }
+                                uninstall_target_suffix(target_state)
                             )];
                             evidence.extend(receipts.iter().map(|receipt| {
                                 format!(
@@ -4631,6 +4627,16 @@ fn uninstall_prompt_lines(prompt: &UninstallPrompt) -> Vec<Line<'static>> {
             ));
             lines
         }
+    }
+}
+
+fn uninstall_target_suffix(state: &crate::operations::UninstallTargetState) -> &'static str {
+    use crate::operations::UninstallTargetState;
+    match state {
+        UninstallTargetState::Directory => "",
+        UninstallTargetState::Missing => " (no longer resolves)",
+        UninstallTargetState::NotADirectory => " (no longer a directory)",
+        UninstallTargetState::Unreadable(_) => " (could not be read)",
     }
 }
 

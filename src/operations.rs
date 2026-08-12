@@ -146,9 +146,9 @@ pub fn locate_variant(
 /// link, which is the difference between "Skilled already installed this" and
 /// "something else is standing here".
 #[derive(Clone, Debug, Eq, PartialEq)]
-enum SymlinkTargetProbe {
+pub enum UninstallTargetState {
     Missing,
-    Resolved,
+    Directory,
     NotADirectory,
     Unreadable(String),
 }
@@ -161,7 +161,7 @@ enum EntryProbe {
     Symlink {
         target: PathBuf,
         canonical: Option<PathBuf>,
-        target_state: SymlinkTargetProbe,
+        target_state: UninstallTargetState,
     },
     /// A physical directory, and where it resolves to. The resolved path
     /// matters even here: another root may reach the very same directory
@@ -453,10 +453,10 @@ fn probe_entry(link_path: &Path) -> EntryProbe {
             Err(error) => return EntryProbe::Unreadable(error.to_string()),
         };
         let target_state = match fs::metadata(link_path) {
-            Ok(metadata) if metadata.is_dir() => SymlinkTargetProbe::Resolved,
-            Ok(_) => SymlinkTargetProbe::NotADirectory,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => SymlinkTargetProbe::Missing,
-            Err(error) => SymlinkTargetProbe::Unreadable(error.to_string()),
+            Ok(metadata) if metadata.is_dir() => UninstallTargetState::Directory,
+            Ok(_) => UninstallTargetState::NotADirectory,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => UninstallTargetState::Missing,
+            Err(error) => UninstallTargetState::Unreadable(error.to_string()),
         };
         return EntryProbe::Symlink {
             target,
@@ -684,7 +684,7 @@ pub enum UninstallExcludedReason {
 pub enum UninstallDisposition {
     RemoveLink {
         link_target: PathBuf,
-        resolves: bool,
+        target_state: UninstallTargetState,
         receipts: Vec<Receipt>,
     },
     Excluded {
@@ -861,14 +861,28 @@ pub fn plan_uninstall(
         for target in &targets {
             if let UninstallDisposition::RemoveLink {
                 link_target,
-                resolves: false,
+                target_state,
                 ..
             } = &target.disposition
             {
-                warnings.push(format!(
-                    "{} no longer resolves; this release will remove the managed link rather than repair it",
-                    link_target.display()
-                ));
+                let warning = match target_state {
+                    UninstallTargetState::Directory => None,
+                    UninstallTargetState::Missing => Some(format!(
+                        "{} no longer resolves; this release will remove the managed link rather than repair it",
+                        link_target.display()
+                    )),
+                    UninstallTargetState::NotADirectory => Some(format!(
+                        "{} is no longer a directory; this release will remove the managed link rather than repair it",
+                        link_target.display()
+                    )),
+                    UninstallTargetState::Unreadable(reason) => Some(format!(
+                        "{} could not be read ({reason}); this release will remove the exact managed link, and content survival will be withheld",
+                        link_target.display()
+                    )),
+                };
+                if let Some(warning) = warning {
+                    warnings.push(warning);
+                }
             }
         }
     }
@@ -960,25 +974,9 @@ fn uninstall_disposition(slot: &TargetProbe, receipts: &[&Receipt]) -> Uninstall
                 .map(|receipt| (*receipt).clone())
                 .collect();
             if !matching_receipts.is_empty() {
-                let resolves = match target_state {
-                    SymlinkTargetProbe::Resolved => true,
-                    SymlinkTargetProbe::Missing => false,
-                    SymlinkTargetProbe::NotADirectory => {
-                        return uninstall_blocked(
-                            "uninstall.target_not_directory",
-                            "the recorded link target is no longer a directory".to_owned(),
-                        );
-                    }
-                    SymlinkTargetProbe::Unreadable(reason) => {
-                        return uninstall_blocked(
-                            "uninstall.unreadable_target",
-                            format!("the recorded link target could not be read: {reason}"),
-                        );
-                    }
-                };
                 UninstallDisposition::RemoveLink {
                     link_target: target.clone(),
-                    resolves,
+                    target_state: target_state.clone(),
                     receipts: matching_receipts,
                 }
             } else {
@@ -2227,7 +2225,7 @@ pub(crate) fn probe_uninstall_content(plan: &UninstallPlan) -> [ContentSighting;
         };
         let UninstallDisposition::RemoveLink {
             link_target,
-            resolves: true,
+            target_state: UninstallTargetState::Directory,
             ..
         } = target.disposition()
         else {
@@ -2274,11 +2272,11 @@ pub fn verify_uninstall(
         let target = plan
             .target(step.agent)
             .expect("an applied target belongs to the plan");
-        if matches!(
-            target.disposition,
-            UninstallDisposition::RemoveLink { resolves: true, .. }
-        ) {
-            match &content[step.agent.index()] {
+        match &target.disposition {
+            UninstallDisposition::RemoveLink {
+                target_state: UninstallTargetState::Directory,
+                ..
+            } => match &content[step.agent.index()] {
                 ContentSighting::Resolved => report.held.push(VerifyPass {
                     agent: step.agent,
                     postcondition: Postcondition::ContentSurvived,
@@ -2301,7 +2299,19 @@ pub fn verify_uninstall(
                     reason: "the recorded target content was not re-read".to_owned(),
                     required: false,
                 }),
-            }
+            },
+            UninstallDisposition::RemoveLink {
+                target_state: UninstallTargetState::Unreadable(reason),
+                ..
+            } => report.withheld.push(VerifyWithheld {
+                agent: step.agent,
+                postcondition: Postcondition::ContentSurvived,
+                reason: format!(
+                    "the recorded target content was unreadable before link removal: {reason}"
+                ),
+                required: false,
+            }),
+            _ => {}
         }
     }
     if applied.steps.iter().any(AppliedStep::removed_link)
@@ -3355,7 +3365,7 @@ mod tests {
     }
 
     #[test]
-    fn an_unreadable_receipted_target_blocks_uninstall_planning() {
+    fn an_unreadable_receipted_target_remains_removable_with_its_state_preserved() {
         let link = PathBuf::from("/home/example/.claude/skills/portable");
         let target = PathBuf::from("/source/skills/portable");
         let slot = TargetProbe {
@@ -3365,7 +3375,7 @@ mod tests {
             entry: EntryProbe::Symlink {
                 target: target.clone(),
                 canonical: None,
-                target_state: SymlinkTargetProbe::Unreadable("permission denied".to_owned()),
+                target_state: UninstallTargetState::Unreadable("permission denied".to_owned()),
             },
             content: SlotContent::Unknown,
         };
@@ -3381,15 +3391,17 @@ mod tests {
 
         let disposition = uninstall_disposition(&slot, &[&receipt]);
 
-        let UninstallDisposition::Blocked { finding } = disposition else {
-            panic!("an unreadable target must block uninstall")
+        let UninstallDisposition::RemoveLink { target_state, .. } = disposition else {
+            panic!("an unreadable exact receipted target remains removable")
         };
-        assert_eq!(finding.code(), "uninstall.unreadable_target");
-        assert!(finding.evidence().contains("permission denied"));
+        assert_eq!(
+            target_state,
+            UninstallTargetState::Unreadable("permission denied".to_owned())
+        );
     }
 
     #[test]
-    fn a_receipted_target_replaced_by_a_file_blocks_uninstall_planning() {
+    fn a_receipted_target_replaced_by_a_file_remains_removable_with_its_state_preserved() {
         let link = PathBuf::from("/home/example/.claude/skills/portable");
         let target = PathBuf::from("/source/skills/portable");
         let slot = TargetProbe {
@@ -3399,7 +3411,7 @@ mod tests {
             entry: EntryProbe::Symlink {
                 target: target.clone(),
                 canonical: Some(target.clone()),
-                target_state: SymlinkTargetProbe::NotADirectory,
+                target_state: UninstallTargetState::NotADirectory,
             },
             content: SlotContent::Nowhere,
         };
@@ -3415,10 +3427,10 @@ mod tests {
 
         let disposition = uninstall_disposition(&slot, &[&receipt]);
 
-        let UninstallDisposition::Blocked { finding } = disposition else {
-            panic!("a non-directory target must block uninstall")
+        let UninstallDisposition::RemoveLink { target_state, .. } = disposition else {
+            panic!("a non-directory exact receipted target remains removable")
         };
-        assert_eq!(finding.code(), "uninstall.target_not_directory");
+        assert_eq!(target_state, UninstallTargetState::NotADirectory);
     }
 
     #[test]
@@ -3535,7 +3547,11 @@ mod tests {
                     link_path: link_path.to_path_buf(),
                     disposition: UninstallDisposition::RemoveLink {
                         link_target: link_target.to_path_buf(),
-                        resolves,
+                        target_state: if resolves {
+                            UninstallTargetState::Directory
+                        } else {
+                            UninstallTargetState::Missing
+                        },
                         receipts: Vec::new(),
                     },
                 }],

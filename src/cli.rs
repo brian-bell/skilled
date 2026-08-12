@@ -451,17 +451,13 @@ fn write_uninstall_plan(output: &mut dyn Write, plan: &UninstallPlan) -> std::io
         let verdict = match target.disposition() {
             UninstallDisposition::RemoveLink {
                 link_target,
-                resolves,
+                target_state,
                 ..
             } => format!(
                 "{} managed link to {}{}",
                 if blocked { "would remove" } else { "remove" },
                 safe(&link_target.display()),
-                if *resolves {
-                    ""
-                } else {
-                    " (target no longer resolves)"
-                },
+                uninstall_target_suffix(target_state),
             ),
             UninstallDisposition::Excluded { reason } => format!("excluded: {reason:?}"),
             UninstallDisposition::Blocked { finding } => {
@@ -499,6 +495,16 @@ fn write_uninstall_plan(output: &mut dyn Write, plan: &UninstallPlan) -> std::io
         output,
         "\nSource content and agent skill roots will not be removed."
     )
+}
+
+fn uninstall_target_suffix(state: &crate::operations::UninstallTargetState) -> &'static str {
+    use crate::operations::UninstallTargetState;
+    match state {
+        UninstallTargetState::Directory => "",
+        UninstallTargetState::Missing => " (target no longer resolves)",
+        UninstallTargetState::NotADirectory => " (target is no longer a directory)",
+        UninstallTargetState::Unreadable(_) => " (target could not be read)",
+    }
 }
 
 fn write_uninstall_report(
