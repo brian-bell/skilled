@@ -1,9 +1,22 @@
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    process::Child,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicI64, Ordering},
+        mpsc::{self, Receiver, TryRecvError},
+    },
+    thread::JoinHandle,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use crate::{
     AgentDetection, AgentKind, AppEnvironment, Result, SessionIdentity,
     agents::{detect_agents, detection_at},
-    inventory::{DoctorEntry, InventoryRow, InventorySnapshot, doctor_order, scan_installations},
+    inventory::{
+        DoctorEntry, Finding, InstalledSkillObservation, InventoryRow, InventorySnapshot,
+        doctor_order, scan_installations,
+    },
     operations::{
         InstallOutcome, InstallPlan, InstallPrompt, Receipt, RepairOfferStatus, RepairOutcome,
         RepairOverlay, RepairPlan, RepairPrompt, apply_install, apply_repair, plan_install,
@@ -15,6 +28,12 @@ use crate::{
         revalidate_source_preview,
     },
     store::Store,
+    updates::{
+        CachedUpdateCheck, RepositoryUpdatePlan, RepositoryUpdatePrompt, RepositoryUpdateVerdict,
+        apply_repository_update_attempt, cached_update_check, plan_repository_update,
+        probe_repository_update, probe_repository_update_against,
+        probe_repository_update_cancellable, verify_repository_update,
+    },
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -83,8 +102,15 @@ pub enum View {
     Setup(SetupStep),
     Inventory,
     Sources,
+    Updates,
     Doctor,
     Settings,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UpdatesPane {
+    Candidates,
+    Details,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -125,6 +151,7 @@ pub enum Action {
     OpenSettings,
     OpenInventory,
     OpenSources,
+    OpenUpdates,
     OpenDoctor,
     MoveDoctorPane(i8),
     AdvanceDoctorPane,
@@ -142,6 +169,14 @@ pub enum Action {
     MoveSourcesPane(i8),
     AdvanceSourcesPane,
     MoveSourcesSelection(i8),
+    MoveUpdatesPane(i8),
+    AdvanceUpdatesPane,
+    MoveUpdatesSelection(i8),
+    BeginUpdateCheck,
+    CancelUpdateCheck,
+    BeginRepositoryUpdate,
+    ConfirmRepositoryUpdate,
+    DismissRepositoryUpdate,
     MoveInventoryPane(i8),
     AdvanceInventoryPane,
     MoveInventorySelection(i8),
@@ -207,12 +242,38 @@ pub enum Effect {
     PlanRepair,
     /// Replace the link in the shown repair preview, then rescan and verify.
     ApplyRepair,
+    CheckUpdates,
+    CancelUpdateCheck,
+    RecordUpdateChecks(Vec<CachedUpdateCheck>),
+    FinishUpdateCheck,
+    PlanRepositoryUpdate,
+    ApplyRepositoryUpdate,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UpdateResult {
     outcome: UpdateOutcome,
     effects: Vec<Effect>,
+}
+
+struct UpdateCheckRun {
+    receiver: Receiver<UpdateCheckMessage>,
+    handle: JoinHandle<()>,
+    cancelled: Arc<AtomicBool>,
+    child: Arc<Mutex<Option<Child>>>,
+}
+
+pub(crate) struct RepositoryApplyOutcome {
+    pub(crate) verification: Option<crate::updates::RepositoryVerifyReport>,
+    pub(crate) apply_error: Option<String>,
+    pub(crate) bookkeeping_error: Option<String>,
+}
+
+enum UpdateCheckMessage {
+    Progress { completed: usize, total: usize },
+    Finished(Vec<CachedUpdateCheck>),
+    Cancelled,
+    Failed(String),
 }
 
 impl UpdateResult {
@@ -223,10 +284,10 @@ impl UpdateResult {
         }
     }
 
-    fn quit() -> Self {
+    fn quit_with(effects: Vec<Effect>) -> Self {
         Self {
             outcome: UpdateOutcome::Quit,
-            effects: Vec::new(),
+            effects,
         }
     }
 
@@ -260,6 +321,41 @@ fn wrapped_index(current: usize, delta: i8, count: usize) -> usize {
     } else {
         (current + count - magnitude) % count
     }
+}
+
+/// The highest generation this process has handed out or seen recorded.
+static GENERATION: AtomicI64 = AtomicI64::new(0);
+
+/// When a check ran, as a value later checks are guaranteed to exceed.
+///
+/// The conditional upsert behind a recorded check keeps an older result from
+/// overwriting a newer one, so this value orders writes as much as it dates
+/// them, and wall time alone cannot do that: an NTP correction, a manual clock
+/// change, or a restored virtual machine moves it backwards, and every explicit
+/// check made before it caught up would be dropped by a store that reported
+/// success. The clock still supplies the value — Updates states when a check
+/// ran — but it is never allowed to fall to or below one already handed out.
+/// [`note_generation`] seeds the floor from what the store already holds, so a
+/// clock that moved back between runs cannot silence the next run's first check.
+fn now() -> i64 {
+    let wall = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos()
+        .min(i64::MAX as u128) as i64;
+    let mut floor = GENERATION.load(Ordering::Acquire);
+    loop {
+        let next = wall.max(floor.saturating_add(1));
+        match GENERATION.compare_exchange_weak(floor, next, Ordering::AcqRel, Ordering::Acquire) {
+            Ok(_) => return next,
+            Err(current) => floor = current,
+        }
+    }
+}
+
+/// Raise the generation floor to a value the store already holds.
+fn note_generation(generation: i64) {
+    GENERATION.fetch_max(generation, Ordering::AcqRel);
 }
 
 /// One row the variants pane offers the selection.
@@ -366,6 +462,69 @@ pub enum PlanRequestFailure {
     Metadata(String),
 }
 
+#[derive(Clone, Debug)]
+pub enum DoctorItem<'a> {
+    Installation(DoctorEntry<'a>),
+    Source {
+        source: &'a RegisteredSource,
+        check: &'a CachedUpdateCheck,
+        finding: Finding,
+    },
+}
+
+impl<'a> DoctorItem<'a> {
+    pub fn skill_name(&self) -> &str {
+        match self {
+            Self::Installation(entry) => entry.skill_name(),
+            Self::Source { source, .. } => source.label(),
+        }
+    }
+    pub fn finding(&self) -> &Finding {
+        match self {
+            Self::Installation(entry) => entry.finding(),
+            Self::Source { finding, .. } => finding,
+        }
+    }
+    /// Source findings have no agent dimension, so callers must handle the
+    /// absence rather than attributing a repository state to an agent.
+    pub fn agent(&self) -> Option<AgentKind> {
+        self.agent_option()
+    }
+    pub fn agent_option(&self) -> Option<AgentKind> {
+        match self {
+            Self::Installation(entry) => Some(entry.agent()),
+            Self::Source { .. } => None,
+        }
+    }
+    pub fn observation(&self) -> Option<&'a InstalledSkillObservation> {
+        match self {
+            Self::Installation(entry) => entry.observation(),
+            Self::Source { .. } => None,
+        }
+    }
+    pub fn variants(&self) -> &'a [VariantRef] {
+        match self {
+            Self::Installation(entry) => entry.variants(),
+            Self::Source { .. } => &[],
+        }
+    }
+    pub fn concerns_the_registry(&self) -> bool {
+        matches!(self, Self::Installation(entry) if entry.concerns_the_registry())
+    }
+    pub fn source(&self) -> Option<&'a RegisteredSource> {
+        match self {
+            Self::Source { source, .. } => Some(source),
+            _ => None,
+        }
+    }
+    pub fn check(&self) -> Option<&'a CachedUpdateCheck> {
+        match self {
+            Self::Source { check, .. } => Some(check),
+            _ => None,
+        }
+    }
+}
+
 impl PlanRequestFailure {
     pub fn message(&self) -> &str {
         match self {
@@ -389,6 +548,15 @@ pub struct SkilledApp {
     sources_pane: SourcesPane,
     focused_source: usize,
     focused_variant: usize,
+    update_checks: Vec<CachedUpdateCheck>,
+    updates_pane: UpdatesPane,
+    focused_update: usize,
+    pending_update: Option<RepositoryUpdatePrompt>,
+    update_preview_fully_seen: bool,
+    update_check_run: Option<UpdateCheckRun>,
+    retired_update_workers: Vec<JoinHandle<()>>,
+    update_check_progress: Option<(usize, usize)>,
+    update_check_error: Option<String>,
     inventory: InventorySnapshot,
     /// Receipt-aware offers and findings recomputed with every inventory scan.
     repair_overlay: RepairOverlay,
@@ -447,6 +615,10 @@ impl SkilledApp {
             }
         }
         let sources = store.registered_sources()?;
+        let update_checks = store.update_checks()?;
+        for check in &update_checks {
+            note_generation(check.checked_at);
+        }
         // Setup reads the installation roots at its own step, after the user
         // has chosen which agents Skilled should configure. Reading them
         // before that would look at roots the user may be about to deselect.
@@ -476,6 +648,15 @@ impl SkilledApp {
             sources_pane: SourcesPane::Repositories,
             focused_source: 0,
             focused_variant: 0,
+            update_checks,
+            updates_pane: UpdatesPane::Candidates,
+            focused_update: 0,
+            pending_update: None,
+            update_preview_fully_seen: false,
+            update_check_run: None,
+            retired_update_workers: Vec::new(),
+            update_check_progress: None,
+            update_check_error: None,
             inventory,
             repair_overlay,
             filtered_installations: Vec::new(),
@@ -514,6 +695,132 @@ impl SkilledApp {
 
     pub fn sources(&self) -> &[RegisteredSource] {
         &self.sources
+    }
+
+    pub fn update_checks(&self) -> &[CachedUpdateCheck] {
+        &self.update_checks
+    }
+
+    pub fn updates_pane(&self) -> UpdatesPane {
+        self.updates_pane
+    }
+
+    pub fn focused_update(&self) -> usize {
+        self.focused_update
+    }
+
+    pub fn pending_update(&self) -> Option<&RepositoryUpdatePrompt> {
+        self.pending_update.as_ref()
+    }
+
+    pub fn update_preview_fully_seen(&self) -> bool {
+        self.update_preview_fully_seen
+    }
+
+    pub fn update_check_in_flight(&self) -> bool {
+        self.update_check_run.is_some()
+    }
+
+    pub fn update_check_progress(&self) -> Option<(usize, usize)> {
+        self.update_check_progress
+    }
+
+    pub fn update_check_error(&self) -> Option<&str> {
+        self.update_check_error.as_deref()
+    }
+
+    pub fn drain_update_check(&mut self) -> Vec<Effect> {
+        self.reap_retired_update_workers();
+        let Some(run) = self.update_check_run.as_mut() else {
+            return Vec::new();
+        };
+        let mut effects = Vec::new();
+        loop {
+            match run.receiver.try_recv() {
+                Ok(UpdateCheckMessage::Progress { completed, total }) => {
+                    self.update_check_progress = Some((completed, total));
+                }
+                Ok(UpdateCheckMessage::Finished(checks)) => {
+                    if run.cancelled.load(Ordering::Acquire) {
+                        effects.push(Effect::FinishUpdateCheck);
+                    } else {
+                        effects.extend([
+                            Effect::RecordUpdateChecks(checks),
+                            Effect::FinishUpdateCheck,
+                        ]);
+                    }
+                    break;
+                }
+                Ok(UpdateCheckMessage::Failed(error)) => {
+                    self.update_check_error = Some(error);
+                    effects.push(Effect::FinishUpdateCheck);
+                    break;
+                }
+                Ok(UpdateCheckMessage::Cancelled) => {
+                    effects.push(Effect::FinishUpdateCheck);
+                    break;
+                }
+                Err(TryRecvError::Disconnected) => {
+                    if !run.cancelled.load(Ordering::Acquire) {
+                        self.update_check_error =
+                            Some("update check ended before completing".to_owned());
+                    }
+                    effects.push(Effect::FinishUpdateCheck);
+                    break;
+                }
+                Err(TryRecvError::Empty) => break,
+            }
+        }
+        effects
+    }
+
+    fn reap_retired_update_workers(&mut self) {
+        let mut index = 0;
+        while index < self.retired_update_workers.len() {
+            if self.retired_update_workers[index].is_finished() {
+                let handle = self.retired_update_workers.swap_remove(index);
+                let _ = handle.join();
+            } else {
+                index += 1;
+            }
+        }
+    }
+
+    /// Latch the renderer's statement-only confirmation measurement.
+    ///
+    /// Changed-file evidence continues below the statement and remains fully
+    /// scrollable, but it does not become a second consent gate.
+    pub fn note_update_preview_fully_seen(&mut self, seen: Option<bool>) {
+        self.update_preview_fully_seen |= seen.unwrap_or(false);
+    }
+
+    pub fn selected_update_source(&self) -> Option<&RegisteredSource> {
+        self.sources.get(self.focused_update)
+    }
+
+    pub fn update_check_for(&self, source_id: i64) -> Option<&CachedUpdateCheck> {
+        self.update_checks
+            .iter()
+            .find(|check| check.source_id == source_id)
+    }
+
+    /// Count available updates only when the result covers the whole current
+    /// registry. A partial count would turn "checked some" into "none left".
+    pub fn stated_update_count(&self) -> Option<usize> {
+        (!self.sources.is_empty()
+            && self.sources.iter().all(|source| {
+                self.update_check_for(source.id())
+                    .is_some_and(|check| !check.superseded_by(source) && check.availability_known())
+            }))
+        .then(|| {
+            self.sources
+                .iter()
+                .filter(|source| {
+                    self.update_check_for(source.id())
+                        .is_some_and(|check| check.verdict == RepositoryUpdateVerdict::Available)
+                })
+                .count()
+        })
     }
 
     pub fn source_path(&self) -> &str {
@@ -591,7 +898,10 @@ impl SkilledApp {
     /// The renderer orders the Doctor list once per frame and uses this form
     /// for its key hint and help entry. Asking [`Self::can_repair_selection`]
     /// there would materialise and sort the same bounded list again.
-    pub fn can_repair_finding(&self, entry: &DoctorEntry<'_>) -> bool {
+    ///
+    /// A repository finding has no observed installation behind it, so it
+    /// offers nothing here: repair replaces one link Skilled is proven to own.
+    pub fn can_repair_finding(&self, entry: &DoctorItem<'_>) -> bool {
         self.view == View::Doctor
             && entry
                 .observation()
@@ -664,33 +974,55 @@ impl SkilledApp {
 
     /// Every finding the last scan holds, in the order Doctor lists them.
     ///
-    /// Materialised on demand from the snapshot and its receipt-aware overlay.
-    /// The overlay is recomputed wherever the snapshot is replaced, so the two
-    /// accounts cannot drift across a rescan.
-    pub fn doctor_findings(&self) -> Vec<DoctorEntry<'_>> {
-        let mut entries: Vec<_> = self.inventory.doctor_findings().collect();
-        entries.extend(self.repair_overlay.findings().iter().filter_map(|overlay| {
+    /// Materialised on demand from the snapshot, its receipt-aware repair
+    /// overlay, and the cached update checks. Nothing is held beside those, so
+    /// no list of findings can disagree with them after a rescan or a check.
+    pub fn doctor_findings(&self) -> Vec<DoctorItem<'_>> {
+        let mut items: Vec<_> = self
+            .inventory
+            .doctor_findings()
+            .map(DoctorItem::Installation)
+            .collect();
+        items.extend(self.repair_overlay.findings().iter().filter_map(|overlay| {
             let row = self.inventory.rows().get(overlay.row_index())?;
             let observation = row.observation(overlay.agent())?;
             debug_assert_eq!(observation.path(), overlay.path());
-            Some(DoctorEntry::from_observation(
+            Some(DoctorItem::Installation(DoctorEntry::from_observation(
                 row.name(),
                 overlay.finding(),
                 observation,
-            ))
+            )))
         }));
-        entries.sort_by_key(|entry| {
+        items.extend(self.sources.iter().flat_map(|source| {
+            let Some(check) = self.update_check_for(source.id()) else {
+                return Vec::new().into_iter();
+            };
+            if check.superseded_by(source) {
+                return Vec::new().into_iter();
+            }
+            check
+                .findings()
+                .into_iter()
+                .map(|finding| DoctorItem::Source {
+                    source,
+                    check,
+                    finding,
+                })
+                .collect::<Vec<_>>()
+                .into_iter()
+        }));
+        items.sort_by_key(|item| {
             (
-                doctor_order(entry.finding().code()),
-                std::cmp::Reverse(entry.finding().severity()),
-                entry.skill_name(),
-                entry.agent().index(),
+                doctor_order(item.finding().code()),
+                std::cmp::Reverse(item.finding().severity()),
+                item.skill_name().to_owned(),
+                item.agent_option().map_or(0, |agent| agent.index() + 1),
             )
         });
-        entries
+        items
     }
 
-    pub fn selected_finding(&self) -> Option<DoctorEntry<'_>> {
+    pub fn selected_finding(&self) -> Option<DoctorItem<'_>> {
         self.doctor_findings().into_iter().nth(self.focused_finding)
     }
 
@@ -699,7 +1031,21 @@ impl SkilledApp {
     /// The key-hint bar and the navigation row ask this on every frame of every
     /// view, so neither may pay for the sort that presenting them costs.
     pub fn finding_count(&self) -> usize {
-        self.inventory.finding_count() + self.repair_overlay.finding_count()
+        self.inventory.finding_count()
+            + self.repair_overlay.finding_count()
+            + self
+                .sources
+                .iter()
+                .map(|source| {
+                    self.update_check_for(source.id()).map_or(0, |check| {
+                        if check.superseded_by(source) {
+                            0
+                        } else {
+                            check.findings().len()
+                        }
+                    })
+                })
+                .sum::<usize>()
     }
 
     pub fn stated_finding_count(&self) -> Option<usize> {
@@ -813,7 +1159,7 @@ impl SkilledApp {
                     self.help_context = None;
                     UpdateResult::continuing(Vec::new())
                 }
-                Action::Quit => UpdateResult::quit(),
+                Action::Quit => self.quit_result(),
                 _ => UpdateResult::continuing(Vec::new()),
             };
         }
@@ -823,7 +1169,7 @@ impl SkilledApp {
         // from under it, and nothing but a confirmation may confirm it.
         if self.pending_install.is_some() {
             return match action {
-                Action::Quit => UpdateResult::quit(),
+                Action::Quit => self.quit_result(),
                 Action::ConfirmInstall => UpdateResult::continuing(self.confirm_install()),
                 Action::DismissInstall => {
                     self.pending_install = None;
@@ -842,10 +1188,31 @@ impl SkilledApp {
 
         if self.pending_repair.is_some() {
             return match action {
-                Action::Quit => UpdateResult::quit(),
+                Action::Quit => self.quit_result(),
                 Action::ConfirmRepair => UpdateResult::continuing(self.confirm_repair()),
                 Action::DismissRepair => {
                     self.pending_repair = None;
+                    self.reset_detail_scroll();
+                    UpdateResult::continuing(Vec::new())
+                }
+                Action::ScrollDetail(delta) => {
+                    self.scroll_detail(delta);
+                    UpdateResult::continuing(Vec::new())
+                }
+                _ => UpdateResult::continuing(Vec::new()),
+            };
+        }
+
+        if self.pending_update.is_some() {
+            return match action {
+                Action::Quit => self.quit_result(),
+                Action::ConfirmRepositoryUpdate => {
+                    let effects = matches!(self.pending_update, Some(RepositoryUpdatePrompt::Preview(ref plan)) if !plan.is_blocked() && self.update_preview_fully_seen)
+                        .then_some(Effect::ApplyRepositoryUpdate).into_iter().collect();
+                    UpdateResult::continuing(effects)
+                }
+                Action::DismissRepositoryUpdate => {
+                    self.pending_update = None;
                     self.reset_detail_scroll();
                     UpdateResult::continuing(Vec::new())
                 }
@@ -862,7 +1229,7 @@ impl SkilledApp {
         // one command no context may swallow.
         if self.inventory_filter_active {
             return match action {
-                Action::Quit => UpdateResult::quit(),
+                Action::Quit => self.quit_result(),
                 _ => {
                     self.filter_input(action);
                     UpdateResult::continuing(Vec::new())
@@ -899,21 +1266,29 @@ impl SkilledApp {
                 Vec::new()
             }
             Action::OpenInventory => {
-                if matches!(self.view, View::Sources | View::Doctor) {
+                if matches!(self.view, View::Sources | View::Updates | View::Doctor) {
                     self.enter_inventory()
                 } else {
                     Vec::new()
                 }
             }
             Action::OpenSources => {
-                if matches!(self.view, View::Inventory | View::Doctor) {
+                if matches!(self.view, View::Inventory | View::Updates | View::Doctor) {
                     self.view = View::Sources;
                     self.sources_pane = SourcesPane::Repositories;
                 }
                 Vec::new()
             }
+            Action::OpenUpdates => {
+                if matches!(self.view, View::Inventory | View::Sources | View::Doctor) {
+                    self.view = View::Updates;
+                    self.updates_pane = UpdatesPane::Candidates;
+                    self.reset_detail_scroll();
+                }
+                Vec::new()
+            }
             Action::OpenDoctor => {
-                if matches!(self.view, View::Inventory | View::Sources) {
+                if matches!(self.view, View::Inventory | View::Sources | View::Updates) {
                     self.enter_doctor()
                 } else {
                     Vec::new()
@@ -932,6 +1307,73 @@ impl SkilledApp {
                 }
                 Vec::new()
             }
+            Action::MoveUpdatesPane(delta) => {
+                if self.view == View::Updates {
+                    let index = usize::from(self.updates_pane == UpdatesPane::Details);
+                    self.updates_pane = if wrapped_index(index, delta, 2) == 0 {
+                        UpdatesPane::Candidates
+                    } else {
+                        UpdatesPane::Details
+                    };
+                }
+                Vec::new()
+            }
+            Action::AdvanceUpdatesPane => {
+                if self.view != View::Updates
+                    || self.sources.is_empty()
+                    || self.update_check_in_flight()
+                {
+                    Vec::new()
+                } else if self.updates_pane == UpdatesPane::Candidates {
+                    self.updates_pane = UpdatesPane::Details;
+                    Vec::new()
+                } else if self.selected_update_source().is_some_and(|source| {
+                    self.update_check_for(source.id()).is_some_and(|check| {
+                        !check.superseded_by(source)
+                            && check.verdict == RepositoryUpdateVerdict::Available
+                    })
+                }) {
+                    vec![Effect::PlanRepositoryUpdate]
+                } else {
+                    Vec::new()
+                }
+            }
+            Action::MoveUpdatesSelection(delta) => {
+                if self.view == View::Updates && self.updates_pane == UpdatesPane::Candidates {
+                    self.focused_update =
+                        wrapped_index(self.focused_update, delta, self.sources.len());
+                    self.reset_detail_scroll();
+                }
+                Vec::new()
+            }
+            Action::BeginUpdateCheck => {
+                if self.view == View::Updates
+                    && !self.sources.is_empty()
+                    && !self.update_check_in_flight()
+                {
+                    vec![Effect::CheckUpdates]
+                } else {
+                    Vec::new()
+                }
+            }
+            Action::CancelUpdateCheck => {
+                if self.view == View::Updates && self.update_check_in_flight() {
+                    vec![Effect::CancelUpdateCheck]
+                } else {
+                    Vec::new()
+                }
+            }
+            Action::BeginRepositoryUpdate => {
+                if self.view == View::Updates
+                    && self.updates_pane == UpdatesPane::Details
+                    && !self.update_check_in_flight()
+                {
+                    vec![Effect::PlanRepositoryUpdate]
+                } else {
+                    Vec::new()
+                }
+            }
+            Action::ConfirmRepositoryUpdate | Action::DismissRepositoryUpdate => Vec::new(),
             Action::AdvanceDoctorPane => {
                 if self.view == View::Doctor && self.selected_finding().is_some() {
                     self.doctor_pane = DoctorPane::Details;
@@ -1109,7 +1551,7 @@ impl SkilledApp {
             }
             Action::ConfirmRepair | Action::DismissRepair => Vec::new(),
             Action::RerunSetup => self.rerun_setup(),
-            Action::Quit => return UpdateResult::quit(),
+            Action::Quit => return self.quit_result(),
         };
         UpdateResult::continuing(effects)
     }
@@ -1189,9 +1631,438 @@ impl SkilledApp {
                     self.reset_detail_scroll();
                 }
                 Effect::ApplyRepair => self.apply_pending_repair(),
+                Effect::CheckUpdates => self.start_update_check(),
+                Effect::CancelUpdateCheck => self.cancel_update_check(),
+                Effect::RecordUpdateChecks(checks) => self.persist_update_checks(checks),
+                Effect::FinishUpdateCheck => self.finish_update_check(),
+                Effect::PlanRepositoryUpdate => {
+                    self.pending_update = Some(self.build_repository_update_preview());
+                    self.reset_detail_scroll();
+                }
+                Effect::ApplyRepositoryUpdate => self.apply_pending_repository_update(),
             }
         }
         Ok(())
+    }
+
+    fn start_update_check(&mut self) {
+        if self.update_check_run.is_some() {
+            return;
+        }
+        self.update_check_error = None;
+        let sources = self.sources.clone();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let child = Arc::new(Mutex::new(None));
+        let (sender, receiver) = mpsc::channel();
+        let worker_cancelled = Arc::clone(&cancelled);
+        let worker_child = Arc::clone(&child);
+        let panic_sender = sender.clone();
+        let handle = std::thread::spawn(move || {
+            let result = crate::terminal::catch_update_worker_panic(|| {
+                let mut checks = Vec::with_capacity(sources.len());
+                let total = sources.len();
+                let _ = sender.send(UpdateCheckMessage::Progress {
+                    completed: 0,
+                    total,
+                });
+                for (index, source) in sources.iter().enumerate() {
+                    if worker_cancelled.load(Ordering::Acquire) {
+                        let _ = sender.send(UpdateCheckMessage::Cancelled);
+                        return;
+                    }
+                    let Some(probe) = probe_repository_update_cancellable(
+                        source,
+                        &worker_cancelled,
+                        &worker_child,
+                    ) else {
+                        let _ = sender.send(UpdateCheckMessage::Cancelled);
+                        return;
+                    };
+                    checks.push(cached_update_check(source, &probe, now()));
+                    if worker_cancelled.load(Ordering::Acquire) {
+                        let _ = sender.send(UpdateCheckMessage::Cancelled);
+                        return;
+                    }
+                    let _ = sender.send(UpdateCheckMessage::Progress {
+                        completed: index + 1,
+                        total,
+                    });
+                }
+                if worker_cancelled.load(Ordering::Acquire) {
+                    let _ = sender.send(UpdateCheckMessage::Cancelled);
+                } else {
+                    let _ = sender.send(UpdateCheckMessage::Finished(checks));
+                }
+            });
+            if result.is_err() {
+                let _ = panic_sender.send(UpdateCheckMessage::Failed(
+                    "update check worker panicked before completing".to_owned(),
+                ));
+            }
+        });
+        self.update_check_run = Some(UpdateCheckRun {
+            receiver,
+            handle,
+            cancelled,
+            child,
+        });
+        self.update_check_progress = Some((0, self.sources.len()));
+    }
+
+    fn cancel_update_check(&mut self) {
+        let mut finished = None;
+        let mut disconnected = false;
+        if let Some(run) = self.update_check_run.as_mut() {
+            loop {
+                match run.receiver.try_recv() {
+                    Ok(UpdateCheckMessage::Progress { completed, total }) => {
+                        self.update_check_progress = Some((completed, total));
+                    }
+                    Ok(UpdateCheckMessage::Finished(checks)) => {
+                        finished = Some(checks);
+                        break;
+                    }
+                    Ok(UpdateCheckMessage::Failed(error)) => {
+                        self.update_check_error = Some(error);
+                        disconnected = true;
+                        break;
+                    }
+                    Ok(UpdateCheckMessage::Cancelled) => {
+                        disconnected = true;
+                        break;
+                    }
+                    Err(TryRecvError::Disconnected) => {
+                        if !run.cancelled.load(Ordering::Acquire) {
+                            self.update_check_error =
+                                Some("update check ended before completing".to_owned());
+                        }
+                        disconnected = true;
+                        break;
+                    }
+                    Err(TryRecvError::Empty) => break,
+                }
+            }
+        }
+        if let Some(checks) = finished {
+            if let Some(run) = self.update_check_run.take() {
+                self.retire_update_worker(run.handle);
+            }
+            self.update_check_progress = None;
+            self.persist_update_checks(&checks);
+            return;
+        }
+        if disconnected {
+            if let Some(run) = self.update_check_run.take() {
+                self.retire_update_worker(run.handle);
+            }
+            self.update_check_progress = None;
+            return;
+        }
+        if let Some(run) = self.update_check_run.take() {
+            run.cancelled.store(true, Ordering::Release);
+            if let Some(mut child) = run
+                .child
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .take()
+            {
+                crate::git::terminate_child(&mut child);
+            }
+            // Non-fetch inspection children are not yet published through the
+            // cancellable child slot. Keep ownership of the run until its
+            // thread actually exits so another check cannot overlap it.
+            self.update_check_run = Some(run);
+        }
+    }
+
+    fn persist_update_checks(&mut self, checks: &[CachedUpdateCheck]) {
+        if let Err(error) = self.store.record_update_checks(checks) {
+            self.update_check_error = Some(format!("update checks could not be saved: {error}"));
+            return;
+        }
+        let sources = match self.store.registered_sources() {
+            Ok(sources) => sources,
+            Err(error) => {
+                self.update_check_error =
+                    Some(format!("source state could not be refreshed: {error}"));
+                return;
+            }
+        };
+        let cached = match self.store.update_checks() {
+            Ok(cached) => cached,
+            Err(error) => {
+                self.update_check_error = Some(format!(
+                    "saved update checks could not be read back: {error}"
+                ));
+                return;
+            }
+        };
+        self.sources = sources;
+        self.update_checks = cached;
+        self.update_check_error = None;
+    }
+
+    fn finish_update_check(&mut self) {
+        if let Some(run) = self.update_check_run.take() {
+            self.retire_update_worker(run.handle);
+        }
+        self.update_check_progress = None;
+    }
+
+    fn retire_update_worker(&mut self, handle: JoinHandle<()>) {
+        if handle.is_finished() {
+            let _ = handle.join();
+        } else {
+            self.retired_update_workers.push(handle);
+        }
+    }
+
+    fn quit_result(&self) -> UpdateResult {
+        UpdateResult::quit_with(
+            self.update_check_in_flight()
+                .then_some(Effect::CancelUpdateCheck)
+                .into_iter()
+                .collect(),
+        )
+    }
+
+    fn build_repository_update_preview(&self) -> RepositoryUpdatePrompt {
+        let Some(source) = self.selected_update_source() else {
+            return RepositoryUpdatePrompt::Failed("no registered source is selected".into());
+        };
+        let Some(check) = self.update_check_for(source.id()) else {
+            return RepositoryUpdatePrompt::Failed(
+                "check this source before previewing an update".into(),
+            );
+        };
+        if check.superseded_by(source) || check.verdict != RepositoryUpdateVerdict::Available {
+            return RepositoryUpdatePrompt::Failed(
+                "the cached check does not describe an available update for the current checkout"
+                    .into(),
+            );
+        }
+        let (Some(upstream_ref), Some(upstream_revision)) =
+            (&check.upstream_ref, &check.upstream_revision)
+        else {
+            return RepositoryUpdatePrompt::Failed(
+                "the cached check does not identify an upstream object".into(),
+            );
+        };
+        let probe = probe_repository_update_against(source, upstream_ref, upstream_revision);
+        match plan_repository_update(source, &probe, &self.inventory) {
+            Ok(plan) => RepositoryUpdatePrompt::Preview(plan),
+            Err(error) => RepositoryUpdatePrompt::Failed(error.to_string()),
+        }
+    }
+
+    fn apply_pending_repository_update(&mut self) {
+        let Some(RepositoryUpdatePrompt::Preview(plan)) = self.pending_update.take() else {
+            return;
+        };
+        let before_inventory = self.inventory.clone();
+        let (apply_result, write_attempted) = apply_repository_update_attempt(&plan);
+        let apply_error = apply_result.err().map(|error| error.to_string());
+        self.sources = match self.store.registered_sources() {
+            Ok(sources) => sources,
+            Err(error) => {
+                let prefix = apply_error.as_deref().map_or_else(String::new, |apply| {
+                    format!("fast-forward command failed: {apply}; ")
+                });
+                self.pending_update = Some(RepositoryUpdatePrompt::Failed(format!(
+                    "{prefix}post-attempt source state could not be refreshed: {error}"
+                )));
+                self.reset_detail_scroll();
+                return;
+            }
+        };
+        self.rescan_installations();
+        let verification = verify_repository_update(&plan, &before_inventory, &self.inventory);
+        let checked_at = self
+            .update_check_for(plan.source_id())
+            .map_or_else(now, |check| check.checked_at);
+        let check = if write_attempted {
+            self.repository_verification_check(&plan, &verification, checked_at)
+        } else {
+            self.superseded_repository_check(plan.source_id(), checked_at)
+        };
+        let persistence_error = self
+            .store
+            .record_update_check(&check)
+            .and_then(|()| self.store.update_checks())
+            .map(|checks| self.update_checks = checks)
+            .err()
+            .map(|error| format!("verified update state could not be cached: {error}"));
+        self.update_check_error = persistence_error.clone();
+        self.pending_update = Some(RepositoryUpdatePrompt::Report {
+            plan,
+            verification,
+            apply_error,
+            persistence_error,
+        });
+        self.reset_detail_scroll();
+    }
+
+    pub(crate) fn plan_repository_update_for(
+        &mut self,
+        source_id: i64,
+    ) -> std::result::Result<RepositoryUpdatePlan, String> {
+        let source = self
+            .sources
+            .iter()
+            .find(|source| source.id() == source_id)
+            .cloned()
+            .ok_or_else(|| "no registered source has that identifier".to_owned())?;
+        let probe = probe_repository_update(&source, true);
+        let check = cached_update_check(&source, &probe, now());
+        self.store
+            .record_update_check(&check)
+            .map_err(|error| error.to_string())?;
+        self.update_checks = self
+            .store
+            .update_checks()
+            .map_err(|error| error.to_string())?;
+        plan_repository_update(&source, &probe, &self.inventory).map_err(|error| error.to_string())
+    }
+
+    /// Apply a plan for `skilled update`, then restate the inventory and check
+    /// the plan against it.
+    ///
+    /// The rescan reads the agent roots whether or not setup has run, exactly
+    /// as [`Self::apply_plan`] does for `skilled install`: a command that was
+    /// asked to write cannot report a verified result without reading what it
+    /// wrote. Withholding the roots until the user has chosen agents belongs to
+    /// the first-run screen, which opens onto them unasked; a typed command
+    /// does not.
+    pub(crate) fn apply_repository_plan(
+        &mut self,
+        plan: &RepositoryUpdatePlan,
+    ) -> RepositoryApplyOutcome {
+        let before_inventory = self.inventory.clone();
+        let (apply_result, write_attempted) = apply_repository_update_attempt(plan);
+        let apply_error = apply_result.err().map(|error| error.to_string());
+        self.sources = match self.store.registered_sources() {
+            Ok(sources) => sources,
+            Err(error) => {
+                return RepositoryApplyOutcome {
+                    verification: None,
+                    apply_error,
+                    bookkeeping_error: Some(format!(
+                        "post-attempt source state could not be refreshed: {error}"
+                    )),
+                };
+            }
+        };
+        self.rescan_installations();
+        let verification = verify_repository_update(plan, &before_inventory, &self.inventory);
+        let checked_at = self
+            .update_check_for(plan.source_id())
+            .map_or_else(now, |check| check.checked_at);
+        let check = if write_attempted {
+            self.repository_verification_check(plan, &verification, checked_at)
+        } else {
+            self.superseded_repository_check(plan.source_id(), checked_at)
+        };
+        let bookkeeping_error = self
+            .store
+            .record_update_check(&check)
+            .and_then(|()| self.store.update_checks())
+            .map(|checks| self.update_checks = checks)
+            .err()
+            .map(|error| format!("post-attempt update state could not be cached: {error}"));
+        RepositoryApplyOutcome {
+            verification: Some(verification),
+            apply_error,
+            bookkeeping_error,
+        }
+    }
+
+    fn repository_verification_check(
+        &self,
+        plan: &RepositoryUpdatePlan,
+        verification: &crate::updates::RepositoryVerifyReport,
+        checked_at: i64,
+    ) -> CachedUpdateCheck {
+        let source = self
+            .sources
+            .iter()
+            .find(|source| source.id() == plan.source_id());
+        let dirty = source.and_then(RegisteredSource::dirty);
+        let (verdict, detail) = if !verification.is_verified() {
+            (
+                RepositoryUpdateVerdict::Blocked,
+                format!(
+                    "update.verification_failed|{}",
+                    verification.failures().join("; ")
+                ),
+            )
+        } else if !verification.is_complete() {
+            (
+                RepositoryUpdateVerdict::Blocked,
+                format!(
+                    "update.verification_incomplete|{}",
+                    verification.withheld().join("; ")
+                ),
+            )
+        } else {
+            (RepositoryUpdateVerdict::UpToDate, String::new())
+        };
+        CachedUpdateCheck {
+            source_id: plan.source_id(),
+            checked_at,
+            local_revision: source
+                .map(RegisteredSource::head)
+                .unwrap_or(plan.target_revision())
+                .to_owned(),
+            // What the refreshed source reports, not what the plan was probed
+            // on: a hook can leave HEAD detached or on another branch, and a
+            // record that still named the planned reference would be superseded
+            // by the very state it is reporting on — taking a verification
+            // failure out of Doctor with it. The plan's reference answers only
+            // for a source that can no longer be read.
+            local_reference: source.map_or_else(
+                || Some(plan.current_reference().to_owned()),
+                |source| source.branch().map(|branch| format!("refs/heads/{branch}")),
+            ),
+            upstream_ref: Some(plan.upstream_ref().into()),
+            upstream_revision: Some(plan.target_revision().into()),
+            merge_base: Some(plan.target_revision().into()),
+            ahead: 0,
+            behind: 0,
+            dirty: dirty.unwrap_or(false),
+            dirty_known: dirty.is_some(),
+            verdict,
+            detail,
+        }
+    }
+
+    fn superseded_repository_check(&self, source_id: i64, checked_at: i64) -> CachedUpdateCheck {
+        let source = self
+            .sources
+            .iter()
+            .find(|source| source.id() == source_id)
+            .expect("an update plan retains its registered source");
+        CachedUpdateCheck {
+            source_id,
+            checked_at,
+            local_revision: source.head().to_owned(),
+            // Nothing was written, so the only reference available is the one
+            // the source records, which Git printed in its shortest unambiguous
+            // spelling. `CachedUpdateCheck::superseded_by` compares the two over
+            // every spelling rather than by rebuilding one from the other.
+            local_reference: source
+                .branch()
+                .map(|branch| format!("refs/heads/{branch}")),
+            upstream_ref: None,
+            upstream_revision: None,
+            merge_base: None,
+            ahead: 0,
+            behind: 0,
+            dirty: source.dirty().unwrap_or(false),
+            dirty_known: source.dirty().is_some(),
+            verdict: RepositoryUpdateVerdict::Blocked,
+            detail: "source.changed_after_preview|repository state changed after the preview; check updates again"
+                .into(),
+        }
     }
 
     /// Only a preview of executable work that has been read to its end accepts
@@ -1463,6 +2334,7 @@ impl SkilledApp {
         self.detail_scroll = 0;
         self.detail_max_scroll = 0;
         self.detail_measured = false;
+        self.update_preview_fully_seen = false;
     }
 
     /// Open Doctor on a scan taken for Doctor.
@@ -1564,11 +2436,15 @@ impl SkilledApp {
         // A modal dialog is drawn over whatever screen is behind it and takes
         // the keyboard with it, so while one is open it is the window the
         // movement keys move.
-        if self.pending_install.is_some() || self.pending_repair.is_some() {
+        if self.pending_install.is_some()
+            || self.pending_repair.is_some()
+            || self.pending_update.is_some()
+        {
             return true;
         }
         match self.view {
             View::Inventory => self.inventory_pane == InventoryPane::Details,
+            View::Updates => self.updates_pane == UpdatesPane::Details,
             View::Doctor => self.doctor_pane == DoctorPane::Details,
             _ => false,
         }
@@ -1621,6 +2497,10 @@ impl SkilledApp {
                 SourcesPane::Repositories => {
                     return UpdateResult::continuing(self.enter_inventory());
                 }
+            },
+            View::Updates => match self.updates_pane {
+                UpdatesPane::Details => self.updates_pane = UpdatesPane::Candidates,
+                UpdatesPane::Candidates => return UpdateResult::continuing(self.enter_inventory()),
             },
             // Back unwinds the narrowest thing first: an applied filter, then
             // a drilled-in detail region.
@@ -1736,9 +2616,219 @@ impl SkilledApp {
     }
 }
 
+/// Letting go of the application ends the check it started.
+///
+/// The worker owns nothing that would stop it: it ignores failed sends, so a
+/// dropped receiver is not a signal, and a run reached through an error path
+/// rather than through Quit would otherwise go on fetching every registered
+/// source after the terminal had been handed back. Cancelling and joining here
+/// is what keeps network work inside the lifetime of the application that
+/// asked for it.
+impl Drop for SkilledApp {
+    fn drop(&mut self) {
+        let Some(run) = self.update_check_run.take() else {
+            return;
+        };
+        run.cancelled.store(true, Ordering::Release);
+        if let Some(mut child) = run
+            .child
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .take()
+        {
+            crate::git::terminate_child(&mut child);
+        }
+        let _ = run.handle.join();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_app() -> (tempfile::TempDir, SkilledApp) {
+        let temporary = tempfile::tempdir().expect("temporary application directory");
+        let app = SkilledApp::open(AppEnvironment::new(
+            temporary.path().join("home"),
+            temporary.path().join("data"),
+            "",
+        ))
+        .expect("open app");
+        (temporary, app)
+    }
+
+    #[test]
+    fn cancelling_honours_a_finished_message_already_in_the_queue() {
+        let (_temporary, mut app) = test_app();
+        let (sender, receiver) = mpsc::channel();
+        sender
+            .send(UpdateCheckMessage::Finished(Vec::new()))
+            .expect("queue finished result");
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let observed_cancelled = Arc::clone(&cancelled);
+        app.update_check_run = Some(UpdateCheckRun {
+            receiver,
+            handle: std::thread::spawn(|| {}),
+            cancelled,
+            child: Arc::new(Mutex::new(None)),
+        });
+
+        app.cancel_update_check();
+
+        assert!(!observed_cancelled.load(Ordering::Acquire));
+        assert!(!app.update_check_in_flight());
+        assert!(app.update_check_error().is_none());
+    }
+
+    #[test]
+    fn cancelling_retains_a_running_worker_until_it_has_stopped() {
+        let (_temporary, mut app) = test_app();
+        let (sender, receiver) = mpsc::channel();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let worker_cancelled = Arc::clone(&cancelled);
+        let handle = std::thread::spawn(move || {
+            while !worker_cancelled.load(Ordering::Acquire) {
+                std::thread::yield_now();
+            }
+            drop(sender);
+        });
+        app.update_check_run = Some(UpdateCheckRun {
+            receiver,
+            handle,
+            cancelled,
+            child: Arc::new(Mutex::new(None)),
+        });
+
+        app.cancel_update_check();
+
+        assert!(app.update_check_in_flight());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        while app.update_check_in_flight() && std::time::Instant::now() < deadline {
+            let effects = app.drain_update_check();
+            app.perform_effects(&effects)
+                .expect("retire cancelled worker");
+            std::thread::yield_now();
+        }
+        assert!(!app.update_check_in_flight());
+    }
+
+    /// A recorded check time also orders writes, so a clock that moves
+    /// backwards must not be able to hand out one the store already holds: the
+    /// conditional upsert would reject the newer check, report success, and go
+    /// on serving the stale one.
+    #[test]
+    fn a_recorded_check_time_never_repeats_or_falls_back() {
+        let first = now();
+        let second = now();
+        assert!(second > first, "{first} then {second}");
+
+        note_generation(second + 5);
+
+        assert!(now() > second + 5);
+    }
+
+    #[test]
+    fn repository_update_windows_own_detail_scrolling() {
+        let (_temporary, mut app) = test_app();
+        app.detail_max_scroll = 4;
+        app.pending_update = Some(RepositoryUpdatePrompt::Failed("fixture".into()));
+
+        app.scroll_detail(1);
+
+        assert_eq!(app.detail_scroll(), 1);
+        app.pending_update = None;
+        app.view = View::Updates;
+        app.updates_pane = UpdatesPane::Details;
+        app.scroll_detail(1);
+        assert_eq!(app.detail_scroll(), 2);
+    }
+
+    #[test]
+    fn a_disconnected_update_worker_surfaces_a_terminal_error() {
+        let (_temporary, mut app) = test_app();
+        let (sender, receiver) = mpsc::channel();
+        drop(sender);
+        app.update_check_run = Some(UpdateCheckRun {
+            receiver,
+            handle: std::thread::spawn(|| {}),
+            cancelled: Arc::new(AtomicBool::new(false)),
+            child: Arc::new(Mutex::new(None)),
+        });
+
+        let effects = app.drain_update_check();
+
+        assert_eq!(effects, [Effect::FinishUpdateCheck]);
+        assert!(
+            app.update_check_error()
+                .is_some_and(|error| error.contains("ended before completing"))
+        );
+    }
+
+    /// A worker ignores failed sends, so a dropped receiver tells it nothing.
+    /// Nothing but the cancellation flag can end a check the application is no
+    /// longer there to receive.
+    #[test]
+    fn dropping_the_application_cancels_an_update_check() {
+        let (_temporary, mut app) = test_app();
+        let (sender, receiver) = mpsc::channel();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let observed = Arc::new(AtomicBool::new(false));
+        let worker_cancelled = Arc::clone(&cancelled);
+        let worker_observed = Arc::clone(&observed);
+        let handle = std::thread::spawn(move || {
+            // Bounded so a regression fails the assertion below rather than
+            // hanging the suite on a join that never returns.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while std::time::Instant::now() < deadline {
+                if worker_cancelled.load(Ordering::Acquire) {
+                    worker_observed.store(true, Ordering::Release);
+                    break;
+                }
+                std::thread::yield_now();
+            }
+            let _ = sender.send(UpdateCheckMessage::Cancelled);
+        });
+        app.update_check_run = Some(UpdateCheckRun {
+            receiver,
+            handle,
+            cancelled: Arc::clone(&cancelled),
+            child: Arc::new(Mutex::new(None)),
+        });
+
+        drop(app);
+
+        assert!(cancelled.load(Ordering::Acquire));
+        assert!(observed.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn update_check_persistence_failures_have_a_dedicated_terminal_error() {
+        let (_temporary, mut app) = test_app();
+        let check = CachedUpdateCheck {
+            source_id: 99,
+            checked_at: 0,
+            local_revision: "abc".into(),
+            local_reference: None,
+            upstream_ref: None,
+            upstream_revision: None,
+            merge_base: None,
+            ahead: 0,
+            behind: 0,
+            dirty: false,
+            dirty_known: true,
+            verdict: RepositoryUpdateVerdict::UpToDate,
+            detail: String::new(),
+        };
+
+        app.persist_update_checks(&[check]);
+
+        assert!(
+            app.update_check_error()
+                .is_some_and(|error| error.contains("could not be saved"))
+        );
+        assert!(app.update_checks().is_empty());
+        assert!(app.source_error().is_none());
+    }
 
     fn describe(row: &SourceRow<'_>) -> String {
         match row {

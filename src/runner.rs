@@ -1,4 +1,5 @@
 use std::io::stdout;
+use std::time::Duration;
 
 use crossterm::event::{self, Event};
 use ratatui::{Terminal, backend::CrosstermBackend};
@@ -18,6 +19,8 @@ pub fn run(environment: AppEnvironment) -> Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     loop {
+        let effects = app.drain_update_check();
+        app.perform_effects(&effects)?;
         // The frame measures what the reducer cannot see, so its report is
         // taken back before the next key is read: `update` stays free of
         // geometry, and the region the user is looking at is the one the next
@@ -30,7 +33,15 @@ pub fn run(environment: AppEnvironment) -> Result<()> {
         // itself reported, so a dialog the terminal was too small to draw
         // cannot be confirmed on the strength of an earlier frame's extent.
         app.note_detail_max_scroll(feedback.detail_max_scroll());
-        let Event::Key(key) = event::read()? else {
+        app.note_update_preview_fully_seen(feedback.update_preview_fully_seen());
+        let event = if app.update_check_in_flight() {
+            event::poll(Duration::from_millis(100))?
+                .then(event::read)
+                .transpose()?
+        } else {
+            Some(event::read()?)
+        };
+        let Some(Event::Key(key)) = event else {
             continue;
         };
         let Some(action) = action_for_app_key(&app, key) else {

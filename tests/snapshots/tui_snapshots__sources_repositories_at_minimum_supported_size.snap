@@ -3,7 +3,7 @@ source: tests/tui_snapshots.rs
 expression: "normalize_sources_screen(&app, &temporary, render(&app, 80, 24))"
 ---
  ◆ skilled  global                                ● ready · 1 source registered
- 1 Inventory    │ 2 Sources ·1   │ Updates (soon) │ 4 Doctor       │
+ 1 Inventory    │ 2 Sources ·1   │ 3 Updates      │ 4 Doctor       │
 ▌ Repositories  1 registered
 ────────────────────────────────────────────────────────────────────────────────
 ▌ source
