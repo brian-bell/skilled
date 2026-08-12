@@ -1107,16 +1107,19 @@ fn degraded_registry_failure_states_that_the_scan_scope_was_retained() {
     let app = SkilledApp::open(harness.environment()).expect("open degraded application");
     let rendered = text(&buffer(&app, 120, 40));
 
+    // The scan scope is the banner's to state, and it states the retained one
+    // rather than the wider scope of a session that lost its selection.
     assert!(
         rendered.contains("The agent selection was retained"),
         "{rendered}"
     );
     assert!(
-        rendered.contains("retained the agent selection"),
+        !rendered.contains("all detected roots were scanned"),
         "{rendered}"
     );
+    // The body keeps what the scan observed instead of repeating the banner.
     assert!(
-        !rendered.contains("all detected roots were scanned"),
+        rendered.contains("No agent skill root exists yet"),
         "{rendered}"
     );
 }
@@ -1226,6 +1229,34 @@ fn a_degraded_no_agent_session_is_not_sent_to_a_setup_it_cannot_rerun() {
     let doctor = text(&buffer(&app, 120, 40));
     assert!(doctor.contains("No agent is configured"), "{doctor}");
     assert!(!doctor.contains("Rerun setup from"), "{doctor}");
+}
+
+/// Roots that are all absent are the only thing the scan learned, and the
+/// Inventory states it for the same reason Doctor does. The banner above the
+/// table is where the degraded session is reported.
+#[test]
+fn a_degraded_inventory_still_reports_that_no_root_exists() {
+    let temporary = tempfile::tempdir().expect("temporary application directory");
+    let home = temporary.path().join("home");
+    let data = temporary.path().join("data");
+    fs::create_dir_all(&home).expect("create a home with no agent root in it");
+    fs::create_dir_all(&data).expect("create established data directory");
+    let app =
+        SkilledApp::open(AppEnvironment::new(&home, &data, "")).expect("open degraded application");
+    assert!(app.metadata_failure().is_some());
+
+    let rendered = text(&buffer(&app, 120, 40));
+
+    assert!(
+        rendered.contains("No agent skill root exists yet"),
+        "{rendered}"
+    );
+    assert!(
+        !rendered.contains("Application metadata is unavailable"),
+        "{rendered}"
+    );
+    // The failure keeps its banner rather than the body.
+    assert!(rendered.contains("metadata unavailable"), "{rendered}");
 }
 
 /// A registry that survived is a registry Sources counts and Doctor draws a

@@ -122,6 +122,17 @@ impl Store {
         if connection.is_readonly(rusqlite::MAIN_DB)? {
             return Err(Error::ReadOnlyMetadata);
         }
+        // Schema before semantics, deliberately. `app::open_metadata` is what
+        // reads stored values and can declare the store unavailable, and it
+        // reads them through the current schema — so a supported older
+        // database holding an invalid value is migrated first and refused
+        // afterwards. Nothing is lost by that ordering: an additive migration
+        // adds schema and no value it carried stops being carried, and a
+        // destructive one has already taken its backup. Validating first would
+        // mean a semantic validator per historical schema version, and
+        // undoing a migration that succeeded because an unrelated field is
+        // malformed is the worse of the two. Recorded rather than reopened;
+        // the decision itself is `skilled-2k3.23`.
         migrate(&mut connection, &sqlite_database_path)?;
         connection.execute_batch("PRAGMA foreign_keys = ON;")?;
         Ok(Self {
@@ -820,6 +831,15 @@ fn valid_backup_component(name: &str) -> bool {
 /// into rather than refused. `O_CREAT | O_EXCL` also refuses a symbolic link,
 /// so the reserved object is the pathname's own regular file, created for the
 /// owner alone. No file is ever replaced or removed.
+///
+/// One pathname window survives it: the reservation is closed before `VACUUM
+/// INTO` reopens the name, so anything able to write the application-data
+/// directory could unlink the reservation and leave another empty file for
+/// SQLite to populate. Closing it means a destination SQLite holds open —
+/// the backup API rather than `VACUUM INTO`, which is a different mechanism
+/// rather than a tightening of this one. It is the same class of window as
+/// `skilled-cb2`, against a directory only this user's account should be able
+/// to write, and it is tracked as `skilled-2k3.24`.
 fn backup_database(
     connection: &Connection,
     database_path: &Path,

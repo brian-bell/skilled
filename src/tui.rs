@@ -1597,35 +1597,30 @@ fn inventory_empty_state(app: &SkilledApp) -> (String, String) {
                 .to_owned(),
         );
     }
-    // Last of the reasons, because it is the only one the header states on its
-    // own: `metadata_failure_line` sits above this table either way. What the
-    // scan observed — no agent chosen, a filter that matched nothing, a root
-    // that could not be read — is this body's to say, and a degraded session
-    // does not make any of it less true.
-    if app.metadata_failure().is_some() {
+    // The degraded session qualifies the one answer it changes the meaning of
+    // — roots read whole, holding nothing — because a reader is entitled to
+    // know that emptiness was observed rather than inferred from metadata.
+    // Every other answer is the scan's alone: `metadata_failure_line` sits
+    // above this table either way, and a session that learned nothing else
+    // about the roots would be trading its only filesystem result for a
+    // sentence already on screen. Doctor orders these the same way.
+    if app.metadata_failure().is_some()
+        && roots
+            .iter()
+            .any(|root| matches!(root.status(), RootStatus::Scanned { .. }))
+    {
         let scope = if app.scan_scope_known() {
             "Skilled retained the agent selection and scanned its selected roots read-only."
         } else {
             "Skilled scanned every detected agent root read-only."
         };
-        let explanation = format!("{scope} {}", withheld_claims_sentence(app));
-        let explanation = explanation.as_str();
-        let scanned_empty = roots
-            .iter()
-            .any(|root| matches!(root.status(), RootStatus::Scanned { .. }));
-        return if scanned_empty {
-            (
-                "No skills are installed".to_owned(),
-                format!(
-                    "The agent skill roots Skilled read hold no skill directories. {explanation}"
-                ),
-            )
-        } else {
-            (
-                "Application metadata is unavailable".to_owned(),
-                explanation.to_owned(),
-            )
-        };
+        return (
+            "No skills are installed".to_owned(),
+            format!(
+                "The agent skill roots Skilled read hold no skill directories. {scope} {}",
+                withheld_claims_sentence(app)
+            ),
+        );
     }
     if roots
         .iter()
