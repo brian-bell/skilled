@@ -1524,6 +1524,36 @@ fn installation_tone(health: InstallationHealth) -> Tone {
     }
 }
 
+/// The way out of having no agent chosen, where there is one.
+///
+/// Rerunning setup is the only way to choose an agent, and a degraded session
+/// refuses it — `can_rerun_setup` is what `src/input.rs` filters the key on.
+/// Naming it anyway would send the user to a dialog that says it is
+/// unavailable, so the sentence is dropped rather than reworded: the empty
+/// state's job is to say what was observed, and Settings already explains why
+/// the way out is closed.
+fn choose_an_agent_sentence(app: &SkilledApp) -> &'static str {
+    if app.can_rerun_setup() {
+        " Rerun setup from Settings to choose an agent."
+    } else {
+        ""
+    }
+}
+
+/// What a degraded session is actually withholding.
+///
+/// Writes always. The registry only when it was in fact lost: `open_metadata`
+/// recovers its units independently, so a session degraded by a malformed
+/// completion flag can hold a registry Sources still counts and Doctor still
+/// draws a verdict from. Claiming those are withheld would contradict both.
+fn withheld_claims_sentence(app: &SkilledApp) -> &'static str {
+    if app.inventory().registry_is_complete() {
+        "Every write is withheld for this session."
+    } else {
+        "Registry-backed claims and every write are withheld for this session."
+    }
+}
+
 /// What an empty table can honestly say, given what the scan observed.
 fn inventory_empty_state(app: &SkilledApp) -> (String, String) {
     let roots = app.inventory().roots();
@@ -1542,10 +1572,11 @@ fn inventory_empty_state(app: &SkilledApp) -> (String, String) {
     if app.inventory().no_agent_configured() {
         return (
             "No agent is configured".to_owned(),
-            "Skilled reads the skill root of the agents chosen during setup, \
-             and none are chosen, so it read nothing. Rerun setup from \
-             Settings to choose an agent."
-                .to_owned(),
+            format!(
+                "Skilled reads the skill root of the agents chosen during setup, \
+                 and none are chosen, so it read nothing.{}",
+                choose_an_agent_sentence(app)
+            ),
         );
     }
     if !app.inventory_filter().trim().is_empty() {
@@ -1572,13 +1603,13 @@ fn inventory_empty_state(app: &SkilledApp) -> (String, String) {
     // that could not be read — is this body's to say, and a degraded session
     // does not make any of it less true.
     if app.metadata_failure().is_some() {
-        let explanation = if app.scan_scope_known() {
-            "Skilled retained the agent selection and scanned its selected roots read-only. \
-             Registry-backed claims and every write are withheld for this session."
+        let scope = if app.scan_scope_known() {
+            "Skilled retained the agent selection and scanned its selected roots read-only."
         } else {
-            "Skilled scanned every detected agent root read-only. Registry-backed claims and \
-             every write are withheld for this session."
+            "Skilled scanned every detected agent root read-only."
         };
+        let explanation = format!("{scope} {}", withheld_claims_sentence(app));
+        let explanation = explanation.as_str();
         let scanned_empty = roots
             .iter()
             .any(|root| matches!(root.status(), RootStatus::Scanned { .. }));
@@ -1840,10 +1871,11 @@ fn doctor_empty_state(app: &SkilledApp) -> (&'static str, String, String) {
         return (
             "·",
             "No agent is configured".to_owned(),
-            "Skilled reads the skill root of the agents chosen during setup, \
-             and none are chosen, so it read nothing. Rerun setup from \
-             Settings to choose an agent."
-                .to_owned(),
+            format!(
+                "Skilled reads the skill root of the agents chosen during setup, \
+                 and none are chosen, so it read nothing.{}",
+                choose_an_agent_sentence(app)
+            ),
         );
     }
     if inventory.unreadable_roots().next().is_some() {

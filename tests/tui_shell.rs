@@ -1195,6 +1195,64 @@ fn a_degraded_session_lets_a_surviving_filter_speak_for_its_own_empty_table() {
     assert!(rendered.contains("metadata unavailable"), "{rendered}");
 }
 
+/// Rerunning setup is the only way to choose an agent, and a degraded session
+/// refuses it. Neither view sends the user to a dialog that will tell them the
+/// action is unavailable.
+#[test]
+fn a_degraded_no_agent_session_is_not_sent_to_a_setup_it_cannot_rerun() {
+    let harness = Harness::new();
+    drop(harness.completed_setup());
+    let database = harness.directory.path().join("data/skilled.sqlite3");
+    let connection = rusqlite::Connection::open(database).expect("open metadata database");
+    connection
+        .execute_batch(
+            "UPDATE configured_agents SET selected = 0;
+             UPDATE settings SET value = 'sometimes' WHERE key = 'setup_complete';",
+        )
+        .expect("deselect every agent and corrupt setup completion");
+    drop(connection);
+
+    let mut app = SkilledApp::open(harness.environment()).expect("open degraded application");
+    assert!(!app.can_rerun_setup());
+    assert!(app.inventory().no_agent_configured());
+
+    let inventory = text(&buffer(&app, 120, 40));
+    assert!(inventory.contains("No agent is configured"), "{inventory}");
+    assert!(!inventory.contains("Rerun setup from"), "{inventory}");
+
+    let update = app.update(Action::OpenDoctor);
+    app.perform_effects(update.effects())
+        .expect("scan for Doctor");
+    let doctor = text(&buffer(&app, 120, 40));
+    assert!(doctor.contains("No agent is configured"), "{doctor}");
+    assert!(!doctor.contains("Rerun setup from"), "{doctor}");
+}
+
+/// A registry that survived is a registry Sources counts and Doctor draws a
+/// verdict from, so the inventory must not say its claims are withheld.
+#[test]
+fn a_degraded_inventory_withholds_only_what_it_actually_withholds() {
+    let harness = Harness::new();
+    drop(harness.completed_setup());
+    fs::create_dir_all(harness.directory.path().join("home/.claude/skills"))
+        .expect("create an empty but readable root");
+    let database = harness.directory.path().join("data/skilled.sqlite3");
+    let connection = rusqlite::Connection::open(database).expect("open metadata database");
+    connection
+        .execute_batch("UPDATE settings SET value = 'sometimes' WHERE key = 'setup_complete';")
+        .expect("corrupt setup completion");
+    drop(connection);
+
+    let app = SkilledApp::open(harness.environment()).expect("open degraded application");
+    assert!(app.inventory().registry_is_complete());
+
+    let rendered = text(&buffer(&app, 120, 40));
+
+    assert!(rendered.contains("No skills are installed"), "{rendered}");
+    assert!(rendered.contains("Every write is withheld"), "{rendered}");
+    assert!(!rendered.contains("Registry-backed claims"), "{rendered}");
+}
+
 /// Roots that are all absent are a complete answer about the roots, and the
 /// only one Doctor gives about them. A degraded session repeats its banner
 /// rather than replacing that answer with it.
