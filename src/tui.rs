@@ -4482,6 +4482,7 @@ fn uninstall_prompt_lines(prompt: &UninstallPrompt) -> Vec<Line<'static>> {
             &terminal_safe(message),
         ))],
         UninstallPrompt::Preview(plan) => {
+            let blocked = plan.is_blocked();
             let mut lines = vec![
                 Line::styled(
                     format!("Skill: {}", terminal_safe(plan.skill_name())),
@@ -4496,34 +4497,47 @@ fn uninstall_prompt_lines(prompt: &UninstallPrompt) -> Vec<Line<'static>> {
                         link_target,
                         resolves,
                         receipts,
-                    } => (Tone::Warning, "remove the managed link".to_owned(), {
-                        let mut evidence = vec![format!(
-                            "receipt target: {}{}",
-                            terminal_safe(&link_target.display().to_string()),
-                            if *resolves {
-                                ""
-                            } else {
-                                " (no longer resolves)"
-                            }
-                        )];
-                        evidence.extend(receipts.iter().map(|receipt| {
-                            format!(
-                                "receipt source {} · catalog {} · variant {}",
-                                receipt
-                                    .source_id()
-                                    .map_or_else(|| "unknown".to_owned(), |id| id.to_string()),
-                                receipt.catalog_relative_path().map_or_else(
-                                    || "unknown".to_owned(),
-                                    |path| terminal_safe(&path.display().to_string())
-                                ),
-                                receipt.variant_relative_path().map_or_else(
-                                    || "unknown".to_owned(),
-                                    |path| terminal_safe(&path.display().to_string())
-                                ),
-                            )
-                        }));
-                        evidence
-                    }),
+                    } => (
+                        if blocked {
+                            Tone::Unmanaged
+                        } else {
+                            Tone::Warning
+                        },
+                        if blocked {
+                            "would remove the managed link"
+                        } else {
+                            "remove the managed link"
+                        }
+                        .to_owned(),
+                        {
+                            let mut evidence = vec![format!(
+                                "receipt target: {}{}",
+                                terminal_safe(&link_target.display().to_string()),
+                                if *resolves {
+                                    ""
+                                } else {
+                                    " (no longer resolves)"
+                                }
+                            )];
+                            evidence.extend(receipts.iter().map(|receipt| {
+                                format!(
+                                    "receipt source {} · catalog {} · variant {}",
+                                    receipt
+                                        .source_id()
+                                        .map_or_else(|| "unknown".to_owned(), |id| id.to_string()),
+                                    receipt.catalog_relative_path().map_or_else(
+                                        || "unknown".to_owned(),
+                                        |path| terminal_safe(&path.display().to_string())
+                                    ),
+                                    receipt.variant_relative_path().map_or_else(
+                                        || "unknown".to_owned(),
+                                        |path| terminal_safe(&path.display().to_string())
+                                    ),
+                                )
+                            }));
+                            evidence
+                        },
+                    ),
                     UninstallDisposition::Excluded { reason } => (
                         Tone::Unmanaged,
                         format!("excluded: {:?}", reason),

@@ -446,6 +446,7 @@ fn execute_uninstall(
 
 fn write_uninstall_plan(output: &mut dyn Write, plan: &UninstallPlan) -> std::io::Result<()> {
     writeln!(output, "Uninstall {}:", safe(plan.skill_name()))?;
+    let blocked = plan.is_blocked();
     for target in plan.targets() {
         let verdict = match target.disposition() {
             UninstallDisposition::RemoveLink {
@@ -453,7 +454,8 @@ fn write_uninstall_plan(output: &mut dyn Write, plan: &UninstallPlan) -> std::io
                 resolves,
                 ..
             } => format!(
-                "remove managed link to {}{}",
+                "{} managed link to {}{}",
+                if blocked { "would remove" } else { "remove" },
                 safe(&link_target.display()),
                 if *resolves {
                     ""

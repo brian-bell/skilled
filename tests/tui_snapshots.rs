@@ -1664,6 +1664,34 @@ fn uninstall_preview_and_report_at_supported_sizes() {
     );
 }
 
+/// A whole-plan block makes otherwise removable targets hypothetical. The
+/// dialog must not tell the user that any removal will occur when confirmation
+/// is unavailable and the executor will write nothing.
+#[cfg(unix)]
+#[test]
+fn blocked_uninstall_preview_states_that_free_targets_would_be_removed() {
+    let (temporary, mut app) = install_fixture();
+    dispatch(&mut app, Action::BeginInstall);
+    app.note_detail_max_scroll(drawn(&app, 120, 40).1.detail_max_scroll());
+    dispatch(&mut app, Action::ConfirmOperation);
+    dispatch(&mut app, Action::DismissOperation);
+    dispatch(&mut app, Action::OpenInventory);
+
+    let codex_link = temporary.path().join("home/.agents/skills/portable");
+    let other_target = temporary.path().join("other/portable");
+    fs::create_dir_all(&other_target).expect("create replacement target");
+    fs::remove_file(&codex_link).expect("remove receipted Codex link");
+    std::os::unix::fs::symlink(&other_target, &codex_link)
+        .expect("replace Codex link with another target");
+
+    dispatch(&mut app, Action::BeginUninstall);
+    let screen = normalize_install_screen(&temporary, render(&app, 120, 40));
+
+    assert!(screen.contains("would remove the managed link"), "{screen}");
+    assert!(!screen.contains("· remove the managed link"), "{screen}");
+    assert!(screen.contains("uninstall.wrong_target"), "{screen}");
+}
+
 #[cfg(unix)]
 #[test]
 fn forget_source_preview_at_supported_sizes() {

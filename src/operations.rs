@@ -153,6 +153,7 @@ enum EntryProbe {
     Symlink {
         target: PathBuf,
         canonical: Option<PathBuf>,
+        resolves_to_directory: bool,
     },
     /// A physical directory, and where it resolves to. The resolved path
     /// matters even here: another root may reach the very same directory
@@ -446,6 +447,7 @@ fn probe_entry(link_path: &Path) -> EntryProbe {
         return EntryProbe::Symlink {
             target,
             canonical: link_path.canonicalize().ok(),
+            resolves_to_directory: fs::metadata(link_path).is_ok_and(|metadata| metadata.is_dir()),
         };
     }
     if file_type.is_dir() {
@@ -928,19 +930,20 @@ fn uninstall_disposition(slot: &TargetProbe, receipts: &[&Receipt]) -> Uninstall
         EntryProbe::NotRead => UninstallDisposition::Excluded {
             reason: UninstallExcludedReason::NotConfigured,
         },
-        EntryProbe::Symlink { target, canonical } => {
+        EntryProbe::Symlink {
+            target,
+            resolves_to_directory,
+            ..
+        } => {
             let matching_receipts: Vec<Receipt> = receipts
                 .iter()
                 .filter(|receipt| receipt.link_target == *target)
                 .map(|receipt| (*receipt).clone())
                 .collect();
             if !matching_receipts.is_empty() {
-                let resolves = canonical
-                    .as_ref()
-                    .is_some_and(|path| fs::metadata(path).is_ok_and(|metadata| metadata.is_dir()));
                 UninstallDisposition::RemoveLink {
                     link_target: target.clone(),
-                    resolves,
+                    resolves: *resolves_to_directory,
                     receipts: matching_receipts,
                 }
             } else {
@@ -1421,7 +1424,9 @@ fn slot_disposition(
         } if canonical == source_dir => TargetDisposition::AlreadyInstalled {
             receipted: receipted(receipts, &probe.link_path),
         },
-        EntryProbe::Symlink { target, canonical } => {
+        EntryProbe::Symlink {
+            target, canonical, ..
+        } => {
             let receipted = receipted(receipts, &probe.link_path);
             let (code, what) = match (receipted, canonical) {
                 (true, Some(_)) => (
@@ -2346,6 +2351,7 @@ pub fn verify_uninstall(
 pub struct FinalizeFailure {
     agent: AgentKind,
     reason: String,
+    invalidates_verification: bool,
 }
 
 impl FinalizeFailure {
@@ -2354,6 +2360,9 @@ impl FinalizeFailure {
     }
     pub fn reason(&self) -> &str {
         &self.reason
+    }
+    fn invalidates_verification(&self) -> bool {
+        self.invalidates_verification
     }
 }
 
@@ -2387,6 +2396,7 @@ pub(crate) fn finalize_uninstall(
                 agent: step.agent,
                 reason: "the ownership receipt was retained because link removal was not positively verified"
                     .to_owned(),
+                invalidates_verification: true,
             });
             continue;
         }
@@ -2404,6 +2414,7 @@ pub(crate) fn finalize_uninstall(
                     reason: format!(
                         "the ownership receipt was retained because the metadata mutation guard could not be acquired: {error}"
                     ),
+                    invalidates_verification: true,
                 });
                 continue;
             }
@@ -2415,6 +2426,7 @@ pub(crate) fn finalize_uninstall(
                     agent: step.agent,
                     reason: "the ownership receipt was retained because the managed link became active again after verification"
                         .to_owned(),
+                    invalidates_verification: true,
                 });
                 continue;
             }
@@ -2424,6 +2436,7 @@ pub(crate) fn finalize_uninstall(
                     reason: format!(
                         "the ownership receipt was retained because the link path could not be re-read: {error}"
                     ),
+                    invalidates_verification: true,
                 });
                 continue;
             }
@@ -2434,6 +2447,7 @@ pub(crate) fn finalize_uninstall(
             report.failures.push(FinalizeFailure {
                 agent: step.agent,
                 reason: error.to_string(),
+                invalidates_verification: false,
             });
             continue;
         }
@@ -2441,6 +2455,7 @@ pub(crate) fn finalize_uninstall(
             report.failures.push(FinalizeFailure {
                 agent: step.agent,
                 reason: error.to_string(),
+                invalidates_verification: false,
             });
         }
     }
@@ -2536,7 +2551,12 @@ fn uninstall_status(
             UninstallStatus::NotApplied
         };
     }
-    if !verification.is_verified() {
+    if !verification.is_verified()
+        || finalized
+            .failures
+            .iter()
+            .any(FinalizeFailure::invalidates_verification)
+    {
         return UninstallStatus::VerificationFailed;
     }
     if !finalized.failures.is_empty() {
@@ -3258,6 +3278,10 @@ mod tests {
         let finalized = finalize_uninstall(&plan, &applied, &verification, &mut store);
 
         assert_eq!(finalized.failures().len(), 1);
+        assert_eq!(
+            uninstall_status(&applied, &verification, &finalized),
+            UninstallStatus::VerificationFailed
+        );
         assert_eq!(store.receipts().expect("retained receipt"), vec![receipt]);
     }
 
