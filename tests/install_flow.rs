@@ -19,9 +19,9 @@ use skilled::{
     Action, AgentKind, AppEnvironment, SkilledApp,
     inventory::{Finding, FindingSeverity, InstallationHealth},
     operations::{
-        ForgetPrompt, ForgetStatus, InstallPrompt, InstallStatus, OpenCodeOutlook, OperationPrompt,
-        StepOutcome, TargetDisposition, UninstallPrompt, UninstallStatus, VerifyFailure,
-        VerifyWithheld, verify_install,
+        ForgetPrompt, ForgetStatus, ForgetVerification, InstallPrompt, InstallStatus,
+        OpenCodeOutlook, OperationPrompt, Postcondition, StepOutcome, TargetDisposition,
+        UninstallPrompt, UninstallStatus, VerifyFailure, VerifyWithheld, verify_install,
     },
     resolution::OpenCodeResolution,
 };
@@ -63,6 +63,10 @@ fn uninstall_removes_only_managed_links_and_preserves_canonical_content_and_root
         panic!("uninstall report expected: {:?}", app.pending_operation());
     };
     assert_eq!(outcome.status(), UninstallStatus::Uninstalled);
+    assert!(outcome.verification().held().iter().any(|pass| {
+        pass.agent() == AgentKind::OpenCode
+            && pass.postcondition() == Postcondition::OpenCodeResolution
+    }));
     for (agent, root) in ROOTS {
         assert!(
             !fixture.home().join(root).join("portable").exists(),
@@ -75,6 +79,35 @@ fn uninstall_removes_only_managed_links_and_preserves_canonical_content_and_root
         before
     );
     assert!(app.receipts().expect("receipts").is_empty());
+}
+
+#[test]
+fn uninstall_withholds_opencode_when_a_consulted_root_was_not_scanned() {
+    let fixture = Fixture::new();
+    let repository = fixture.source("library", &["portable"]);
+    let mut app = fixture.registered(&repository);
+    fixture.create_root_parents();
+    deselect_codex(&mut app);
+    focus_first_variant(&mut app);
+    dispatch(&mut app, Action::BeginInstall);
+    dispatch(&mut app, Action::ConfirmOperation);
+    dispatch(&mut app, Action::DismissOperation);
+    dispatch(&mut app, Action::OpenInventory);
+
+    dispatch(&mut app, Action::BeginUninstall);
+    dispatch(&mut app, Action::ConfirmOperation);
+
+    let Some(OperationPrompt::Uninstall(UninstallPrompt::Report(outcome))) =
+        app.pending_operation()
+    else {
+        panic!("uninstall report expected");
+    };
+    assert_eq!(outcome.status(), UninstallStatus::Uninstalled);
+    assert!(!outcome.verification().is_complete());
+    assert!(outcome.verification().withheld().iter().any(|check| {
+        check.agent() == AgentKind::OpenCode
+            && check.postcondition() == Postcondition::OpenCodeResolution
+    }));
 }
 
 #[test]
@@ -156,6 +189,46 @@ fn active_managed_links_block_forget_source() {
             .all(|finding| finding.code() == "forget.active_links")
     );
     dispatch(&mut app, Action::ConfirmOperation);
+    assert_eq!(app.sources().len(), 1);
+    assert_eq!(app.receipts().expect("receipts retained").len(), 3);
+}
+
+#[test]
+fn forget_that_becomes_active_after_preview_is_not_reported_as_verified() {
+    let fixture = Fixture::new();
+    let repository = fixture.source("library", &["portable"]);
+    let mut app = fixture.registered(&repository);
+    fixture.create_root_parents();
+    focus_first_variant(&mut app);
+    dispatch(&mut app, Action::BeginInstall);
+    dispatch(&mut app, Action::ConfirmOperation);
+    dispatch(&mut app, Action::DismissOperation);
+
+    let link = fixture.root(AgentKind::ClaudeCode).join("portable");
+    let target = fs::read_link(&link).expect("managed link target");
+    for (agent, _) in ROOTS {
+        fs::remove_file(fixture.root(agent).join("portable")).expect("make receipt inactive");
+    }
+    dispatch(&mut app, Action::OpenInventory);
+    dispatch(&mut app, Action::OpenSources);
+    dispatch(&mut app, Action::BeginForgetSource);
+    let Some(OperationPrompt::Forget(ForgetPrompt::Preview(plan))) = app.pending_operation() else {
+        panic!("forget preview expected");
+    };
+    assert!(plan.is_executable());
+
+    symlink(target, &link).expect("reactivate a receipted link after preview");
+    dispatch(&mut app, Action::ConfirmOperation);
+
+    let Some(OperationPrompt::Forget(ForgetPrompt::Report(outcome))) = app.pending_operation()
+    else {
+        panic!("forget report expected");
+    };
+    assert_eq!(outcome.status(), ForgetStatus::NotForgotten);
+    assert!(matches!(
+        outcome.verification(),
+        ForgetVerification::Withheld(_)
+    ));
     assert_eq!(app.sources().len(), 1);
     assert_eq!(app.receipts().expect("receipts retained").len(), 3);
 }

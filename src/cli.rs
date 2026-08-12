@@ -143,12 +143,10 @@ pub fn exit_code_for(status: InstallStatus) -> ExitCodeKind {
 
 pub fn exit_code_for_uninstall(status: UninstallStatus) -> ExitCodeKind {
     match status {
-        UninstallStatus::Uninstalled
-        | UninstallStatus::UninstalledUnrecorded
-        | UninstallStatus::NothingToDo => ExitCodeKind::Success,
-        UninstallStatus::PartiallyApplied | UninstallStatus::NotApplied => {
-            ExitCodeKind::PartialApply
-        }
+        UninstallStatus::Uninstalled | UninstallStatus::NothingToDo => ExitCodeKind::Success,
+        UninstallStatus::PartiallyApplied
+        | UninstallStatus::NotApplied
+        | UninstallStatus::UninstalledUnrecorded => ExitCodeKind::PartialApply,
         UninstallStatus::VerificationFailed => ExitCodeKind::VerificationFailed,
     }
 }

@@ -2234,30 +2234,78 @@ pub fn verify_uninstall(
         }
     }
     if applied.steps.iter().any(AppliedStep::removed_link)
-        && let (Some(expected), Some(observed)) = (
-            plan.opencode_outlook(),
-            row.and_then(InventoryRow::opencode_resolution),
-        )
+        && let Some(expected) = plan.opencode_outlook()
     {
-        match UninstallOutlook::of(observed) {
-            UninstallOutlook::Unknown => report.withheld.push(VerifyWithheld {
+        let observed = row.and_then(InventoryRow::opencode_resolution);
+        if matches!(expected, UninstallOutlook::Unknown) {
+            report.withheld.push(VerifyWithheld {
                 agent: AgentKind::OpenCode,
                 postcondition: Postcondition::OpenCodeResolution,
-                reason: "what OpenCode resolves the name to could not be established".to_owned(),
+                reason:
+                    "the plan could not establish what OpenCode would resolve after the uninstall"
+                        .to_owned(),
                 required: false,
-            }),
-            actual if &actual == expected => report.held.push(VerifyPass {
+            });
+        } else if let Some(observed) = observed {
+            match UninstallOutlook::of(observed) {
+                UninstallOutlook::Unknown => report.withheld.push(VerifyWithheld {
+                    agent: AgentKind::OpenCode,
+                    postcondition: Postcondition::OpenCodeResolution,
+                    reason: "what OpenCode resolves the name to could not be established"
+                        .to_owned(),
+                    required: false,
+                }),
+                actual if &actual == expected => report.held.push(VerifyPass {
+                    agent: AgentKind::OpenCode,
+                    postcondition: Postcondition::OpenCodeResolution,
+                }),
+                _ => report.failures.push(VerifyFailure {
+                    agent: AgentKind::OpenCode,
+                    postcondition: Postcondition::OpenCodeResolution,
+                    observed: format!(
+                        "this was not the OpenCode outcome the plan described: {}",
+                        observed_summary(observed)
+                    ),
+                }),
+            }
+        } else if row.is_none() {
+            let gaps = AgentKind::ALL
+                .into_iter()
+                .filter_map(|agent| {
+                    unscanned(snapshot.root(agent).status())
+                        .map(|reason| format!("{}: {reason}", agent.display_name()))
+                })
+                .collect::<Vec<_>>();
+            if gaps.is_empty() && matches!(expected, UninstallOutlook::Nothing) {
+                report.held.push(VerifyPass {
+                    agent: AgentKind::OpenCode,
+                    postcondition: Postcondition::OpenCodeResolution,
+                });
+            } else if gaps.is_empty() {
+                report.failures.push(VerifyFailure {
+                    agent: AgentKind::OpenCode,
+                    postcondition: Postcondition::OpenCodeResolution,
+                    observed: "OpenCode found nothing under this name".to_owned(),
+                });
+            } else {
+                report.withheld.push(VerifyWithheld {
+                    agent: AgentKind::OpenCode,
+                    postcondition: Postcondition::OpenCodeResolution,
+                    reason: format!(
+                        "what OpenCode resolves the name to could not be established: {}",
+                        gaps.join("; ")
+                    ),
+                    required: false,
+                });
+            }
+        } else {
+            report.withheld.push(VerifyWithheld {
                 agent: AgentKind::OpenCode,
                 postcondition: Postcondition::OpenCodeResolution,
-            }),
-            _ => report.failures.push(VerifyFailure {
-                agent: AgentKind::OpenCode,
-                postcondition: Postcondition::OpenCodeResolution,
-                observed: format!(
-                    "this was not the OpenCode outcome the plan described: {}",
-                    observed_summary(observed)
-                ),
-            }),
+                reason: "the post-uninstall inventory did not state OpenCode's resolution"
+                    .to_owned(),
+                required: false,
+            });
         }
     }
     report
@@ -2298,11 +2346,7 @@ pub(crate) fn finalize_uninstall(
 ) -> FinalizeReport {
     let mut report = FinalizeReport::default();
     for step in applied.steps.iter().filter(|step| step.removed_link()) {
-        let passed = verification
-            .held
-            .iter()
-            .any(|pass| pass.agent == step.agent && pass.postcondition == Postcondition::LinkGone);
-        if !passed {
+        if !verification_holds(verification, step.agent, Postcondition::LinkGone) {
             continue;
         }
         let Some(target) = plan.target(step.agent) else {
@@ -2311,6 +2355,59 @@ pub(crate) fn finalize_uninstall(
         let UninstallDisposition::RemoveLink { link_target, .. } = target.disposition() else {
             continue;
         };
+        if matches!(
+            target.disposition(),
+            UninstallDisposition::RemoveLink { resolves: true, .. }
+        ) {
+            if !verification_holds(verification, step.agent, Postcondition::ContentSurvived) {
+                report.failures.push(FinalizeFailure {
+                    agent: step.agent,
+                    reason: "the ownership receipt was retained because canonical content survival was not positively verified"
+                        .to_owned(),
+                });
+                continue;
+            }
+            match fs::metadata(link_target) {
+                Ok(metadata) if metadata.is_dir() => {}
+                Ok(_) => {
+                    report.failures.push(FinalizeFailure {
+                        agent: step.agent,
+                        reason: "the ownership receipt was retained because the recorded target is no longer a directory"
+                            .to_owned(),
+                    });
+                    continue;
+                }
+                Err(error) => {
+                    report.failures.push(FinalizeFailure {
+                        agent: step.agent,
+                        reason: format!(
+                            "the ownership receipt was retained because the recorded target could not be re-read: {error}"
+                        ),
+                    });
+                    continue;
+                }
+            }
+        }
+        match exact_link_is_inactive(step.link_path(), link_target) {
+            Ok(true) => {}
+            Ok(false) => {
+                report.failures.push(FinalizeFailure {
+                    agent: step.agent,
+                    reason: "the ownership receipt was retained because the managed link became active again after verification"
+                        .to_owned(),
+                });
+                continue;
+            }
+            Err(error) => {
+                report.failures.push(FinalizeFailure {
+                    agent: step.agent,
+                    reason: format!(
+                        "the ownership receipt was retained because the link path could not be re-read: {error}"
+                    ),
+                });
+                continue;
+            }
+        }
         if let Err(error) =
             store.delete_receipts_for_link(step.agent, step.link_path(), link_target)
         {
@@ -2321,6 +2418,31 @@ pub(crate) fn finalize_uninstall(
         }
     }
     report
+}
+
+fn verification_holds(
+    verification: &VerifyReport,
+    agent: AgentKind,
+    postcondition: Postcondition,
+) -> bool {
+    verification
+        .held
+        .iter()
+        .any(|pass| pass.agent == agent && pass.postcondition == postcondition)
+}
+
+/// Re-read the final component immediately before receipt deletion.
+///
+/// A different occupant means the exact link described by the receipt is gone;
+/// an exact matching symbolic link means it became active again and its
+/// ownership evidence must survive.
+fn exact_link_is_inactive(link_path: &Path, link_target: &Path) -> io::Result<bool> {
+    match fs::symlink_metadata(link_path) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(true),
+        Err(error) => Err(error),
+        Ok(metadata) if !metadata.file_type().is_symlink() => Ok(true),
+        Ok(_) => fs::read_link(link_path).map(|target| target != link_target),
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -3011,6 +3133,7 @@ impl Receipt {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::Store;
 
     /// Creating only the root is still a filesystem mutation. It is not a
     /// written link for verification, but it makes a failed step a partial
@@ -3032,5 +3155,146 @@ mod tests {
         );
         assert!(applied.steps[0].changed_filesystem());
         assert!(!applied.steps[0].wrote_link());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn receipt_finalization_rechecks_that_the_managed_link_is_still_gone() {
+        let fixture = tempfile::tempdir().expect("temporary fixture");
+        let target = fixture.path().join("target");
+        let link = fixture.path().join("home/.claude/skills/portable");
+        fs::create_dir_all(&target).expect("target directory");
+        fs::create_dir_all(link.parent().expect("link root")).expect("link root");
+        std::os::unix::fs::symlink(&target, &link).expect("recreated managed link");
+        let store = Store::open(&fixture.path().join("data")).expect("metadata store");
+        let receipt = Receipt::new(
+            AgentKind::ClaudeCode,
+            "portable".to_owned(),
+            link.clone(),
+            target.clone(),
+            None,
+            None,
+            None,
+        );
+        store.record_receipt(&receipt).expect("record receipt");
+        let (plan, applied) = removable_uninstall(&link, &target, true);
+        let verification = VerifyReport {
+            held: vec![
+                VerifyPass {
+                    agent: AgentKind::ClaudeCode,
+                    postcondition: Postcondition::LinkGone,
+                },
+                VerifyPass {
+                    agent: AgentKind::ClaudeCode,
+                    postcondition: Postcondition::ContentSurvived,
+                },
+            ],
+            ..VerifyReport::default()
+        };
+
+        let finalized = finalize_uninstall(&plan, &applied, &verification, &store);
+
+        assert_eq!(finalized.failures().len(), 1);
+        assert_eq!(store.receipts().expect("retained receipt"), vec![receipt]);
+    }
+
+    #[test]
+    fn receipt_finalization_requires_the_applicable_content_survival_pass() {
+        let fixture = tempfile::tempdir().expect("temporary fixture");
+        let target = fixture.path().join("target");
+        let link = fixture.path().join("home/.claude/skills/portable");
+        fs::create_dir_all(&target).expect("target directory");
+        let store = Store::open(&fixture.path().join("data")).expect("metadata store");
+        let receipt = Receipt::new(
+            AgentKind::ClaudeCode,
+            "portable".to_owned(),
+            link.clone(),
+            target.clone(),
+            None,
+            None,
+            None,
+        );
+        store.record_receipt(&receipt).expect("record receipt");
+        let (plan, applied) = removable_uninstall(&link, &target, true);
+        let verification = VerifyReport {
+            held: vec![VerifyPass {
+                agent: AgentKind::ClaudeCode,
+                postcondition: Postcondition::LinkGone,
+            }],
+            ..VerifyReport::default()
+        };
+
+        let finalized = finalize_uninstall(&plan, &applied, &verification, &store);
+
+        assert_eq!(finalized.failures().len(), 1);
+        assert_eq!(store.receipts().expect("retained receipt"), vec![receipt]);
+    }
+
+    #[test]
+    fn receipt_finalization_rechecks_content_after_the_verification_pass() {
+        let fixture = tempfile::tempdir().expect("temporary fixture");
+        let target = fixture.path().join("target");
+        let link = fixture.path().join("home/.claude/skills/portable");
+        fs::create_dir_all(&target).expect("target directory");
+        let store = Store::open(&fixture.path().join("data")).expect("metadata store");
+        let receipt = Receipt::new(
+            AgentKind::ClaudeCode,
+            "portable".to_owned(),
+            link.clone(),
+            target.clone(),
+            None,
+            None,
+            None,
+        );
+        store.record_receipt(&receipt).expect("record receipt");
+        let (plan, applied) = removable_uninstall(&link, &target, true);
+        let verification = VerifyReport {
+            held: vec![
+                VerifyPass {
+                    agent: AgentKind::ClaudeCode,
+                    postcondition: Postcondition::LinkGone,
+                },
+                VerifyPass {
+                    agent: AgentKind::ClaudeCode,
+                    postcondition: Postcondition::ContentSurvived,
+                },
+            ],
+            ..VerifyReport::default()
+        };
+        fs::remove_dir(&target).expect("content disappears after verification");
+
+        let finalized = finalize_uninstall(&plan, &applied, &verification, &store);
+
+        assert_eq!(finalized.failures().len(), 1);
+        assert_eq!(store.receipts().expect("retained receipt"), vec![receipt]);
+    }
+
+    fn removable_uninstall(
+        link_path: &Path,
+        link_target: &Path,
+        resolves: bool,
+    ) -> (UninstallPlan, ApplyReport) {
+        (
+            UninstallPlan {
+                skill_name: "portable".to_owned(),
+                targets: vec![UninstallTarget {
+                    agent: AgentKind::ClaudeCode,
+                    link_path: link_path.to_path_buf(),
+                    disposition: UninstallDisposition::RemoveLink {
+                        link_target: link_target.to_path_buf(),
+                        resolves,
+                    },
+                }],
+                warnings: Vec::new(),
+                opencode_outlook: None,
+            },
+            ApplyReport {
+                steps: vec![AppliedStep {
+                    agent: AgentKind::ClaudeCode,
+                    link_path: link_path.to_path_buf(),
+                    outcome: StepOutcome::Removed,
+                }],
+            },
+        )
     }
 }

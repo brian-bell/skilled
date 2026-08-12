@@ -17,7 +17,7 @@ use std::{
 use skilled::{
     Action, AgentKind, AppEnvironment, SkilledApp,
     cli::{self, ExitCodeKind},
-    operations::InstallStatus,
+    operations::{InstallStatus, UninstallStatus},
 };
 
 const ROOTS: [(AgentKind, &str); 3] = [
@@ -134,6 +134,53 @@ fn uninstall_without_a_receipt_is_blocked_and_leaves_the_link_alone() {
             .file_type()
             .is_symlink()
     );
+}
+
+#[test]
+fn uninstall_reports_partial_apply_when_receipt_cleanup_fails() {
+    let fixture = Fixture::new();
+    let repository = fixture.register("library", &["portable"]);
+    let source = repository.display().to_string();
+    let (installed, output) = fixture.run(&[
+        "install",
+        "--yes",
+        "--source",
+        &source,
+        "--skill",
+        "portable",
+        "--agents",
+        "claude-code",
+    ]);
+    assert_eq!(installed, ExitCodeKind::Success, "{output}");
+
+    let connection =
+        rusqlite::Connection::open(fixture.directory.path().join("data/skilled.sqlite3"))
+            .expect("open the metadata database");
+    connection
+        .execute_batch(
+            "CREATE TRIGGER refuse_receipt_cleanup
+             BEFORE DELETE ON operation_receipts
+             BEGIN
+               SELECT RAISE(ABORT, 'simulated receipt cleanup failure');
+             END;",
+        )
+        .expect("install failing delete trigger");
+    drop(connection);
+
+    let link = fixture.home().join(".claude/skills/portable");
+    let (code, output) = fixture.run(&[
+        "uninstall",
+        "--yes",
+        "--skill",
+        "portable",
+        "--agent",
+        "claude-code",
+    ]);
+
+    assert_eq!(code, ExitCodeKind::PartialApply, "{output}");
+    assert!(fs::symlink_metadata(&link).is_err(), "{output}");
+    assert!(output.contains("Ownership record remains"), "{output}");
+    assert_eq!(fixture.app().receipts().expect("receipt retained").len(), 1);
 }
 
 /// Spec 15: `--yes` is fail-closed. It answers a question the user cannot see,
@@ -511,6 +558,29 @@ fn every_outcome_has_its_own_exit_status() {
         ),
     ] {
         assert_eq!(cli::exit_code_for(status), expected, "{status:?}");
+        assert_eq!(expected.code(), code, "{status:?}");
+    }
+    for (status, expected, code) in [
+        (UninstallStatus::Uninstalled, ExitCodeKind::Success, 0),
+        (UninstallStatus::NothingToDo, ExitCodeKind::Success, 0),
+        (
+            UninstallStatus::PartiallyApplied,
+            ExitCodeKind::PartialApply,
+            4,
+        ),
+        (UninstallStatus::NotApplied, ExitCodeKind::PartialApply, 4),
+        (
+            UninstallStatus::UninstalledUnrecorded,
+            ExitCodeKind::PartialApply,
+            4,
+        ),
+        (
+            UninstallStatus::VerificationFailed,
+            ExitCodeKind::VerificationFailed,
+            5,
+        ),
+    ] {
+        assert_eq!(cli::exit_code_for_uninstall(status), expected, "{status:?}");
         assert_eq!(expected.code(), code, "{status:?}");
     }
     // The statuses no outcome carries, pinned beside them: a blocked plan never

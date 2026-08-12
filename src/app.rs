@@ -1333,11 +1333,17 @@ impl SkilledApp {
 
     pub(crate) fn apply_forget_plan(&mut self, plan: &ForgetPlan) -> ForgetOutcome {
         let applied = apply_forget(plan, &mut self.store);
-        let verification = match applied {
-            crate::operations::ForgetApply::Forgotten => {
+        let verification = match &applied {
+            crate::operations::ForgetApply::Forgotten
+            | crate::operations::ForgetApply::NothingToDo => {
                 verify_forget(plan.source().id(), &self.store)
             }
-            _ => crate::operations::ForgetVerification::Held,
+            crate::operations::ForgetApply::Failed(_) => {
+                crate::operations::ForgetVerification::Withheld(
+                    "metadata postconditions were not checked because the forget operation did not run"
+                        .to_owned(),
+                )
+            }
         };
         if matches!(applied, crate::operations::ForgetApply::Forgotten) {
             self.sources = self
