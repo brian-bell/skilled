@@ -31,7 +31,9 @@ use crate::{
         CandidateSelection, OpenCodeResolution, RootSighting, SightedEntry, UnknownCause,
         UnknownRoot, VariantRef, narrow, resolve_opencode, variants_by_name,
     },
-    source::{RegisteredSource, SkillValidation, contains_revision},
+    source::{
+        RegisteredSource, RevisionLookup, SkillValidation, contains_revision, look_up_revision,
+    },
     store::Store,
     validation::{
         InspectionBudget, PortableValidationError, valid_skill_name,
@@ -2780,6 +2782,25 @@ fn apply_target(
             ));
         }
     }
+    // The identifier surviving is not the registration surviving. Re-registering
+    // the same checkout keeps the row's id while replacing the catalog set this
+    // variant was chosen from, and the receipt about to be written names that
+    // catalog — so all of it is compared with what is registered now.
+    match mutation.variant_registration_matches(&plan.variant, &plan.source_checkout) {
+        Ok(true) => {}
+        Ok(false) => {
+            return StepOutcome::Failed(
+                "the source's registration changed after the plan was shown, so nothing was \
+                 written"
+                    .to_owned(),
+            );
+        }
+        Err(error) => {
+            return StepOutcome::Failed(format!(
+                "the source registration could not be re-read, so nothing was written: {error}"
+            ));
+        }
+    }
     if let Err(reason) = recheck_source_identity(plan) {
         return StepOutcome::Failed(format!("{reason}, so nothing was written"));
     }
@@ -2953,7 +2974,15 @@ impl RepairApplyReport {
 /// one, and is therefore explicitly non-atomic. A creation failure after the
 /// removal is a partial apply and is reported as such rather than as an inert
 /// refusal.
-pub(crate) fn apply_repair(plan: &RepairPlan, store: &Store, home: &Path) -> RepairApplyReport {
+///
+/// The metadata mutation guard covers the replacement for the same reason it
+/// covers install's creation. A repair makes a link active and records a
+/// receipt naming a registered source, which is exactly the state Forget Source
+/// proves absent before it deletes that source's metadata. Taking the guard
+/// before the final rechecks and holding it through the receipt commit is what
+/// keeps a repair from landing inside Forget's window and leaving an active
+/// link into a source Skilled no longer knows.
+pub(crate) fn apply_repair(plan: &RepairPlan, store: &mut Store, home: &Path) -> RepairApplyReport {
     if !plan.is_executable() {
         return RepairApplyReport::default();
     }
@@ -2967,7 +2996,7 @@ pub(crate) fn apply_repair(plan: &RepairPlan, store: &Store, home: &Path) -> Rep
     }
 }
 
-fn apply_repair_target(plan: &RepairPlan, store: &Store, home: &Path) -> RepairStepOutcome {
+fn apply_repair_target(plan: &RepairPlan, store: &mut Store, home: &Path) -> RepairStepOutcome {
     let Some(root) = plan.link_path.parent() else {
         return RepairStepOutcome::Failed("the target has no parent directory".to_owned());
     };
@@ -2982,16 +3011,8 @@ fn apply_repair_target(plan: &RepairPlan, store: &Store, home: &Path) -> RepairS
     ) else {
         return RepairStepOutcome::Failed("the plan carries no repair source".to_owned());
     };
-    match source_dir.canonicalize() {
-        Ok(resolved)
-            if resolved == source_dir
-                && fs::metadata(&resolved).is_ok_and(|metadata| metadata.is_dir()) => {}
-        _ => {
-            return RepairStepOutcome::Failed(format!(
-                "{} is no longer the directory the plan resolved, so nothing was written",
-                source_dir.display()
-            ));
-        }
+    if let Err(reason) = repair_source_unchanged(source_dir, source_checkout, source_revision) {
+        return RepairStepOutcome::Failed(reason);
     }
     let mut budget = InspectionBudget::source_scan();
     if let Err(error) = validate_portable_skill_with_budget(source_dir, &mut budget) {
@@ -3015,12 +3036,68 @@ fn apply_repair_target(plan: &RepairPlan, store: &Store, home: &Path) -> RepairS
             "the ownership receipt cannot record this target, so nothing was written: {error}"
         ));
     }
-    if let Err(reason) = verified_checkout(source_checkout, source_revision) {
-        return RepairStepOutcome::Failed(format!("{reason}, so nothing was written"));
+    // From here to the receipt commit, no other Skilled process may decide this
+    // source's metadata is safe to delete: the replacement below makes the link
+    // active, which is the fact Forget Source proves absent before it deletes.
+    let mutation = match store.begin_mutation() {
+        Ok(mutation) => mutation,
+        Err(error) => {
+            return RepairStepOutcome::Failed(format!(
+                "the metadata mutation guard could not be acquired, so nothing was written: {error}"
+            ));
+        }
+    };
+    match mutation.source_is_registered(variant.source_id()) {
+        Ok(true) => {}
+        Ok(false) => {
+            return RepairStepOutcome::Failed(
+                "the source was forgotten after the plan was shown, so nothing was written"
+                    .to_owned(),
+            );
+        }
+        Err(error) => {
+            return RepairStepOutcome::Failed(format!(
+                "the source registration could not be re-read, so nothing was written: {error}"
+            ));
+        }
+    }
+    // Install's reasoning, for the receipt this repair records: a re-register of
+    // the same checkout keeps the source's id while replacing the catalog the
+    // replacement variant was chosen from.
+    match mutation.variant_registration_matches(variant, source_checkout) {
+        Ok(true) => {}
+        Ok(false) => {
+            return RepairStepOutcome::Failed(
+                "the source's registration changed after the plan was shown, so nothing was \
+                 written"
+                    .to_owned(),
+            );
+        }
+        Err(error) => {
+            return RepairStepOutcome::Failed(format!(
+                "the source registration could not be re-read, so nothing was written: {error}"
+            ));
+        }
     }
     // Source validation, receipt checks, and Git identity verification can all
-    // take time. Re-establish the destination guards at the mutation boundary
-    // so that only the final syscall window tracked by skilled-2k3.6.1 remains.
+    // take time, and acquiring the guard above can wait behind another writer
+    // for as long as that writer holds it. The guard freezes the metadata, not
+    // the filesystem, so both sides of the write — where the link points and
+    // where it lands — are re-established here, leaving only the final syscall
+    // window tracked by skilled-2k3.6.1.
+    if let Err(reason) = repair_source_unchanged(source_dir, source_checkout, source_revision) {
+        return RepairStepOutcome::Failed(reason);
+    }
+    // The revision surviving does not make the working tree valid: a dirty
+    // checkout can lose the variant's `SKILL.md` without moving HEAD. The scan
+    // is bounded, so it is repeated rather than trusted from before the wait.
+    let mut guarded_budget = InspectionBudget::source_scan();
+    if let Err(error) = validate_portable_skill_with_budget(source_dir, &mut guarded_budget) {
+        return RepairStepOutcome::Failed(format!(
+            "{} no longer validates as a portable skill, so nothing was written: {error}",
+            source_dir.display()
+        ));
+    }
     if let Err(reason) = repair_destination_unchanged(plan, root, home) {
         return RepairStepOutcome::Failed(reason);
     }
@@ -3046,10 +3123,42 @@ fn apply_repair_target(plan: &RepairPlan, store: &Store, home: &Path) -> RepairS
             },
         };
     }
-    match store.record_receipt(&receipt) {
+    if let Err(error) = mutation.record_receipt(&receipt) {
+        return RepairStepOutcome::RepairedUnrecorded(error.to_string());
+    }
+    match mutation.commit() {
         Ok(()) => RepairStepOutcome::Repaired,
         Err(error) => RepairStepOutcome::RepairedUnrecorded(error.to_string()),
     }
+}
+
+/// Re-establish that the replacement still points where the plan resolved.
+///
+/// The directory the new link would name has to still be exactly that directory
+/// — canonicalizing to itself, and a directory rather than something that
+/// replaced it — and the checkout it belongs to has to still be the one the plan
+/// named. Cheap enough to repeat under the mutation guard, which is where it
+/// matters: everything checked before that guard was checked before an
+/// unbounded wait.
+fn repair_source_unchanged(
+    source_dir: &Path,
+    checkout: &Path,
+    revision: &str,
+) -> Result<(), String> {
+    match source_dir.canonicalize() {
+        Ok(resolved)
+            if resolved == source_dir
+                && fs::metadata(&resolved).is_ok_and(|metadata| metadata.is_dir()) => {}
+        _ => {
+            return Err(format!(
+                "{} is no longer the directory the plan resolved, so nothing was written",
+                source_dir.display()
+            ));
+        }
+    }
+    verified_checkout(checkout, revision)
+        .map(|_| ())
+        .map_err(|reason| format!("{reason}, so nothing was written"))
 }
 
 fn repair_destination_unchanged(plan: &RepairPlan, root: &Path, home: &Path) -> Result<(), String> {
@@ -4142,8 +4251,10 @@ impl ForgetOutcome {
 /// Recheck the exact receipt multiset and every link immediately before deletion.
 ///
 /// The mutation guard begins before both checks and stays held through the
-/// transaction commit. Install acquires the same guard before touching a link,
-/// so no other Skilled process can make a receipt active inside this window.
+/// transaction commit. Install and repair — the two operations that make a link
+/// active and record ownership of it — acquire that same guard before they
+/// write, so no other Skilled process can make a receipt active inside this
+/// window.
 pub(crate) fn apply_forget(plan: &ForgetPlan, store: &mut Store) -> ForgetApply {
     if plan.is_blocked() {
         debug_assert!(false, "a blocked plan reached apply_forget");
@@ -4238,16 +4349,106 @@ pub(crate) fn apply_forget(plan: &ForgetPlan, store: &mut Store) -> ForgetApply 
     }
 }
 
-pub(crate) fn verify_forget(source_id: i64, store: &Store) -> ForgetVerification {
-    match store.verify_source_forgotten(source_id) {
-        Ok([true, true, true]) => ForgetVerification::Held,
-        Ok(checks) => ForgetVerification::Failed(format!(
-            "metadata remained after forgetting (source: {}, catalogs: {}, receipts: {})",
-            !checks[0], !checks[1], !checks[2],
-        )),
-        Err(error) => {
-            ForgetVerification::Withheld(format!("the metadata could not be re-read: {error}"))
+/// Check both of Forget's postconditions: the metadata is gone, and the
+/// checkout is not.
+///
+/// The preview states the second one as plainly as the first — it names the
+/// checkout path and promises it is left alone — so a report that says
+/// "forgotten and verified" without looking at that path would be claiming
+/// something nothing checked.
+///
+/// A directory being there is not the checkout being there, and this is the one
+/// place that distinction has to be paid for: an empty replacement at the same
+/// pathname would satisfy an object-type check while the repository it stood
+/// for is gone. The registered revision is the same identity witness install
+/// and repair use, so the check is that the path still canonicalizes to itself
+/// and that the repository there still contains the revision the source was
+/// registered at. What the operating system or Git will not answer about leaves
+/// the check withheld, which is the inventory's own rule applied here.
+pub(crate) fn verify_forget(plan: &ForgetPlan, store: &Store) -> ForgetVerification {
+    match store.verify_source_forgotten(plan.source.id()) {
+        Ok([true, true, true]) => {}
+        Ok(checks) => {
+            return ForgetVerification::Failed(format!(
+                "metadata remained after forgetting (source: {}, catalogs: {}, receipts: {})",
+                !checks[0], !checks[1], !checks[2],
+            ));
         }
+        Err(error) => {
+            return ForgetVerification::Withheld(format!(
+                "the metadata could not be re-read: {error}"
+            ));
+        }
+    }
+    let checkout = plan.source.git_top_level();
+    match fs::symlink_metadata(checkout) {
+        Ok(metadata) if metadata.is_dir() => {}
+        Ok(_) => {
+            return ForgetVerification::Failed(format!(
+                "the checkout at {} is no longer a directory",
+                checkout.display()
+            ));
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return ForgetVerification::Failed(format!(
+                "the checkout at {} is no longer on disk",
+                checkout.display()
+            ));
+        }
+        Err(error) => {
+            return ForgetVerification::Withheld(format!(
+                "the checkout at {} could not be read: {error}",
+                checkout.display()
+            ));
+        }
+    }
+    match checkout.canonicalize() {
+        Ok(resolved) if resolved == checkout => {}
+        Ok(resolved) => {
+            return ForgetVerification::Failed(format!(
+                "the checkout at {} now resolves to {}",
+                checkout.display(),
+                resolved.display()
+            ));
+        }
+        Err(error) => {
+            return ForgetVerification::Withheld(format!(
+                "the checkout at {} could not be resolved: {error}",
+                checkout.display()
+            ));
+        }
+    }
+    // A repository's own `.git` is a filesystem fact, and asking for it first
+    // keeps the definite answer definite: an empty directory standing where the
+    // checkout stood is not something Git can be asked about at all. Absent is
+    // that answer; a lookup the filesystem refused is not an answer.
+    if let Err(error) = fs::symlink_metadata(checkout.join(".git")) {
+        return if error.kind() == io::ErrorKind::NotFound {
+            ForgetVerification::Failed(format!(
+                "the directory at {} is no longer a Git checkout",
+                checkout.display()
+            ))
+        } else {
+            ForgetVerification::Withheld(format!(
+                "the checkout at {} could not be read: {error}",
+                checkout.display()
+            ))
+        };
+    }
+    match look_up_revision(checkout, plan.source.head()) {
+        Ok(RevisionLookup::Present) => ForgetVerification::Held,
+        Ok(RevisionLookup::Absent) => ForgetVerification::Failed(format!(
+            "the checkout at {} no longer contains the revision it was registered at",
+            checkout.display()
+        )),
+        Ok(RevisionLookup::Undetermined(message)) => ForgetVerification::Withheld(format!(
+            "the checkout at {} could not be verified: {message}",
+            checkout.display()
+        )),
+        Err(error) => ForgetVerification::Withheld(format!(
+            "the checkout at {} could not be verified: {error}",
+            checkout.display()
+        )),
     }
 }
 

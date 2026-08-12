@@ -9,6 +9,7 @@ use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, 
 use crate::{
     AgentKind, Error, Result,
     operations::{Receipt, ReceiptOperation},
+    resolution::VariantRef,
     source::{
         CatalogClassification, CatalogProposal, Compatibility, InspectedSource, RegisteredSource,
         SourcePreview, contains_revision, inspect_local_source,
@@ -117,21 +118,6 @@ impl Store {
         ensure_receipt_recordable(receipt)
     }
 
-    /// Record that Skilled created one particular link.
-    ///
-    /// One statement, and therefore its own transaction: the receipt is written
-    /// the moment the link exists, so a crash between two targets still leaves
-    /// the store describing exactly what is on disk.
-    ///
-    /// A receipt identical to one already recorded is left alone rather than
-    /// refused. Timestamps are whole seconds, so a link removed and put back
-    /// inside one second would otherwise fail its insert and leave Skilled
-    /// reporting that it does not own something it just created — when the
-    /// receipt it needs is already there.
-    pub(crate) fn record_receipt(&self, receipt: &Receipt) -> Result<()> {
-        record_receipt_on(&self.connection, receipt)
-    }
-
     /// Every ownership receipt, oldest first.
     ///
     /// The last element is the most recent. `id` is the stable tiebreaker for
@@ -237,10 +223,7 @@ impl Store {
                 params![
                     source_id,
                     path_text(catalog.relative_path())?,
-                    match catalog.classification() {
-                        CatalogClassification::Common => "common",
-                        CatalogClassification::AgentSpecific => "agent-specific",
-                    },
+                    classification_text(catalog.classification()),
                     catalog.compatibility().claude_code(),
                     catalog.compatibility().codex(),
                     catalog.compatibility().opencode(),
@@ -417,6 +400,72 @@ impl Mutation<'_> {
             .map_err(Into::into)
     }
 
+    /// Recheck the exact registration a confirmed install or repair plan named.
+    ///
+    /// [`Self::source_is_registered`] answers only that the identifier survived,
+    /// and identifiers survive a re-registration of the same checkout: between
+    /// the preview and this guard, a catalog can be excluded, reclassified, or
+    /// have an agent removed from its compatibility declaration while the source
+    /// row keeps its id. The transaction cannot invalidate a change committed
+    /// before it began, so the plan is compared with what is registered now.
+    ///
+    /// Every field the ownership receipt is about to record is compared: the
+    /// source it names, the checkout that source stands at, and the catalog root
+    /// beneath it with the classification and compatibility the plan selected
+    /// under. The variant directory itself is not registration — candidates are
+    /// scan results rather than metadata — and the caller revalidates it against
+    /// the filesystem immediately before this.
+    ///
+    /// This compares the inputs the plan chose from, not the choice. A source
+    /// another process registers after the preview can offer a competing
+    /// variant of the same name, which these queries cannot see; closing that
+    /// needs a registry generation the guard can compare, tracked as
+    /// `skilled-g64`.
+    pub(crate) fn variant_registration_matches(
+        &self,
+        variant: &VariantRef,
+        checkout: &Path,
+    ) -> Result<bool> {
+        let source = self
+            .transaction
+            .query_row(
+                "SELECT label, canonical_path FROM source_repositories WHERE id = ?1",
+                params![variant.source_id()],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?;
+        if source != Some((variant.source_label().to_owned(), path_text(checkout)?)) {
+            return Ok(false);
+        }
+        let catalog = self
+            .transaction
+            .query_row(
+                "SELECT classification, claude_code, codex, opencode
+                 FROM catalog_roots WHERE source_id = ?1 AND relative_path = ?2",
+                params![
+                    variant.source_id(),
+                    path_text(variant.catalog_relative_path())?
+                ],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, bool>(1)?,
+                        row.get::<_, bool>(2)?,
+                        row.get::<_, bool>(3)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let compatibility = variant.compatibility();
+        Ok(catalog
+            == Some((
+                classification_text(variant.classification()).to_owned(),
+                compatibility.claude_code(),
+                compatibility.codex(),
+                compatibility.opencode(),
+            )))
+    }
+
     /// Recheck the complete stored registration represented by a Forget plan.
     /// Candidate scans are not metadata and are intentionally excluded; every
     /// source-row and catalog-root field the store persists is compared while
@@ -478,10 +527,7 @@ impl Mutation<'_> {
             .map(|catalog| {
                 Ok((
                     path_text(catalog.relative_path())?,
-                    match catalog.classification() {
-                        CatalogClassification::Common => "common".to_owned(),
-                        CatalogClassification::AgentSpecific => "agent-specific".to_owned(),
-                    },
+                    classification_text(catalog.classification()).to_owned(),
                     catalog.compatibility().claude_code(),
                     catalog.compatibility().codex(),
                     catalog.compatibility().opencode(),
@@ -623,6 +669,15 @@ fn path_text(path: &Path) -> Result<String> {
     path.to_str()
         .map(str::to_owned)
         .ok_or_else(|| Error::InvalidSourcePath(path.to_path_buf()))
+}
+
+/// The one spelling of a classification the `catalog_roots` CHECK constraint
+/// accepts, shared by everything that writes or compares that column.
+fn classification_text(classification: CatalogClassification) -> &'static str {
+    match classification {
+        CatalogClassification::Common => "common",
+        CatalogClassification::AgentSpecific => "agent-specific",
+    }
 }
 
 /// A path stored outside the source tables, where "not a portable catalog path"

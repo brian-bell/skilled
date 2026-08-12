@@ -178,9 +178,119 @@ fn forget_source_removes_only_private_metadata_when_no_links_are_active() {
         panic!("forget report expected");
     };
     assert_eq!(outcome.status(), ForgetStatus::Forgotten);
+    assert!(matches!(outcome.verification(), ForgetVerification::Held));
     assert!(app.sources().is_empty());
     assert!(repository.join("skills/portable/SKILL.md").is_file());
     assert!(repository.is_dir());
+}
+
+/// Forget states one filesystem postcondition — the checkout is left alone —
+/// and that is the one it may not skip checking. A checkout that is gone when
+/// the removal is verified leaves the metadata correctly deleted and the
+/// promise unmet, which is a failed verification rather than a quiet pass.
+#[test]
+fn a_forget_whose_checkout_vanished_is_never_reported_as_verified() {
+    let fixture = Fixture::new();
+    let repository = fixture.source("library", &["portable"]);
+    let mut app = fixture.registered(&repository);
+    dispatch(&mut app, Action::OpenSources);
+    dispatch(&mut app, Action::BeginForgetSource);
+    let Some(OperationPrompt::Forget(ForgetPrompt::Preview(plan))) = app.pending_operation() else {
+        panic!("forget preview expected");
+    };
+    assert!(plan.is_executable());
+    fs::remove_dir_all(&repository).expect("remove the checkout after the preview");
+
+    dispatch(&mut app, Action::ConfirmOperation);
+
+    let Some(OperationPrompt::Forget(ForgetPrompt::Report(outcome))) = app.pending_operation()
+    else {
+        panic!("forget report expected");
+    };
+    assert_eq!(*outcome.applied(), ForgetApply::Forgotten);
+    assert_eq!(outcome.status(), ForgetStatus::VerificationFailed);
+    let ForgetVerification::Failed(reason) = outcome.verification() else {
+        panic!(
+            "an absent checkout fails verification: {:?}",
+            outcome.verification()
+        );
+    };
+    assert!(reason.contains("checkout"), "{reason}");
+    assert!(app.sources().is_empty());
+}
+
+/// A directory at the checkout's pathname is not the checkout. Verification
+/// asks for the repository and the revision it was registered at, so an empty
+/// replacement standing where the repository stood is reported for what it is
+/// rather than passing an object-type check.
+#[test]
+fn a_checkout_replaced_by_a_bare_directory_does_not_pass_forget_verification() {
+    let fixture = Fixture::new();
+    let repository = fixture.source("library", &["portable"]);
+    let mut app = fixture.registered(&repository);
+    dispatch(&mut app, Action::OpenSources);
+    dispatch(&mut app, Action::BeginForgetSource);
+    assert!(matches!(
+        app.pending_operation(),
+        Some(OperationPrompt::Forget(ForgetPrompt::Preview(plan))) if plan.is_executable()
+    ));
+    fs::remove_dir_all(&repository).expect("remove the checkout after the preview");
+    fs::create_dir(&repository).expect("stand an empty directory in its place");
+
+    dispatch(&mut app, Action::ConfirmOperation);
+
+    let Some(OperationPrompt::Forget(ForgetPrompt::Report(outcome))) = app.pending_operation()
+    else {
+        panic!("forget report expected");
+    };
+    assert_eq!(*outcome.applied(), ForgetApply::Forgotten);
+    assert_eq!(outcome.status(), ForgetStatus::VerificationFailed);
+    assert!(
+        matches!(
+            outcome.verification(),
+            ForgetVerification::Failed(reason) if reason.contains("no longer a Git checkout")
+        ),
+        "{:?}",
+        outcome.verification()
+    );
+}
+
+/// The revision lookup's other answer. A checkout that is still a repository
+/// but no longer holds the revision it was registered at is a definite failure,
+/// distinct from a checkout Git refused to answer about at all.
+#[test]
+fn a_checkout_that_no_longer_holds_its_registered_revision_fails_forget_verification() {
+    let fixture = Fixture::new();
+    let repository = fixture.source("library", &["portable"]);
+    let mut app = fixture.registered(&repository);
+    dispatch(&mut app, Action::OpenSources);
+    dispatch(&mut app, Action::BeginForgetSource);
+    assert!(matches!(
+        app.pending_operation(),
+        Some(OperationPrompt::Forget(ForgetPrompt::Preview(plan))) if plan.is_executable()
+    ));
+    // Same pathname, still a repository, different history: the registered
+    // revision is not one this one contains.
+    fs::remove_dir_all(repository.join(".git")).expect("remove the original history");
+    fs::write(repository.join("NOTES.md"), "a different history\n").expect("differing content");
+    initialize_repository(&repository);
+
+    dispatch(&mut app, Action::ConfirmOperation);
+
+    let Some(OperationPrompt::Forget(ForgetPrompt::Report(outcome))) = app.pending_operation()
+    else {
+        panic!("forget report expected");
+    };
+    assert_eq!(*outcome.applied(), ForgetApply::Forgotten);
+    assert_eq!(outcome.status(), ForgetStatus::VerificationFailed);
+    assert!(
+        matches!(
+            outcome.verification(),
+            ForgetVerification::Failed(reason) if reason.contains("registered at")
+        ),
+        "{:?}",
+        outcome.verification()
+    );
 }
 
 #[test]
@@ -538,6 +648,81 @@ fn a_stale_install_preview_cannot_recreate_a_forgotten_sources_link() {
         reopened.sources()[0].git_top_level(),
         replacement.canonicalize().expect("replacement path")
     );
+}
+
+/// Re-registering the same checkout keeps its source identifier, so a stale
+/// preview's existence check still passes over registration metadata the live
+/// registry has replaced. The confirmed plan named a catalog, a classification,
+/// and a compatibility declaration, and the receipt it would leave behind names
+/// them too: all of it is compared under the guard before anything is written.
+#[test]
+fn a_stale_install_preview_cannot_write_a_link_the_live_registration_no_longer_offers() {
+    let fixture = Fixture::new();
+    let repository = fixture.source("library", &["portable"]);
+    let mut installing = fixture.registered(&repository);
+    fixture.create_root_parents();
+    focus_first_variant(&mut installing);
+    dispatch(&mut installing, Action::BeginInstall);
+    let Some(InstallPrompt::Preview(plan)) = installing.pending_install() else {
+        panic!("install preview expected");
+    };
+    assert!(plan.is_executable());
+    let source_id = installing.sources()[0].id();
+
+    let mut registering = fixture.app();
+    dispatch(&mut registering, Action::OpenSources);
+    dispatch(&mut registering, Action::BeginAddSource);
+    for character in repository.to_string_lossy().chars() {
+        dispatch(&mut registering, Action::AppendSourcePath(character));
+    }
+    dispatch(&mut registering, Action::SubmitSourcePath);
+    dispatch(
+        &mut registering,
+        Action::ToggleCatalogCompatibility(AgentKind::OpenCode),
+    );
+    dispatch(&mut registering, Action::ConfirmPendingSource);
+    assert_eq!(registering.sources()[0].id(), source_id);
+    assert!(
+        !registering.sources()[0].catalogs()[0]
+            .compatibility()
+            .opencode(),
+        "the re-registration must have changed the stored compatibility"
+    );
+
+    dispatch(&mut installing, Action::ConfirmOperation);
+
+    let Some(InstallPrompt::Report(outcome)) = installing.pending_install() else {
+        panic!("install report expected");
+    };
+    assert_eq!(outcome.status(), InstallStatus::NotApplied);
+    // The first target refuses on the changed registration and the plan blocks
+    // whole, so the rest are never attempted.
+    assert!(
+        matches!(
+            outcome.step(AgentKind::ClaudeCode).map(|step| step.outcome()),
+            Some(StepOutcome::Failed(reason)) if reason.contains("registration changed")
+        ),
+        "{:?}",
+        outcome
+            .step(AgentKind::ClaudeCode)
+            .map(|step| step.outcome())
+    );
+    for (agent, _) in ROOTS {
+        assert!(
+            !matches!(
+                outcome.step(agent).map(|step| step.outcome()),
+                Some(StepOutcome::Created)
+            ),
+            "{agent:?} wrote against replaced registration metadata"
+        );
+    }
+    for (agent, root) in ROOTS {
+        assert!(
+            !fixture.home().join(root).join("portable").exists(),
+            "{agent:?} was written from a stale registration"
+        );
+    }
+    assert!(installing.receipts().expect("receipts").is_empty());
 }
 
 /// A catalog that explicitly excludes OpenCode is still installable for the

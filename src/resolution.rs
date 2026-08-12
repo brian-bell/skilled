@@ -85,6 +85,19 @@ impl VariantRef {
         &self.variant_relative_path
     }
 
+    /// The catalog classification this variant was selected under.
+    ///
+    /// Carried so a confirmed plan can be compared with the registration the
+    /// store holds now, rather than only with the one it was built from.
+    pub(crate) fn classification(&self) -> CatalogClassification {
+        self.classification
+    }
+
+    /// The catalog's stored compatibility declaration, for the same comparison.
+    pub(crate) fn compatibility(&self) -> Compatibility {
+        self.compatibility
+    }
+
     /// The total order every list of variants is reported in.
     ///
     /// Deterministic and independent of the order the registry hands its

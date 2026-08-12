@@ -1,6 +1,5 @@
 ---
 source: tests/tui_snapshots.rs
-assertion_line: 1679
 expression: "normalize_install_screen(&temporary, render(&app, 120, 40))"
 ---
  ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁
@@ -14,7 +13,7 @@ expression: "normalize_install_screen(&temporary, render(&app, 120, 40))"
 ▕──│  source registration and cached scan state                                                                     │─ ▏
 ▕▌ │  catalog: skills                                                                                               │  ▏
 ▕▌ │                                                                                                                │─ ▏
-▕▌ │  The checkout and every skill directory are left alone.                                                        │  ▏
+▕▌ │  Skilled writes nothing to the checkout or any skill directory.                                                │  ▏
 ▕  │                                                                                                                │c ▏
 ▕  │                                                                                                                │  ▏
 ▕  │                                                                                                                │  ▏

@@ -1537,9 +1537,7 @@ impl SkilledApp {
         let applied = apply_forget(plan, &mut self.store);
         let verification = match &applied {
             crate::operations::ForgetApply::Forgotten
-            | crate::operations::ForgetApply::NothingToDo => {
-                verify_forget(plan.source().id(), &self.store)
-            }
+            | crate::operations::ForgetApply::NothingToDo => verify_forget(plan, &self.store),
             crate::operations::ForgetApply::Failed(_) => {
                 crate::operations::ForgetVerification::Withheld(
                     "metadata postconditions were not checked because the forget operation did not run"
@@ -1571,7 +1569,7 @@ impl SkilledApp {
     }
 
     pub(crate) fn apply_repair_plan(&mut self, plan: &RepairPlan) -> RepairOutcome {
-        let applied = apply_repair(plan, &self.store, &self.environment.home_dir);
+        let applied = apply_repair(plan, &mut self.store, &self.environment.home_dir);
         self.rescan_installations();
         let verification = verify_repair(plan, &applied, &self.inventory);
         RepairOutcome::new(plan.clone(), applied, verification)

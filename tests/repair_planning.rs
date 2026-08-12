@@ -690,6 +690,84 @@ fn a_repair_source_relocated_after_preview_is_refused_without_modifying_the_link
     assert_no_repair_temporary(&fixture.root(AgentKind::Codex));
 }
 
+/// Forget Source proves every one of a source's receipted links inactive and
+/// then deletes its metadata, all inside one mutation guard. A repair makes a
+/// link active and records a receipt naming that same metadata, so it has to
+/// take the guard too and recheck the registration under it. Without that,
+/// this repair lands between Forget's liveness probe and its deletion, and
+/// leaves an active link pointing into a source Skilled no longer knows.
+#[test]
+fn a_repair_whose_source_is_forgotten_after_the_preview_writes_nothing() {
+    let fixture = Fixture::new();
+    let repository = fixture.source("library", "skills", "portable");
+    let mut app = fixture.registered(&repository);
+    fixture.create_root_parents();
+    fixture.install(&mut app);
+    let old_target = repository.join("skills/portable").canonicalize().unwrap();
+    let moved = fixture.directory.path().join("moved-library");
+    fs::rename(&repository, &moved).unwrap();
+    let preview = app.preview_source(&moved).unwrap();
+    app.confirm_source(preview).unwrap();
+    let link = fixture.root(AgentKind::Codex).join("portable");
+
+    dispatch(&mut app, Action::OpenDoctor);
+    dispatch(&mut app, Action::MoveDoctorSelection(1));
+    dispatch(&mut app, Action::BeginRepair);
+    let Some(RepairPrompt::Preview(plan)) = app.pending_repair() else {
+        panic!("repair preview expected: {:?}", app.pending_repair());
+    };
+    assert!(plan.is_executable());
+    let replacement_id = plan.variant().expect("a repair source").source_id();
+
+    // A second process forgets the relocated source the repair would point
+    // this link at. It holds no active links of its own, so nothing blocks it.
+    let mut forgetting = fixture.app();
+    dispatch(&mut forgetting, Action::OpenSources);
+    let forgotten = forgetting
+        .sources()
+        .iter()
+        .position(|source| source.id() == replacement_id)
+        .expect("the relocated source is registered");
+    for _ in 0..forgotten {
+        dispatch(&mut forgetting, Action::MoveSourcesSelection(1));
+    }
+    dispatch(&mut forgetting, Action::BeginForgetSource);
+    forgetting.note_detail_max_scroll(Some(0));
+    dispatch(&mut forgetting, Action::ConfirmOperation);
+    assert!(
+        forgetting
+            .sources()
+            .iter()
+            .all(|source| source.id() != replacement_id),
+        "the second process must have forgotten the repair's source"
+    );
+
+    app.note_detail_max_scroll(Some(0));
+    dispatch(&mut app, Action::ConfirmRepair);
+
+    let Some(RepairPrompt::Report(outcome)) = app.pending_repair() else {
+        panic!("repair should report its guarded refusal");
+    };
+    assert_eq!(outcome.status(), RepairStatus::NotApplied);
+    assert!(
+        matches!(
+            outcome.applied().step().map(|step| step.outcome()),
+            Some(RepairStepOutcome::Failed(reason)) if reason.contains("forgotten")
+        ),
+        "{:?}",
+        outcome.applied().step().map(|step| step.outcome())
+    );
+    assert_eq!(fs::read_link(&link).unwrap(), old_target);
+    assert_no_repair_temporary(&fixture.root(AgentKind::Codex));
+    assert!(
+        app.receipts()
+            .unwrap()
+            .iter()
+            .all(|receipt| receipt.operation() != ReceiptOperation::Repair),
+        "no repair receipt may name a forgotten source"
+    );
+}
+
 #[test]
 fn a_root_that_becomes_unreadable_after_preview_is_refused_without_modifying_the_link() {
     let fixture = Fixture::new();

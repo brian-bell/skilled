@@ -4875,7 +4875,7 @@ fn forget_prompt_lines(prompt: &ForgetPrompt) -> Vec<Line<'static>> {
             }
             lines.push(Line::default());
             lines.push(Line::styled(
-                "The checkout and every skill directory are left alone.",
+                "Skilled writes nothing to the checkout or any skill directory.",
                 theme::key_label(),
             ));
             lines
@@ -4900,7 +4900,8 @@ fn forget_prompt_lines(prompt: &ForgetPrompt) -> Vec<Line<'static>> {
             }
             match outcome.verification() {
                 ForgetVerification::Held => lines.push(Line::from(
-                    "Verified: source, catalogs, and receipts are absent.",
+                    "Verified: source, catalogs, and receipts are absent; the registered \
+                     checkout is still there.",
                 )),
                 ForgetVerification::Failed(reason) => lines.push(Line::from(components::badge(
                     Tone::Critical,
@@ -4913,7 +4914,7 @@ fn forget_prompt_lines(prompt: &ForgetPrompt) -> Vec<Line<'static>> {
             }
             lines.push(Line::default());
             lines.push(Line::styled(
-                "The checkout and every skill directory were left alone.",
+                "Skilled wrote nothing to the checkout or any skill directory.",
                 theme::key_label(),
             ));
             lines
