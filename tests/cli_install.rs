@@ -26,6 +26,60 @@ const ROOTS: [(AgentKind, &str); 3] = [
     (AgentKind::OpenCode, ".config/opencode/skills"),
 ];
 
+#[test]
+fn unavailable_metadata_is_an_internal_error_before_any_install_request_is_resolved() {
+    for state in ["missing", "corrupt", "future"] {
+        for assume_yes in [false, true] {
+            let fixture = Fixture::new();
+            let data = fixture.directory.path().join("data");
+            fs::create_dir_all(&data).expect("create established data directory");
+            let database = data.join("skilled.sqlite3");
+            match state {
+                "missing" => {}
+                "corrupt" => fs::write(&database, b"corrupt sqlite fixture\n")
+                    .expect("write corrupt database"),
+                "future" => {
+                    let connection =
+                        rusqlite::Connection::open(&database).expect("create future database");
+                    connection
+                        .execute_batch("PRAGMA user_version = 99;")
+                        .expect("set future version");
+                }
+                _ => unreachable!(),
+            }
+            let before = database
+                .exists()
+                .then(|| fs::read(&database).expect("read database"));
+            let mut arguments = vec![
+                "install",
+                "--source",
+                "1",
+                "--skill",
+                "portable",
+                "--agents",
+                "claude-code",
+            ];
+            if assume_yes {
+                arguments.insert(1, "--yes");
+            }
+
+            let (code, output) = fixture.run(&arguments);
+
+            assert_eq!(code, ExitCodeKind::InternalError, "{state}: {output}");
+            assert!(output.contains("skilled.sqlite3"), "{state}: {output}");
+            assert!(!output.contains('\u{1b}'), "{state}: {output:?}");
+            assert!(fixture.nothing_installed(), "{state}: {output}");
+            assert_eq!(
+                database
+                    .exists()
+                    .then(|| fs::read(&database).expect("reread database")),
+                before,
+                "{state} database changed"
+            );
+        }
+    }
+}
+
 /// The bead's fourth criterion: `--yes` skips the confirmation and nothing
 /// else. The plan, the safety checks, the receipts, and the verification all
 /// still run.

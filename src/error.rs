@@ -2,8 +2,38 @@ use std::{io, path::PathBuf};
 
 use thiserror::Error;
 
+/// The private metadata store could not be used for this session.
+///
+/// The path and operation cause remain separate until presentation so both can
+/// be escaped as terminal input independently.
+#[derive(Clone, Debug, Eq, Error, PartialEq)]
+#[error("application metadata unavailable at {}: {cause}", database_path.display())]
+pub struct MetadataFailure {
+    database_path: PathBuf,
+    cause: String,
+}
+
+impl MetadataFailure {
+    pub(crate) fn new(database_path: PathBuf, cause: impl Into<String>) -> Self {
+        Self {
+            database_path,
+            cause: cause.into(),
+        }
+    }
+
+    pub fn database_path(&self) -> &std::path::Path {
+        &self.database_path
+    }
+
+    pub fn cause(&self) -> &str {
+        &self.cause
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum Error {
+    #[error("{0}")]
+    MetadataUnavailable(MetadataFailure),
     #[error("filesystem operation failed: {0}")]
     Io(#[from] io::Error),
     #[error("application metadata operation failed: {0}")]

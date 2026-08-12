@@ -10,18 +10,21 @@ Skilled is an early Rust 2024 / Ratatui terminal application for inspecting
 and managing global coding-agent skills. First-run setup, local Git source
 registration, Sources browsing, a read-only installation inventory, OpenCode
 effective resolution across its documented roots, a read-only Doctor findings
-view, and installation — previewed, confirmed, and verified — are implemented.
+view, degraded read-only startup when private metadata is unavailable, and
+installation — previewed, confirmed, and verified — are implemented.
 
-Installation is the only filesystem mutation Skilled performs, and it is
-narrow on purpose: it creates one directory symbolic link per agent, and
-creates an agent's documented skill root when its own parent already exists.
-It never replaces, overwrites, unlinks, or recursively creates anything, so
-every occupied path is a refusal. Updates, repair, uninstall, adoption of links
-Skilled did not create, and every network operation are not implemented: do not
-turn the current placeholders into behavior unless the active Beads issue
-places that work in scope, and do not display a count, finding, status, or key
-hint the code cannot currently produce. Doctor lists what was observed and
-states that no repair exists; it offers no key that would perform one.
+Skilled performs two narrow filesystem mutations. Installation creates one
+directory symbolic link per agent, and creates an agent's documented skill root
+when its own parent already exists. A pending destructive metadata migration
+first creates one consistent, uniquely named SQLite backup beside the database;
+an occupied backup path is never overwritten. Installation never replaces,
+overwrites, unlinks, or recursively creates anything, so every occupied target
+is a refusal. Updates, repair, uninstall, adoption of links Skilled did not
+create, and every network operation are not implemented: do not turn the
+current placeholders into behavior unless the active Beads issue places that
+work in scope, and do not display a count, finding, status, or key hint the code
+cannot currently produce. Doctor lists what was observed and states that no
+repair exists; it offers no key that would perform one.
 
 [GitHub issue #3](https://github.com/brian-bell/skilled/issues/3) is the
 product and technical source of truth. The tracked `spec/tui-prototype.html`
@@ -72,8 +75,9 @@ signal needs both, because colour alone is not an acceptable cue.
   what OpenCode would load, over data the caller already holds. It states no
   findings — `inventory.rs` maps its verdicts to codes and severities.
 - `src/validation.rs`: portable `SKILL.md` front-matter validation.
-- `src/store.rs`: private versioned SQLite metadata and migrations; newer
-  unknown schemas fail closed.
+- `src/store.rs`: private versioned SQLite metadata and transactional
+  migrations; newer unknown schemas fail closed, and destructive migrations
+  create a recoverable backup before any pending step runs.
 - `src/theme.rs`: every colour in the application, as semantic roles.
 - `src/viewport.rs`: responsive viewport classes and workspace geometry.
 - `src/components.rs`: pure shared UI primitives.

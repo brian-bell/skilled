@@ -8,8 +8,8 @@ use ratatui::{
 };
 
 use crate::{
-    AgentKind, DoctorPane, InventoryPane, SessionIdentity, SetupStep, SkilledApp, SourcesPane,
-    View,
+    AgentKind, DoctorPane, InventoryPane, RegistryAvailability, SessionIdentity, SetupStep,
+    SkilledApp, SourcesPane, View,
     app::{MAX_INVENTORY_FILTER, SourceRow, catalog_rows},
     components::{self, KeyHint, terminal_safe},
     inventory::{
@@ -119,7 +119,7 @@ pub fn render(frame: &mut Frame<'_>, app: &SkilledApp) -> RenderFeedback {
         View::Doctor => render_doctor(frame, body, app, &findings),
         View::Settings => {
             render_inventory(frame, body, app, airy);
-            render_settings(frame, body);
+            render_settings(frame, body, app);
         }
     }
     if let Some(prompt) = app.pending_install() {
@@ -348,12 +348,16 @@ fn context_path(identity: &SessionIdentity, width: usize) -> String {
 /// never.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SessionStatus {
+    Degraded,
     SetupInProgress,
     Ready { sources: usize },
 }
 
 impl SessionStatus {
     fn of(app: &SkilledApp) -> Self {
+        if app.metadata_failure().is_some() {
+            return Self::Degraded;
+        }
         match app.view() {
             View::Setup(_) => Self::SetupInProgress,
             _ => Self::Ready {
@@ -364,6 +368,7 @@ impl SessionStatus {
 
     fn tone(self) -> Tone {
         match self {
+            Self::Degraded => Tone::Critical,
             Self::SetupInProgress => Tone::Warning,
             Self::Ready { .. } => Tone::Healthy,
         }
@@ -371,6 +376,7 @@ impl SessionStatus {
 
     fn label(self) -> String {
         match self {
+            Self::Degraded => "degraded · metadata unavailable".to_owned(),
             Self::SetupInProgress => "setup in progress".to_owned(),
             Self::Ready { sources: 1 } => "ready · 1 source registered".to_owned(),
             Self::Ready { sources } => format!("ready · {sources} sources registered"),
@@ -671,8 +677,8 @@ impl Destination {
 
     /// What this destination can honestly say it holds, if anything.
     ///
-    /// The registry is always fully known, so Sources always has a count, zero
-    /// included. The inventory is an observation of the filesystem, and
+    /// Sources has a count only when its registry was read. The inventory is
+    /// an observation of the filesystem, and
     /// whether that observation may be stated as a number is decided by
     /// [`crate::inventory::InventorySnapshot::stated_skill_count`] — the same decision
     /// [`inventory_subtitle`] defers to, so the tab and the subtitle beneath it
@@ -682,7 +688,8 @@ impl Destination {
     fn count(self, app: &SkilledApp) -> Option<usize> {
         match self {
             Self::Inventory => app.inventory().stated_skill_count(),
-            Self::Sources => Some(app.sources().len()),
+            Self::Sources => (app.registry_availability() == RegistryAvailability::Readable)
+                .then(|| app.sources().len()),
             // Findings are observations of the same roots the inventory reads,
             // so the same verdict decides whether either may be stated.
             Self::Doctor => app.inventory().stated_finding_count(),
@@ -1158,6 +1165,9 @@ fn render_inventory_skills(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp, 
             )),
         ])
     }));
+    if let Some(line) = metadata_failure_line(app) {
+        header_lines.push(line);
+    }
 
     // Measured after the lines exist, so a wrapped root status or a second
     // failure reason cannot displace the rule that closes the header.
@@ -1524,6 +1534,14 @@ fn inventory_empty_state(app: &SkilledApp) -> (String, String) {
             "Skilled scans the roots when this view opens.".to_owned(),
         );
     }
+    if app.metadata_failure().is_some() {
+        return (
+            "Application metadata is unavailable".to_owned(),
+            "Skilled scanned every detected agent root read-only. Registry-backed claims and \
+             every write are withheld for this session."
+                .to_owned(),
+        );
+    }
     // Nothing was looked at, so nothing may be said about what exists — and a
     // surviving filter must not invent installed skills to match against.
     if app.inventory().no_agent_configured() {
@@ -1632,14 +1650,25 @@ fn render_doctor_findings(
     app: &SkilledApp,
     findings: &[DoctorEntry<'_>],
 ) {
-    let body = render_pane_scaffold(
-        frame,
-        area,
-        "Doctor",
-        &doctor_subtitle(app, findings.len()),
-        app.doctor_pane() == DoctorPane::Findings,
-        false,
-    );
+    let body = if let Some(line) = metadata_failure_line(app) {
+        render_pane_scaffold_with_status(
+            frame,
+            area,
+            "Doctor",
+            &doctor_subtitle(app, findings.len()),
+            app.doctor_pane() == DoctorPane::Findings,
+            line,
+        )
+    } else {
+        render_pane_scaffold(
+            frame,
+            area,
+            "Doctor",
+            &doctor_subtitle(app, findings.len()),
+            app.doctor_pane() == DoctorPane::Findings,
+            false,
+        )
+    };
 
     if findings.is_empty() {
         let region = body.inner(Margin {
@@ -1682,6 +1711,13 @@ fn doctor_subtitle(app: &SkilledApp, listed: usize) -> String {
     }
     if inventory.no_agent_configured() {
         return "no root read".to_owned();
+    }
+    if app.metadata_failure().is_some() {
+        return if listed > 0 {
+            format!("{listed} listed · metadata unavailable")
+        } else {
+            "metadata unavailable".to_owned()
+        };
     }
     // A withheld count is withheld for one of two reasons, and they are
     // different answers: part of the requested scope could not be read, or
@@ -1769,6 +1805,15 @@ fn doctor_empty_state(app: &SkilledApp) -> (&'static str, String, String) {
             "·",
             "Installation roots have not been scanned".to_owned(),
             "Skilled scans the roots when this view opens.".to_owned(),
+        );
+    }
+    if app.metadata_failure().is_some() {
+        return (
+            "·",
+            "Application metadata is unavailable".to_owned(),
+            "Skilled kept the read-only scan and diagnosis available, but it cannot claim the \
+             registry is complete or perform writes in this session."
+                .to_owned(),
         );
     }
     if inventory.no_agent_configured() {
@@ -1976,8 +2021,8 @@ fn finding_consequence(entry: &DoctorEntry<'_>) -> &'static str {
              that failed to install."
         }
         "install.provenance_unverified" => {
-            "A registered source could not be read, so Skilled cannot say whether this \
-             came from one."
+            "Skilled could not read its registry in full, so it cannot say whether this came \
+             from a registered source."
         }
         "variant.duplicate_for_agent" => {
             "Which definition the agent would resolve is not something Skilled can \
@@ -2065,6 +2110,48 @@ fn render_pane_scaffold(
     });
     frame.render_widget(Paragraph::new(lines), header);
     body
+}
+
+/// A Doctor header with the session-wide metadata failure kept above its
+/// finding rows rather than synthesised as a skill finding.
+fn render_pane_scaffold_with_status(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    heading: &str,
+    subtitle: &str,
+    focused: bool,
+    status: Line<'static>,
+) -> Rect {
+    let mut lines = vec![pane_header(heading, subtitle, focused, area.width), status];
+    let height = detail_lines_height(&lines, area.width)
+        .saturating_add(1)
+        .min(usize::from(area.height.saturating_sub(1)));
+    let [header, body] = Layout::vertical([
+        Constraint::Length(u16::try_from(height).unwrap_or(u16::MAX)),
+        Constraint::Min(1),
+    ])
+    .areas(area);
+    lines.push(components::rule(header.width));
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), header);
+    body
+}
+
+fn metadata_failure_line(app: &SkilledApp) -> Option<Line<'static>> {
+    let failure = app.metadata_failure()?;
+    let scope = if app.registry_availability() == RegistryAvailability::Unavailable {
+        "The agent selection could not be read; all detected roots were scanned read-only. \
+         Writes are refused."
+    } else {
+        "Metadata became unreadable during this session; the sources and selection shown were \
+         read before that. Writes are refused."
+    };
+    Some(Line::from(vec![
+        components::badge(Tone::Critical, "metadata unavailable"),
+        Span::raw(format!(
+            ": {}. {scope}",
+            components::metadata_failure_text(failure)
+        )),
+    ]))
 }
 
 /// The gap `components::focused_pane_header` sets between a heading and its
@@ -2633,8 +2720,8 @@ fn inventory_detail_lines(
         // Not knowing where something came from is not the same as knowing it
         // came from nowhere registered.
         RowProvenance::Unverified => lines.push(Line::from(
-            "A registered source could not be read, so Skilled cannot tell whether \
-             this came from one.",
+            "Skilled could not read its registry in full, so it cannot say whether this came \
+             from a registered source.",
         )),
         // Unresolved content is observed, never adopted.
         RowProvenance::Unregistered => lines.push(Line::from(
@@ -3060,23 +3147,36 @@ fn render_sources(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
 }
 
 fn render_source_repositories(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
+    let metadata_unavailable = app.registry_availability() == RegistryAvailability::Unavailable;
+    let subtitle = if metadata_unavailable {
+        "registry unavailable".to_owned()
+    } else {
+        format!("{} registered", app.sources().len())
+    };
     let inner = render_pane_scaffold(
         frame,
         area,
         "Repositories",
-        &format!("{} registered", app.sources().len()),
+        &subtitle,
         app.sources_pane() == SourcesPane::Repositories,
         false,
     );
 
     if app.sources().is_empty() {
-        frame.render_widget(
-            components::empty_state(
-                "·",
+        let (headline, explanation) = if metadata_unavailable {
+            (
+                "Source registry is unavailable",
+                "Skilled cannot state which sources are registered, and adding one is disabled \
+                 for this session.",
+            )
+        } else {
+            (
                 "No sources are registered",
                 "Press a to register a local Git checkout.",
-                inner,
-            ),
+            )
+        };
+        frame.render_widget(
+            components::empty_state("·", headline, explanation, inner),
             inner,
         );
         return;
@@ -3190,13 +3290,13 @@ fn render_source_variants(
     );
 
     let Some(source) = app.selected_source() else {
+        let explanation = if app.metadata_failure().is_some() {
+            "The source registry is unavailable in this session."
+        } else {
+            "Press a to register a local Git checkout."
+        };
         frame.render_widget(
-            components::empty_state(
-                "·",
-                "No source selected",
-                "Press a to register a local Git checkout.",
-                inner,
-            ),
+            components::empty_state("·", "No source selected", explanation, inner),
             inner,
         );
         return;
@@ -4635,7 +4735,7 @@ fn install_step_verdict(outcome: &StepOutcome) -> (Tone, String) {
             Tone::Warning,
             format!(
                 "link created, but Skilled could not record owning it: {}",
-                terminal_safe(error)
+                terminal_safe(&error.to_string())
             ),
         ),
         StepOutcome::RootCreatedLinkFailed(error) => (
@@ -5084,7 +5184,7 @@ fn worktree_badge(dirty: Option<bool>) -> Span<'static> {
     }
 }
 
-fn render_settings(frame: &mut Frame<'_>, area: Rect) {
+fn render_settings(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
     frame.render_widget(Clear, area);
     frame.render_widget(Block::new().style(theme::app_surface()), area);
     let width = match viewport::classify(area) {
@@ -5096,18 +5196,28 @@ fn render_settings(frame: &mut Frame<'_>, area: Rect) {
     let block = components::dialog_frame("Settings", "global scope");
     let regions = components::dialog_regions(block.inner(popup), 29);
     frame.render_widget(block, popup);
-    frame.render_widget(
-        Paragraph::new(vec![
-            Line::styled("Setup", theme::section_title()),
-            Line::default(),
-            components::list_row(vec![Span::raw("Rerun setup")], true, regions.body.width),
-            Line::default(),
+    let mut lines = vec![
+        Line::styled("Setup", theme::section_title()),
+        Line::default(),
+        components::list_row(vec![Span::raw("Rerun setup")], true, regions.body.width),
+        Line::default(),
+    ];
+    if app.metadata_failure().is_some() {
+        lines.extend([
+            Line::from("Rerunning setup is unavailable while metadata cannot be written."),
+            Line::from("Inventory, Sources, and Doctor remain available read-only."),
+            Line::from("Esc closes Settings."),
+        ]);
+    } else {
+        lines.extend([
             Line::from("Reset setup completion and return to Welcome."),
             Line::from("Agent root and executable detection is refreshed."),
             Line::from("Agent selections and registered sources are retained."),
             Line::from("Enter reruns setup; Esc closes Settings."),
-        ])
-        .wrap(Wrap { trim: false }),
+        ]);
+    }
+    frame.render_widget(
+        Paragraph::new(lines).wrap(Wrap { trim: false }),
         regions.body,
     );
     frame.render_widget(
@@ -5123,15 +5233,23 @@ fn render_settings(frame: &mut Frame<'_>, area: Rect) {
     );
     frame.render_widget(
         Paragraph::new(
-            Line::from(vec![
-                Span::styled("Enter", theme::key_cap()),
-                Span::raw(" "),
-                Span::styled("Rerun", theme::key_label()),
-                Span::raw("   "),
-                Span::styled("Esc", theme::key_cap()),
-                Span::raw(" "),
-                Span::styled("Close", theme::key_label()),
-            ])
+            Line::from(if app.can_rerun_setup() {
+                vec![
+                    Span::styled("Enter", theme::key_cap()),
+                    Span::raw(" "),
+                    Span::styled("Rerun", theme::key_label()),
+                    Span::raw("   "),
+                    Span::styled("Esc", theme::key_cap()),
+                    Span::raw(" "),
+                    Span::styled("Close", theme::key_label()),
+                ]
+            } else {
+                vec![
+                    Span::styled("Esc", theme::key_cap()),
+                    Span::raw(" "),
+                    Span::styled("Close", theme::key_label()),
+                ]
+            })
             .right_aligned(),
         ),
         regions.actions,
@@ -5402,12 +5520,14 @@ fn help_commands(
                     description: "preview installing the focused variant",
                 });
             }
-            commands.extend([
-                HelpCommand {
+            if app.can_add_source() {
+                commands.push(HelpCommand {
                     key: "a",
                     label: "Add source",
                     description: "inspect a local checkout",
-                },
+                });
+            }
+            commands.extend([
                 HelpCommand {
                     key: "1",
                     label: "Inventory",
@@ -5492,23 +5612,29 @@ fn help_commands(
             ]);
             commands
         }
-        View::Settings => vec![
-            HelpCommand {
-                key: "Enter",
-                label: "Rerun setup",
-                description: "reset setup and start again",
-            },
-            HelpCommand {
-                key: "Esc",
-                label: "Close Settings",
-                description: "return to Inventory after help closes",
-            },
-            HelpCommand {
-                key: "?",
-                label: "Help",
-                description: "open this keyboard reference",
-            },
-        ],
+        View::Settings => {
+            let mut commands = Vec::new();
+            if app.can_rerun_setup() {
+                commands.push(HelpCommand {
+                    key: "Enter",
+                    label: "Rerun setup",
+                    description: "reset setup and start again",
+                });
+            }
+            commands.extend([
+                HelpCommand {
+                    key: "Esc",
+                    label: "Close Settings",
+                    description: "return to Inventory after help closes",
+                },
+                HelpCommand {
+                    key: "?",
+                    label: "Help",
+                    description: "open this keyboard reference",
+                },
+            ]);
+            commands
+        }
     }
 }
 
@@ -5689,8 +5815,10 @@ fn key_hints(app: &SkilledApp, detail_extent: Option<usize>) -> Vec<KeyHint> {
             if app.can_install_selection() {
                 hints.push(KeyHint::new("i", "Install"));
             }
+            if app.can_add_source() {
+                hints.push(KeyHint::new("a", "Add source"));
+            }
             hints.extend([
-                KeyHint::new("a", "Add source"),
                 KeyHint::new("1", "Inventory"),
                 KeyHint::new("4", "Doctor"),
                 KeyHint::new("?", "Help"),
@@ -5719,11 +5847,17 @@ fn key_hints(app: &SkilledApp, detail_extent: Option<usize>) -> Vec<KeyHint> {
             ]);
             hints
         }
-        View::Settings => vec![
-            KeyHint::essential("Enter", "Rerun setup"),
-            KeyHint::new("?", "Help"),
-            KeyHint::essential("Esc", "Close"),
-        ],
+        View::Settings => {
+            let mut hints = Vec::new();
+            if app.can_rerun_setup() {
+                hints.push(KeyHint::essential("Enter", "Rerun setup"));
+            }
+            hints.extend([
+                KeyHint::new("?", "Help"),
+                KeyHint::essential("Esc", "Close"),
+            ]);
+            hints
+        }
     }
 }
 

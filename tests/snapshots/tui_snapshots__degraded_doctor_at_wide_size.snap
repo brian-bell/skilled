@@ -1,0 +1,44 @@
+---
+source: tests/tui_snapshots.rs
+expression: "normalize_degraded(&temporary, render(&app, 120, 40))"
+---
+ ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁
+▕                                                                                                                      ▏
+▕ ◆ skilled  global                                                                                                    ▏
+▕▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▏
+▕                │                │                │                │                                                  ▏
+▕ 1 Inventory ·1 │ 2 Sources      │ Updates (soon) │ 4 Doctor       │                ● degraded · metadata unavailable ▏
+▕▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁│▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁│▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁│▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁│▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▏
+▕▌ Doctor  1 listed · metadata unavailable                                     │   Details  portable                   ▏
+▕× metadata unavailable:                                                       │ ───────────────────────────────────── ▏
+▕<TEMP>/data/skilled.sqlit│ FINDING                               ▏
+▕e3: filesystem operation failed: No such file or directory (os error 2). The  │ ───────────────────────────────────── ▏
+▕agent selection could not be read; all detected roots were scanned read-only. │ install.provenance_unverified         ▏
+▕Writes are refused.                                                           │ ! warning                             ▏
+▕──────────────────────────────────────────────────────────────────────────────│ Agent: Claude Code                    ▏
+▕  SEVERITY   FINDING                           SKILL              AGENT       │ OBSERVED                              ▏
+▕▌ ! warning  install.provenance_unverified     portable           Claude Code │ ───────────────────────────────────── ▏
+▕                                                                              │ Skilled could not read its own        ▏
+▕                                                                              │ metadata, so it cannot tell whether   ▏
+▕                                                                              │ this came from a registered source    ▏
+▕                                                                              │ CONSEQUENCE                           ▏
+▕                                                                              │ ───────────────────────────────────── ▏
+▕                                                                              │ Skilled could not read its registry   ▏
+▕                                                                              │ in full, so it cannot say whether     ▏
+▕                                                                              │ this came from a registered source.   ▏
+▕                                                                              │ INSTALLATION                          ▏
+▕                                                                              │ ───────────────────────────────────── ▏
+▕                                                                              │ Path: ~/.claude/skills/portable       ▏
+▕                                                                              │ Object: directory                     ▏
+▕                                                                              │ Repair: not offered in this release   ▏
+▕                                                                              │                                       ▏
+▕                                                                              │                                       ▏
+▕                                                                              │                                       ▏
+▕                                                                              │                                       ▏
+▕                                                                              │                                       ▏
+▕                                                                              │                                       ▏
+▕                                                                              │                                       ▏
+▕                                                                              │                                       ▏
+▕                                                                                                                      ▏
+▕ Tab/Shift-Tab Region   Enter Open   1 Inventory   2 Sources   ? Help   q Quit   Esc Back                             ▏
+ ▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔

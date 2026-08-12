@@ -1,9 +1,9 @@
 use std::{fs, path::Path, process::Command};
 
-use skilled::{Action, AgentKind, AppEnvironment, Error, SkilledApp, View};
+use skilled::{Action, AgentKind, AppEnvironment, SkilledApp, View};
 
 #[test]
-fn a_database_from_a_newer_skilled_version_is_rejected_before_use() {
+fn a_database_from_a_newer_skilled_version_opens_degraded_without_writing() {
     let temporary = tempfile::tempdir().expect("temporary application directory");
     let data_dir = temporary.path().join("data");
     std::fs::create_dir_all(&data_dir).expect("create data directory");
@@ -13,26 +13,30 @@ fn a_database_from_a_newer_skilled_version_is_rejected_before_use() {
         .execute_batch("PRAGMA user_version = 99;")
         .expect("set future schema version");
     drop(connection);
+    let database = data_dir.join("skilled.sqlite3");
+    let before = fs::read(&database).expect("read future database");
 
-    let result = SkilledApp::open(AppEnvironment::new(
+    let app = SkilledApp::open(AppEnvironment::new(
         temporary.path().join("home"),
         data_dir,
         "",
-    ));
+    ))
+    .expect("open degraded application");
 
-    assert!(matches!(
-        result,
-        Err(Error::UnsupportedSchema {
-            found: 99,
-            supported: 5
-        })
-    ));
+    assert_eq!(app.view(), View::Inventory);
+    assert!(
+        app.metadata_failure()
+            .expect("metadata failure")
+            .cause()
+            .contains("schema 99")
+    );
+    assert_eq!(fs::read(database).expect("reread future database"), before);
 }
 
 /// The next schema after the one this build writes is still refused, so a
 /// database a newer Skilled upgraded is never written through by an older one.
 #[test]
-fn the_schema_one_past_this_build_is_refused_rather_than_written_through() {
+fn the_schema_one_past_this_build_degrades_rather_than_writing_through() {
     let temporary = tempfile::tempdir().expect("temporary application directory");
     let data_dir = temporary.path().join("data");
     fs::create_dir_all(&data_dir).expect("create data directory");
@@ -42,20 +46,24 @@ fn the_schema_one_past_this_build_is_refused_rather_than_written_through() {
         .execute_batch("PRAGMA user_version = 6;")
         .expect("set the next schema version");
     drop(connection);
+    let database = data_dir.join("skilled.sqlite3");
+    let before = fs::read(&database).expect("read future database");
 
-    let result = SkilledApp::open(AppEnvironment::new(
+    let app = SkilledApp::open(AppEnvironment::new(
         temporary.path().join("home"),
         data_dir,
         "",
-    ));
+    ))
+    .expect("open degraded application");
 
-    assert!(matches!(
-        result,
-        Err(Error::UnsupportedSchema {
-            found: 6,
-            supported: 5
-        })
-    ));
+    assert_eq!(app.view(), View::Inventory);
+    assert!(
+        app.metadata_failure()
+            .expect("metadata failure")
+            .cause()
+            .contains("schema 6")
+    );
+    assert_eq!(fs::read(database).expect("reread future database"), before);
 }
 
 /// Spec 7: an ownership receipt is evidence that Skilled created a particular

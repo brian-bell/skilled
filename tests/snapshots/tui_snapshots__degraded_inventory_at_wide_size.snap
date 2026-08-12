@@ -1,0 +1,44 @@
+---
+source: tests/tui_snapshots.rs
+expression: "normalize_degraded(&temporary, render(&app, 120, 40))"
+---
+ ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁
+▕                                                                                                                      ▏
+▕ ◆ skilled  global                                                                                                    ▏
+▕▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▏
+▕                │                │                │                │                                                  ▏
+▕ 1 Inventory ·1 │ 2 Sources      │ Updates (soon) │ 4 Doctor       │                ● degraded · metadata unavailable ▏
+▕▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁│▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁│▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁│▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁│▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▏
+▕                                                                              │                                       ▏
+▕▌ Global inventory  1 skill                                                   │   Details  portable                   ▏
+▕× metadata unavailable:                                                       │ ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁ ▏
+▕<TEMP>/data/skilled.sqlit│ SKILL                                 ▏
+▕e3: filesystem operation failed: No such file or directory (os error 2). The  │ ───────────────────────────────────── ▏
+▕agent selection could not be read; all detected roots were scanned read-only. │ portable                              ▏
+▕Writes are refused.                                                           │ U unverified                          ▏
+▕──────────────────────────────────────────────────────────────────────────────│ Description: Portable fixture         ▏
+▕  SKILL                 SOURCE         CLAUDE  CODEX  OPENCODE  HEALTH        │ SOURCE                                ▏
+▕──────────────────────────────────────────────────────────────────────────────│ ───────────────────────────────────── ▏
+▕▌ portable              unverified     U       -      -         U unverified  │ Skilled could not read its registry   ▏
+▕──────────────────────────────────────────────────────────────────────────────│ in full, so it cannot say whether     ▏
+▕                                                                              │ this came from a registered source.   ▏
+▕                                                                              │ CLAUDE CODE  U unverified             ▏
+▕                                                                              │ ───────────────────────────────────── ▏
+▕                                                                              │ Finding:                              ▏
+▕                                                                              │ install.provenance_unverified ·       ▏
+▕                                                                              │ warning                               ▏
+▕                                                                              │   Skilled could not read its own      ▏
+▕                                                                              │ metadata, so it cannot tell whether   ▏
+▕                                                                              │ this came from a registered source    ▏
+▕                                                                              │ Path: ~/.claude/skills/portable       ▏
+▕                                                                              │ Object: directory                     ▏
+▕                                                                              │ Validation: ✓ valid as portable       ▏
+▕                                                                              │ OPENCODE RESOLUTION  ✓ resolved       ▏
+▕                                                                              │ ───────────────────────────────────── ▏
+▕                                                                              │ Loads: ~/.claude/skills/portable      ▏
+▕                                                                              │ NO ROOT                               ▏
+▕                                                                              │ ───────────────────────────────────── ▏
+▕                                                                              │ - Codex, OpenCode                     ▏
+▕                                                                                                                      ▏
+▕ Tab/Shift-Tab Region   Enter Open   / Filter   2 Sources   4 Doctor   s Settings   ? Help   q Quit                   ▏
+ ▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔

@@ -1053,6 +1053,44 @@ fn session_status_reports_only_what_the_application_knows() {
 }
 
 #[test]
+fn degraded_chrome_withholds_registry_counts_and_mutation_hints() {
+    let temporary = tempfile::tempdir().expect("temporary application directory");
+    let home = temporary.path().join("home");
+    let data = temporary.path().join("data");
+    let skill = home.join(".claude/skills/portable");
+    fs::create_dir_all(&skill).expect("create degraded skill fixture");
+    fs::write(
+        skill.join("SKILL.md"),
+        "---\nname: portable\ndescription: Portable fixture\n---\n",
+    )
+    .expect("write degraded skill fixture");
+    fs::create_dir_all(&data).expect("create established data directory");
+    let mut app =
+        SkilledApp::open(AppEnvironment::new(&home, &data, "")).expect("open degraded application");
+
+    let inventory = buffer(&app, 120, 40);
+    let navigation = row_text(&inventory, 5);
+    assert!(navigation.contains("1 Inventory ·1"), "{navigation}");
+    assert!(navigation.contains("2 Sources"), "{navigation}");
+    assert!(!navigation.contains("2 Sources ·0"), "{navigation}");
+    assert_eq!(
+        style_in_row(&inventory, 5, "●").fg,
+        Some(Color::Rgb(0xee, 0x6b, 0x73))
+    );
+
+    app.update(Action::OpenSources);
+    let sources = text(&buffer(&app, 120, 40));
+    assert!(!sources.contains("a Add source"), "{sources}");
+    assert!(!sources.contains("i Install"), "{sources}");
+
+    app.update(Action::OpenInventory);
+    app.update(Action::OpenSettings);
+    let settings = text(&buffer(&app, 120, 40));
+    assert!(!settings.contains("Enter Rerun"), "{settings}");
+    assert!(settings.contains("Esc Close"), "{settings}");
+}
+
+#[test]
 fn navigation_follows_the_active_view() {
     let harness = Harness::new();
     let mut app = harness.completed_setup();

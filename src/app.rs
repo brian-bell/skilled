@@ -1,9 +1,11 @@
 use std::path::{Path, PathBuf};
 
 use crate::{
-    AgentDetection, AgentKind, AppEnvironment, Result, SessionIdentity,
+    AgentDetection, AgentKind, AppEnvironment, Error, MetadataFailure, Result, SessionIdentity,
     agents::{detect_agents, detection_at},
-    inventory::{DoctorEntry, InventoryRow, InventorySnapshot, scan_installations},
+    inventory::{
+        DoctorEntry, InventoryRow, InventorySnapshot, RegistryAvailability, scan_installations,
+    },
     operations::{
         InstallOutcome, InstallPlan, InstallPrompt, Receipt, apply_install, plan_install,
         probe_install, verify_install,
@@ -13,7 +15,7 @@ use crate::{
         CatalogProposal, RegisteredSource, SkillCandidate, SourcePreview, preview_local_source,
         revalidate_source_preview,
     },
-    store::Store,
+    store::{StartupState, Store},
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -354,20 +356,55 @@ pub enum PlanRequestFailure {
     /// The request names no variant Skilled can plan an install for.
     Unplannable(String),
     /// Skilled's own metadata could not be read.
-    Metadata(String),
+    Metadata(MetadataFailure),
 }
 
 impl PlanRequestFailure {
-    pub fn message(&self) -> &str {
+    pub fn message(&self) -> String {
         match self {
-            Self::Unplannable(message) | Self::Metadata(message) => message,
+            Self::Unplannable(message) => message.clone(),
+            Self::Metadata(failure) => failure.to_string(),
         }
+    }
+}
+
+enum Metadata {
+    Ready(Store),
+    Unavailable(MetadataFailure),
+}
+
+struct MetadataStartup {
+    metadata: Metadata,
+    state: Option<StartupState>,
+}
+
+fn open_metadata(data_dir: &Path) -> MetadataStartup {
+    let database_path = data_dir.join("skilled.sqlite3");
+    match Store::open(data_dir) {
+        Ok(store) => match store.load_startup_state_read_only() {
+            Ok(state) => MetadataStartup {
+                metadata: Metadata::Ready(store),
+                state: Some(state),
+            },
+            Err(error) => MetadataStartup {
+                metadata: Metadata::Unavailable(MetadataFailure::new(
+                    database_path,
+                    error.to_string(),
+                )),
+                state: None,
+            },
+        },
+        Err(error) => MetadataStartup {
+            metadata: Metadata::Unavailable(MetadataFailure::new(database_path, error.to_string())),
+            state: None,
+        },
     }
 }
 
 pub struct SkilledApp {
     view: View,
-    store: Store,
+    metadata: Metadata,
+    registry_availability: RegistryAvailability,
     environment: AppEnvironment,
     agents: [AgentDetection; 3],
     focused_agent: usize,
@@ -421,32 +458,46 @@ pub struct SkilledApp {
 
 impl SkilledApp {
     pub fn open(environment: AppEnvironment) -> Result<Self> {
-        let store = Store::open(&environment.data_dir)?;
-        let view = if store.setup_complete()? {
-            View::Inventory
-        } else {
-            View::Setup(SetupStep::Welcome)
+        let startup = open_metadata(&environment.data_dir);
+        let (view, registry_availability) = match &startup.state {
+            Some(state) if state.setup_complete => {
+                (View::Inventory, RegistryAvailability::Readable)
+            }
+            Some(_) => (
+                View::Setup(SetupStep::Welcome),
+                RegistryAvailability::Readable,
+            ),
+            None => (View::Inventory, RegistryAvailability::Unavailable),
         };
         let mut agents = detect_agents(&environment);
-        if let Some(selections) = store.agent_selections()? {
+        if let Some(selections) = startup
+            .state
+            .as_ref()
+            .and_then(|state| state.agent_selections)
+        {
             for (agent, selected) in agents.iter_mut().zip(selections) {
                 agent.set_selected(selected);
             }
         }
-        let sources = store.registered_sources()?;
+        let sources = startup
+            .state
+            .as_ref()
+            .map(|state| state.sources.clone())
+            .unwrap_or_default();
         // Setup reads the installation roots at its own step, after the user
         // has chosen which agents Skilled should configure. Reading them
         // before that would look at roots the user may be about to deselect.
         // Once setup is complete the selections are known, so opening
         // straight into the Inventory opens onto a real scan.
         let inventory = if view == View::Inventory {
-            scan_installations(&agents, &sources)
+            scan_installations(&agents, &sources, registry_availability)
         } else {
-            InventorySnapshot::not_scanned(&agents)
+            InventorySnapshot::not_scanned(&agents, registry_availability)
         };
         let mut app = Self {
             view,
-            store,
+            metadata: startup.metadata,
+            registry_availability,
             environment,
             agents,
             focused_agent: 0,
@@ -479,6 +530,25 @@ impl SkilledApp {
 
     pub fn view(&self) -> View {
         self.view
+    }
+
+    pub fn metadata_failure(&self) -> Option<&MetadataFailure> {
+        match &self.metadata {
+            Metadata::Ready(_) => None,
+            Metadata::Unavailable(failure) => Some(failure),
+        }
+    }
+
+    pub fn registry_availability(&self) -> RegistryAvailability {
+        self.registry_availability
+    }
+
+    #[cfg(test)]
+    fn fail_metadata_next(&self, operation: crate::store::MetadataOperation) {
+        let Metadata::Ready(store) = &self.metadata else {
+            panic!("metadata is already unavailable");
+        };
+        store.fail_next(operation);
     }
 
     pub fn agent(&self, kind: AgentKind) -> &AgentDetection {
@@ -566,7 +636,8 @@ impl SkilledApp {
     /// install from it, and offering the key would promise an answer whose only
     /// content is that the row was never installable.
     pub fn can_install_selection(&self) -> bool {
-        self.view == View::Sources
+        self.metadata_failure().is_none()
+            && self.view == View::Sources
             && matches!(
                 self.sources_pane,
                 SourcesPane::Variants | SourcesPane::Details
@@ -577,12 +648,23 @@ impl SkilledApp {
             )
     }
 
+    pub fn can_add_source(&self) -> bool {
+        self.metadata_failure().is_none()
+    }
+
+    pub fn can_rerun_setup(&self) -> bool {
+        self.metadata_failure().is_none()
+    }
+
     /// Every ownership receipt Skilled holds.
     ///
     /// Spec 7 evidence, exposed so a caller can see what Skilled claims to have
     /// put on disk. Nothing reads one as an instruction.
     pub fn receipts(&self) -> Result<Vec<Receipt>> {
-        self.store.receipts()
+        match &self.metadata {
+            Metadata::Ready(store) => store.receipts(),
+            Metadata::Unavailable(failure) => Err(Error::MetadataUnavailable(failure.clone())),
+        }
     }
 
     pub fn inventory(&self) -> &InventorySnapshot {
@@ -718,11 +800,65 @@ impl SkilledApp {
 
     pub fn confirm_source(&mut self, preview: SourcePreview) -> Result<()> {
         let preview = revalidate_source_preview(&preview)?;
-        self.store.register_source(&preview)?;
-        self.sources = self.store.registered_sources()?;
+        if let Err(failure) = self.register_and_refresh_source(&preview) {
+            self.degrade(failure.clone());
+            return Err(Error::MetadataUnavailable(failure));
+        }
         self.focus_registered_source(preview.inspected().git_top_level());
         self.rescan_installations();
         Ok(())
+    }
+
+    fn register_and_refresh_source(
+        &mut self,
+        preview: &SourcePreview,
+    ) -> std::result::Result<(), MetadataFailure> {
+        let (result, committed) = match &mut self.metadata {
+            Metadata::Ready(store) => {
+                let database_path = store.database_path().to_path_buf();
+                match store.register_source(preview) {
+                    Ok(()) => (
+                        store.registered_sources().map_err(|error| {
+                            MetadataFailure::new(database_path, error.to_string())
+                        }),
+                        true,
+                    ),
+                    Err(error) => (
+                        Err(MetadataFailure::new(database_path, error.to_string())),
+                        false,
+                    ),
+                }
+            }
+            Metadata::Unavailable(failure) => return Err(failure.clone()),
+        };
+        match result {
+            Ok(sources) => {
+                self.sources = sources;
+                Ok(())
+            }
+            Err(failure) => {
+                if committed {
+                    self.registry_availability = RegistryAvailability::Unavailable;
+                }
+                Err(failure)
+            }
+        }
+    }
+
+    /// Enter the session's fail-closed read-only state while retaining data
+    /// that was read successfully before the failure.
+    fn degrade(&mut self, failure: MetadataFailure) {
+        self.set_degraded(failure);
+        self.rescan_installations();
+    }
+
+    fn set_degraded(&mut self, failure: MetadataFailure) {
+        if matches!(self.metadata, Metadata::Ready(_)) {
+            self.metadata = Metadata::Unavailable(failure);
+        }
+        self.view = View::Inventory;
+        self.clear_pending_source_state();
+        self.pending_install = None;
     }
 
     pub fn update(&mut self, action: Action) -> UpdateResult {
@@ -850,8 +986,9 @@ impl SkilledApp {
                 Vec::new()
             }
             Action::BeginAddSource => {
-                if self.view == View::Sources
-                    || self.view == View::Setup(SetupStep::DiscoverSources)
+                if self.can_add_source()
+                    && (self.view == View::Sources
+                        || self.view == View::Setup(SetupStep::DiscoverSources))
                 {
                     self.source_path.clear();
                     self.source_error = None;
@@ -917,7 +1054,8 @@ impl SkilledApp {
                 }
                 Vec::new()
             }
-            Action::ConfirmPendingSource => self.register_pending_source(),
+            Action::ConfirmPendingSource if self.can_add_source() => self.register_pending_source(),
+            Action::ConfirmPendingSource => Vec::new(),
             Action::MoveSourcesPane(delta) => {
                 if self.view == View::Sources {
                     let index = match self.sources_pane {
@@ -1002,7 +1140,8 @@ impl SkilledApp {
             // Reachable only with no prompt open, where there is nothing to
             // confirm and nothing to dismiss.
             Action::ConfirmInstall | Action::DismissInstall => Vec::new(),
-            Action::RerunSetup => self.rerun_setup(),
+            Action::RerunSetup if self.can_rerun_setup() => self.rerun_setup(),
+            Action::RerunSetup => Vec::new(),
             Action::Quit => return UpdateResult::quit(),
         };
         UpdateResult::continuing(effects)
@@ -1012,9 +1151,37 @@ impl SkilledApp {
         for effect in effects {
             match effect {
                 Effect::PersistSetup { agent_selections } => {
-                    self.store.complete_setup(*agent_selections)?;
+                    let result = match &mut self.metadata {
+                        Metadata::Ready(store) => {
+                            store.complete_setup(*agent_selections).map_err(|error| {
+                                MetadataFailure::new(
+                                    store.database_path().to_path_buf(),
+                                    error.to_string(),
+                                )
+                            })
+                        }
+                        Metadata::Unavailable(failure) => Err(failure.clone()),
+                    };
+                    if let Err(failure) = result {
+                        self.degrade(failure);
+                    }
                 }
-                Effect::ResetSetup => self.store.set_setup_complete(false)?,
+                Effect::ResetSetup => {
+                    let result = match &self.metadata {
+                        Metadata::Ready(store) => {
+                            store.set_setup_complete(false).map_err(|error| {
+                                MetadataFailure::new(
+                                    store.database_path().to_path_buf(),
+                                    error.to_string(),
+                                )
+                            })
+                        }
+                        Metadata::Unavailable(failure) => Err(failure.clone()),
+                    };
+                    if let Err(failure) = result {
+                        self.degrade(failure);
+                    }
+                }
                 Effect::RedetectAgents { agent_selections } => {
                     let mut detections = detect_agents(&self.environment);
                     for (detection, selected) in detections.iter_mut().zip(agent_selections) {
@@ -1052,11 +1219,10 @@ impl SkilledApp {
                             continue;
                         }
                     };
-                    if let Err(error) = self.store.register_source(&preview) {
-                        self.source_error = Some(error.to_string());
+                    if let Err(failure) = self.register_and_refresh_source(&preview) {
+                        self.degrade(failure);
                         continue;
                     }
-                    self.sources = self.store.registered_sources()?;
                     self.focus_registered_source(preview.inspected().git_top_level());
                     self.pending_source = None;
                     self.source_path.clear();
@@ -1072,7 +1238,10 @@ impl SkilledApp {
                 }
                 Effect::ScanInstallations => self.rescan_installations(),
                 Effect::PlanInstall => {
-                    self.pending_install = Some(self.build_install_preview());
+                    match self.build_install_preview() {
+                        Ok(prompt) => self.pending_install = Some(prompt),
+                        Err(failure) => self.degrade(failure),
+                    }
                     // The window belongs to the content under it, and this is
                     // new content.
                     self.reset_detail_scroll();
@@ -1089,6 +1258,9 @@ impl SkilledApp {
     /// A blocked plan and a plan with nothing left to do both stay on screen
     /// rather than turning into a report of an install that never ran.
     fn confirm_install(&mut self) -> Vec<Effect> {
+        if self.metadata_failure().is_some() {
+            return Vec::new();
+        }
         match &self.pending_install {
             Some(InstallPrompt::Preview(plan))
                 if plan.is_executable() && self.install_preview_fully_seen() =>
@@ -1117,22 +1289,23 @@ impl SkilledApp {
     /// A failure here becomes something the dialog states rather than an error
     /// out of `perform_effects`, which would end the process: the user asked a
     /// question about their machine and is owed the answer, not an exit.
-    fn build_install_preview(&self) -> InstallPrompt {
+    fn build_install_preview(&self) -> std::result::Result<InstallPrompt, MetadataFailure> {
         let Some(SourceRow::Variant { catalog, candidate }) = self.selected_variant_row() else {
-            return InstallPrompt::Failed(
+            return Ok(InstallPrompt::Failed(
                 "the focused row is not a skill variant, so there is nothing to install".to_owned(),
-            );
+            ));
         };
         let Some(source) = self.selected_source() else {
-            return InstallPrompt::Failed("no source is selected".to_owned());
+            return Ok(InstallPrompt::Failed("no source is selected".to_owned()));
         };
         let variant = VariantRef::of(source, catalog, candidate);
         match self.plan_install_for(&variant, [true; 3]) {
-            Ok(plan) => InstallPrompt::Preview(plan),
+            Ok(plan) => Ok(InstallPrompt::Preview(plan)),
             // The dialog states either, because either is the answer to the
             // question the user asked. Only a caller that has to choose an exit
             // status needs them apart.
-            Err(failure) => InstallPrompt::Failed(failure.message().to_owned()),
+            Err(PlanRequestFailure::Unplannable(message)) => Ok(InstallPrompt::Failed(message)),
+            Err(PlanRequestFailure::Metadata(failure)) => Err(failure),
         }
     }
 
@@ -1146,10 +1319,19 @@ impl SkilledApp {
         variant: &VariantRef,
         requested: [bool; 3],
     ) -> std::result::Result<InstallPlan, PlanRequestFailure> {
-        let receipts = self.store.receipts().map_err(|error| {
-            PlanRequestFailure::Metadata(format!(
-                "the ownership receipts could not be read, so Skilled cannot tell its own links \
-                 from anyone else\'s: {error}"
+        let store = match &self.metadata {
+            Metadata::Ready(store) => store,
+            Metadata::Unavailable(failure) => {
+                return Err(PlanRequestFailure::Metadata(failure.clone()));
+            }
+        };
+        let receipts = store.receipts().map_err(|error| {
+            PlanRequestFailure::Metadata(MetadataFailure::new(
+                store.database_path().to_path_buf(),
+                format!(
+                    "the ownership receipts could not be read, so Skilled cannot tell its own \
+                     links from anyone else\'s: {error}"
+                ),
             ))
         })?;
         let probe = probe_install(&self.agents, &self.sources, variant, self.home());
@@ -1168,11 +1350,21 @@ impl SkilledApp {
     ///
     /// The same three steps [`Effect::ApplyInstall`] performs, in the same
     /// order and for the same reason.
-    pub(crate) fn apply_plan(&mut self, plan: &InstallPlan) -> InstallOutcome {
-        let applied = apply_install(plan, &self.store, &self.environment.home_dir);
+    pub(crate) fn apply_plan(&mut self, plan: &InstallPlan) -> Result<InstallOutcome> {
+        let Metadata::Ready(store) = &self.metadata else {
+            return Err(Error::MetadataUnavailable(
+                self.metadata_failure()
+                    .expect("unavailable metadata")
+                    .clone(),
+            ));
+        };
+        let applied = apply_install(plan, store, &self.environment.home_dir);
+        if let Some(failure) = applied.metadata_failure().cloned() {
+            self.set_degraded(failure);
+        }
         self.rescan_installations();
         let verification = verify_install(plan, &applied, &self.inventory);
-        InstallOutcome::new(plan.clone(), applied, verification)
+        Ok(InstallOutcome::new(plan.clone(), applied, verification))
     }
 
     /// Apply the shown preview, then restate the inventory and check the plan
@@ -1185,8 +1377,11 @@ impl SkilledApp {
         let Some(InstallPrompt::Preview(plan)) = self.pending_install.take() else {
             return;
         };
-        let outcome = self.apply_plan(&plan);
-        self.pending_install = Some(InstallPrompt::Report(outcome));
+        match self.apply_plan(&plan) {
+            Ok(outcome) => self.pending_install = Some(InstallPrompt::Report(outcome)),
+            Err(Error::MetadataUnavailable(failure)) => self.degrade(failure),
+            Err(_) => unreachable!("apply_plan only refuses unavailable metadata"),
+        }
         // The report is different content from the preview it replaced.
         self.reset_detail_scroll();
     }
@@ -1196,7 +1391,8 @@ impl SkilledApp {
     /// This is the only place installation scanning happens; the reducer stays
     /// free of filesystem work.
     fn rescan_installations(&mut self) {
-        self.inventory = scan_installations(&self.agents, &self.sources);
+        self.inventory =
+            scan_installations(&self.agents, &self.sources, self.registry_availability);
         self.refilter_installations();
         // The findings behind the selection are gone with the snapshot, so the
         // selection is pulled back onto the list that replaced them.
@@ -1263,7 +1459,7 @@ impl SkilledApp {
     fn enter_doctor(&mut self) -> Vec<Effect> {
         self.view = View::Doctor;
         self.doctor_pane = DoctorPane::Findings;
-        self.inventory = InventorySnapshot::not_scanned(&self.agents);
+        self.inventory = InventorySnapshot::not_scanned(&self.agents, self.registry_availability);
         self.filtered_installations.clear();
         self.reset_detail_scroll();
         vec![Effect::ScanInstallations]
@@ -1280,7 +1476,7 @@ impl SkilledApp {
         // runner performs effects before drawing, so no frame of this state
         // reaches a user today; the reset is what keeps the reducer honest at
         // every instant should that ever change.
-        self.inventory = InventorySnapshot::not_scanned(&self.agents);
+        self.inventory = InventorySnapshot::not_scanned(&self.agents, self.registry_availability);
         // The gap snapshot holds no rows, so the only consistent filtered
         // list is empty whatever the query. Clearing it directly — rather
         // than refiltering — leaves the focused row alone: the scan that
@@ -1446,6 +1642,9 @@ impl SkilledApp {
     }
 
     fn advance_setup(&mut self) -> Vec<Effect> {
+        if self.metadata_failure().is_some() {
+            return Vec::new();
+        }
         let View::Setup(step) = self.view else {
             return Vec::new();
         };
@@ -1580,5 +1779,35 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["no variants"]
         );
+    }
+
+    #[test]
+    fn a_mid_session_reset_failure_forces_read_only_inventory_without_propagating() {
+        let temporary = tempfile::tempdir().expect("temporary application directory");
+        let mut app = SkilledApp::open(AppEnvironment::new(
+            temporary.path().join("home"),
+            temporary.path().join("data"),
+            "",
+        ))
+        .expect("open application");
+        for _ in 0..7 {
+            let update = app.update(Action::Continue);
+            app.perform_effects(update.effects())
+                .expect("complete setup");
+        }
+        app.update(Action::OpenSettings);
+        let update = app.update(Action::RerunSetup);
+        app.fail_metadata_next(crate::store::MetadataOperation::ResetSetup);
+
+        app.perform_effects(update.effects())
+            .expect("metadata failure is recoverable");
+
+        assert_eq!(app.view(), View::Inventory);
+        assert!(app.metadata_failure().is_some());
+        assert_eq!(app.registry_availability(), RegistryAvailability::Readable);
+        assert!(!app.can_add_source());
+        assert!(!app.can_rerun_setup());
+        assert!(app.pending_source().is_none());
+        assert!(!app.source_path_input_active());
     }
 }

@@ -99,6 +99,82 @@ fn inventory_empty_state_at_wide_size() {
 }
 
 #[test]
+fn degraded_inventory_at_supported_sizes() {
+    let (temporary, app) = degraded_app();
+    insta::assert_snapshot!(
+        "degraded_inventory_at_minimum_supported_size",
+        normalize_degraded(&temporary, render(&app, 80, 24))
+    );
+    insta::assert_snapshot!(
+        "degraded_inventory_at_wide_size",
+        normalize_degraded(&temporary, render(&app, 120, 40))
+    );
+}
+
+#[test]
+fn degraded_sources_at_supported_sizes() {
+    let (temporary, mut app) = degraded_app();
+    app.update(Action::OpenSources);
+    insta::assert_snapshot!(
+        "degraded_sources_at_minimum_supported_size",
+        normalize_degraded(&temporary, render(&app, 80, 24))
+    );
+    insta::assert_snapshot!(
+        "degraded_sources_at_wide_size",
+        normalize_degraded(&temporary, render(&app, 120, 40))
+    );
+}
+
+#[test]
+fn degraded_doctor_at_supported_sizes() {
+    let (temporary, mut app) = degraded_app();
+    dispatch(&mut app, Action::OpenDoctor);
+    insta::assert_snapshot!(
+        "degraded_doctor_at_minimum_supported_size",
+        normalize_degraded(&temporary, render(&app, 80, 24))
+    );
+    insta::assert_snapshot!(
+        "degraded_doctor_at_wide_size",
+        normalize_degraded(&temporary, render(&app, 120, 40))
+    );
+}
+
+#[test]
+fn degraded_settings_at_supported_sizes() {
+    let (temporary, mut app) = degraded_app();
+    app.update(Action::OpenSettings);
+    insta::assert_snapshot!(
+        "degraded_settings_at_minimum_supported_size",
+        normalize_degraded(&temporary, render(&app, 80, 24))
+    );
+    insta::assert_snapshot!(
+        "degraded_settings_at_wide_size",
+        normalize_degraded(&temporary, render(&app, 120, 40))
+    );
+}
+
+fn degraded_app() -> (tempfile::TempDir, SkilledApp) {
+    let temporary = tempfile::tempdir().expect("temporary application directory");
+    let home = temporary.path().join("home");
+    let data = temporary.path().join("data");
+    let skill = home.join(".claude/skills/portable");
+    fs::create_dir_all(&skill).expect("create degraded skill fixture");
+    fs::write(
+        skill.join("SKILL.md"),
+        "---\nname: portable\ndescription: Portable fixture\n---\n",
+    )
+    .expect("write degraded skill fixture");
+    fs::create_dir_all(&data).expect("create established data directory");
+    let app =
+        SkilledApp::open(AppEnvironment::new(&home, &data, "")).expect("open degraded application");
+    (temporary, app)
+}
+
+fn normalize_degraded(temporary: &tempfile::TempDir, screen: String) -> String {
+    screen.replace(&temporary.path().display().to_string(), "<TEMP>")
+}
+
+#[test]
 fn undersized_terminal_shows_a_recoverable_notice() {
     let temporary = tempfile::tempdir().expect("temporary application directory");
     let app = SkilledApp::open(AppEnvironment::new(

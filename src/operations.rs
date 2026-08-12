@@ -19,7 +19,7 @@ use std::{
 };
 
 use crate::{
-    AgentDetection, AgentKind,
+    AgentDetection, AgentKind, MetadataFailure,
     agents::detection_at,
     inventory::{
         Finding, FindingSeverity, InstallationHealth, InstallationObject,
@@ -1147,6 +1147,15 @@ fn slot_disposition(
 }
 
 /// What happened to one target the plan called work.
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum ReceiptFailure {
+    #[error("{0}")]
+    Metadata(MetadataFailure),
+    #[error("{0}")]
+    Other(String),
+}
+
+/// What happened to one target the plan called work.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum StepOutcome {
     /// The link was created and its ownership receipt recorded.
@@ -1154,7 +1163,7 @@ pub enum StepOutcome {
     /// The link was created but the receipt could not be written, so Skilled
     /// does not own something it put on disk. Stated rather than hidden: the
     /// link is real, and a later repair will not recognise it.
-    CreatedUnrecorded(String),
+    CreatedUnrecorded(ReceiptFailure),
     /// The skill root was created, but the link could not be. The empty root is
     /// deliberately left in place, so this is a partial write rather than a
     /// failed step that changed nothing.
@@ -1216,6 +1225,13 @@ impl ApplyReport {
 
     pub fn step(&self, agent: AgentKind) -> Option<&AppliedStep> {
         self.steps.iter().find(|step| step.agent == agent)
+    }
+
+    pub(crate) fn metadata_failure(&self) -> Option<&MetadataFailure> {
+        self.steps.iter().find_map(|step| match &step.outcome {
+            StepOutcome::CreatedUnrecorded(ReceiptFailure::Metadata(failure)) => Some(failure),
+            _ => None,
+        })
     }
 }
 
@@ -1577,7 +1593,7 @@ fn apply_target(
     }
     match store.record_receipt(&receipt) {
         Ok(()) => StepOutcome::Created,
-        Err(error) => StepOutcome::CreatedUnrecorded(error.to_string()),
+        Err(error) => StepOutcome::CreatedUnrecorded(error),
     }
 }
 
