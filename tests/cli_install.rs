@@ -70,6 +70,72 @@ fn yes_installs_after_planning_and_verifying_without_asking() {
     );
 }
 
+#[test]
+fn uninstall_yes_removes_only_the_named_managed_link_and_still_verifies() {
+    let fixture = Fixture::new();
+    let repository = fixture.register("library", &["portable"]);
+    let source = repository.display().to_string();
+    let (installed, output) = fixture.run(&[
+        "install",
+        "--yes",
+        "--source",
+        &source,
+        "--skill",
+        "portable",
+        "--agents",
+        "claude-code",
+    ]);
+    assert_eq!(installed, ExitCodeKind::Success, "{output}");
+
+    let link = fixture.home().join(".claude/skills/portable");
+    let (code, output) = fixture.run(&[
+        "uninstall",
+        "--yes",
+        "--skill",
+        "portable",
+        "--agent",
+        "claude-code",
+    ]);
+
+    assert_eq!(code, ExitCodeKind::Success, "{output}");
+    assert!(!output.contains("Proceed?"), "{output}");
+    assert!(fs::symlink_metadata(&link).is_err(), "{output}");
+    assert!(link.parent().expect("root").is_dir(), "root must remain");
+    assert!(repository.join("skills/portable/SKILL.md").is_file());
+    assert!(fixture.app().receipts().expect("receipts").is_empty());
+    assert!(
+        output.contains("Source content and agent skill roots were not removed"),
+        "{output}"
+    );
+}
+
+#[test]
+fn uninstall_without_a_receipt_is_blocked_and_leaves_the_link_alone() {
+    let fixture = Fixture::new();
+    let repository = fixture.register("library", &["portable"]);
+    let root = fixture.home().join(".claude/skills");
+    fs::create_dir_all(&root).expect("root");
+    let link = root.join("portable");
+    std::os::unix::fs::symlink(repository.join("skills/portable"), &link).expect("unmanaged link");
+
+    let (code, output) = fixture.run(&[
+        "uninstall",
+        "--yes",
+        "--skill",
+        "portable",
+        "--agent",
+        "claude-code",
+    ]);
+
+    assert_eq!(code, ExitCodeKind::Blocked, "{output}");
+    assert!(
+        fs::symlink_metadata(&link)
+            .expect("link remains")
+            .file_type()
+            .is_symlink()
+    );
+}
+
 /// Spec 15: `--yes` is fail-closed. It answers a question the user cannot see,
 /// so every part of the target set has to be spelled out before it is accepted.
 #[test]

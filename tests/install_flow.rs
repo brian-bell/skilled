@@ -19,8 +19,9 @@ use skilled::{
     Action, AgentKind, AppEnvironment, SkilledApp,
     inventory::{Finding, FindingSeverity, InstallationHealth},
     operations::{
-        InstallPrompt, InstallStatus, OpenCodeOutlook, StepOutcome, TargetDisposition,
-        VerifyFailure, VerifyWithheld, verify_install,
+        ForgetPrompt, ForgetStatus, InstallPrompt, InstallStatus, OpenCodeOutlook, OperationPrompt,
+        StepOutcome, TargetDisposition, UninstallPrompt, UninstallStatus, VerifyFailure,
+        VerifyWithheld, verify_install,
     },
     resolution::OpenCodeResolution,
 };
@@ -34,6 +35,130 @@ const ROOTS: [(AgentKind, &str); 3] = [
     (AgentKind::Codex, CODEX_ROOT),
     (AgentKind::OpenCode, OPENCODE_ROOT),
 ];
+
+#[test]
+fn uninstall_removes_only_managed_links_and_preserves_canonical_content_and_roots() {
+    let fixture = Fixture::new();
+    let repository = fixture.source("library", &["portable"]);
+    let mut app = fixture.registered(&repository);
+    fixture.create_root_parents();
+    focus_first_variant(&mut app);
+    dispatch(&mut app, Action::BeginInstall);
+    dispatch(&mut app, Action::ConfirmOperation);
+    dispatch(&mut app, Action::DismissOperation);
+    dispatch(&mut app, Action::OpenInventory);
+
+    let content = repository.join("skills/portable/SKILL.md");
+    let before = fs::read(&content).expect("canonical skill content");
+    dispatch(&mut app, Action::BeginUninstall);
+    let Some(OperationPrompt::Uninstall(UninstallPrompt::Preview(plan))) = app.pending_operation()
+    else {
+        panic!("uninstall preview expected: {:?}", app.pending_operation());
+    };
+    assert!(plan.is_executable());
+    dispatch(&mut app, Action::ConfirmOperation);
+    let Some(OperationPrompt::Uninstall(UninstallPrompt::Report(outcome))) =
+        app.pending_operation()
+    else {
+        panic!("uninstall report expected: {:?}", app.pending_operation());
+    };
+    assert_eq!(outcome.status(), UninstallStatus::Uninstalled);
+    for (agent, root) in ROOTS {
+        assert!(
+            !fixture.home().join(root).join("portable").exists(),
+            "{agent:?} link remained"
+        );
+        assert!(fixture.home().join(root).is_dir(), "agent root was removed");
+    }
+    assert_eq!(
+        fs::read(&content).expect("canonical content survives"),
+        before
+    );
+    assert!(app.receipts().expect("receipts").is_empty());
+}
+
+#[test]
+fn a_link_retargeted_after_preview_is_not_removed() {
+    let fixture = Fixture::new();
+    let repository = fixture.source("library", &["portable"]);
+    let mut app = fixture.registered(&repository);
+    fixture.create_root_parents();
+    focus_first_variant(&mut app);
+    dispatch(&mut app, Action::BeginInstall);
+    dispatch(&mut app, Action::ConfirmOperation);
+    dispatch(&mut app, Action::DismissOperation);
+    dispatch(&mut app, Action::OpenInventory);
+    dispatch(&mut app, Action::BeginUninstall);
+
+    let link = fixture.root(AgentKind::ClaudeCode).join("portable");
+    let other = fixture.path().join("other-target");
+    write_skill(&other, "other");
+    fs::remove_file(&link).expect("remove managed link for race fixture");
+    symlink(other.canonicalize().expect("other target"), &link).expect("retarget link");
+    dispatch(&mut app, Action::ConfirmOperation);
+    let Some(OperationPrompt::Uninstall(UninstallPrompt::Report(outcome))) =
+        app.pending_operation()
+    else {
+        panic!("uninstall report expected");
+    };
+    assert_eq!(outcome.status(), UninstallStatus::NotApplied);
+    assert!(
+        fs::symlink_metadata(&link)
+            .expect("retargeted link survives")
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(app.receipts().expect("receipt retained").len(), 3);
+}
+
+#[test]
+fn forget_source_removes_only_private_metadata_when_no_links_are_active() {
+    let fixture = Fixture::new();
+    let repository = fixture.source("library", &["portable"]);
+    let mut app = fixture.registered(&repository);
+    dispatch(&mut app, Action::OpenSources);
+    dispatch(&mut app, Action::BeginForgetSource);
+    let Some(OperationPrompt::Forget(ForgetPrompt::Preview(plan))) = app.pending_operation() else {
+        panic!("forget preview expected");
+    };
+    assert!(plan.is_executable());
+    dispatch(&mut app, Action::ConfirmOperation);
+    let Some(OperationPrompt::Forget(ForgetPrompt::Report(outcome))) = app.pending_operation()
+    else {
+        panic!("forget report expected");
+    };
+    assert_eq!(outcome.status(), ForgetStatus::Forgotten);
+    assert!(app.sources().is_empty());
+    assert!(repository.join("skills/portable/SKILL.md").is_file());
+    assert!(repository.is_dir());
+}
+
+#[test]
+fn active_managed_links_block_forget_source() {
+    let fixture = Fixture::new();
+    let repository = fixture.source("library", &["portable"]);
+    let mut app = fixture.registered(&repository);
+    fixture.create_root_parents();
+    focus_first_variant(&mut app);
+    dispatch(&mut app, Action::BeginInstall);
+    dispatch(&mut app, Action::ConfirmOperation);
+    dispatch(&mut app, Action::DismissOperation);
+    dispatch(&mut app, Action::OpenInventory);
+    dispatch(&mut app, Action::OpenSources);
+    dispatch(&mut app, Action::BeginForgetSource);
+    let Some(OperationPrompt::Forget(ForgetPrompt::Preview(plan))) = app.pending_operation() else {
+        panic!("forget preview expected");
+    };
+    assert!(plan.is_blocked());
+    assert!(
+        plan.blocking_findings()
+            .iter()
+            .all(|finding| finding.code() == "forget.active_links")
+    );
+    dispatch(&mut app, Action::ConfirmOperation);
+    assert_eq!(app.sources().len(), 1);
+    assert_eq!(app.receipts().expect("receipts retained").len(), 3);
+}
 
 /// The acceptance criterion of this slice: one common variant reaches all three
 /// agents as individual directory symbolic links, only after a preview the user
@@ -62,7 +187,7 @@ fn a_confirmed_plan_links_every_agent_records_receipts_and_verifies_itself() {
         );
     }
 
-    dispatch(&mut app, Action::ConfirmInstall);
+    dispatch(&mut app, Action::ConfirmOperation);
 
     let Some(InstallPrompt::Report(outcome)) = app.pending_install() else {
         panic!("a report follows the apply: {:?}", app.pending_install());
@@ -149,7 +274,7 @@ fn incompatible_opencode_exposure_matches_the_confirmed_plan() {
             winner: fixture.root(AgentKind::Codex).join("portable")
         })
     );
-    dispatch(&mut app, Action::ConfirmInstall);
+    dispatch(&mut app, Action::ConfirmOperation);
 
     let Some(InstallPrompt::Report(outcome)) = app.pending_install() else {
         panic!("a report follows the apply: {:?}", app.pending_install());
@@ -197,7 +322,7 @@ fn a_blocked_plan_cannot_be_confirmed_and_writes_nothing_anywhere() {
         ["install.physical_path_collision"]
     );
 
-    dispatch(&mut app, Action::ConfirmInstall);
+    dispatch(&mut app, Action::ConfirmOperation);
 
     // Confirmation is refused, so the preview is still what is on screen.
     assert!(matches!(
@@ -237,7 +362,7 @@ fn an_existing_identical_link_is_neither_rewritten_nor_adopted() {
     focus_first_variant(&mut app);
 
     dispatch(&mut app, Action::BeginInstall);
-    dispatch(&mut app, Action::ConfirmInstall);
+    dispatch(&mut app, Action::ConfirmOperation);
 
     let Some(InstallPrompt::Report(outcome)) = app.pending_install() else {
         panic!("a report follows the apply");
@@ -274,7 +399,7 @@ fn a_target_that_changed_since_the_preview_stops_the_run_where_it_stands() {
     // precondition that fails is reached.
     let root = fixture.create_root(AgentKind::Codex);
     fs::write(root.join("portable"), "arrived after the preview").expect("occupy the slot");
-    dispatch(&mut app, Action::ConfirmInstall);
+    dispatch(&mut app, Action::ConfirmOperation);
 
     let Some(InstallPrompt::Report(outcome)) = app.pending_install() else {
         panic!("a report follows the apply");
@@ -325,7 +450,7 @@ fn a_root_that_appeared_since_the_preview_is_refused() {
     let root = fixture.create_root(AgentKind::ClaudeCode);
     let witness = root.join("belongs-to-someone-else");
     fs::write(&witness, "untouched").expect("mark the externally created root");
-    dispatch(&mut app, Action::ConfirmInstall);
+    dispatch(&mut app, Action::ConfirmOperation);
 
     let Some(InstallPrompt::Report(outcome)) = app.pending_install() else {
         panic!("a report follows the refused apply");
@@ -371,7 +496,7 @@ fn a_plan_with_no_work_left_reports_that_there_was_nothing_to_do() {
         TargetDisposition::AlreadyInstalled { .. }
     )));
 
-    dispatch(&mut app, Action::ConfirmInstall);
+    dispatch(&mut app, Action::ConfirmOperation);
     assert!(matches!(
         app.pending_install(),
         Some(InstallPrompt::Preview(_))
@@ -397,10 +522,10 @@ fn the_prompt_swallows_other_actions_and_dismissal_keeps_the_fresh_inventory() {
     );
     assert_eq!(app.view(), skilled::View::Sources);
 
-    dispatch(&mut app, Action::ConfirmInstall);
-    dispatch(&mut app, Action::DismissInstall);
+    dispatch(&mut app, Action::ConfirmOperation);
+    dispatch(&mut app, Action::DismissOperation);
 
-    assert!(app.pending_install().is_none());
+    assert!(app.pending_operation().is_none());
     assert_eq!(
         app.inventory()
             .row("portable")
@@ -422,7 +547,7 @@ fn verification_reports_a_link_that_stopped_matching_the_plan() {
     fixture.create_root_parents();
     focus_first_variant(&mut app);
     dispatch(&mut app, Action::BeginInstall);
-    dispatch(&mut app, Action::ConfirmInstall);
+    dispatch(&mut app, Action::ConfirmOperation);
     let Some(InstallPrompt::Report(outcome)) = app.pending_install() else {
         panic!("a report follows the apply");
     };
@@ -436,7 +561,7 @@ fn verification_reports_a_link_that_stopped_matching_the_plan() {
     let elsewhere = fixture.directory.path().join("elsewhere/portable");
     write_skill(&elsewhere, "portable");
     symlink(&elsewhere, &link).expect("point it elsewhere");
-    dispatch(&mut app, Action::DismissInstall);
+    dispatch(&mut app, Action::DismissOperation);
     dispatch(&mut app, Action::OpenInventory);
 
     let report = verify_install(&plan, &applied, app.inventory());
@@ -470,7 +595,7 @@ fn verification_withheld_for_a_written_target_is_not_verified() {
     fixture.create_root_parents();
     focus_first_variant(&mut app);
     dispatch(&mut app, Action::BeginInstall);
-    dispatch(&mut app, Action::ConfirmInstall);
+    dispatch(&mut app, Action::ConfirmOperation);
     let Some(InstallPrompt::Report(outcome)) = app.pending_install() else {
         panic!("a report follows the apply");
     };
@@ -511,7 +636,7 @@ fn a_variant_directory_that_moved_since_the_preview_stops_the_run() {
 
     dispatch(&mut app, Action::BeginInstall);
     fs::rename(&repository, fixture.path().join("moved")).expect("move the checkout");
-    dispatch(&mut app, Action::ConfirmInstall);
+    dispatch(&mut app, Action::ConfirmOperation);
 
     let Some(InstallPrompt::Report(outcome)) = app.pending_install() else {
         panic!("a report follows the apply");
@@ -587,7 +712,7 @@ fn a_checkout_replaced_since_the_preview_is_not_written() {
         .expect("distinguish the replacement history");
     initialize_repository(&repository);
 
-    dispatch(&mut app, Action::ConfirmInstall);
+    dispatch(&mut app, Action::ConfirmOperation);
 
     let Some(InstallPrompt::Report(outcome)) = app.pending_install() else {
         panic!("a report follows the refused apply");
@@ -646,7 +771,7 @@ fn a_variant_that_stopped_validating_since_the_preview_is_not_written() {
     dispatch(&mut app, Action::BeginInstall);
     fs::remove_file(repository.join("skills/portable/SKILL.md"))
         .expect("invalidate the previewed skill");
-    dispatch(&mut app, Action::ConfirmInstall);
+    dispatch(&mut app, Action::ConfirmOperation);
 
     let Some(InstallPrompt::Report(outcome)) = app.pending_install() else {
         panic!("a report follows the refused apply");
@@ -695,7 +820,7 @@ fn an_unrecordable_link_path_is_refused_before_any_write() {
     focus_first_variant(&mut app);
 
     dispatch(&mut app, Action::BeginInstall);
-    dispatch(&mut app, Action::ConfirmInstall);
+    dispatch(&mut app, Action::ConfirmOperation);
 
     let Some(InstallPrompt::Report(outcome)) = app.pending_install() else {
         panic!("a report follows the refused apply");
@@ -743,7 +868,7 @@ fn an_unread_root_leaves_opencode_unstated_rather_than_unverified() {
         plan.warnings()
     );
 
-    dispatch(&mut app, Action::ConfirmInstall);
+    dispatch(&mut app, Action::ConfirmOperation);
 
     let Some(InstallPrompt::Report(outcome)) = app.pending_install() else {
         panic!("a report follows the apply");
@@ -798,7 +923,7 @@ fn a_different_winner_under_the_same_classification_is_a_verification_failure() 
     );
     focus_first_variant(&mut app);
     dispatch(&mut app, Action::BeginInstall);
-    dispatch(&mut app, Action::ConfirmInstall);
+    dispatch(&mut app, Action::ConfirmOperation);
     let Some(InstallPrompt::Report(outcome)) = app.pending_install() else {
         panic!("a report follows the apply");
     };
@@ -810,7 +935,7 @@ fn a_different_winner_under_the_same_classification_is_a_verification_failure() 
     // different slot from the one the plan named.
     fs::remove_file(fixture.home().join(OPENCODE_ROOT).join("portable"))
         .expect("remove OpenCode's link");
-    dispatch(&mut app, Action::DismissInstall);
+    dispatch(&mut app, Action::DismissOperation);
     dispatch(&mut app, Action::OpenInventory);
 
     let report = verify_install(&plan, &applied, app.inventory());
@@ -846,7 +971,7 @@ fn an_installation_is_still_managed_and_healthy_after_a_restart() {
     fixture.create_root_parents();
     focus_first_variant(&mut app);
     dispatch(&mut app, Action::BeginInstall);
-    dispatch(&mut app, Action::ConfirmInstall);
+    dispatch(&mut app, Action::ConfirmOperation);
     drop(app);
 
     let reopened = fixture.app();
@@ -892,7 +1017,7 @@ fn deselect_codex(app: &mut SkilledApp) {
 /// so they stand in the measurement a terminal large enough to hold the dialog
 /// would report: the whole plan on screen, nothing left to scroll to.
 fn dispatch(app: &mut SkilledApp, action: Action) {
-    if app.pending_install().is_some() {
+    if app.pending_operation().is_some() {
         app.note_detail_max_scroll(Some(0));
     }
     let update = app.update(action);

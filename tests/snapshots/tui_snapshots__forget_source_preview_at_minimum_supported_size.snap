@@ -1,0 +1,29 @@
+---
+source: tests/tui_snapshots.rs
+assertion_line: 1675
+expression: "normalize_install_screen(&temporary, render(&app, 80, 24))"
+---
+ ◆ skilled  global                                ● ready · 1 source registered
+ 1┌ Forget source ──────────────────────────────────────────── metadata only ┐
+▌ │                                                                          │
+──│  Source: src                                                             │──
+▌ │  Checkout left untouched: [CANONICAL]                 /src               │
+▌ │                                                                          │
+▌ │  Metadata to remove                                                      │
+  │  source registration and cached scan state                               │
+  │  catalog: skills                                                         │
+  │                                                                          │
+  │  The checkout and every skill directory are left alone.                  │
+  │                                                                          │
+  │                                                                          │
+  │                                                                          │
+  │                                                                          │
+  │                                                                          │
+  │                                                                          │
+  │                                                                          │
+  │                                                                          │
+  │  ──────────────────────────────────────────────────────────────────────  │
+  │  Ready to forget source metadata              Enter Forget   Esc Cancel  │
+  │                                                                          │
+  └──────────────────────────────────────────────────────────────────────────┘
+ Enter Forget   Esc Cancel   Ctrl-C Quit

@@ -629,8 +629,8 @@ fn install_through_the_application(app: &mut SkilledApp) {
         skilled::Action::OpenSources,
         skilled::Action::AdvanceSourcesPane,
         skilled::Action::BeginInstall,
-        skilled::Action::ConfirmInstall,
-        skilled::Action::DismissInstall,
+        skilled::Action::ConfirmOperation,
+        skilled::Action::DismissOperation,
     ] {
         // Standing in the frame the runner would have drawn; see the note on
         // `dispatch` in `install_flow.rs`.

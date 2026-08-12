@@ -519,6 +519,63 @@ fn install_is_offered_only_where_a_variant_is_focused() {
     assert_eq!(action_for_app_key(&app, key(KeyCode::Char('i'))), None);
 }
 
+#[cfg(unix)]
+#[test]
+fn x_maps_only_to_the_owned_object_in_the_active_region() {
+    use skilled::input::action_for_app_key;
+
+    let temporary = tempfile::tempdir().expect("temporary application directory");
+    let repository = temporary.path().join("library");
+    create_source_fixture(&repository);
+    let home = temporary.path().join("home");
+    let mut app = SkilledApp::open(AppEnvironment::new(
+        &home,
+        temporary.path().join("data"),
+        "",
+    ))
+    .expect("open application");
+    let preview = app.preview_source(&repository).expect("preview source");
+    app.confirm_source(preview).expect("register source");
+    for _ in 0..7 {
+        let update = app.update(Action::Continue);
+        app.perform_effects(update.effects())
+            .expect("setup effects");
+    }
+
+    app.update(Action::OpenSources);
+    assert_eq!(
+        action_for_app_key(&app, key(KeyCode::Char('x'))),
+        Some(Action::BeginForgetSource)
+    );
+    app.update(Action::AdvanceSourcesPane);
+    assert_eq!(action_for_app_key(&app, key(KeyCode::Char('x'))), None);
+
+    for root in [".claude", ".agents", ".config/opencode"] {
+        fs::create_dir_all(home.join(root)).expect("root parent");
+    }
+    let update = app.update(Action::BeginInstall);
+    app.perform_effects(update.effects()).expect("plan install");
+    app.note_detail_max_scroll(Some(0));
+    let update = app.update(Action::ConfirmOperation);
+    app.perform_effects(update.effects())
+        .expect("apply install");
+    app.update(Action::DismissOperation);
+    let update = app.update(Action::OpenInventory);
+    app.perform_effects(update.effects())
+        .expect("scan inventory");
+
+    assert_eq!(
+        action_for_app_key(&app, key(KeyCode::Char('x'))),
+        Some(Action::BeginUninstall)
+    );
+    assert_eq!(action_for_app_key(&app, repeat(KeyCode::Char('x'))), None);
+    app.update(Action::BeginInventoryFilter);
+    assert_eq!(
+        action_for_app_key(&app, key(KeyCode::Char('x'))),
+        Some(Action::AppendInventoryFilter('x'))
+    );
+}
+
 /// The install preview owns the keyboard: only a confirmation, a dismissal, and
 /// the one command no context may swallow get through.
 #[cfg(unix)]
@@ -550,11 +607,11 @@ fn the_install_prompt_owns_input_until_it_is_answered() {
 
     assert_eq!(
         action_for_app_key(&app, key(KeyCode::Enter)),
-        Some(Action::ConfirmInstall)
+        Some(Action::ConfirmOperation)
     );
     assert_eq!(
         action_for_app_key(&app, key(KeyCode::Esc)),
-        Some(Action::DismissInstall)
+        Some(Action::DismissOperation)
     );
     for blocked in [
         KeyCode::Char('q'),

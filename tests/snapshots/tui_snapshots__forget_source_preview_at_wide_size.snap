@@ -1,28 +1,28 @@
 ---
 source: tests/tui_snapshots.rs
-assertion_line: 1656
+assertion_line: 1679
 expression: "normalize_install_screen(&temporary, render(&app, 120, 40))"
 ---
  ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁
 ▕                                                                                                                      ▏
-▕ ◆┌ Install result ─────────────────────────────────────────────────────────────────────────────── already applied ┐d ▏
+▕ ◆┌ Forget source ────────────────────────────────────────────────────────────────────────────────── metadata only ┐d ▏
 ▕▁▁│                                                                                                                │▁▁▏
-▕  │  Skill: portable                                                                                               │  ▏
-▕ 1│  Links to: [CANONICAL]                 /src/skills/portable                                                    │  ▏
+▕  │  Source: src                                                                                                   │  ▏
+▕ 1│  Checkout left untouched: [CANONICAL]                 /src                                                     │  ▏
 ▕▁▁│                                                                                                                │▁▁▏
-▕  │  Steps                                                                                                         │  ▏
-▕──│  × Claude Code: skill root created, but the link was not: Permission denied (os error 13)                      │─ ▏
-▕▌ │      [TEMP]                      /home/.claude/skills/portable                                                 │  ▏
-▕▌ │  U Codex: not attempted, because an earlier step stopped the run                                               │─ ▏
-▕▌ │      [TEMP]                      /home/.agents/skills/portable                                                 │  ▏
-▕  │  U OpenCode: not attempted, because an earlier step stopped the run                                            │c ▏
-▕  │      [TEMP]                      /home/.config/opencode/skills/portable                                        │  ▏
+▕▌ │  Metadata to remove                                                                                            │  ▏
+▕──│  source registration and cached scan state                                                                     │─ ▏
+▕▌ │  catalog: skills                                                                                               │  ▏
+▕▌ │                                                                                                                │─ ▏
+▕▌ │  The checkout and every skill directory are left alone.                                                        │  ▏
+▕  │                                                                                                                │c ▏
 ▕  │                                                                                                                │  ▏
-▕  │  Verification                                                                                                  │  ▏
-▕  │  ✓ every link written was observed again and matches this plan                                                 │  ▏
 ▕  │                                                                                                                │  ▏
-▕  │  Skilled does not undo a partial install automatically; uninstall is a separate confirmed operation, and no    │─ ▏
-▕  │  repair exists in this release.                                                                                │n ▏
+▕  │                                                                                                                │  ▏
+▕  │                                                                                                                │  ▏
+▕  │                                                                                                                │  ▏
+▕  │                                                                                                                │─ ▏
+▕  │                                                                                                                │n ▏
 ▕  │                                                                                                                │  ▏
 ▕  │                                                                                                                │  ▏
 ▕  │                                                                                                                │─ ▏
@@ -38,8 +38,8 @@ expression: "normalize_install_screen(&temporary, render(&app, 120, 40))"
 ▕  │                                                                                                                │  ▏
 ▕  │                                                                                                                │  ▏
 ▕  │  ────────────────────────────────────────────────────────────────────────────────────────────────────────────  │  ▏
-▕  │  Partly applied                                                                                     Esc Close  │  ▏
+▕  │  Ready to forget source metadata                                                    Enter Forget   Esc Cancel  │  ▏
 ▕  │                                                                                                                │  ▏
 ▕  └────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘  ▏
-▕ Esc Close   Ctrl-C Quit                                                                                              ▏
+▕ Enter Forget   Esc Cancel   Ctrl-C Quit                                                                              ▏
  ▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔

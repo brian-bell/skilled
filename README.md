@@ -6,8 +6,8 @@ Rust with Ratatui and Crossterm.
 
 The project is early in version-one development. The current build establishes
 the setup, terminal, source-registration, and read-only inspection foundation,
-and installs a registered skill across the agents that can use it. It does not
-yet repair, update, or uninstall.
+installs and safely uninstalls registered skills across the agents that can use
+them, and can forget inactive source metadata. It does not yet repair or update.
 
 ## Design references
 
@@ -94,9 +94,19 @@ yet repair, update, or uninstall.
   that another root already answers for is a postcondition Skilled can see
   failing, and it stops before writing rather than writing and reporting it.
 - An ownership receipt for every link Skilled creates, recorded the moment the
-  link exists and outliving the source it came from. A link Skilled did not
-  create is never claimed: an identical one already in place is left alone and
-  unowned.
+  link exists. A link Skilled did not create is never claimed: an identical one
+  already in place is left alone and unowned. Receipts are deleted only after a
+  guarded removal is positively verified or a source forget has established
+  the described link inactive.
+- Guarded uninstall from Inventory (`x`) or `skilled uninstall`: Skilled removes
+  only a symlink whose path, object type, recorded target, documented root, and
+  ownership receipt still match the preview. It never removes the agent root or
+  follows the link into canonical content, then rescans and verifies both that
+  the link is gone and that resolving content survived.
+- Metadata-only Forget Source from the Sources Repositories pane (`x`). Active
+  or unreadable receipted links block the operation; otherwise one transaction
+  removes the source registration, catalogs, cached scan state, and inactive
+  receipts while leaving the checkout and every skill directory untouched.
 - A rescan and a postcondition check after every install. Each link written is
   observed again and compared with the plan — the object, the variant it
   resolves to, its validation, its health, and for OpenCode the name it
@@ -139,11 +149,10 @@ yet repair, update, or uninstall.
 - Terminal restoration on normal exit, startup failure, panic unwinding, and
   the Ctrl-C key path used in raw mode.
 
-Repair, update, remote fetching, and uninstall are still future work.
-Registration, inventory, and Doctor remain read-only: they catalog local
-checkouts and observe agent roots without changing anything in them. Installing
-is the one thing Skilled writes, and it only ever creates — a link, and the
-documented skill root above it when that root's own parent already exists.
+Repair, update, and remote fetching are still future work. Registration,
+inventory, and Doctor remain read-only. Install creates only a link and, when
+allowed, its documented root; uninstall removes only verified managed links;
+Forget Source removes only private metadata.
 
 ## Requirements
 
@@ -190,12 +199,17 @@ returns. `j` / `k` or arrow keys move the selection in the table, and scroll the
 details region once it has focus — a region with more to show than fits says so
 at the foot of its window and names the keys that reach the rest. `/` filters by
 name, source, or health — Enter applies the query and Esc clears it.
+Press `x` on a managed skill to preview removing its receipted links. The dialog
+states every absolute path and offers confirmation only after the complete plan
+has been visible.
 
 From Inventory, press `2` to open Sources. In Sources, Tab and Shift-Tab move
 forward and backward through Repositories, Variants, and Details; Enter advances
 toward Details; and Esc returns through the region hierarchy before leaving the
 screen. In a selectable list, `j` / `k` or arrow keys move the selection. Press
 `a` to add another source or `1` to return to Inventory.
+In the Repositories pane, press `x` to preview forgetting the selected source's
+private metadata. Active or unreadable managed links block confirmation.
 
 In Sources, press `i` on a skill variant to preview installing it. The dialog
 names every agent, what would happen to it, and the exact absolute path
@@ -217,11 +231,12 @@ Private metadata is stored in the platform application-data directory. On
 macOS, the database is normally
 `~/Library/Application Support/skilled/skilled.sqlite3`.
 
-## Install from the command line
+## Install and uninstall from the command line
 
 ```bash
 skilled install --source <id-or-path> --skill <name> \
                 --agents claude-code,codex,opencode [--yes]
+skilled uninstall --skill <name> --agent <agent> [--yes]
 ```
 
 `--source` takes the identifier Skilled gave a registered source or the path its
@@ -233,6 +248,10 @@ cancels and writes nothing.
 `--skill`, and `--agents` to be given explicitly — a target set Skilled chose is
 not one anybody agreed to — and every collision check, apply guard, rescan, and
 verification still runs.
+
+Uninstall's `--agent` is deliberately singular. It removes only that agent's
+still-matching managed link; an absent receipt, changed target, changed object
+type, or redirected root blocks the request. `--yes` skips only the prompt.
 
 Exit statuses: `0` success, `1` internal error, `2` invalid request, `3` blocked
 plan, `4` the apply did not complete as planned, `5` verification failed.
@@ -271,10 +290,11 @@ under `tests/snapshots/` and cell-level style assertions in
   skill roots and owns the finding codes it reports.
 - `src/resolution.rs` decides, purely, which registered variant an agent
   resolves a name to and what OpenCode would load across the roots it reads.
-- `src/operations.rs` plans installations and executes them under guard: one
-  read of the machine, one pure decision over it, one re-read immediately before
-  each write, and one check of a fresh scan against the plan.
-- `src/cli.rs` implements `skilled install` over that same path.
+- `src/operations.rs` plans install, uninstall, and source-forget operations;
+  each executor rechecks the facts that authorize its narrowly scoped mutation
+  and verifies the result.
+- `src/cli.rs` implements `skilled install` and `skilled uninstall` over those
+  same planner/apply paths.
 - `src/validation.rs` validates the portable `SKILL.md` subset used during
   source browsing.
 - `src/terminal.rs` guards raw mode and alternate-screen restoration.

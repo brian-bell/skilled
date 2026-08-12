@@ -147,6 +147,24 @@ impl Store {
         Ok(())
     }
 
+    /// Delete exactly the ownership facts whose link was positively verified gone.
+    pub(crate) fn delete_receipts_for_link(
+        &self,
+        agent: AgentKind,
+        link_path: &Path,
+        link_target: &Path,
+    ) -> Result<usize> {
+        Ok(self.connection.execute(
+            "DELETE FROM operation_receipts
+             WHERE agent = ?1 AND link_path = ?2 AND link_target = ?3",
+            params![
+                agent_identifier(agent),
+                stored_path(link_path)?,
+                stored_path(link_target)?,
+            ],
+        )?)
+    }
+
     /// Every ownership receipt, oldest first.
     ///
     /// A row naming an agent this build does not know is an error rather than a
@@ -194,6 +212,45 @@ impl Store {
                 },
             )
             .collect()
+    }
+
+    /// Forget one source's private metadata in one transaction.
+    ///
+    /// Receipts stay foreign-key-free so this deletion is never an implicit
+    /// cascade: the caller first proves every described link inactive, then
+    /// explicitly removes those receipts before the source/catalog cascade.
+    pub(crate) fn forget_source(&mut self, source_id: i64) -> Result<usize> {
+        let transaction = self.connection.transaction()?;
+        transaction.execute(
+            "DELETE FROM operation_receipts WHERE source_id = ?1",
+            params![source_id],
+        )?;
+        let deleted = transaction.execute(
+            "DELETE FROM source_repositories WHERE id = ?1",
+            params![source_id],
+        )?;
+        transaction.commit()?;
+        Ok(deleted)
+    }
+
+    /// Required postconditions for forgetting: source, catalogs, and receipts absent.
+    pub(crate) fn verify_source_forgotten(&self, source_id: i64) -> Result<[bool; 3]> {
+        let source: i64 = self.connection.query_row(
+            "SELECT COUNT(*) FROM source_repositories WHERE id = ?1",
+            params![source_id],
+            |row| row.get(0),
+        )?;
+        let catalogs: i64 = self.connection.query_row(
+            "SELECT COUNT(*) FROM catalog_roots WHERE source_id = ?1",
+            params![source_id],
+            |row| row.get(0),
+        )?;
+        let receipts: i64 = self.connection.query_row(
+            "SELECT COUNT(*) FROM operation_receipts WHERE source_id = ?1",
+            params![source_id],
+            |row| row.get(0),
+        )?;
+        Ok([source == 0, catalogs == 0, receipts == 0])
     }
 
     pub(crate) fn register_source(&mut self, preview: &SourcePreview) -> Result<()> {

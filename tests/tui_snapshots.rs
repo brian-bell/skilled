@@ -1623,11 +1623,61 @@ fn install_report_at_minimum_supported_size() {
     // frame measured. This preview fits at the size the report is snapshotted
     // at, so the measurement is that there is nothing left to scroll to.
     app.note_detail_max_scroll(drawn(&app, 120, 40).1.detail_max_scroll());
-    dispatch(&mut app, Action::ConfirmInstall);
+    dispatch(&mut app, Action::ConfirmOperation);
 
     insta::assert_snapshot!(normalize_install_screen(&temporary, render(&app, 80, 24)));
     insta::assert_snapshot!(
         "install_report_at_wide_size",
+        normalize_install_screen(&temporary, render(&app, 120, 40))
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn uninstall_preview_and_report_at_supported_sizes() {
+    let (temporary, mut app) = install_fixture();
+    dispatch(&mut app, Action::BeginInstall);
+    app.note_detail_max_scroll(drawn(&app, 120, 40).1.detail_max_scroll());
+    dispatch(&mut app, Action::ConfirmOperation);
+    dispatch(&mut app, Action::DismissOperation);
+    dispatch(&mut app, Action::OpenInventory);
+    dispatch(&mut app, Action::BeginUninstall);
+
+    insta::assert_snapshot!(
+        "uninstall_preview_at_minimum_supported_size",
+        normalize_install_screen(&temporary, render(&app, 80, 24))
+    );
+    insta::assert_snapshot!(
+        "uninstall_preview_at_wide_size",
+        normalize_install_screen(&temporary, render(&app, 120, 40))
+    );
+
+    app.note_detail_max_scroll(drawn(&app, 120, 40).1.detail_max_scroll());
+    dispatch(&mut app, Action::ConfirmOperation);
+    insta::assert_snapshot!(
+        "uninstall_report_at_minimum_supported_size",
+        normalize_install_screen(&temporary, render(&app, 80, 24))
+    );
+    insta::assert_snapshot!(
+        "uninstall_report_at_wide_size",
+        normalize_install_screen(&temporary, render(&app, 120, 40))
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn forget_source_preview_at_supported_sizes() {
+    let (temporary, mut app) = install_fixture();
+    dispatch(&mut app, Action::OpenInventory);
+    dispatch(&mut app, Action::OpenSources);
+    dispatch(&mut app, Action::BeginForgetSource);
+
+    insta::assert_snapshot!(
+        "forget_source_preview_at_minimum_supported_size",
+        normalize_install_screen(&temporary, render(&app, 80, 24))
+    );
+    insta::assert_snapshot!(
+        "forget_source_preview_at_wide_size",
         normalize_install_screen(&temporary, render(&app, 120, 40))
     );
 }
@@ -1648,7 +1698,7 @@ fn install_report_with_a_residual_root_at_minimum_supported_size() {
     // The preview is the same one the successful report's test measures, so the
     // measurement is again that there is nothing left to scroll to.
     app.note_detail_max_scroll(drawn(&app, 120, 40).1.detail_max_scroll());
-    dispatch(&mut app, Action::ConfirmInstall);
+    dispatch(&mut app, Action::ConfirmOperation);
 
     insta::assert_snapshot!(normalize_install_screen(&temporary, render(&app, 80, 24)));
     // The narrow screen scrolls, so the note that nothing undoes the residual

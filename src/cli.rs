@@ -22,7 +22,8 @@ use crate::{
     components::terminal_safe,
     operations::{
         AppliedStep, ExcludedReason, InstallOutcome, InstallPlan, InstallStatus, InstallTarget,
-        LocateFailure, StepOutcome, TargetDisposition, locate_variant,
+        LocateFailure, StepOutcome, TargetDisposition, UninstallDisposition, UninstallOutcome,
+        UninstallPlan, UninstallStatus, locate_variant,
     },
 };
 
@@ -64,6 +65,7 @@ impl ExitCodeKind {
 const USAGE: &str = "\
 usage: skilled install --source <id-or-path> --skill <name> \
 [--agents claude-code,codex,opencode] [--yes]
+       skilled uninstall --skill <name> --agent <agent> [--yes]
 
   --source   a registered source, by the identifier Skilled gave it or by its
              checkout path
@@ -71,6 +73,10 @@ usage: skilled install --source <id-or-path> --skill <name> \
   --agents   which agents to install for; defaults to every configured agent
   --yes      skip the confirmation. Requires --source, --skill, and --agents to
              be given explicitly; every safety check still runs.
+
+Uninstall removes only an exact matching Skilled-managed link. Its --agent is
+singular and every receipt, object-type, target, containment, and verification
+check still runs with --yes.
 
 Run skilled with no arguments for the interactive application.";
 
@@ -86,15 +92,19 @@ pub fn run(
     input: &mut dyn BufRead,
     output: &mut dyn Write,
 ) -> ExitCodeKind {
-    let request = match parse(arguments) {
-        Ok(Parsed::Install(request)) => request,
-        Ok(Parsed::Usage) => {
+    let parsed = match parse(arguments) {
+        Ok(parsed) => parsed,
+        Err(message) => return refuse(output, &message),
+    };
+    let result = match parsed {
+        Parsed::Install(request) => execute(&request, environment, input, output),
+        Parsed::Uninstall(request) => execute_uninstall(&request, environment, input, output),
+        Parsed::Usage => {
             let _ = writeln!(output, "{USAGE}");
             return ExitCodeKind::Success;
         }
-        Err(message) => return refuse(output, &message),
     };
-    match execute(&request, environment, input, output) {
+    match result {
         Ok(code) => code,
         Err(message) => {
             let _ = writeln!(output, "skilled: {}", safe(&message));
@@ -131,6 +141,18 @@ pub fn exit_code_for(status: InstallStatus) -> ExitCodeKind {
     }
 }
 
+pub fn exit_code_for_uninstall(status: UninstallStatus) -> ExitCodeKind {
+    match status {
+        UninstallStatus::Uninstalled
+        | UninstallStatus::UninstalledUnrecorded
+        | UninstallStatus::NothingToDo => ExitCodeKind::Success,
+        UninstallStatus::PartiallyApplied | UninstallStatus::NotApplied => {
+            ExitCodeKind::PartialApply
+        }
+        UninstallStatus::VerificationFailed => ExitCodeKind::VerificationFailed,
+    }
+}
+
 fn refuse(output: &mut dyn Write, message: &str) -> ExitCodeKind {
     let _ = writeln!(output, "skilled: {}\n\n{USAGE}", safe(message));
     ExitCodeKind::InvalidRequest
@@ -144,23 +166,32 @@ struct InstallRequest {
     assume_yes: bool,
 }
 
+struct UninstallRequest {
+    skill: String,
+    agent: AgentKind,
+    assume_yes: bool,
+}
+
 enum Parsed {
     Install(InstallRequest),
+    Uninstall(UninstallRequest),
     Usage,
 }
 
 fn parse(arguments: &[String]) -> Result<Parsed, String> {
     let mut arguments = arguments.iter();
-    match arguments.next().map(String::as_str) {
-        Some("install") => {}
+    let command = match arguments.next().map(String::as_str) {
+        Some("install") => "install",
+        Some("uninstall") => "uninstall",
         Some("--help" | "-h" | "help") => return Ok(Parsed::Usage),
         Some(other) => return Err(format!("unknown command {other}")),
         None => return Err("no command was given".to_owned()),
-    }
+    };
 
     let mut source = None;
     let mut skill = None;
     let mut agents = None;
+    let mut agent = None;
     let mut assume_yes = false;
     while let Some(flag) = arguments.next() {
         // A value that looks like a flag is a missing value, not a value:
@@ -173,6 +204,7 @@ fn parse(arguments: &[String]) -> Result<Parsed, String> {
             "--source" => source = Some(value("--source")?),
             "--skill" => skill = Some(value("--skill")?),
             "--agents" => agents = Some(parse_agents(&value("--agents")?)?),
+            "--agent" => agent = Some(parse_agent(&value("--agent")?)?),
             "--yes" => assume_yes = true,
             "--help" | "-h" => return Ok(Parsed::Usage),
             other => return Err(format!("unknown option {other}")),
@@ -183,7 +215,7 @@ fn parse(arguments: &[String]) -> Result<Parsed, String> {
     // every part of what would have been shown has to have been stated. Spec 15
     // asks for the confirmation to be the only thing it removes, and a target
     // set Skilled chose is not a target set the user agreed to.
-    if assume_yes {
+    if assume_yes && command == "install" {
         for (flag, given) in [
             ("--source", source.is_some()),
             ("--skill", skill.is_some()),
@@ -195,12 +227,40 @@ fn parse(arguments: &[String]) -> Result<Parsed, String> {
         }
     }
 
+    if command == "uninstall" {
+        if source.is_some() || agents.is_some() {
+            return Err("uninstall takes --agent, not --source or --agents".to_owned());
+        }
+        return Ok(Parsed::Uninstall(UninstallRequest {
+            skill: skill.ok_or("--skill is required")?,
+            agent: agent.ok_or("--agent is required")?,
+            assume_yes,
+        }));
+    }
+    if agent.is_some() {
+        return Err("install takes --agents, not --agent".to_owned());
+    }
     Ok(Parsed::Install(InstallRequest {
         source: source.ok_or("--source is required")?,
         skill: skill.ok_or("--skill is required")?,
         agents,
         assume_yes,
     }))
+}
+
+fn parse_agent(value: &str) -> Result<AgentKind, String> {
+    if value.contains(',') {
+        return Err("--agent takes exactly one agent, not a list".to_owned());
+    }
+    AgentKind::ALL
+        .into_iter()
+        .find(|agent| agent_identifier(*agent) == value)
+        .ok_or_else(|| {
+            format!(
+                "unknown agent {value}; --agent takes one of {}",
+                AgentKind::ALL.map(agent_identifier).join(", ")
+            )
+        })
 }
 
 fn parse_agents(value: &str) -> Result<[bool; 3], String> {
@@ -340,6 +400,132 @@ fn execute(
     Ok(exit_code_for(outcome.status()))
 }
 
+fn execute_uninstall(
+    request: &UninstallRequest,
+    environment: AppEnvironment,
+    input: &mut dyn BufRead,
+    output: &mut dyn Write,
+) -> Result<ExitCodeKind, String> {
+    let mut app = SkilledApp::open(environment).map_err(|error| error.to_string())?;
+    let mut requested = [false; 3];
+    requested[request.agent.index()] = true;
+    let plan = app
+        .plan_uninstall_for(&request.skill, requested)
+        .map_err(|failure| failure.message().to_owned())?;
+    write_uninstall_plan(output, &plan).map_err(|error| error.to_string())?;
+    let named = plan
+        .target(request.agent)
+        .expect("every plan has one target per agent");
+    if matches!(named.disposition(), UninstallDisposition::Excluded { .. }) {
+        let _ = writeln!(
+            output,
+            "\nBlocked: nothing was removed. The named agent has no matching Skilled-managed link."
+        );
+        return Ok(ExitCodeKind::Blocked);
+    }
+    if plan.is_blocked() {
+        let _ = writeln!(output, "\nBlocked: nothing was removed.");
+        return Ok(ExitCodeKind::Blocked);
+    }
+    if !plan.is_executable() {
+        let _ = writeln!(output, "\nNothing to do.");
+        return Ok(ExitCodeKind::Success);
+    }
+    if !request.assume_yes && !confirmed(input, output)? {
+        let _ = writeln!(output, "Cancelled. Nothing was removed.");
+        return Ok(ExitCodeKind::Success);
+    }
+    let outcome = app.apply_uninstall_plan(&plan);
+    write_uninstall_report(output, &outcome).map_err(|error| error.to_string())?;
+    Ok(exit_code_for_uninstall(outcome.status()))
+}
+
+fn write_uninstall_plan(output: &mut dyn Write, plan: &UninstallPlan) -> std::io::Result<()> {
+    writeln!(output, "Uninstall {}:", safe(plan.skill_name()))?;
+    for target in plan.targets() {
+        let verdict = match target.disposition() {
+            UninstallDisposition::RemoveLink {
+                link_target,
+                resolves,
+            } => format!(
+                "remove managed link to {}{}",
+                safe(&link_target.display()),
+                if *resolves {
+                    ""
+                } else {
+                    " (target no longer resolves)"
+                },
+            ),
+            UninstallDisposition::Excluded { reason } => format!("excluded: {reason:?}"),
+            UninstallDisposition::Blocked { finding } => {
+                format!("blocked: {} — {}", finding.code(), safe(finding.evidence()))
+            }
+        };
+        writeln!(output, "  {:<12} {verdict}", target.agent().display_name())?;
+        writeln!(
+            output,
+            "               {}",
+            safe(&target.link_path().display())
+        )?;
+    }
+    for warning in plan.warnings() {
+        writeln!(output, "\n  warning: {}", safe(warning))?;
+    }
+    writeln!(
+        output,
+        "\nSource content and agent skill roots will not be removed."
+    )
+}
+
+fn write_uninstall_report(
+    output: &mut dyn Write,
+    outcome: &UninstallOutcome,
+) -> std::io::Result<()> {
+    writeln!(output)?;
+    for step in outcome.applied().steps() {
+        let verdict = match step.outcome() {
+            StepOutcome::Removed => "link removed".to_owned(),
+            StepOutcome::Failed(reason) => format!("not removed — {}", safe(reason)),
+            StepOutcome::Unattempted => "not attempted after an earlier failure".to_owned(),
+            other => install_step_verdict(other),
+        };
+        writeln!(output, "  {:<12} {verdict}", step.agent().display_name())?;
+        writeln!(
+            output,
+            "               {}",
+            safe(&step.link_path().display())
+        )?;
+    }
+    for withheld in outcome.verification().withheld() {
+        writeln!(
+            output,
+            "Not established: {} — {}",
+            withheld.agent().display_name(),
+            safe(withheld.reason())
+        )?;
+    }
+    for failure in outcome.verification().failures() {
+        writeln!(
+            output,
+            "Not verified: {} — {}",
+            failure.agent().display_name(),
+            safe(failure.observed())
+        )?;
+    }
+    for failure in outcome.finalized().failures() {
+        writeln!(
+            output,
+            "Ownership record remains: {} — {}",
+            failure.agent().display_name(),
+            safe(failure.reason())
+        )?;
+    }
+    writeln!(
+        output,
+        "Source content and agent skill roots were not removed."
+    )
+}
+
 /// A source named by the identifier the registry gave it, or by the path its
 /// checkout sits at.
 ///
@@ -461,6 +647,7 @@ fn target_verdict(target: &InstallTarget, plan_is_blocked: bool) -> String {
 fn install_step_verdict(outcome: &StepOutcome) -> String {
     match outcome {
         StepOutcome::Created => "link created".to_owned(),
+        StepOutcome::Removed => "link removed".to_owned(),
         StepOutcome::CreatedUnrecorded(error) => {
             format!(
                 "link created, but Skilled could not record owning it: {}",
@@ -528,8 +715,8 @@ fn write_report(output: &mut dyn Write, outcome: &InstallOutcome) -> std::io::Re
     {
         writeln!(
             output,
-            "Skilled does not undo what it wrote. Nothing above was removed, and no repair \
-             exists in this release."
+            "Skilled does not undo a partial install automatically; uninstall is a separate \
+             confirmed operation, and no repair exists in this release."
         )?;
     }
     Ok(())

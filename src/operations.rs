@@ -1,17 +1,16 @@
-//! Install planning and its guarded execution.
+//! Install, uninstall, and source-forget planning with guarded execution.
 //!
 //! Spec 17.2 reserves this module for pure plan builders and guarded executors,
-//! and the split is kept literally: [`probe_install`] is the only read of the
-//! machine, [`plan_install`] decides everything over the value it returns, and
-//! nothing here writes until [`apply_install`] is called with a plan the user
-//! has confirmed.
+//! and the split is kept literally: each probe reads the machine, each planner
+//! decides over that observation, and no executor writes until the immutable
+//! preview it belongs to has been confirmed.
 //!
 //! Two rules shape the whole module. A plan blocks whole rather than in part —
 //! if any target is blocked, nothing is written anywhere, because spec 15 asks
 //! Skilled to stop before writing when it already knows a step would fail. And
-//! nothing is ever replaced: this release creates links and creates them only,
-//! so every occupied slot is a refusal rather than an overwrite, and repair is
-//! a later slice's work.
+//! nothing is ever replaced. Install creates links; uninstall removes only an
+//! exact receipted link without following it; forgetting removes only private
+//! metadata after proving every described link inactive. Repair remains later work.
 
 use std::{
     fs, io,
@@ -440,8 +439,12 @@ fn probe_entry(link_path: &Path) -> EntryProbe {
         Err(error) => return EntryProbe::Unreadable(error.to_string()),
     };
     if file_type.is_symlink() {
+        let target = match fs::read_link(link_path) {
+            Ok(target) => target,
+            Err(error) => return EntryProbe::Unreadable(error.to_string()),
+        };
         return EntryProbe::Symlink {
-            target: fs::read_link(link_path).unwrap_or_default(),
+            target,
             canonical: link_path.canonicalize().ok(),
         };
     }
@@ -649,6 +652,335 @@ impl InstallPlan {
     pub fn is_executable(&self) -> bool {
         !self.is_blocked() && self.targets.iter().any(InstallTarget::is_work)
     }
+}
+
+/// Why one configured agent is not part of an uninstall request.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum UninstallExcludedReason {
+    NotConfigured,
+    NotRequested,
+    NothingThere,
+    NotSkilleds,
+}
+
+/// What uninstall will do about one documented agent slot.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum UninstallDisposition {
+    RemoveLink {
+        link_target: PathBuf,
+        resolves: bool,
+    },
+    Excluded {
+        reason: UninstallExcludedReason,
+    },
+    Blocked {
+        finding: Finding,
+    },
+}
+
+/// One agent's uninstall target, always synthesized beneath its documented root.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UninstallTarget {
+    agent: AgentKind,
+    link_path: PathBuf,
+    disposition: UninstallDisposition,
+}
+
+impl UninstallTarget {
+    pub fn agent(&self) -> AgentKind {
+        self.agent
+    }
+    pub fn link_path(&self) -> &Path {
+        &self.link_path
+    }
+    pub fn disposition(&self) -> &UninstallDisposition {
+        &self.disposition
+    }
+    pub fn is_work(&self) -> bool {
+        matches!(self.disposition, UninstallDisposition::RemoveLink { .. })
+    }
+}
+
+/// The reduced fact an uninstall can truthfully predict about OpenCode.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum UninstallOutlook {
+    Loads { winner: PathBuf },
+    Disagreement,
+    Nothing,
+    Unknown,
+}
+
+impl UninstallOutlook {
+    fn of(resolution: &OpenCodeResolution) -> Self {
+        match resolution {
+            OpenCodeResolution::Selected { winner, .. }
+            | OpenCodeResolution::ForeignExposure { winner, .. }
+            | OpenCodeResolution::IncompatibleExposure { winner, .. } => Self::Loads {
+                winner: winner.path().to_path_buf(),
+            },
+            OpenCodeResolution::Conflict { .. } => Self::Disagreement,
+            OpenCodeResolution::NothingVisible => Self::Nothing,
+            OpenCodeResolution::Incomplete { .. } => Self::Unknown,
+        }
+    }
+}
+
+/// The read-only observation from which an uninstall plan is built.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UninstallProbe {
+    targets: [TargetProbe; 3],
+}
+
+impl UninstallProbe {
+    pub fn target(&self, agent: AgentKind) -> &TargetProbe {
+        &self.targets[agent.index()]
+    }
+}
+
+/// Read each selected native root once without following the final component.
+pub fn probe_uninstall(
+    agents: &[AgentDetection; 3],
+    skill_name: &str,
+    home: &Path,
+) -> UninstallProbe {
+    UninstallProbe {
+        targets: agents
+            .each_ref()
+            .map(|agent| probe_target(agent, skill_name, home)),
+    }
+}
+
+/// One immutable statement of every link uninstall would remove.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UninstallPlan {
+    skill_name: String,
+    targets: Vec<UninstallTarget>,
+    warnings: Vec<String>,
+    opencode_outlook: Option<UninstallOutlook>,
+}
+
+impl UninstallPlan {
+    pub fn skill_name(&self) -> &str {
+        &self.skill_name
+    }
+    pub fn targets(&self) -> &[UninstallTarget] {
+        &self.targets
+    }
+    pub fn target(&self, agent: AgentKind) -> Option<&UninstallTarget> {
+        self.targets.iter().find(|target| target.agent == agent)
+    }
+    pub fn warnings(&self) -> &[String] {
+        &self.warnings
+    }
+    pub fn opencode_outlook(&self) -> Option<&UninstallOutlook> {
+        self.opencode_outlook.as_ref()
+    }
+    pub fn blocking_findings(&self) -> impl Iterator<Item = (AgentKind, &Finding)> {
+        self.targets
+            .iter()
+            .filter_map(|target| match &target.disposition {
+                UninstallDisposition::Blocked { finding } => Some((target.agent, finding)),
+                _ => None,
+            })
+    }
+    pub fn is_blocked(&self) -> bool {
+        self.blocking_findings().next().is_some()
+    }
+    pub fn is_executable(&self) -> bool {
+        !self.is_blocked() && self.targets.iter().any(UninstallTarget::is_work)
+    }
+}
+
+/// Decide which exact receipted links can be removed, without reading the machine.
+///
+/// Ownership is proved against a receipt's recorded target rather than the
+/// currently registered variant. A source may have moved or disappeared while
+/// the receipt remains the evidence of the exact link Skilled created.
+pub fn plan_uninstall(
+    agents: &[AgentDetection; 3],
+    receipts: &[Receipt],
+    skill_name: &str,
+    requested: [bool; 3],
+    probe: &UninstallProbe,
+) -> UninstallPlan {
+    let mut targets = Vec::with_capacity(3);
+    for agent in AgentKind::ALL {
+        let detected = detection_at(agents, agent);
+        let slot = probe.target(agent);
+        let matching_path: Vec<&Receipt> = receipts
+            .iter()
+            .filter(|receipt| receipt.agent == agent && receipt.link_path == slot.link_path)
+            .collect();
+        let disposition = if !detected.selected() {
+            UninstallDisposition::Excluded {
+                reason: UninstallExcludedReason::NotConfigured,
+            }
+        } else if !requested[agent.index()] {
+            UninstallDisposition::Excluded {
+                reason: UninstallExcludedReason::NotRequested,
+            }
+        } else if matching_path.is_empty() {
+            UninstallDisposition::Excluded {
+                reason: match slot.entry {
+                    EntryProbe::Absent => UninstallExcludedReason::NothingThere,
+                    _ => UninstallExcludedReason::NotSkilleds,
+                },
+            }
+        } else {
+            uninstall_disposition(slot, &matching_path)
+        };
+        targets.push(UninstallTarget {
+            agent,
+            link_path: slot.link_path.clone(),
+            disposition,
+        });
+    }
+
+    let mut warnings = Vec::new();
+    for target in &targets {
+        if let UninstallDisposition::RemoveLink {
+            link_target,
+            resolves: false,
+        } = &target.disposition
+        {
+            warnings.push(format!(
+                "{} no longer resolves; this release will remove the managed link rather than repair it",
+                link_target.display()
+            ));
+        }
+    }
+    let opencode_outlook = detection_at(agents, AgentKind::OpenCode)
+        .selected()
+        .then(|| {
+            let before = UninstallOutlook::of(&resolve_opencode(uninstall_sightings(
+                &targets, probe, false,
+            )));
+            let after = UninstallOutlook::of(&resolve_opencode(uninstall_sightings(
+                &targets, probe, true,
+            )));
+            if before != after && !matches!(after, UninstallOutlook::Unknown) {
+                warnings.push(match &after {
+                    UninstallOutlook::Loads { winner } => format!(
+                        "after this uninstall, OpenCode would load {}",
+                        winner.display()
+                    ),
+                    UninstallOutlook::Disagreement => {
+                        "after this uninstall, OpenCode would see disagreeing directories"
+                            .to_owned()
+                    }
+                    UninstallOutlook::Nothing => {
+                        "after this uninstall, OpenCode would find nothing under this name"
+                            .to_owned()
+                    }
+                    UninstallOutlook::Unknown => unreachable!(),
+                });
+            }
+            after
+        });
+    UninstallPlan {
+        skill_name: skill_name.to_owned(),
+        targets,
+        warnings,
+        opencode_outlook,
+    }
+}
+
+fn uninstall_disposition(slot: &TargetProbe, receipts: &[&Receipt]) -> UninstallDisposition {
+    match &slot.root {
+        RootProbe::Present => {}
+        RootProbe::Redirected { via } => {
+            return uninstall_blocked(
+                "uninstall.redirected_root",
+                format!("the skill root is redirected through {}", via.display()),
+            );
+        }
+        RootProbe::Unreadable(reason) => {
+            return uninstall_blocked(
+                "uninstall.unreadable_root",
+                format!("the skill root could not be read: {reason}"),
+            );
+        }
+        RootProbe::Missing { .. } => {
+            return UninstallDisposition::Excluded {
+                reason: UninstallExcludedReason::NothingThere,
+            };
+        }
+        RootProbe::NotRead => {
+            return UninstallDisposition::Excluded {
+                reason: UninstallExcludedReason::NotConfigured,
+            };
+        }
+    }
+    match &slot.entry {
+        EntryProbe::Absent => UninstallDisposition::Excluded {
+            reason: UninstallExcludedReason::NothingThere,
+        },
+        EntryProbe::Unreadable(reason) => uninstall_blocked(
+            "uninstall.unreadable_entry",
+            format!("the installation entry could not be read: {reason}"),
+        ),
+        EntryProbe::Directory { .. } | EntryProbe::NotADirectory => uninstall_blocked(
+            "uninstall.not_a_symlink",
+            "the receipted path is no longer a symbolic link".to_owned(),
+        ),
+        EntryProbe::NotRead => UninstallDisposition::Excluded {
+            reason: UninstallExcludedReason::NotConfigured,
+        },
+        EntryProbe::Symlink { target, canonical } => {
+            if receipts
+                .iter()
+                .any(|receipt| receipt.link_target == *target)
+            {
+                let resolves = canonical
+                    .as_ref()
+                    .is_some_and(|path| fs::metadata(path).is_ok_and(|metadata| metadata.is_dir()));
+                UninstallDisposition::RemoveLink {
+                    link_target: target.clone(),
+                    resolves,
+                }
+            } else {
+                uninstall_blocked(
+                    "uninstall.wrong_target",
+                    format!("the link now points to {}", target.display()),
+                )
+            }
+        }
+    }
+}
+
+fn uninstall_blocked(code: &'static str, evidence: String) -> UninstallDisposition {
+    UninstallDisposition::Blocked {
+        finding: Finding::new(code, FindingSeverity::Critical, evidence),
+    }
+}
+
+fn uninstall_sightings(
+    targets: &[UninstallTarget],
+    probe: &UninstallProbe,
+    after: bool,
+) -> [RootSighting; 3] {
+    AgentKind::ALL.map(|agent| {
+        let target = &targets[agent.index()];
+        let slot = probe.target(agent);
+        if matches!(
+            slot.root,
+            RootProbe::Unreadable(_) | RootProbe::NotRead | RootProbe::Redirected { .. }
+        ) {
+            return RootSighting::Unread;
+        }
+        if after && target.is_work() {
+            return RootSighting::NothingToLoad;
+        }
+        match &slot.content {
+            SlotContent::At(canonical) => RootSighting::Offers(SightedEntry::new(
+                slot.link_path.clone(),
+                canonical.clone(),
+                None,
+            )),
+            SlotContent::Nowhere => RootSighting::NothingToLoad,
+            SlotContent::Unknown => RootSighting::Unknown,
+        }
+    })
 }
 
 /// Decide what installing one variant would do, over one probe.
@@ -978,11 +1310,11 @@ fn disposition_for(
 /// Whether Skilled holds an ownership receipt for this exact path.
 ///
 /// Deliberately not the same claim as "Skilled created the object that is there
-/// now". A receipt outlives the link it describes — that is what makes it
-/// evidence for a later repair — so a link removed and remade by hand at the
-/// same path still matches one. Skilled records no inode or creation time, so
-/// it cannot tell those apart, and every surface that reports this says what it
-/// actually knows: that a receipt exists for the path.
+/// now". A receipt may outlive a missing link until guarded uninstall or Forget
+/// Source establishes that link gone; that makes it evidence for later repair.
+/// A link removed and remade by hand at the same path still matches one. Skilled
+/// records no inode or creation time, so it cannot tell those apart, and every
+/// surface says only that a receipt exists for the path.
 fn receipted(receipts: &[Receipt], link_path: &Path) -> bool {
     receipts
         .iter()
@@ -1155,6 +1487,8 @@ pub enum StepOutcome {
     /// does not own something it put on disk. Stated rather than hidden: the
     /// link is real, and a later repair will not recognise it.
     CreatedUnrecorded(String),
+    /// A managed directory link was removed.
+    Removed,
     /// The skill root was created, but the link could not be. The empty root is
     /// deliberately left in place, so this is a partial write rather than a
     /// failed step that changed nothing.
@@ -1193,12 +1527,17 @@ impl AppliedStep {
         )
     }
 
+    fn removed_link(&self) -> bool {
+        matches!(self.outcome, StepOutcome::Removed)
+    }
+
     pub(crate) fn changed_filesystem(&self) -> bool {
         matches!(
             self.outcome,
             StepOutcome::Created
                 | StepOutcome::CreatedUnrecorded(_)
                 | StepOutcome::RootCreatedLinkFailed(_)
+                | StepOutcome::Removed
         )
     }
 }
@@ -1223,12 +1562,17 @@ impl ApplyReport {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VerifyFailure {
     agent: AgentKind,
+    postcondition: Postcondition,
     observed: String,
 }
 
 impl VerifyFailure {
     pub fn agent(&self) -> AgentKind {
         self.agent
+    }
+
+    pub fn postcondition(&self) -> Postcondition {
+        self.postcondition
     }
 
     /// What the scan taken after the apply actually found.
@@ -1246,6 +1590,7 @@ impl VerifyFailure {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VerifyWithheld {
     agent: AgentKind,
+    postcondition: Postcondition,
     reason: String,
     /// Whether this is a postcondition on a target Skilled wrote, as opposed
     /// to an ancillary OpenCode resolution affected through another root.
@@ -1257,6 +1602,14 @@ impl VerifyWithheld {
         self.agent
     }
 
+    pub fn postcondition(&self) -> Postcondition {
+        self.postcondition
+    }
+
+    pub fn required(&self) -> bool {
+        self.required
+    }
+
     /// What stopped the check, in words.
     pub fn reason(&self) -> &str {
         &self.reason
@@ -1264,6 +1617,30 @@ impl VerifyWithheld {
 
     fn blocks_success(&self) -> bool {
         self.required
+    }
+}
+
+/// A separately identifiable postcondition, so no pass is inferred from silence.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Postcondition {
+    LinkAsPlanned,
+    LinkGone,
+    ContentSurvived,
+    OpenCodeResolution,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct VerifyPass {
+    agent: AgentKind,
+    postcondition: Postcondition,
+}
+
+impl VerifyPass {
+    pub fn agent(self) -> AgentKind {
+        self.agent
+    }
+    pub fn postcondition(self) -> Postcondition {
+        self.postcondition
     }
 }
 
@@ -1279,6 +1656,7 @@ impl VerifyWithheld {
 /// user deselected into a failed install.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct VerifyReport {
+    held: Vec<VerifyPass>,
     failures: Vec<VerifyFailure>,
     withheld: Vec<VerifyWithheld>,
 }
@@ -1302,6 +1680,10 @@ impl VerifyReport {
 
     pub fn withheld(&self) -> &[VerifyWithheld] {
         &self.withheld
+    }
+
+    pub fn held(&self) -> &[VerifyPass] {
+        &self.held
     }
 }
 
@@ -1417,6 +1799,18 @@ pub enum InstallPrompt {
     Report(InstallOutcome),
     /// No plan could be made at all, and why.
     Failed(String),
+}
+
+/// The one modal operation dialog currently owning the keyboard.
+///
+/// Keeping every mutating flow behind one prompt preserves a single preview
+/// confirmation and scrolling rule as uninstall and source forgetting are
+/// added beside installation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum OperationPrompt {
+    Install(InstallPrompt),
+    Uninstall(UninstallPrompt),
+    Forget(ForgetPrompt),
 }
 
 /// Create every link the plan calls work, in [`AgentKind::ALL`] order.
@@ -1634,6 +2028,645 @@ fn create_directory_symlink(_target: &Path, _link_path: &Path) -> io::Result<()>
     ))
 }
 
+/// Remove only links that still satisfy every ownership and containment guard.
+///
+/// The final component is never followed and the documented root is never
+/// removed. As with installation, one pathname window remains between the
+/// final check and the write because the standard library has no handle-based
+/// `unlinkat`; the mandatory rescan makes any disagreement non-silent.
+pub(crate) fn apply_uninstall(plan: &UninstallPlan, store: &Store, home: &Path) -> ApplyReport {
+    let mut steps = Vec::new();
+    if plan.is_blocked() {
+        debug_assert!(false, "a blocked plan reached apply_uninstall");
+        return ApplyReport { steps };
+    }
+    let mut stopped = false;
+    for target in plan.targets.iter().filter(|target| target.is_work()) {
+        let outcome = if stopped {
+            StepOutcome::Unattempted
+        } else {
+            apply_uninstall_target(plan, target, store, home)
+        };
+        stopped = !matches!(outcome, StepOutcome::Removed);
+        steps.push(AppliedStep {
+            agent: target.agent,
+            link_path: target.link_path.clone(),
+            outcome,
+        });
+    }
+    ApplyReport { steps }
+}
+
+fn apply_uninstall_target(
+    plan: &UninstallPlan,
+    target: &UninstallTarget,
+    store: &Store,
+    home: &Path,
+) -> StepOutcome {
+    let UninstallDisposition::RemoveLink { link_target, .. } = &target.disposition else {
+        return StepOutcome::Failed("the target is not removable".to_owned());
+    };
+    if !target.link_path.is_absolute()
+        || target.link_path.file_name() != Some(std::ffi::OsStr::new(plan.skill_name()))
+    {
+        return StepOutcome::Failed(
+            "the target is not beneath the documented skill root".to_owned(),
+        );
+    }
+    let Some(root) = target.link_path.parent() else {
+        return StepOutcome::Failed("the target has no parent directory".to_owned());
+    };
+    if probe_root(root, home) != RootProbe::Present {
+        return StepOutcome::Failed(
+            "the agent's skill root changed after the plan was shown, so nothing was removed"
+                .to_owned(),
+        );
+    }
+    match probe_entry(&target.link_path) {
+        EntryProbe::Symlink {
+            target: current, ..
+        } if current == *link_target => {}
+        EntryProbe::Symlink { .. } => {
+            return StepOutcome::Failed(
+                "the link target changed after the plan was shown, so nothing was removed"
+                    .to_owned(),
+            );
+        }
+        _ => return StepOutcome::Failed(
+            "the path is no longer the symbolic link the plan described, so nothing was removed"
+                .to_owned(),
+        ),
+    }
+    let receipts = match store.receipts() {
+        Ok(receipts) => receipts,
+        Err(error) => {
+            return StepOutcome::Failed(format!(
+                "the ownership receipts could not be re-read, so nothing was removed: {error}"
+            ));
+        }
+    };
+    if !receipts.iter().any(|receipt| {
+        receipt.agent == target.agent
+            && receipt.link_path == target.link_path
+            && receipt.link_target == *link_target
+    }) {
+        return StepOutcome::Failed(
+            "the matching ownership receipt disappeared after the plan was shown, so nothing was removed"
+                .to_owned(),
+        );
+    }
+    match remove_directory_symlink(&target.link_path) {
+        Ok(()) => StepOutcome::Removed,
+        Err(error) => {
+            StepOutcome::Failed(format!("the managed link could not be removed: {error}"))
+        }
+    }
+}
+
+#[cfg(unix)]
+fn remove_directory_symlink(path: &Path) -> io::Result<()> {
+    fs::remove_file(path)
+}
+
+#[cfg(windows)]
+fn remove_directory_symlink(path: &Path) -> io::Result<()> {
+    fs::remove_dir(path)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn remove_directory_symlink(_path: &Path) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "Skilled cannot remove directory symbolic links on this platform",
+    ))
+}
+
+/// What a direct post-removal read of canonical content found.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ContentSighting {
+    Resolved,
+    Missing,
+    Unreadable(String),
+    NotApplicable,
+}
+
+pub(crate) fn probe_uninstall_content(plan: &UninstallPlan) -> [ContentSighting; 3] {
+    AgentKind::ALL.map(|agent| {
+        let Some(target) = plan.target(agent) else {
+            return ContentSighting::NotApplicable;
+        };
+        let UninstallDisposition::RemoveLink {
+            link_target,
+            resolves: true,
+        } = target.disposition()
+        else {
+            return ContentSighting::NotApplicable;
+        };
+        match fs::metadata(link_target) {
+            Ok(metadata) if metadata.is_dir() => ContentSighting::Resolved,
+            Ok(_) => ContentSighting::Missing,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => ContentSighting::Missing,
+            Err(error) => ContentSighting::Unreadable(error.to_string()),
+        }
+    })
+}
+
+/// Verify link removal, canonical-content survival, and the reduced OpenCode outlook.
+pub fn verify_uninstall(
+    plan: &UninstallPlan,
+    applied: &ApplyReport,
+    snapshot: &InventorySnapshot,
+    content: &[ContentSighting; 3],
+) -> VerifyReport {
+    let mut report = VerifyReport::default();
+    let row = snapshot.row(plan.skill_name());
+    for step in applied.steps.iter().filter(|step| step.removed_link()) {
+        if let Some(reason) = unscanned(snapshot.root(step.agent).status()) {
+            report.withheld.push(VerifyWithheld {
+                agent: step.agent,
+                postcondition: Postcondition::LinkGone,
+                reason,
+                required: true,
+            });
+        } else if row.and_then(|row| row.observation(step.agent)).is_none() {
+            report.held.push(VerifyPass {
+                agent: step.agent,
+                postcondition: Postcondition::LinkGone,
+            });
+        } else {
+            report.failures.push(VerifyFailure {
+                agent: step.agent,
+                postcondition: Postcondition::LinkGone,
+                observed: "the scan taken afterwards still found an entry at this path".to_owned(),
+            });
+        }
+        let target = plan
+            .target(step.agent)
+            .expect("an applied target belongs to the plan");
+        if matches!(
+            target.disposition,
+            UninstallDisposition::RemoveLink { resolves: true, .. }
+        ) {
+            match &content[step.agent.index()] {
+                ContentSighting::Resolved => report.held.push(VerifyPass {
+                    agent: step.agent,
+                    postcondition: Postcondition::ContentSurvived,
+                }),
+                ContentSighting::Missing => report.failures.push(VerifyFailure {
+                    agent: step.agent,
+                    postcondition: Postcondition::ContentSurvived,
+                    observed: "the recorded target content is no longer present; Skilled removed only the link"
+                        .to_owned(),
+                }),
+                ContentSighting::Unreadable(reason) => report.withheld.push(VerifyWithheld {
+                    agent: step.agent,
+                    postcondition: Postcondition::ContentSurvived,
+                    reason: format!("the recorded target content could not be re-read: {reason}"),
+                    required: false,
+                }),
+                ContentSighting::NotApplicable => report.withheld.push(VerifyWithheld {
+                    agent: step.agent,
+                    postcondition: Postcondition::ContentSurvived,
+                    reason: "the recorded target content was not re-read".to_owned(),
+                    required: false,
+                }),
+            }
+        }
+    }
+    if applied.steps.iter().any(AppliedStep::removed_link)
+        && let (Some(expected), Some(observed)) = (
+            plan.opencode_outlook(),
+            row.and_then(InventoryRow::opencode_resolution),
+        )
+    {
+        match UninstallOutlook::of(observed) {
+            UninstallOutlook::Unknown => report.withheld.push(VerifyWithheld {
+                agent: AgentKind::OpenCode,
+                postcondition: Postcondition::OpenCodeResolution,
+                reason: "what OpenCode resolves the name to could not be established".to_owned(),
+                required: false,
+            }),
+            actual if &actual == expected => report.held.push(VerifyPass {
+                agent: AgentKind::OpenCode,
+                postcondition: Postcondition::OpenCodeResolution,
+            }),
+            _ => report.failures.push(VerifyFailure {
+                agent: AgentKind::OpenCode,
+                postcondition: Postcondition::OpenCodeResolution,
+                observed: format!(
+                    "this was not the OpenCode outcome the plan described: {}",
+                    observed_summary(observed)
+                ),
+            }),
+        }
+    }
+    report
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FinalizeFailure {
+    agent: AgentKind,
+    reason: String,
+}
+
+impl FinalizeFailure {
+    pub fn agent(&self) -> AgentKind {
+        self.agent
+    }
+    pub fn reason(&self) -> &str {
+        &self.reason
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct FinalizeReport {
+    failures: Vec<FinalizeFailure>,
+}
+
+impl FinalizeReport {
+    pub fn failures(&self) -> &[FinalizeFailure] {
+        &self.failures
+    }
+}
+
+/// Delete receipts only after a positive LinkGone pass authorizes it.
+pub(crate) fn finalize_uninstall(
+    plan: &UninstallPlan,
+    applied: &ApplyReport,
+    verification: &VerifyReport,
+    store: &Store,
+) -> FinalizeReport {
+    let mut report = FinalizeReport::default();
+    for step in applied.steps.iter().filter(|step| step.removed_link()) {
+        let passed = verification
+            .held
+            .iter()
+            .any(|pass| pass.agent == step.agent && pass.postcondition == Postcondition::LinkGone);
+        if !passed {
+            continue;
+        }
+        let Some(target) = plan.target(step.agent) else {
+            continue;
+        };
+        let UninstallDisposition::RemoveLink { link_target, .. } = target.disposition() else {
+            continue;
+        };
+        if let Err(error) =
+            store.delete_receipts_for_link(step.agent, step.link_path(), link_target)
+        {
+            report.failures.push(FinalizeFailure {
+                agent: step.agent,
+                reason: error.to_string(),
+            });
+        }
+    }
+    report
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UninstallStatus {
+    NothingToDo,
+    NotApplied,
+    PartiallyApplied,
+    VerificationFailed,
+    UninstalledUnrecorded,
+    Uninstalled,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UninstallOutcome {
+    plan: UninstallPlan,
+    applied: ApplyReport,
+    verification: VerifyReport,
+    finalized: FinalizeReport,
+}
+
+impl UninstallOutcome {
+    pub(crate) fn new(
+        plan: UninstallPlan,
+        applied: ApplyReport,
+        verification: VerifyReport,
+        finalized: FinalizeReport,
+    ) -> Self {
+        Self {
+            plan,
+            applied,
+            verification,
+            finalized,
+        }
+    }
+    pub fn plan(&self) -> &UninstallPlan {
+        &self.plan
+    }
+    pub fn applied(&self) -> &ApplyReport {
+        &self.applied
+    }
+    pub fn verification(&self) -> &VerifyReport {
+        &self.verification
+    }
+    pub fn finalized(&self) -> &FinalizeReport {
+        &self.finalized
+    }
+    pub fn status(&self) -> UninstallStatus {
+        uninstall_status(&self.applied, &self.verification, &self.finalized)
+    }
+}
+
+fn uninstall_status(
+    applied: &ApplyReport,
+    verification: &VerifyReport,
+    finalized: &FinalizeReport,
+) -> UninstallStatus {
+    if applied.steps.is_empty() {
+        return UninstallStatus::NothingToDo;
+    }
+    if !applied.steps.iter().all(AppliedStep::removed_link) {
+        return if applied.steps.iter().any(AppliedStep::removed_link) {
+            UninstallStatus::PartiallyApplied
+        } else {
+            UninstallStatus::NotApplied
+        };
+    }
+    if !verification.is_verified() {
+        return UninstallStatus::VerificationFailed;
+    }
+    if !finalized.failures.is_empty() {
+        return UninstallStatus::UninstalledUnrecorded;
+    }
+    UninstallStatus::Uninstalled
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum UninstallPrompt {
+    Preview(UninstallPlan),
+    Report(UninstallOutcome),
+    Failed(String),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum ForgetObservation {
+    Active,
+    Inactive(String),
+    Unreadable(String),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ForgetProbe {
+    observations: Vec<ForgetObservation>,
+}
+
+/// Inspect every receipted path without following its final component.
+pub fn probe_forget(source: &RegisteredSource, receipts: &[Receipt]) -> ForgetProbe {
+    let observations = receipts
+        .iter()
+        .filter(|receipt| receipt.source_id == Some(source.id()))
+        .map(|receipt| match fs::symlink_metadata(receipt.link_path()) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                ForgetObservation::Inactive("nothing remains at this path".to_owned())
+            }
+            Err(error) => ForgetObservation::Unreadable(error.to_string()),
+            Ok(metadata) if !metadata.file_type().is_symlink() => {
+                ForgetObservation::Inactive("the path is no longer a symbolic link".to_owned())
+            }
+            Ok(_) => match fs::read_link(receipt.link_path()) {
+                Ok(target) if target == receipt.link_target() => ForgetObservation::Active,
+                Ok(target) => ForgetObservation::Inactive(format!(
+                    "the link now points to {}",
+                    target.display()
+                )),
+                Err(error) => ForgetObservation::Unreadable(error.to_string()),
+            },
+        })
+        .collect();
+    ForgetProbe { observations }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ForgetReceiptState {
+    Active,
+    Inactive { reason: String },
+    Unreadable { reason: String },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ForgetReceipt {
+    receipt: Receipt,
+    state: ForgetReceiptState,
+}
+
+impl ForgetReceipt {
+    pub fn receipt(&self) -> &Receipt {
+        &self.receipt
+    }
+    pub fn state(&self) -> &ForgetReceiptState {
+        &self.state
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ForgetPlan {
+    source: RegisteredSource,
+    receipts: Vec<ForgetReceipt>,
+    blocking_findings: Vec<Finding>,
+}
+
+impl ForgetPlan {
+    pub fn source(&self) -> &RegisteredSource {
+        &self.source
+    }
+    pub fn receipts(&self) -> &[ForgetReceipt] {
+        &self.receipts
+    }
+    pub fn blocking_findings(&self) -> &[Finding] {
+        &self.blocking_findings
+    }
+    pub fn is_blocked(&self) -> bool {
+        !self.blocking_findings.is_empty()
+    }
+    pub fn is_executable(&self) -> bool {
+        !self.is_blocked()
+    }
+}
+
+/// Classify exactly which inactive ownership facts will be discarded.
+pub fn plan_forget(
+    source: &RegisteredSource,
+    receipts: &[Receipt],
+    probe: &ForgetProbe,
+) -> ForgetPlan {
+    let source_receipts: Vec<Receipt> = receipts
+        .iter()
+        .filter(|receipt| receipt.source_id == Some(source.id()))
+        .cloned()
+        .collect();
+    let mut blocking_findings = Vec::new();
+    let classified = source_receipts
+        .into_iter()
+        .zip(&probe.observations)
+        .map(|(receipt, observation)| {
+            let state = match observation {
+                ForgetObservation::Active => {
+                    blocking_findings.push(Finding::new(
+                        "forget.active_links",
+                        FindingSeverity::Critical,
+                        format!(
+                            "an active managed link remains at {}",
+                            receipt.link_path().display()
+                        ),
+                    ));
+                    ForgetReceiptState::Active
+                }
+                ForgetObservation::Inactive(reason) => ForgetReceiptState::Inactive {
+                    reason: reason.clone(),
+                },
+                ForgetObservation::Unreadable(reason) => {
+                    blocking_findings.push(Finding::new(
+                        "forget.unreadable_link",
+                        FindingSeverity::Critical,
+                        format!(
+                            "{} could not be established inactive: {reason}",
+                            receipt.link_path().display()
+                        ),
+                    ));
+                    ForgetReceiptState::Unreadable {
+                        reason: reason.clone(),
+                    }
+                }
+            };
+            ForgetReceipt { receipt, state }
+        })
+        .collect();
+    ForgetPlan {
+        source: source.clone(),
+        receipts: classified,
+        blocking_findings,
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ForgetApply {
+    NothingToDo,
+    Forgotten,
+    Failed(String),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ForgetVerification {
+    Held,
+    Failed(String),
+    Withheld(String),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ForgetStatus {
+    NothingToDo,
+    NotForgotten,
+    Forgotten,
+    VerificationFailed,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ForgetOutcome {
+    plan: ForgetPlan,
+    applied: ForgetApply,
+    verification: ForgetVerification,
+}
+
+impl ForgetOutcome {
+    pub(crate) fn new(
+        plan: ForgetPlan,
+        applied: ForgetApply,
+        verification: ForgetVerification,
+    ) -> Self {
+        Self {
+            plan,
+            applied,
+            verification,
+        }
+    }
+    pub fn plan(&self) -> &ForgetPlan {
+        &self.plan
+    }
+    pub fn applied(&self) -> &ForgetApply {
+        &self.applied
+    }
+    pub fn verification(&self) -> &ForgetVerification {
+        &self.verification
+    }
+    pub fn status(&self) -> ForgetStatus {
+        match (&self.applied, &self.verification) {
+            (ForgetApply::NothingToDo, _) => ForgetStatus::NothingToDo,
+            (ForgetApply::Failed(_), _) => ForgetStatus::NotForgotten,
+            (ForgetApply::Forgotten, ForgetVerification::Held) => ForgetStatus::Forgotten,
+            (ForgetApply::Forgotten, _) => ForgetStatus::VerificationFailed,
+        }
+    }
+}
+
+/// Recheck the exact receipt multiset and every link immediately before deletion.
+pub(crate) fn apply_forget(plan: &ForgetPlan, store: &mut Store) -> ForgetApply {
+    if plan.is_blocked() {
+        debug_assert!(false, "a blocked plan reached apply_forget");
+        return ForgetApply::Failed("the plan is blocked".to_owned());
+    }
+    let expected: Vec<Receipt> = plan
+        .receipts
+        .iter()
+        .map(|item| item.receipt.clone())
+        .collect();
+    let current = match store.receipts() {
+        Ok(receipts) => receipts
+            .into_iter()
+            .filter(|receipt| receipt.source_id == Some(plan.source.id()))
+            .collect::<Vec<_>>(),
+        Err(error) => {
+            return ForgetApply::Failed(format!(
+                "the ownership receipts could not be re-read: {error}"
+            ));
+        }
+    };
+    if current != expected {
+        return ForgetApply::Failed(
+            "the source's receipt set changed after the preview was shown".to_owned(),
+        );
+    }
+    let reprobe = probe_forget(&plan.source, &current);
+    if reprobe
+        .observations
+        .iter()
+        .any(|observation| !matches!(observation, ForgetObservation::Inactive(_)))
+    {
+        return ForgetApply::Failed(
+            "a receipted path is active or unreadable now, so no metadata was removed".to_owned(),
+        );
+    }
+    match store.forget_source(plan.source.id()) {
+        Ok(0) => ForgetApply::NothingToDo,
+        Ok(_) => ForgetApply::Forgotten,
+        Err(error) => ForgetApply::Failed(format!("the metadata transaction failed: {error}")),
+    }
+}
+
+pub(crate) fn verify_forget(source_id: i64, store: &Store) -> ForgetVerification {
+    match store.verify_source_forgotten(source_id) {
+        Ok([true, true, true]) => ForgetVerification::Held,
+        Ok(checks) => ForgetVerification::Failed(format!(
+            "metadata remained after forgetting (source: {}, catalogs: {}, receipts: {})",
+            !checks[0], !checks[1], !checks[2],
+        )),
+        Err(error) => {
+            ForgetVerification::Withheld(format!("the metadata could not be re-read: {error}"))
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ForgetPrompt {
+    Preview(ForgetPlan),
+    Report(ForgetOutcome),
+    Failed(String),
+}
+
 /// Check every link the apply wrote against the plan that called for it.
 ///
 /// Pure, over a scan taken after the apply. The observation has to be a
@@ -1657,6 +2690,7 @@ pub fn verify_install(
     applied: &ApplyReport,
     snapshot: &InventorySnapshot,
 ) -> VerifyReport {
+    let mut held = Vec::new();
     let mut failures = Vec::new();
     let mut withheld = Vec::new();
     let mut opencode_native = false;
@@ -1670,6 +2704,7 @@ pub fn verify_install(
         if let Some(reason) = unscanned(snapshot.root(step.agent).status()) {
             withheld.push(VerifyWithheld {
                 agent: step.agent,
+                postcondition: Postcondition::LinkAsPlanned,
                 reason,
                 required: true,
             });
@@ -1678,15 +2713,20 @@ pub fn verify_install(
         let Some(observed) = row.and_then(|row| row.observation(step.agent)) else {
             failures.push(VerifyFailure {
                 agent: step.agent,
+                postcondition: Postcondition::LinkAsPlanned,
                 observed: "the scan taken afterwards found nothing at this path".to_owned(),
             });
             continue;
         };
         match mismatch(plan, observed) {
-            Checked::Held => {}
+            Checked::Held => held.push(VerifyPass {
+                agent: step.agent,
+                postcondition: Postcondition::LinkAsPlanned,
+            }),
             Checked::Failed(observed) => {
                 failures.push(VerifyFailure {
                     agent: step.agent,
+                    postcondition: Postcondition::LinkAsPlanned,
                     observed,
                 });
                 continue;
@@ -1694,6 +2734,7 @@ pub fn verify_install(
             Checked::Withheld(reason) => {
                 withheld.push(VerifyWithheld {
                     agent: step.agent,
+                    postcondition: Postcondition::LinkAsPlanned,
                     reason,
                     required: true,
                 });
@@ -1711,11 +2752,16 @@ pub fn verify_install(
             resolution,
             OpenCodeResolution::Selected { winner, .. } if winner.path() == step.link_path
         ) {
+            held.push(VerifyPass {
+                agent: step.agent,
+                postcondition: Postcondition::OpenCodeResolution,
+            });
             continue;
         }
         if let OpenCodeResolution::Incomplete { roots } = resolution {
             withheld.push(VerifyWithheld {
                 agent: step.agent,
+                postcondition: Postcondition::OpenCodeResolution,
                 reason: format!(
                     "what OpenCode resolves the name to could not be established: {}",
                     unknown_roots(roots)
@@ -1726,6 +2772,7 @@ pub fn verify_install(
         }
         failures.push(VerifyFailure {
             agent: step.agent,
+            postcondition: Postcondition::OpenCodeResolution,
             observed: format!(
                 "OpenCode does not resolve the name to this link: {}",
                 observed_summary(resolution)
@@ -1756,6 +2803,7 @@ pub fn verify_install(
                 };
                 withheld.push(VerifyWithheld {
                     agent: AgentKind::OpenCode,
+                    postcondition: Postcondition::OpenCodeResolution,
                     reason: format!(
                         "what OpenCode resolves the name to could not be established: {}",
                         unknown_roots(roots)
@@ -1765,15 +2813,24 @@ pub fn verify_install(
             }
             (Some(expected), actual) if expected != &actual => failures.push(VerifyFailure {
                 agent: AgentKind::OpenCode,
+                postcondition: Postcondition::OpenCodeResolution,
                 observed: format!(
                     "this was not what the plan described: {}",
                     observed_summary(observed)
                 ),
             }),
-            _ => {}
+            (Some(_), _) => held.push(VerifyPass {
+                agent: AgentKind::OpenCode,
+                postcondition: Postcondition::OpenCodeResolution,
+            }),
+            (None, _) => {}
         }
     }
-    VerifyReport { failures, withheld }
+    VerifyReport {
+        held,
+        failures,
+        withheld,
+    }
 }
 
 /// Name each root whose contribution is unknown, and say which kind of unknown

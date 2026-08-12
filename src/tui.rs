@@ -17,8 +17,10 @@ use crate::{
         InstalledSkillObservation, InventoryRow, RootScan, RootStatus, RowProvenance, RowVerdict,
     },
     operations::{
-        AppliedStep, ExcludedReason, InstallOutcome, InstallPlan, InstallPrompt, InstallStatus,
-        InstallTarget, StepOutcome, TargetDisposition,
+        AppliedStep, ExcludedReason, ForgetApply, ForgetPrompt, ForgetReceiptState, ForgetStatus,
+        ForgetVerification, InstallOutcome, InstallPlan, InstallPrompt, InstallStatus,
+        InstallTarget, OperationPrompt, StepOutcome, TargetDisposition, UninstallDisposition,
+        UninstallPrompt, UninstallStatus,
     },
     resolution::{OpenCodeEntry, OpenCodeResolution, UnknownCause},
     source::{
@@ -122,16 +124,34 @@ pub fn render(frame: &mut Frame<'_>, app: &SkilledApp) -> RenderFeedback {
             render_settings(frame, body);
         }
     }
-    if let Some(prompt) = app.pending_install() {
-        render_install_prompt(
-            frame,
-            area,
-            prompt,
-            app.home(),
-            app.detail_scroll(),
-            detail_extent,
-            install_preview_fully_seen(app, detail_extent),
-        );
+    if let Some(prompt) = app.pending_operation() {
+        match prompt {
+            OperationPrompt::Install(prompt) => render_install_prompt(
+                frame,
+                area,
+                prompt,
+                app.home(),
+                app.detail_scroll(),
+                detail_extent,
+                operation_preview_fully_seen(app, detail_extent),
+            ),
+            OperationPrompt::Uninstall(prompt) => render_uninstall_prompt(
+                frame,
+                area,
+                prompt,
+                app.detail_scroll(),
+                detail_extent,
+                operation_preview_fully_seen(app, detail_extent),
+            ),
+            OperationPrompt::Forget(prompt) => render_forget_prompt(
+                frame,
+                area,
+                prompt,
+                app.detail_scroll(),
+                detail_extent,
+                operation_preview_fully_seen(app, detail_extent),
+            ),
+        }
     } else if app.source_path_input_active() {
         render_source_path_entry(frame, area, app);
     } else if app.pending_source().is_some() && app.view() == View::Sources {
@@ -268,7 +288,7 @@ fn session_status_on_nav_row(app: &SkilledApp, area: Rect) -> bool {
 /// in the same precedence, that [`render`] draws overlays under, plus the
 /// help modal that can sit over any of them.
 fn overlay_open(app: &SkilledApp) -> bool {
-    app.pending_install().is_some()
+    app.pending_operation().is_some()
         || app.source_path_input_active()
         || (app.pending_source().is_some() && app.view() == View::Sources)
         || app.help_context().is_some()
@@ -2437,7 +2457,7 @@ fn detail_scroll_extent(
     // it is open, so it is measured instead of whatever is behind it. The
     // reducer keeps one offset because only one scrollable thing is ever on
     // screen, and a modal is exactly that.
-    if let Some(prompt) = app.pending_install() {
+    if let Some(prompt) = app.pending_operation() {
         let body = install_prompt_regions(area, 0).body;
         if body.width == 0 {
             return None;
@@ -2450,7 +2470,14 @@ fn detail_scroll_extent(
         // shared with the detail regions because only one scrollable thing is
         // ever on screen — the renderer measures the unit, and the reducer
         // only ever clamps to what it was told.
-        let rows: usize = install_prompt_lines(prompt, app.home(), body.width)
+        let lines = match prompt {
+            OperationPrompt::Install(prompt) => {
+                install_prompt_lines(prompt, app.home(), body.width)
+            }
+            OperationPrompt::Uninstall(prompt) => uninstall_prompt_lines(prompt),
+            OperationPrompt::Forget(prompt) => forget_prompt_lines(prompt),
+        };
+        let rows: usize = lines
             .iter()
             .map(|line| wrapped_line_count(line, body.width))
             .sum();
@@ -4351,6 +4378,413 @@ fn render_install_prompt(
     frame.render_widget(Paragraph::new(actions.right_aligned()), regions.actions);
 }
 
+fn render_uninstall_prompt(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    prompt: &UninstallPrompt,
+    scroll: usize,
+    extent: Option<usize>,
+    fully_seen: bool,
+) {
+    let popup = install_prompt_popup(area);
+    frame.render_widget(Clear, popup);
+    let (title, scope) = match prompt {
+        UninstallPrompt::Preview(_) | UninstallPrompt::Failed(_) => {
+            ("Uninstall skill", "managed links only")
+        }
+        UninstallPrompt::Report(_) => ("Uninstall result", "already applied"),
+    };
+    let confirm =
+        fully_seen && matches!(prompt, UninstallPrompt::Preview(plan) if plan.is_executable());
+    let mut spans = Vec::new();
+    if confirm {
+        spans.extend([
+            Span::styled("Enter", theme::key_cap()),
+            Span::raw(" "),
+            Span::styled("Uninstall", theme::key_label()),
+            Span::raw("   "),
+        ]);
+    }
+    spans.extend([
+        Span::styled("Esc", theme::key_cap()),
+        Span::raw(" "),
+        Span::styled(if confirm { "Cancel" } else { "Close" }, theme::key_label()),
+    ]);
+    let actions = Line::from(spans);
+    let regions = install_prompt_regions(area, u16::try_from(actions.width()).unwrap_or(u16::MAX));
+    frame.render_widget(components::dialog_frame(title, scope), popup);
+    frame.render_widget(
+        Paragraph::new(uninstall_prompt_lines(prompt))
+            .wrap(Wrap { trim: false })
+            .scroll((u16::try_from(scroll).unwrap_or(u16::MAX), 0)),
+        regions.body,
+    );
+    frame.render_widget(
+        Paragraph::new(components::rule(regions.divider.width)),
+        regions.divider,
+    );
+    let mut status = uninstall_prompt_verdict(prompt);
+    if let Some(extent) = extent.filter(|extent| *extent > 0) {
+        let where_to = match (scroll > 0, scroll < extent) {
+            (true, true) => "more above and below",
+            (true, false) => "more above",
+            _ => "more below",
+        };
+        status.push_str(" · ");
+        status.push_str(where_to);
+    }
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(status, theme::key_label()))),
+        regions.status,
+    );
+    frame.render_widget(Paragraph::new(actions.right_aligned()), regions.actions);
+}
+
+fn uninstall_prompt_verdict(prompt: &UninstallPrompt) -> String {
+    match prompt {
+        UninstallPrompt::Preview(plan) if plan.is_blocked() => {
+            "Blocked — nothing will be removed".to_owned()
+        }
+        UninstallPrompt::Preview(plan) if plan.is_executable() => {
+            let count = plan
+                .targets()
+                .iter()
+                .filter(|target| target.is_work())
+                .count();
+            format!(
+                "{count} managed link{} to remove",
+                if count == 1 { "" } else { "s" }
+            )
+        }
+        UninstallPrompt::Preview(_) => "Nothing left to do".to_owned(),
+        UninstallPrompt::Report(outcome) => match outcome.status() {
+            UninstallStatus::Uninstalled if outcome.verification().is_complete() => {
+                "Uninstalled and verified".to_owned()
+            }
+            UninstallStatus::Uninstalled => "Uninstalled · not fully verified".to_owned(),
+            UninstallStatus::NothingToDo | UninstallStatus::NotApplied => {
+                "Nothing was removed".to_owned()
+            }
+            UninstallStatus::PartiallyApplied => "Partly applied".to_owned(),
+            UninstallStatus::VerificationFailed => "Removed, but not verified".to_owned(),
+            UninstallStatus::UninstalledUnrecorded => {
+                "Removed, but ownership metadata remains".to_owned()
+            }
+        },
+        UninstallPrompt::Failed(_) => "No plan was made".to_owned(),
+    }
+}
+
+fn uninstall_prompt_lines(prompt: &UninstallPrompt) -> Vec<Line<'static>> {
+    match prompt {
+        UninstallPrompt::Failed(message) => vec![Line::from(components::badge(
+            Tone::Critical,
+            &terminal_safe(message),
+        ))],
+        UninstallPrompt::Preview(plan) => {
+            let mut lines = vec![
+                Line::styled(
+                    format!("Skill: {}", terminal_safe(plan.skill_name())),
+                    theme::section_title(),
+                ),
+                Line::default(),
+                Line::styled("Targets", theme::section_title()),
+            ];
+            for target in plan.targets() {
+                let (tone, verdict, evidence) = match target.disposition() {
+                    UninstallDisposition::RemoveLink {
+                        link_target,
+                        resolves,
+                    } => (
+                        Tone::Warning,
+                        "remove the managed link".to_owned(),
+                        Some(format!(
+                            "receipt target: {}{}",
+                            terminal_safe(&link_target.display().to_string()),
+                            if *resolves {
+                                ""
+                            } else {
+                                " (no longer resolves)"
+                            }
+                        )),
+                    ),
+                    UninstallDisposition::Excluded { reason } => {
+                        (Tone::Unmanaged, format!("excluded: {:?}", reason), None)
+                    }
+                    UninstallDisposition::Blocked { finding } => (
+                        Tone::Critical,
+                        format!("blocked: {}", finding.code()),
+                        Some(terminal_safe(finding.evidence())),
+                    ),
+                };
+                lines.push(Line::from(components::badge(
+                    tone,
+                    &format!("{} · {verdict}", target.agent().display_name()),
+                )));
+                lines.push(Line::from(format!(
+                    "  {}",
+                    terminal_safe(&target.link_path().display().to_string())
+                )));
+                if let Some(evidence) = evidence {
+                    lines.push(Line::from(format!("  {evidence}")));
+                }
+            }
+            if !plan.warnings().is_empty() {
+                lines.push(Line::default());
+                lines.push(Line::styled("Before you confirm", theme::section_title()));
+                for warning in plan.warnings() {
+                    lines.push(Line::from(components::badge(
+                        Tone::Warning,
+                        &terminal_safe(warning),
+                    )));
+                }
+            }
+            lines.push(Line::default());
+            lines.push(Line::styled(
+                "Source content and agent skill roots are not removed.",
+                theme::key_label(),
+            ));
+            lines
+        }
+        UninstallPrompt::Report(outcome) => {
+            let mut lines = vec![Line::styled(
+                format!("Skill: {}", terminal_safe(outcome.plan().skill_name())),
+                theme::section_title(),
+            )];
+            for step in outcome.applied().steps() {
+                let (tone, verdict) = install_step_verdict(step.outcome());
+                lines.push(Line::from(components::badge(
+                    tone,
+                    &format!("{} · {verdict}", step.agent().display_name()),
+                )));
+                lines.push(Line::from(format!(
+                    "  {}",
+                    terminal_safe(&step.link_path().display().to_string())
+                )));
+            }
+            for withheld in outcome.verification().withheld() {
+                lines.push(Line::from(components::badge(
+                    Tone::Warning,
+                    &format!(
+                        "Not established: {} — {}",
+                        withheld.agent().display_name(),
+                        terminal_safe(withheld.reason())
+                    ),
+                )));
+            }
+            for failure in outcome.verification().failures() {
+                lines.push(Line::from(components::badge(
+                    Tone::Critical,
+                    &format!(
+                        "Not verified: {} — {}",
+                        failure.agent().display_name(),
+                        terminal_safe(failure.observed())
+                    ),
+                )));
+            }
+            for failure in outcome.finalized().failures() {
+                lines.push(Line::from(components::badge(
+                    Tone::Warning,
+                    &format!(
+                        "Ownership record remains for {} — {}",
+                        failure.agent().display_name(),
+                        terminal_safe(failure.reason())
+                    ),
+                )));
+            }
+            lines.push(Line::default());
+            lines.push(Line::styled(
+                "Source content and agent skill roots were not removed.",
+                theme::key_label(),
+            ));
+            lines
+        }
+    }
+}
+
+fn render_forget_prompt(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    prompt: &ForgetPrompt,
+    scroll: usize,
+    extent: Option<usize>,
+    fully_seen: bool,
+) {
+    let popup = install_prompt_popup(area);
+    frame.render_widget(Clear, popup);
+    let report = matches!(prompt, ForgetPrompt::Report(_));
+    let confirm =
+        fully_seen && matches!(prompt, ForgetPrompt::Preview(plan) if plan.is_executable());
+    let mut spans = Vec::new();
+    if confirm {
+        spans.extend([
+            Span::styled("Enter", theme::key_cap()),
+            Span::raw(" "),
+            Span::styled("Forget", theme::key_label()),
+            Span::raw("   "),
+        ]);
+    }
+    spans.extend([
+        Span::styled("Esc", theme::key_cap()),
+        Span::raw(" "),
+        Span::styled(if confirm { "Cancel" } else { "Close" }, theme::key_label()),
+    ]);
+    let actions = Line::from(spans);
+    let regions = install_prompt_regions(area, u16::try_from(actions.width()).unwrap_or(u16::MAX));
+    frame.render_widget(
+        components::dialog_frame(
+            if report {
+                "Forget result"
+            } else {
+                "Forget source"
+            },
+            if report {
+                "already applied"
+            } else {
+                "metadata only"
+            },
+        ),
+        popup,
+    );
+    frame.render_widget(
+        Paragraph::new(forget_prompt_lines(prompt))
+            .wrap(Wrap { trim: false })
+            .scroll((u16::try_from(scroll).unwrap_or(u16::MAX), 0)),
+        regions.body,
+    );
+    frame.render_widget(
+        Paragraph::new(components::rule(regions.divider.width)),
+        regions.divider,
+    );
+    let mut status = match prompt {
+        ForgetPrompt::Preview(plan) if plan.is_blocked() => {
+            "Blocked — no metadata will be removed".to_owned()
+        }
+        ForgetPrompt::Preview(_) => "Ready to forget source metadata".to_owned(),
+        ForgetPrompt::Report(outcome) => match outcome.status() {
+            ForgetStatus::Forgotten => "Source forgotten and verified".to_owned(),
+            ForgetStatus::NothingToDo => "Nothing was removed".to_owned(),
+            ForgetStatus::NotForgotten => "Source was not forgotten".to_owned(),
+            ForgetStatus::VerificationFailed => "Forgotten, but not verified".to_owned(),
+        },
+        ForgetPrompt::Failed(_) => "No plan was made".to_owned(),
+    };
+    if let Some(extent) = extent.filter(|extent| *extent > 0) {
+        status.push_str(if scroll < extent {
+            " · more below"
+        } else {
+            " · more above"
+        });
+    }
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(status, theme::key_label()))),
+        regions.status,
+    );
+    frame.render_widget(Paragraph::new(actions.right_aligned()), regions.actions);
+}
+
+fn forget_prompt_lines(prompt: &ForgetPrompt) -> Vec<Line<'static>> {
+    match prompt {
+        ForgetPrompt::Failed(message) => vec![Line::from(components::badge(
+            Tone::Critical,
+            &terminal_safe(message),
+        ))],
+        ForgetPrompt::Preview(plan) => {
+            let source = plan.source();
+            let mut lines = vec![
+                Line::styled(
+                    format!("Source: {}", terminal_safe(source.label())),
+                    theme::section_title(),
+                ),
+                Line::from(format!(
+                    "Checkout left untouched: {}",
+                    terminal_safe(&source.git_top_level().display().to_string())
+                )),
+                Line::default(),
+                Line::styled("Metadata to remove", theme::section_title()),
+                Line::from("source registration and cached scan state"),
+            ];
+            for catalog in source.catalogs() {
+                lines.push(Line::from(format!(
+                    "catalog: {}",
+                    terminal_safe(&catalog.relative_path().display().to_string())
+                )));
+            }
+            for item in plan.receipts() {
+                let receipt = item.receipt();
+                match item.state() {
+                    ForgetReceiptState::Active => lines.push(Line::from(components::badge(
+                        Tone::Critical,
+                        &format!(
+                            "active link blocks: {}",
+                            terminal_safe(&receipt.link_path().display().to_string())
+                        ),
+                    ))),
+                    ForgetReceiptState::Inactive { reason } => lines.push(Line::from(format!(
+                        "inactive receipt: {} — {}",
+                        terminal_safe(&receipt.link_path().display().to_string()),
+                        terminal_safe(reason)
+                    ))),
+                    ForgetReceiptState::Unreadable { reason } => {
+                        lines.push(Line::from(components::badge(
+                            Tone::Critical,
+                            &format!(
+                                "unreadable receipt: {} — {}",
+                                terminal_safe(&receipt.link_path().display().to_string()),
+                                terminal_safe(reason)
+                            ),
+                        )))
+                    }
+                }
+            }
+            lines.push(Line::default());
+            lines.push(Line::styled(
+                "The checkout and every skill directory are left alone.",
+                theme::key_label(),
+            ));
+            lines
+        }
+        ForgetPrompt::Report(outcome) => {
+            let mut lines = vec![Line::styled(
+                format!("Source: {}", terminal_safe(outcome.plan().source().label())),
+                theme::section_title(),
+            )];
+            match outcome.applied() {
+                ForgetApply::Forgotten => lines.push(Line::from(components::badge(
+                    Tone::Healthy,
+                    "private metadata removed",
+                ))),
+                ForgetApply::NothingToDo => {
+                    lines.push(Line::from("the source row was already absent"))
+                }
+                ForgetApply::Failed(reason) => lines.push(Line::from(components::badge(
+                    Tone::Critical,
+                    &format!("not forgotten — {}", terminal_safe(reason)),
+                ))),
+            }
+            match outcome.verification() {
+                ForgetVerification::Held => lines.push(Line::from(
+                    "Verified: source, catalogs, and receipts are absent.",
+                )),
+                ForgetVerification::Failed(reason) => lines.push(Line::from(components::badge(
+                    Tone::Critical,
+                    &terminal_safe(reason),
+                ))),
+                ForgetVerification::Withheld(reason) => lines.push(Line::from(components::badge(
+                    Tone::Warning,
+                    &terminal_safe(reason),
+                ))),
+            }
+            lines.push(Line::default());
+            lines.push(Line::styled(
+                "The checkout and every skill directory were left alone.",
+                theme::key_label(),
+            ));
+            lines
+        }
+    }
+}
+
 /// The keys the dialog offers, which are exactly the ones the reducer honours
 /// in this state: a plan with no executable work accepts no confirmation, and
 /// neither does one whose last row has not been on screen, so neither
@@ -4631,6 +5065,7 @@ fn excluded_reason(reason: &ExcludedReason) -> (String, Option<String>) {
 fn install_step_verdict(outcome: &StepOutcome) -> (Tone, String) {
     match outcome {
         StepOutcome::Created => (Tone::Healthy, "link created".to_owned()),
+        StepOutcome::Removed => (Tone::Healthy, "link removed".to_owned()),
         StepOutcome::CreatedUnrecorded(error) => (
             Tone::Warning,
             format!(
@@ -4728,8 +5163,8 @@ fn install_report_lines(outcome: &InstallOutcome) -> Vec<Line<'static>> {
     {
         lines.push(Line::default());
         lines.push(Line::from(
-            "Skilled does not undo what it wrote. Nothing above was removed, and no repair \
-             exists in this release.",
+            "Skilled does not undo a partial install automatically; uninstall is a separate \
+             confirmed operation, and no repair exists in this release.",
         ));
     }
     lines
@@ -5339,6 +5774,13 @@ fn help_commands(
                     description: "narrow by name, source, or health",
                 });
             }
+            if app.can_uninstall_selection() {
+                commands.push(HelpCommand {
+                    key: "x",
+                    label: "Uninstall",
+                    description: "remove only matching Skilled-managed links",
+                });
+            }
             commands.extend([
                 HelpCommand {
                     key: "2",
@@ -5381,6 +5823,13 @@ fn help_commands(
                 label: "Region",
                 description: "move region focus forward or backward",
             }];
+            if app.can_forget_source() {
+                commands.push(HelpCommand {
+                    key: "x",
+                    label: "Forget",
+                    description: "remove inactive source metadata only",
+                });
+            }
             if sources_can_move_selection(app) {
                 commands.push(HelpCommand {
                     key: "Up/Down or j/k",
@@ -5554,8 +6003,7 @@ fn render_footer(
 ///
 /// This mirrors [`crate::input`]. A hint that is not backed by a key mapping is
 /// a promise the application cannot keep, so unimplemented commands —
-/// installation, updates, repair, uninstall, and forget — are absent by
-/// construction.
+/// updates and repair — are absent by construction.
 ///
 /// The row is budgeted, and every context declares its routes before `?` and
 /// `q`: where they do not all fit, the route survives and the two commands the
@@ -5577,7 +6025,7 @@ fn key_hints(app: &SkilledApp, detail_extent: Option<usize>) -> Vec<KeyHint> {
     }
     // The install dialog answers for the whole row while it is open, and only
     // offers a confirmation where the reducer would accept one.
-    if let Some(prompt) = app.pending_install() {
+    if let Some(prompt) = app.pending_operation() {
         let mut hints = Vec::new();
         if detail_extent.is_some_and(|extent| extent > 0) {
             hints.push(KeyHint::essential("j/k", "Scroll"));
@@ -5588,10 +6036,22 @@ fn key_hints(app: &SkilledApp, detail_extent: Option<usize>) -> Vec<KeyHint> {
         // so the hint cannot survive a resize that put content back under the
         // window; the runner notes the same measurement before reading the key,
         // so the two agree at the moment one is pressed.
-        if install_preview_fully_seen(app, detail_extent)
-            && matches!(prompt, InstallPrompt::Preview(plan) if plan.is_executable())
-        {
-            hints.push(KeyHint::essential("Enter", "Install"));
+        let (executable, label) = match prompt {
+            OperationPrompt::Install(InstallPrompt::Preview(plan)) => {
+                (plan.is_executable(), "Install")
+            }
+            OperationPrompt::Uninstall(UninstallPrompt::Preview(plan)) => {
+                (plan.is_executable(), "Uninstall")
+            }
+            OperationPrompt::Forget(ForgetPrompt::Preview(plan)) => {
+                (plan.is_executable(), "Forget")
+            }
+            OperationPrompt::Install(_) => (false, "Install"),
+            OperationPrompt::Uninstall(_) => (false, "Uninstall"),
+            OperationPrompt::Forget(_) => (false, "Forget"),
+        };
+        if operation_preview_fully_seen(app, detail_extent) && executable {
+            hints.push(KeyHint::essential("Enter", label));
             hints.push(KeyHint::essential("Esc", "Cancel"));
         } else {
             hints.push(KeyHint::essential("Esc", "Close"));
@@ -5651,6 +6111,9 @@ fn key_hints(app: &SkilledApp, detail_extent: Option<usize>) -> Vec<KeyHint> {
         }
         View::Inventory => {
             let mut hints = vec![KeyHint::new("Tab/Shift-Tab", "Region")];
+            if app.can_uninstall_selection() {
+                hints.push(KeyHint::new("x", "Uninstall"));
+            }
             if inventory_can_move_selection(app) {
                 hints.push(KeyHint::new("j/k", "Move"));
             }
@@ -5680,6 +6143,9 @@ fn key_hints(app: &SkilledApp, detail_extent: Option<usize>) -> Vec<KeyHint> {
         }
         View::Sources => {
             let mut hints = vec![KeyHint::new("Tab/Shift-Tab", "Region")];
+            if app.can_forget_source() {
+                hints.push(KeyHint::new("x", "Forget"));
+            }
             if sources_can_move_selection(app) {
                 hints.push(KeyHint::new("j/k", "Move"));
             }
@@ -5729,7 +6195,7 @@ fn key_hints(app: &SkilledApp, detail_extent: Option<usize>) -> Vec<KeyHint> {
 
 /// Whether every row of the open preview has been on screen, as this frame
 /// measures it.
-fn install_preview_fully_seen(app: &SkilledApp, detail_extent: Option<usize>) -> bool {
+fn operation_preview_fully_seen(app: &SkilledApp, detail_extent: Option<usize>) -> bool {
     detail_extent.is_none_or(|extent| app.detail_scroll() >= extent)
 }
 
