@@ -1222,12 +1222,20 @@ struct RepairOffer {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct OverlayFinding {
     path: PathBuf,
+    row_index: usize,
+    agent: AgentKind,
     finding: Finding,
 }
 
 impl OverlayFinding {
     pub(crate) fn path(&self) -> &Path {
         &self.path
+    }
+    pub(crate) fn row_index(&self) -> usize {
+        self.row_index
+    }
+    pub(crate) fn agent(&self) -> AgentKind {
+        self.agent
     }
     pub(crate) fn finding(&self) -> &Finding {
         &self.finding
@@ -1251,7 +1259,7 @@ impl RepairOverlay {
     ) -> Self {
         let by_name = variants_by_name(sources);
         let mut overlay = Self::default();
-        for row in snapshot.rows() {
+        for (row_index, row) in snapshot.rows().iter().enumerate() {
             for observation in row.observations() {
                 let InstallationObject::Symlink { target } = observation.object() else {
                     continue;
@@ -1304,6 +1312,8 @@ impl RepairOverlay {
                 {
                     overlay.findings.push(OverlayFinding {
                         path: observation.path().to_path_buf(),
+                        row_index,
+                        agent: observation.agent(),
                         finding: Finding::new(
                             "install.wrong_managed_target",
                             FindingSeverity::Warning,

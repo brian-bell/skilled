@@ -579,9 +579,11 @@ impl SkilledApp {
     }
 
     pub fn can_repair_selection(&self) -> bool {
-        self.selected_finding()
-            .as_ref()
-            .is_some_and(|entry| self.can_repair_finding(entry))
+        self.view == View::Doctor
+            && self
+                .selected_finding()
+                .as_ref()
+                .is_some_and(|entry| self.can_repair_finding(entry))
     }
 
     /// Whether one already-materialised Doctor entry offers repair.
@@ -668,9 +670,11 @@ impl SkilledApp {
     pub fn doctor_findings(&self) -> Vec<DoctorEntry<'_>> {
         let mut entries: Vec<_> = self.inventory.doctor_findings().collect();
         entries.extend(self.repair_overlay.findings().iter().filter_map(|overlay| {
-            let (skill_name, observation) = self.inventory.observation_at(overlay.path())?;
+            let row = self.inventory.rows().get(overlay.row_index())?;
+            let observation = row.observation(overlay.agent())?;
+            debug_assert_eq!(observation.path(), overlay.path());
             Some(DoctorEntry::from_observation(
-                skill_name,
+                row.name(),
                 overlay.finding(),
                 observation,
             ))

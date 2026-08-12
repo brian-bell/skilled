@@ -723,13 +723,6 @@ pub struct InventorySnapshot {
 }
 
 impl InventorySnapshot {
-    pub(crate) fn observation_at(&self, path: &Path) -> Option<(&str, &InstalledSkillObservation)> {
-        self.rows.iter().find_map(|row| {
-            row.observations()
-                .find(|observation| observation.path() == path)
-                .map(|observation| (row.name(), observation))
-        })
-    }
     pub fn rows(&self) -> &[InventoryRow] {
         &self.rows
     }

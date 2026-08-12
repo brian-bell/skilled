@@ -106,9 +106,10 @@ pub fn action_for_app_key(app: &SkilledApp, key: KeyEvent) -> Option<Action> {
     {
         return Some(Action::BeginInstall);
     }
-    if app.can_repair_selection()
-        && key.kind == KeyEventKind::Press
+    if key.kind == KeyEventKind::Press
         && key.code == KeyCode::Char('r')
+        && app.view() == View::Doctor
+        && app.can_repair_selection()
     {
         return Some(Action::BeginRepair);
     }
