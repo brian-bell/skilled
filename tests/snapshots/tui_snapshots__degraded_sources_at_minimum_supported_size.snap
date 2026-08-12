@@ -1,0 +1,28 @@
+---
+source: tests/tui_snapshots.rs
+expression: "normalize_degraded(&temporary, render(&app, 80, 24))"
+---
+ ◆ skilled  global                            ● degraded · metadata unavailable
+ 1 Inventory ·1 │ 2 Sources      │ Updates (soon) │ 4 Doctor       │
+▌ Repositories  registry unavailable
+────────────────────────────────────────────────────────────────────────────────
+
+
+
+
+
+
+                                        ·
+
+                         Source registry is unavailable
+
+  Skilled cannot state which sources are registered, and adding one is disabled
+                                for this session.
+
+
+
+
+
+
+
+ Tab/Shift-Tab Region   1 Inventory   4 Doctor   ? Help   q Quit   Esc Back

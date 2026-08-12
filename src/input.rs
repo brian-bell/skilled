@@ -98,7 +98,7 @@ pub fn action_for_app_key(app: &SkilledApp, key: KeyEvent) -> Option<Action> {
     // and it happens after that call so the held-key allowance the movement
     // keys already have carries over to scrolling, which is where a user is
     // most likely to hold one down.
-    match action_for_key(app.view(), key) {
+    let action = match action_for_key(app.view(), key) {
         Some(Action::MoveInventorySelection(delta))
             if app.view() == View::Inventory && app.inventory_pane() == InventoryPane::Details =>
         {
@@ -109,6 +109,13 @@ pub fn action_for_app_key(app: &SkilledApp, key: KeyEvent) -> Option<Action> {
         {
             Some(Action::ScrollDetail(delta))
         }
+        action => action,
+    };
+    match action {
+        Some(Action::BeginAddSource | Action::ConfirmPendingSource) if !app.can_add_source() => {
+            None
+        }
+        Some(Action::RerunSetup) if !app.can_rerun_setup() => None,
         action => action,
     }
 }

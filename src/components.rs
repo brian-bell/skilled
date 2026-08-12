@@ -10,7 +10,10 @@ use ratatui::{
     widgets::{Block, Borders, Padding, Paragraph, Wrap},
 };
 
-use crate::theme::{self, Tone};
+use crate::{
+    MetadataFailure,
+    theme::{self, Tone},
+};
 
 /// One advertised command in the persistent key-hint bar.
 ///
@@ -284,6 +287,16 @@ pub(crate) fn terminal_safe(value: &str) -> String {
     safe
 }
 
+/// A metadata failure rendered without allowing either its path or cause to
+/// inject terminal control sequences.
+pub(crate) fn metadata_failure_text(failure: &MetadataFailure) -> String {
+    format!(
+        "{}: {}",
+        terminal_safe(&failure.database_path().display().to_string()),
+        terminal_safe(failure.cause())
+    )
+}
+
 /// The marker that identifies the focused row in a list.
 pub(crate) const FOCUS_MARKER: &str = "▌";
 
@@ -514,6 +527,21 @@ pub(crate) fn empty_state(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn metadata_failure_text_escapes_the_path_and_cause_independently() {
+        let failure = MetadataFailure::new(
+            std::path::PathBuf::from("/data/skill\n.sqlite3"),
+            "sqlite\u{1b}[31mfailed",
+        );
+
+        let rendered = metadata_failure_text(&failure);
+
+        assert!(!rendered.contains('\n'));
+        assert!(!rendered.contains('\u{1b}'));
+        assert!(rendered.contains("\\n"));
+        assert!(rendered.contains("\\u{1b}"));
+    }
 
     const HINTS: [KeyHint; 3] = [
         KeyHint::new("j/k", "Move"),

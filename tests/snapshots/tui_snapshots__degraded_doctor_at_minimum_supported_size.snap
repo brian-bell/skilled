@@ -1,0 +1,28 @@
+---
+source: tests/tui_snapshots.rs
+expression: "normalize_degraded(&temporary, render(&app, 80, 24))"
+---
+ ◆ skilled  global                            ● degraded · metadata unavailable
+ 1 Inventory ·1 │ 2 Sources      │ Updates (soon) │ 4 Doctor       │
+▌ Doctor  1 listed · metadata unavailable
+× metadata unavailable:
+<TEMP>/data/sk
+illed.sqlite3: filesystem operation failed: No such file or directory (os error
+2). The agent selection could not be read; all detected roots were scanned
+read-only. Writes are refused.
+────────────────────────────────────────────────────────────────────────────────
+  SEVERITY   FINDING                           SKILL                AGENT
+▌ ! warning  install.provenance_unverified     portable             Claude Code
+
+
+
+
+
+
+
+
+
+
+
+
+ Tab/Shift-Tab Region   Enter Open   1 Inventory   2 Sources   Esc Back …

@@ -19,7 +19,7 @@ use crate::{
     AgentKind, AppEnvironment, SkilledApp, View,
     agents::adapter,
     app::PlanRequestFailure,
-    components::terminal_safe,
+    components::{metadata_failure_text, terminal_safe},
     operations::{
         AppliedStep, ExcludedReason, InstallOutcome, InstallPlan, InstallStatus, InstallTarget,
         LocateFailure, StepOutcome, TargetDisposition, locate_variant,
@@ -243,6 +243,9 @@ fn execute(
     output: &mut dyn Write,
 ) -> Result<ExitCodeKind, String> {
     let mut app = SkilledApp::open(environment).map_err(|error| error.to_string())?;
+    if let Some(failure) = app.metadata_failure() {
+        return Err(metadata_failure_text(failure));
+    }
     if request.agents.is_none() && matches!(app.view(), View::Setup(_)) {
         return Ok(refuse(
             output,
@@ -285,7 +288,9 @@ fn execute(
         }
         // Not a request error: a different request would not fix it, and
         // printing usage would tell the reader to look in the wrong place.
-        Err(PlanRequestFailure::Metadata(message)) => return Err(message),
+        Err(PlanRequestFailure::Metadata(failure)) => {
+            return Err(metadata_failure_text(&failure));
+        }
     };
     write_plan(output, &plan, app.home()).map_err(|error| error.to_string())?;
 
@@ -335,7 +340,7 @@ fn execute(
         return Ok(ExitCodeKind::Success);
     }
 
-    let outcome = app.apply_plan(&plan);
+    let outcome = app.apply_plan(&plan).map_err(|error| error.to_string())?;
     write_report(output, &outcome).map_err(|error| error.to_string())?;
     Ok(exit_code_for(outcome.status()))
 }
@@ -464,7 +469,7 @@ fn install_step_verdict(outcome: &StepOutcome) -> String {
         StepOutcome::CreatedUnrecorded(error) => {
             format!(
                 "link created, but Skilled could not record owning it: {}",
-                safe(error)
+                safe(&error.to_string())
             )
         }
         StepOutcome::RootCreatedLinkFailed(error) => {
