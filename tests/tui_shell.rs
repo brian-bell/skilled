@@ -1146,6 +1146,83 @@ fn a_readable_empty_registry_offers_no_add_key_while_other_metadata_is_degraded(
     assert!(rendered.contains("No sources are registered"), "{rendered}");
     assert!(!rendered.contains("Press a to register"), "{rendered}");
     assert!(!rendered.contains("a Add source"), "{rendered}");
+    // The pane beside it has just counted the registry, so nothing on this
+    // screen may call the same registry unavailable.
+    assert!(
+        !rendered.contains("The source registry is unavailable"),
+        "{rendered}"
+    );
+}
+
+/// A filter that matched nothing is a fact about the filter, not about the
+/// roots. Degraded metadata does not turn "these rows were hidden" into "the
+/// roots hold no skill directories" — the subtitle counting `0 of 1 listed`
+/// beside it would be flatly contradicted.
+#[test]
+fn a_degraded_session_lets_a_surviving_filter_speak_for_its_own_empty_table() {
+    let temporary = tempfile::tempdir().expect("temporary application directory");
+    let home = temporary.path().join("home");
+    let data = temporary.path().join("data");
+    let skill = home.join(".claude/skills/portable");
+    fs::create_dir_all(&skill).expect("create degraded skill fixture");
+    fs::write(
+        skill.join("SKILL.md"),
+        "---\nname: portable\ndescription: Portable fixture\n---\n",
+    )
+    .expect("write degraded skill fixture");
+    fs::create_dir_all(&data).expect("create established data directory");
+    let mut app =
+        SkilledApp::open(AppEnvironment::new(&home, &data, "")).expect("open degraded application");
+    assert!(app.metadata_failure().is_some());
+    assert!(app.inventory().row("portable").is_some());
+
+    app.update(Action::BeginInventoryFilter);
+    for character in "nothingmatchesthis".chars() {
+        app.update(Action::AppendInventoryFilter(character));
+    }
+    let rendered = text(&buffer(&app, 120, 40));
+
+    assert!(
+        rendered.contains("No skills match the filter"),
+        "{rendered}"
+    );
+    assert!(!rendered.contains("No skills are installed"), "{rendered}");
+    assert!(
+        !rendered.contains("hold no skill directories"),
+        "{rendered}"
+    );
+    // The degraded fact is still stated, by the banner that owns it.
+    assert!(rendered.contains("metadata unavailable"), "{rendered}");
+}
+
+/// Doctor lists what was observed. A root that could not be read is named
+/// nowhere else on that screen, so an unavailable metadata store — which the
+/// banner above already states — must not take its place.
+#[test]
+fn degraded_doctor_still_reports_a_root_it_could_not_read() {
+    let temporary = tempfile::tempdir().expect("temporary application directory");
+    let home = temporary.path().join("home");
+    let data = temporary.path().join("data");
+    fs::create_dir_all(home.join(".claude")).expect("create Claude Code parent");
+    fs::write(home.join(".claude/skills"), "not a directory")
+        .expect("write a file where the root belongs");
+    fs::create_dir_all(&data).expect("create established data directory");
+    let mut app =
+        SkilledApp::open(AppEnvironment::new(&home, &data, "")).expect("open degraded application");
+    assert!(app.metadata_failure().is_some());
+
+    let update = app.update(Action::OpenDoctor);
+    app.perform_effects(update.effects())
+        .expect("scan for Doctor");
+    let rendered = text(&buffer(&app, 120, 40));
+
+    assert!(
+        rendered.contains("An agent skill root could not be read"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("not fully read"), "{rendered}");
+    // The degraded fact keeps its own banner rather than the subtitle.
+    assert!(rendered.contains("metadata unavailable"), "{rendered}");
 }
 
 #[test]

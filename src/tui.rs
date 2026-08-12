@@ -1537,31 +1537,6 @@ fn inventory_empty_state(app: &SkilledApp) -> (String, String) {
             "Skilled scans the roots when this view opens.".to_owned(),
         );
     }
-    if app.metadata_failure().is_some() {
-        let explanation = if app.scan_scope_known() {
-            "Skilled retained the agent selection and scanned its selected roots read-only. \
-             Registry-backed claims and every write are withheld for this session."
-        } else {
-            "Skilled scanned every detected agent root read-only. Registry-backed claims and \
-             every write are withheld for this session."
-        };
-        let scanned_empty = roots
-            .iter()
-            .any(|root| matches!(root.status(), RootStatus::Scanned { .. }));
-        return if scanned_empty {
-            (
-                "No skills are installed".to_owned(),
-                format!(
-                    "The agent skill roots Skilled read hold no skill directories. {explanation}"
-                ),
-            )
-        } else {
-            (
-                "Application metadata is unavailable".to_owned(),
-                explanation.to_owned(),
-            )
-        };
-    }
     // Nothing was looked at, so nothing may be said about what exists — and a
     // surviving filter must not invent installed skills to match against.
     if app.inventory().no_agent_configured() {
@@ -1590,6 +1565,36 @@ fn inventory_empty_state(app: &SkilledApp) -> (String, String) {
              reason above."
                 .to_owned(),
         );
+    }
+    // Last of the reasons, because it is the only one the header states on its
+    // own: `metadata_failure_line` sits above this table either way. What the
+    // scan observed — no agent chosen, a filter that matched nothing, a root
+    // that could not be read — is this body's to say, and a degraded session
+    // does not make any of it less true.
+    if app.metadata_failure().is_some() {
+        let explanation = if app.scan_scope_known() {
+            "Skilled retained the agent selection and scanned its selected roots read-only. \
+             Registry-backed claims and every write are withheld for this session."
+        } else {
+            "Skilled scanned every detected agent root read-only. Registry-backed claims and \
+             every write are withheld for this session."
+        };
+        let scanned_empty = roots
+            .iter()
+            .any(|root| matches!(root.status(), RootStatus::Scanned { .. }));
+        return if scanned_empty {
+            (
+                "No skills are installed".to_owned(),
+                format!(
+                    "The agent skill roots Skilled read hold no skill directories. {explanation}"
+                ),
+            )
+        } else {
+            (
+                "Application metadata is unavailable".to_owned(),
+                explanation.to_owned(),
+            )
+        };
     }
     if roots
         .iter()
@@ -1732,7 +1737,11 @@ fn doctor_subtitle(app: &SkilledApp, listed: usize) -> String {
     if inventory.no_agent_configured() {
         return "no root read".to_owned();
     }
-    if app.metadata_failure().is_some() {
+    // The banner above this subtitle already states the metadata failure, so
+    // the subtitle is spent on it only where the roots have nothing more
+    // specific to report. A root that could not be read is Doctor's own
+    // observation and appears nowhere else on this screen.
+    if app.metadata_failure().is_some() && inventory.unreadable_roots().next().is_none() {
         return if listed > 0 {
             format!("{listed} listed · metadata unavailable")
         } else {
@@ -1827,15 +1836,6 @@ fn doctor_empty_state(app: &SkilledApp) -> (&'static str, String, String) {
             "Skilled scans the roots when this view opens.".to_owned(),
         );
     }
-    if app.metadata_failure().is_some() {
-        return (
-            "·",
-            "Application metadata is unavailable".to_owned(),
-            "Skilled kept the read-only scan and diagnosis available, but it cannot claim the \
-             registry is complete or perform writes in this session."
-                .to_owned(),
-        );
-    }
     if inventory.no_agent_configured() {
         return (
             "·",
@@ -1853,6 +1853,19 @@ fn doctor_empty_state(app: &SkilledApp) -> (&'static str, String, String) {
             "Skilled reports nothing from a root it could not read in full \
              rather than reporting part of it, so this list covers less than \
              the roots it was asked to look at."
+                .to_owned(),
+        );
+    }
+    // After the scan's own answers, because Doctor lists what was observed and
+    // the metadata banner already states the failure above this body. A root
+    // that could not be read is named nowhere else on this screen, so the
+    // degraded session must not take its place.
+    if app.metadata_failure().is_some() {
+        return (
+            "·",
+            "Application metadata is unavailable".to_owned(),
+            "Skilled kept the read-only scan and diagnosis available, but it cannot claim the \
+             registry is complete or perform writes in this session."
                 .to_owned(),
         );
     }
@@ -3319,10 +3332,22 @@ fn render_source_variants(
     );
 
     let Some(source) = app.selected_source() else {
-        let explanation = if app.metadata_failure().is_some() {
-            "The source registry is unavailable in this session."
-        } else {
-            "Press a to register a local Git checkout."
+        // The same two questions the Repositories pane beside this one asks,
+        // answered the same way: whether the registry could be read decides
+        // what may be claimed about it, and whether metadata is writable
+        // decides whether the key may be named. Reading the session-wide
+        // failure for both would call a registry unavailable that the pane
+        // beside it has just counted.
+        let explanation = match (
+            app.registry_availability() == RegistryAvailability::Unavailable,
+            app.can_add_source(),
+        ) {
+            (true, _) => "The source registry is unavailable in this session.",
+            (false, false) => {
+                "Adding one is disabled for this session because Skilled could not read its own \
+                 metadata."
+            }
+            (false, true) => "Press a to register a local Git checkout.",
         };
         frame.render_widget(
             components::empty_state("·", "No source selected", explanation, inner),

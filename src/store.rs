@@ -787,9 +787,13 @@ fn valid_backup_component(name: &str) -> bool {
 ///
 /// The filename generator is constrained to one normal component and the
 /// physical data-directory leaf is rechecked immediately before `VACUUM
-/// INTO`. SQLite creates the final file and refuses an occupied one; no file
-/// is replaced or removed. One pathname window remains between the recheck and
-/// SQLite's destination open.
+/// INTO`. The destination is then reserved with create-new semantics, which
+/// is the check: SQLite accepts an *empty* file for `VACUUM INTO`, so a bare
+/// absence test would let a zero-byte file that appeared after it be written
+/// into rather than refused. `O_CREAT | O_EXCL` also refuses a symbolic link,
+/// so the reserved object is the pathname's own regular file. No file is
+/// replaced or removed except the one this call created, if populating it
+/// fails.
 fn backup_database(
     connection: &Connection,
     database_path: &Path,
@@ -831,15 +835,26 @@ fn backup_database_with(
             ));
         }
         let candidate = data_dir.join(name);
-        match fs::symlink_metadata(&candidate) {
-            Ok(_) => continue,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
-        }
         let candidate_text = candidate
             .to_str()
-            .ok_or_else(|| Error::UnrepresentablePath(candidate.clone()))?;
-        connection.execute("VACUUM INTO ?1", params![candidate_text])?;
+            .ok_or_else(|| Error::UnrepresentablePath(candidate.clone()))?
+            .to_owned();
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
+            Ok(reserved) => drop(reserved),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error.into()),
+        }
+        // The reservation is this call's own, so removing it on failure takes
+        // back only what this call put there and leaves the directory as the
+        // migration found it.
+        if let Err(error) = connection.execute("VACUUM INTO ?1", params![candidate_text]) {
+            let _ = fs::remove_file(&candidate);
+            return Err(error.into());
+        }
         return Ok(candidate);
     }
     Err(Error::Io(std::io::Error::new(
@@ -1019,6 +1034,41 @@ mod migration_tests {
             occupied_bytes
         );
         assert!(backup.exists());
+    }
+
+    /// `VACUUM INTO` accepts an existing empty file, so an absence check alone
+    /// would let a zero-byte occupant be written into. An occupied path is
+    /// occupied whatever its size.
+    #[test]
+    fn an_empty_occupied_backup_candidate_is_refused_like_any_other() {
+        let temporary = tempfile::tempdir().expect("temporary data directory");
+        let database = temporary.path().join("skilled.sqlite3");
+        let connection = Connection::open(&database).expect("create database");
+        connection
+            .execute_batch(
+                "CREATE TABLE original (value TEXT); INSERT INTO original VALUES ('row');",
+            )
+            .expect("create database contents");
+        let occupied = temporary.path().join("empty.backup");
+        fs::write(&occupied, b"").expect("occupy backup candidate with an empty file");
+        let mut attempt = 0;
+
+        let backup = backup_database_with(&connection, &database, 0, |_| {
+            attempt += 1;
+            if attempt == 1 {
+                "empty.backup".to_owned()
+            } else {
+                "fresh.backup".to_owned()
+            }
+        })
+        .expect("create distinct backup");
+
+        assert_eq!(backup, temporary.path().join("fresh.backup"));
+        assert_eq!(
+            fs::metadata(&occupied).expect("reread occupied file").len(),
+            0
+        );
+        assert!(fs::metadata(&backup).expect("read backup").len() > 0);
     }
 
     fn backup_files(directory: &Path) -> Vec<PathBuf> {
