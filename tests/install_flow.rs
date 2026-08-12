@@ -22,7 +22,8 @@ use skilled::{
     operations::{
         ForgetPrompt, ForgetStatus, ForgetVerification, InstallPrompt, InstallStatus,
         OpenCodeOutlook, OperationPrompt, Postcondition, StepOutcome, TargetDisposition,
-        UninstallPrompt, UninstallStatus, VerifyFailure, VerifyWithheld, verify_install,
+        UninstallDisposition, UninstallPrompt, UninstallStatus, VerifyFailure, VerifyWithheld,
+        verify_install,
     },
     resolution::OpenCodeResolution,
 };
@@ -57,6 +58,21 @@ fn uninstall_removes_only_managed_links_and_preserves_canonical_content_and_root
         panic!("uninstall preview expected: {:?}", app.pending_operation());
     };
     assert!(plan.is_executable());
+    for target in plan.targets().iter().filter(|target| target.is_work()) {
+        let UninstallDisposition::RemoveLink { receipts, .. } = target.disposition() else {
+            unreachable!("work target must remove a link");
+        };
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(receipts[0].source_id(), Some(app.sources()[0].id()));
+        assert_eq!(
+            receipts[0].catalog_relative_path(),
+            Some(Path::new("skills"))
+        );
+        assert_eq!(
+            receipts[0].variant_relative_path(),
+            Some(Path::new("skills/portable"))
+        );
+    }
     dispatch(&mut app, Action::ConfirmOperation);
     let Some(OperationPrompt::Uninstall(UninstallPrompt::Report(outcome))) =
         app.pending_operation()

@@ -1682,6 +1682,28 @@ fn forget_source_preview_at_supported_sizes() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn forget_source_receipt_failure_states_its_blocking_finding() {
+    let (temporary, mut app) = install_fixture();
+    let connection = rusqlite::Connection::open(temporary.path().join("data/skilled.sqlite3"))
+        .expect("second metadata connection");
+    connection
+        .execute_batch("DROP TABLE operation_receipts;")
+        .expect("make receipts unreadable");
+    drop(connection);
+    dispatch(&mut app, Action::OpenInventory);
+    dispatch(&mut app, Action::OpenSources);
+    dispatch(&mut app, Action::BeginForgetSource);
+
+    let rendered = normalize_install_screen(&temporary, render(&app, 120, 40));
+    assert!(
+        rendered.contains("forget.unreadable_receipts"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("no such table"), "{rendered}");
+}
+
 /// A step that created a skill root and then could not write the link into it
 /// states the residual root, the steps it stopped, and that nothing undoes it.
 #[cfg(unix)]

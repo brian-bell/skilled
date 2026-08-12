@@ -669,6 +669,7 @@ pub enum UninstallDisposition {
     RemoveLink {
         link_target: PathBuf,
         resolves: bool,
+        receipts: Vec<Receipt>,
     },
     Excluded {
         reason: UninstallExcludedReason,
@@ -841,6 +842,7 @@ pub fn plan_uninstall(
         if let UninstallDisposition::RemoveLink {
             link_target,
             resolves: false,
+            ..
         } = &target.disposition
         {
             warnings.push(format!(
@@ -927,16 +929,19 @@ fn uninstall_disposition(slot: &TargetProbe, receipts: &[&Receipt]) -> Uninstall
             reason: UninstallExcludedReason::NotConfigured,
         },
         EntryProbe::Symlink { target, canonical } => {
-            if receipts
+            let matching_receipts: Vec<Receipt> = receipts
                 .iter()
-                .any(|receipt| receipt.link_target == *target)
-            {
+                .filter(|receipt| receipt.link_target == *target)
+                .map(|receipt| (*receipt).clone())
+                .collect();
+            if !matching_receipts.is_empty() {
                 let resolves = canonical
                     .as_ref()
                     .is_some_and(|path| fs::metadata(path).is_ok_and(|metadata| metadata.is_dir()));
                 UninstallDisposition::RemoveLink {
                     link_target: target.clone(),
                     resolves,
+                    receipts: matching_receipts,
                 }
             } else {
                 uninstall_blocked(
@@ -2183,6 +2188,7 @@ pub(crate) fn probe_uninstall_content(plan: &UninstallPlan) -> [ContentSighting;
         let UninstallDisposition::RemoveLink {
             link_target,
             resolves: true,
+            ..
         } = target.disposition()
         else {
             return ContentSighting::NotApplicable;
@@ -2377,6 +2383,11 @@ pub(crate) fn finalize_uninstall(
     let mut report = FinalizeReport::default();
     for step in applied.steps.iter().filter(|step| step.removed_link()) {
         if !verification_holds(verification, step.agent, Postcondition::LinkGone) {
+            report.failures.push(FinalizeFailure {
+                agent: step.agent,
+                reason: "the ownership receipt was retained because link removal was not positively verified"
+                    .to_owned(),
+            });
             continue;
         }
         let Some(target) = plan.target(step.agent) else {
@@ -3283,6 +3294,36 @@ mod tests {
     }
 
     #[test]
+    fn receipt_finalization_reports_when_link_gone_was_not_established() {
+        let fixture = tempfile::tempdir().expect("temporary fixture");
+        let target = fixture.path().join("target");
+        let link = fixture.path().join("home/.claude/skills/portable");
+        fs::create_dir_all(&target).expect("target directory");
+        let mut store = Store::open(&fixture.path().join("data")).expect("metadata store");
+        let receipt = Receipt::new(
+            AgentKind::ClaudeCode,
+            "portable".to_owned(),
+            link.clone(),
+            target.clone(),
+            None,
+            None,
+            None,
+        );
+        record_test_receipt(&mut store, &receipt);
+        let (plan, applied) = removable_uninstall(&link, &target, true);
+
+        let finalized = finalize_uninstall(&plan, &applied, &VerifyReport::default(), &mut store);
+
+        assert_eq!(finalized.failures().len(), 1);
+        assert!(
+            finalized.failures()[0]
+                .reason()
+                .contains("not positively verified")
+        );
+        assert_eq!(store.receipts().expect("retained receipt"), vec![receipt]);
+    }
+
+    #[test]
     fn receipt_finalization_does_not_make_ancillary_content_control_cleanup() {
         let fixture = tempfile::tempdir().expect("temporary fixture");
         let target = fixture.path().join("target");
@@ -3335,6 +3376,7 @@ mod tests {
                     disposition: UninstallDisposition::RemoveLink {
                         link_target: link_target.to_path_buf(),
                         resolves,
+                        receipts: Vec::new(),
                     },
                 }],
                 warnings: Vec::new(),

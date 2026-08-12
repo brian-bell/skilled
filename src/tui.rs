@@ -4495,10 +4495,9 @@ fn uninstall_prompt_lines(prompt: &UninstallPrompt) -> Vec<Line<'static>> {
                     UninstallDisposition::RemoveLink {
                         link_target,
                         resolves,
-                    } => (
-                        Tone::Warning,
-                        "remove the managed link".to_owned(),
-                        Some(format!(
+                        receipts,
+                    } => (Tone::Warning, "remove the managed link".to_owned(), {
+                        let mut evidence = vec![format!(
                             "receipt target: {}{}",
                             terminal_safe(&link_target.display().to_string()),
                             if *resolves {
@@ -4506,15 +4505,34 @@ fn uninstall_prompt_lines(prompt: &UninstallPrompt) -> Vec<Line<'static>> {
                             } else {
                                 " (no longer resolves)"
                             }
-                        )),
+                        )];
+                        evidence.extend(receipts.iter().map(|receipt| {
+                            format!(
+                                "receipt source {} · catalog {} · variant {}",
+                                receipt
+                                    .source_id()
+                                    .map_or_else(|| "unknown".to_owned(), |id| id.to_string()),
+                                receipt.catalog_relative_path().map_or_else(
+                                    || "unknown".to_owned(),
+                                    |path| terminal_safe(&path.display().to_string())
+                                ),
+                                receipt.variant_relative_path().map_or_else(
+                                    || "unknown".to_owned(),
+                                    |path| terminal_safe(&path.display().to_string())
+                                ),
+                            )
+                        }));
+                        evidence
+                    }),
+                    UninstallDisposition::Excluded { reason } => (
+                        Tone::Unmanaged,
+                        format!("excluded: {:?}", reason),
+                        Vec::new(),
                     ),
-                    UninstallDisposition::Excluded { reason } => {
-                        (Tone::Unmanaged, format!("excluded: {:?}", reason), None)
-                    }
                     UninstallDisposition::Blocked { finding } => (
                         Tone::Critical,
                         format!("blocked: {}", finding.code()),
-                        Some(terminal_safe(finding.evidence())),
+                        vec![terminal_safe(finding.evidence())],
                     ),
                 };
                 lines.push(Line::from(components::badge(
@@ -4525,7 +4543,7 @@ fn uninstall_prompt_lines(prompt: &UninstallPrompt) -> Vec<Line<'static>> {
                     "  {}",
                     terminal_safe(&target.link_path().display().to_string())
                 )));
-                if let Some(evidence) = evidence {
+                for evidence in evidence {
                     lines.push(Line::from(format!("  {evidence}")));
                 }
             }
@@ -4552,7 +4570,7 @@ fn uninstall_prompt_lines(prompt: &UninstallPrompt) -> Vec<Line<'static>> {
                 theme::section_title(),
             )];
             for step in outcome.applied().steps() {
-                let (tone, verdict) = install_step_verdict(step.outcome());
+                let (tone, verdict) = uninstall_step_verdict(step.outcome());
                 lines.push(Line::from(components::badge(
                     tone,
                     &format!("{} · {verdict}", step.agent().display_name()),
@@ -4735,6 +4753,18 @@ fn forget_prompt_lines(prompt: &ForgetPrompt) -> Vec<Line<'static>> {
                             ),
                         )))
                     }
+                }
+            }
+            if plan.receipts().is_empty() {
+                for finding in plan.blocking_findings() {
+                    lines.push(Line::from(components::badge(
+                        Tone::Critical,
+                        &format!(
+                            "blocked: {} — {}",
+                            finding.code(),
+                            terminal_safe(finding.evidence())
+                        ),
+                    )));
                 }
             }
             lines.push(Line::default());
@@ -5088,6 +5118,21 @@ fn install_step_verdict(outcome: &StepOutcome) -> (Tone, String) {
             Tone::Unmanaged,
             "not attempted, because an earlier step stopped the run".to_owned(),
         ),
+    }
+}
+
+fn uninstall_step_verdict(outcome: &StepOutcome) -> (Tone, String) {
+    match outcome {
+        StepOutcome::Removed => (Tone::Healthy, "link removed".to_owned()),
+        StepOutcome::Failed(reason) => (
+            Tone::Critical,
+            format!("not removed — {}", terminal_safe(reason)),
+        ),
+        StepOutcome::Unattempted => (
+            Tone::Unmanaged,
+            "not attempted, because an earlier step stopped the run".to_owned(),
+        ),
+        other => install_step_verdict(other),
     }
 }
 
@@ -6321,6 +6366,15 @@ mod tests {
             verdict,
             "skill root created, but the link was not: permission denied"
         );
+    }
+
+    #[test]
+    fn a_failed_uninstall_step_says_not_removed() {
+        let (tone, verdict) =
+            uninstall_step_verdict(&StepOutcome::Failed("the target changed".to_owned()));
+
+        assert_eq!(tone, Tone::Critical);
+        assert_eq!(verdict, "not removed — the target changed");
     }
 
     fn identity(

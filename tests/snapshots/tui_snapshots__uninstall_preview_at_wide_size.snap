@@ -1,6 +1,5 @@
 ---
 source: tests/tui_snapshots.rs
-assertion_line: 1650
 expression: "normalize_install_screen(&temporary, render(&app, 120, 40))"
 ---
  ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁
@@ -13,20 +12,20 @@ expression: "normalize_install_screen(&temporary, render(&app, 120, 40))"
 ▕  │  ! Claude Code · remove the managed link                                                                       │  ▏
 ▕▌ │    [TEMP]                      /home/.claude/skills/portable                                                   │  ▏
 ▕──│    receipt target: [CANONICAL]                 /src/skills/portable                                            │▁ ▏
-▕  │  ! Codex · remove the managed link                                                                             │  ▏
-▕──│    [TEMP]                      /home/.agents/skills/portable                                                   │─ ▏
-▕▌ │    receipt target: [CANONICAL]                 /src/skills/portable                                            │  ▏
-▕──│  ! OpenCode · remove the managed link                                                                          │  ▏
-▕  │    [TEMP]                      /home/.config/opencode/skills/portable                                          │  ▏
+▕  │    receipt source 1 · catalog skills · variant skills/portable                                                 │  ▏
+▕──│  ! Codex · remove the managed link                                                                             │─ ▏
+▕▌ │    [TEMP]                      /home/.agents/skills/portable                                                   │  ▏
+▕──│    receipt target: [CANONICAL]                 /src/skills/portable                                            │  ▏
+▕  │    receipt source 1 · catalog skills · variant skills/portable                                                 │  ▏
+▕  │  ! OpenCode · remove the managed link                                                                          │  ▏
+▕  │    [TEMP]                      /home/.config/opencode/skills/portable                                          │─ ▏
 ▕  │    receipt target: [CANONICAL]                 /src/skills/portable                                            │  ▏
+▕  │    receipt source 1 · catalog skills · variant skills/portable                                                 │  ▏
 ▕  │                                                                                                                │─ ▏
 ▕  │  Before you confirm                                                                                            │  ▏
 ▕  │  ! after this uninstall, OpenCode would find nothing under this name                                           │  ▏
-▕  │                                                                                                                │─ ▏
+▕  │                                                                                                                │  ▏
 ▕  │  Source content and agent skill roots are not removed.                                                         │  ▏
-▕  │                                                                                                                │  ▏
-▕  │                                                                                                                │  ▏
-▕  │                                                                                                                │  ▏
 ▕  │                                                                                                                │l ▏
 ▕  │                                                                                                                │  ▏
 ▕  │                                                                                                                │  ▏

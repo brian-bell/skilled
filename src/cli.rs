@@ -451,6 +451,7 @@ fn write_uninstall_plan(output: &mut dyn Write, plan: &UninstallPlan) -> std::io
             UninstallDisposition::RemoveLink {
                 link_target,
                 resolves,
+                ..
             } => format!(
                 "remove managed link to {}{}",
                 safe(&link_target.display()),
@@ -471,6 +472,23 @@ fn write_uninstall_plan(output: &mut dyn Write, plan: &UninstallPlan) -> std::io
             "               {}",
             safe(&target.link_path().display())
         )?;
+        if let UninstallDisposition::RemoveLink { receipts, .. } = target.disposition() {
+            for receipt in receipts {
+                writeln!(
+                    output,
+                    "               receipt source {} · catalog {} · variant {}",
+                    receipt
+                        .source_id()
+                        .map_or_else(|| "unknown".to_owned(), |id| id.to_string()),
+                    receipt
+                        .catalog_relative_path()
+                        .map_or_else(|| "unknown".to_owned(), |path| safe(&path.display())),
+                    receipt
+                        .variant_relative_path()
+                        .map_or_else(|| "unknown".to_owned(), |path| safe(&path.display())),
+                )?;
+            }
+        }
     }
     for warning in plan.warnings() {
         writeln!(output, "\n  warning: {}", safe(warning))?;

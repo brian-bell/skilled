@@ -104,6 +104,10 @@ fn uninstall_yes_removes_only_the_named_managed_link_and_still_verifies() {
     assert!(repository.join("skills/portable/SKILL.md").is_file());
     assert!(fixture.app().receipts().expect("receipts").is_empty());
     assert!(
+        output.contains("receipt source 1 · catalog skills"),
+        "{output}"
+    );
+    assert!(
         output.contains("Source content and agent skill roots were not removed"),
         "{output}"
     );
