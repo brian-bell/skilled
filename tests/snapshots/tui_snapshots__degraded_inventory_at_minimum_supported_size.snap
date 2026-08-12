@@ -7,10 +7,10 @@ expression: "normalize_degraded(&temporary, render(&app, 80, 24))"
 
 ▌ Global inventory  1 skill
 × metadata unavailable:
-<TEMP>/data/skilled.sqlite3
-: filesystem operation failed: No such file or directory (os error 2). The agent
-selection could not be read; all detected roots were scanned read-only. Writes
-are refused.
+<TEMP>/data/sk
+illed.sqlite3: filesystem operation failed: No such file or directory (os error
+2). The agent selection could not be read; all detected roots were scanned
+read-only. Writes are refused.
 ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁
   SKILL                  SOURCE          CLAUDE  CODEX  OPENCODE  HEALTH
 ▌ portable               unverified      U       -      -         U unverified

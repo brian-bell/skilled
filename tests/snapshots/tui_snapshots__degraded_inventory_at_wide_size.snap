@@ -12,10 +12,10 @@ expression: "normalize_degraded(&temporary, render(&app, 120, 40))"
 ▕                                                                              │                                       ▏
 ▕▌ Global inventory  1 skill                                                   │   Details  portable                   ▏
 ▕× metadata unavailable:                                                       │ ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁ ▏
-▕<TEMP>/data/skilled.sqlit│ SKILL                                 ▏
-▕e3: filesystem operation failed: No such file or directory (os error 2). The  │ ───────────────────────────────────── ▏
-▕agent selection could not be read; all detected roots were scanned read-only. │ portable                              ▏
-▕Writes are refused.                                                           │ U unverified                          ▏
+▕<TEMP>/data/│ SKILL                                 ▏
+▕skilled.sqlite3: filesystem operation failed: No such file or directory (os   │ ───────────────────────────────────── ▏
+▕error 2). The agent selection could not be read; all detected roots were      │ portable                              ▏
+▕scanned read-only. Writes are refused.                                        │ U unverified                          ▏
 ▕──────────────────────────────────────────────────────────────────────────────│ Description: Portable fixture         ▏
 ▕  SKILL                 SOURCE         CLAUDE  CODEX  OPENCODE  HEALTH        │ SOURCE                                ▏
 ▕──────────────────────────────────────────────────────────────────────────────│ ───────────────────────────────────── ▏

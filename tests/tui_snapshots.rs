@@ -153,10 +153,29 @@ fn degraded_settings_at_supported_sizes() {
     );
 }
 
+/// Width the degraded fixture's root is padded to before anything is created
+/// under it.
+///
+/// The degraded banner states its database path in full, so where that path
+/// wraps — and on the wide screens, where the pane truncates it — is part of
+/// what these snapshots assert. The length is `tempfile`'s to choose otherwise,
+/// and it chooses differently per platform: a Linux `/tmp/.tmpXXXXXX` root is
+/// 15 characters where the macOS `/var/folders/…/T/.tmpXXXXXX` it renders
+/// beside is 59, which is the same screen breaking in two places. Substituting
+/// the root after the fact cannot undo a wrap that already happened, so the
+/// fixture fixes the length instead and the padded root is normalised away
+/// whole.
+///
+/// Chosen to clear the longest root observed in practice with room to spare
+/// while leaving the path inside the banner's two-row budget, so these
+/// snapshots keep showing a wrapped path rather than an elided one.
+const DEGRADED_ROOT_WIDTH: usize = 72;
+
 fn degraded_app() -> (tempfile::TempDir, SkilledApp) {
     let temporary = tempfile::tempdir().expect("temporary application directory");
-    let home = temporary.path().join("home");
-    let data = temporary.path().join("data");
+    let root = degraded_root(&temporary);
+    let home = root.join("home");
+    let data = root.join("data");
     let skill = home.join(".claude/skills/portable");
     fs::create_dir_all(&skill).expect("create degraded skill fixture");
     fs::write(
@@ -170,8 +189,26 @@ fn degraded_app() -> (tempfile::TempDir, SkilledApp) {
     (temporary, app)
 }
 
+/// The fixture's root: one directory inside `temporary`, named to pad the
+/// whole path to exactly [`DEGRADED_ROOT_WIDTH`] characters. Deterministic
+/// given the temporary directory, so [`normalize_degraded`] recomputes it
+/// rather than being handed it.
+fn degraded_root(temporary: &tempfile::TempDir) -> PathBuf {
+    let base = temporary.path().display().to_string();
+    let padding = DEGRADED_ROOT_WIDTH
+        .checked_sub(base.chars().count() + 1)
+        .unwrap_or_else(|| {
+            panic!(
+                "temporary directory {base:?} leaves no room to pad the degraded fixture root to \
+                 {DEGRADED_ROOT_WIDTH} characters; raise DEGRADED_ROOT_WIDTH and re-record the \
+                 degraded snapshots"
+            )
+        });
+    temporary.path().join("d".repeat(padding))
+}
+
 fn normalize_degraded(temporary: &tempfile::TempDir, screen: String) -> String {
-    screen.replace(&temporary.path().display().to_string(), "<TEMP>")
+    screen.replace(&degraded_root(temporary).display().to_string(), "<TEMP>")
 }
 
 #[test]
