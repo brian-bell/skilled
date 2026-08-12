@@ -2256,13 +2256,19 @@ fn render_inventory_detail(
     // exist, so content that does not fit is reported as missing rather than
     // dropped off the bottom without a trace — and, where the region has the
     // keyboard, reached by scrolling rather than only reported.
+    let overlay_findings = row
+        .observations()
+        .filter_map(|observation| {
+            app.repair_overlay_finding(observation.path())
+                .map(|finding| (observation.agent(), finding))
+        })
+        .collect::<Vec<_>>();
     let lines = inventory_detail_lines(
         row,
         app.inventory().roots(),
         app.home(),
         body.width,
-        row.observations()
-            .find_map(|observation| app.repair_overlay_finding(observation.path())),
+        &overlay_findings,
     );
     render_detail_window(
         frame,
@@ -2536,6 +2542,13 @@ fn detail_scroll_extent(
             let Some(row) = app.selected_installation() else {
                 return Some(0);
             };
+            let overlay_findings = row
+                .observations()
+                .filter_map(|observation| {
+                    app.repair_overlay_finding(observation.path())
+                        .map(|finding| (observation.agent(), finding))
+                })
+                .collect::<Vec<_>>();
             (
                 body,
                 inventory_detail_lines(
@@ -2543,8 +2556,7 @@ fn detail_scroll_extent(
                     app.inventory().roots(),
                     app.home(),
                     body.width,
-                    row.observations()
-                        .find_map(|observation| app.repair_overlay_finding(observation.path())),
+                    &overlay_findings,
                 ),
             )
         }
@@ -2662,7 +2674,7 @@ fn inventory_detail_lines(
     roots: &[RootScan; 3],
     home: &Path,
     width: u16,
-    overlay_finding: Option<&Finding>,
+    overlay_findings: &[(AgentKind, &Finding)],
 ) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     // Kicker, then the skill's own name as the title, then its health: the
@@ -2679,10 +2691,6 @@ fn inventory_detail_lines(
         verdict_tone(row.verdict()),
         row.verdict().label(),
     )));
-    if let Some(finding) = overlay_finding {
-        lines.push(detail_field("Finding", finding.code()));
-        lines.push(Line::from(terminal_safe(finding.evidence())));
-    }
     if let Some(SkillValidation::Valid { description, .. }) = row
         .observations()
         .find_map(InstalledSkillObservation::validation)
@@ -2748,6 +2756,12 @@ fn inventory_detail_lines(
                 observation.health().label(),
             ),
             width,
+        );
+        lines.extend(
+            overlay_findings
+                .iter()
+                .filter(|(agent, _)| *agent == observation.agent())
+                .flat_map(|(_, finding)| finding_lines(finding, width)),
         );
         lines.extend(observation_lines(
             observation,
@@ -4597,6 +4611,9 @@ fn repair_prompt_status(prompt: &RepairPrompt, scroll: usize, extent: Option<usi
             }
             RepairStatus::Repaired => "Repaired · not fully verified".to_owned(),
             RepairStatus::NotApplied => "Nothing was written".to_owned(),
+            RepairStatus::PartiallyApplied => {
+                "Original link removed · repair incomplete".to_owned()
+            }
             RepairStatus::RepairedUnrecorded => {
                 "Repaired, but not recorded as Skilled's".to_owned()
             }
@@ -4709,6 +4726,10 @@ fn repair_report_lines(outcome: &RepairOutcome) -> Vec<Line<'static>> {
             RepairStepOutcome::Repaired => "link replaced and receipt recorded".to_owned(),
             RepairStepOutcome::RepairedUnrecorded(error) => format!(
                 "link replaced, but its receipt failed: {}",
+                terminal_safe(error)
+            ),
+            RepairStepOutcome::RemovedUnreplaced(error) => format!(
+                "original link removed without replacement: {}",
                 terminal_safe(error)
             ),
             RepairStepOutcome::Failed(reason) => {
@@ -5013,8 +5034,8 @@ fn install_report_lines(outcome: &InstallOutcome) -> Vec<Line<'static>> {
     {
         lines.push(Line::default());
         lines.push(Line::from(
-            "Skilled does not undo what it wrote. Nothing above was removed, and no repair \
-             exists in this release.",
+            "Skilled does not undo what it wrote. Nothing above was removed. Repair only \
+             replaces a still-present link whose ownership can be proven.",
         ));
     }
     lines

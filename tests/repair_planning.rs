@@ -70,6 +70,12 @@ fn an_owned_healthy_link_is_replanned_to_the_agent_specific_variant_selected_tod
         )
     );
     assert!(plan.source_changed());
+    assert!(
+        plan.warnings().iter().any(|warning| warning.contains(
+            "after this repair, OpenCode would have more than one directory to choose between"
+        )),
+        "the consent surface must state the conflict this Codex repair would create: {plan:?}"
+    );
     assert_eq!(fs::read_link(&link).unwrap(), old_target, "a plan is inert");
     let overlay = app
         .doctor_findings()
@@ -94,6 +100,84 @@ fn an_owned_healthy_link_is_replanned_to_the_agent_specific_variant_selected_tod
     assert!(preview.contains("Repair skill"), "{preview}");
     assert!(preview.contains("Old target:"), "{preview}");
     assert!(preview.contains("New target:"), "{preview}");
+    assert!(
+        preview.contains("OpenCode would have more than one directory to choose between"),
+        "{preview}"
+    );
+
+    drop(app);
+    let mut input = Cursor::new(Vec::<u8>::new());
+    let mut output = Vec::new();
+    let code = cli::run(
+        &[
+            "repair".to_owned(),
+            "--yes".to_owned(),
+            "--skill".to_owned(),
+            "portable".to_owned(),
+            "--agent".to_owned(),
+            "codex".to_owned(),
+        ],
+        fixture.environment(),
+        &mut input,
+        &mut output,
+    );
+    let output = String::from_utf8(output).unwrap();
+    assert_eq!(code, ExitCodeKind::Success, "{output}");
+    assert!(
+        output.contains("OpenCode would have more than one directory to choose between"),
+        "{output}"
+    );
+}
+
+#[test]
+fn a_removed_old_link_is_a_partial_apply_exit() {
+    assert_eq!(
+        cli::exit_code_for_repair(RepairStatus::PartiallyApplied),
+        ExitCodeKind::PartialApply
+    );
+}
+
+#[test]
+fn inventory_details_render_every_owned_incorrect_link_finding_by_agent() {
+    let fixture = Fixture::new();
+    let common = fixture.source("common", "skills", "portable");
+    let mut app = fixture.registered(&common);
+    fixture.create_root_parents();
+    fixture.install(&mut app);
+    for (repository, catalog) in [
+        ("claude-specific", ".claude/skills"),
+        ("codex-specific", ".agents/skills"),
+    ] {
+        let specific = fixture.source(repository, catalog, "portable");
+        let preview = app
+            .preview_source(&specific)
+            .expect("preview specific source");
+        app.confirm_source(preview)
+            .expect("register specific source");
+    }
+
+    dispatch(&mut app, Action::OpenInventory);
+    dispatch(&mut app, Action::AdvanceInventoryPane);
+    let detail = render_text(&app, 120, 80);
+
+    assert_eq!(
+        detail.matches("install.wrong_managed_target").count(),
+        2,
+        "each incorrect link must render beside its own agent observation:\n{detail}"
+    );
+    let claude = detail.find("CLAUDE CODE").expect("Claude Code section");
+    let codex = claude
+        + detail[claude..]
+            .find("CODEX  ")
+            .expect("Codex section after Claude Code");
+    let first_finding = detail
+        .find("install.wrong_managed_target")
+        .expect("first overlay finding");
+    let second_finding = detail
+        .rfind("install.wrong_managed_target")
+        .expect("second overlay finding");
+    assert!(claude < first_finding && first_finding < codex, "{detail}");
+    assert!(codex < second_finding, "{detail}");
 }
 
 #[test]

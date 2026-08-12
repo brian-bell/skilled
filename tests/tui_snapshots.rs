@@ -1653,6 +1653,8 @@ fn install_report_with_a_residual_root_at_minimum_supported_size() {
     insta::assert_snapshot!(normalize_install_screen(&temporary, render(&app, 80, 24)));
     // The narrow screen scrolls, so the note that nothing undoes the residual
     // root is only whole at the wider size.
+    let wide = normalize_install_screen(&temporary, render(&app, 120, 40));
+    assert!(!wide.contains("no repair exists in this release"), "{wide}");
     insta::assert_snapshot!(
         "install_report_with_a_residual_root_at_wide_size",
         normalize_install_screen(&temporary, render(&app, 120, 40))

@@ -1025,6 +1025,13 @@ pub fn plan_repair(
         &source.directory,
         true,
     ));
+    let current = resolve_opencode(repair_sightings(
+        probe,
+        agent,
+        &variant,
+        &source.directory,
+        false,
+    ));
     plan.opencode_outlook = Some(OpenCodeOutlook::of(&predicted));
     if agent == AgentKind::OpenCode
         && plan.is_executable()
@@ -1042,6 +1049,14 @@ pub fn plan_repair(
             "what OpenCode would resolve {} to cannot be established: {}",
             plan.skill_name,
             unknown_roots(roots)
+        ));
+    } else if plan.is_executable()
+        && predicted_kind(&predicted) != predicted_kind(&current)
+        && let Some(concern) = opencode_concern(&predicted)
+    {
+        plan.warnings.push(format!(
+            "after this repair, OpenCode {concern} for {}",
+            plan.skill_name
         ));
     }
     plan
@@ -2314,6 +2329,10 @@ fn create_directory_symlink(_target: &Path, _link_path: &Path) -> io::Result<()>
 pub enum RepairStepOutcome {
     Repaired,
     RepairedUnrecorded(String),
+    /// Windows removed the proven old link before creating its replacement,
+    /// and creation then failed. Skilled did not install a replacement; the
+    /// path may be absent or occupied by an object that raced with creation.
+    RemovedUnreplaced(String),
     Failed(String),
 }
 
@@ -2367,7 +2386,9 @@ impl RepairApplyReport {
 ///
 /// Windows cannot atomically rename over an existing directory symlink. Its
 /// fallback removes the directory link with `remove_dir` and creates the new
-/// one, and is therefore explicitly non-atomic.
+/// one, and is therefore explicitly non-atomic. A creation failure after the
+/// removal is a partial apply and is reported as such rather than as an inert
+/// refusal.
 pub(crate) fn apply_repair(plan: &RepairPlan, store: &Store, home: &Path) -> RepairApplyReport {
     if !plan.is_executable() {
         return RepairApplyReport::default();
@@ -2445,7 +2466,15 @@ fn apply_repair_target(plan: &RepairPlan, store: &Store, home: &Path) -> RepairS
         return RepairStepOutcome::Failed(format!("{reason}, so nothing was written"));
     }
     if let Err(error) = replace_directory_symlink(source_dir, &plan.link_path) {
-        return RepairStepOutcome::Failed(format!("the link could not be replaced: {error}"));
+        return match error {
+            ReplaceLinkError::Unchanged(error) => {
+                RepairStepOutcome::Failed(format!("the link could not be replaced: {error}"))
+            }
+            #[cfg(windows)]
+            ReplaceLinkError::RemovedOldLink(error) => {
+                RepairStepOutcome::RemovedUnreplaced(error.to_string())
+            }
+        };
     }
     match store.record_receipt(&receipt) {
         Ok(()) => RepairStepOutcome::Repaired,
@@ -2454,37 +2483,49 @@ fn apply_repair_target(plan: &RepairPlan, store: &Store, home: &Path) -> RepairS
 }
 
 #[cfg(unix)]
-fn replace_directory_symlink(target: &Path, link_path: &Path) -> io::Result<()> {
+fn replace_directory_symlink(target: &Path, link_path: &Path) -> Result<(), ReplaceLinkError> {
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    let parent = link_path
-        .parent()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "target has no parent"))?;
+    let parent = link_path.parent().ok_or_else(|| {
+        ReplaceLinkError::Unchanged(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "target has no parent",
+        ))
+    })?;
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
     let temporary = parent.join(format!(".skilled-repair-{}-{nonce}", std::process::id()));
-    create_directory_symlink(target, &temporary)?;
+    create_directory_symlink(target, &temporary).map_err(ReplaceLinkError::Unchanged)?;
     if let Err(error) = fs::rename(&temporary, link_path) {
         let _ = fs::remove_file(&temporary);
-        return Err(error);
+        return Err(ReplaceLinkError::Unchanged(error));
     }
     Ok(())
 }
 
 #[cfg(windows)]
-fn replace_directory_symlink(target: &Path, link_path: &Path) -> io::Result<()> {
-    fs::remove_dir(link_path)?;
-    create_directory_symlink(target, link_path)
+fn replace_directory_symlink(target: &Path, link_path: &Path) -> Result<(), ReplaceLinkError> {
+    fs::remove_dir(link_path).map_err(ReplaceLinkError::Unchanged)?;
+    create_directory_symlink(target, link_path).map_err(ReplaceLinkError::RemovedOldLink)
 }
 
 #[cfg(not(any(unix, windows)))]
-fn replace_directory_symlink(_target: &Path, _link_path: &Path) -> io::Result<()> {
-    Err(io::Error::new(
+fn replace_directory_symlink(_target: &Path, _link_path: &Path) -> Result<(), ReplaceLinkError> {
+    Err(ReplaceLinkError::Unchanged(io::Error::new(
         io::ErrorKind::Unsupported,
         "this platform does not support Skilled's directory-link repair",
-    ))
+    )))
+}
+
+#[derive(Debug)]
+enum ReplaceLinkError {
+    /// The destination still names the same object it did before this attempt.
+    Unchanged(io::Error),
+    /// The proven old link was removed before replacement creation failed.
+    #[cfg(windows)]
+    RemovedOldLink(io::Error),
 }
 
 /// Check a repaired link and its OpenCode outlook against a fresh scan.
@@ -2499,10 +2540,15 @@ pub fn verify_repair(
         return VerifyReport { failures, withheld };
     };
     if !step.outcome.wrote_link() {
+        let reason = match &step.outcome {
+            RepairStepOutcome::RemovedUnreplaced(_) => {
+                "the original link was removed but no replacement was written, so there was no repaired link to verify"
+            }
+            _ => "the repair was not applied, so there was no repaired link to verify",
+        };
         withheld.push(VerifyWithheld {
             agent: step.agent,
-            reason: "the repair was not applied, so there was no repaired link to verify"
-                .to_owned(),
+            reason: reason.to_owned(),
             required: true,
         });
         return VerifyReport { failures, withheld };
@@ -2578,6 +2624,7 @@ pub enum RepairStatus {
     NothingToRepair,
     Repaired,
     NotApplied,
+    PartiallyApplied,
     RepairedUnrecorded,
     VerificationFailed,
 }
@@ -2619,6 +2666,7 @@ impl RepairOutcome {
             }
             None => RepairStatus::NotApplied,
             Some(RepairStepOutcome::Failed(_)) => RepairStatus::NotApplied,
+            Some(RepairStepOutcome::RemovedUnreplaced(_)) => RepairStatus::PartiallyApplied,
             Some(RepairStepOutcome::RepairedUnrecorded(_)) => RepairStatus::RepairedUnrecorded,
             Some(RepairStepOutcome::Repaired) if !self.verification.is_verified() => {
                 RepairStatus::VerificationFailed
@@ -3014,5 +3062,28 @@ mod tests {
         );
         assert!(applied.steps[0].changed_filesystem());
         assert!(!applied.steps[0].wrote_link());
+    }
+
+    /// Windows must remove a directory symlink before it can create its
+    /// replacement. If creation then fails, that is a partial mutation rather
+    /// than the same `NotApplied` state as a guard refusal.
+    #[test]
+    fn an_old_link_removed_before_replacement_failure_is_a_partial_repair() {
+        let mut plan = empty_repair_plan(
+            AgentKind::Codex,
+            "portable",
+            PathBuf::from("/home/example/.agents/skills/portable"),
+        );
+        plan.disposition = RepairDisposition::ReplaceLink { dangling: false };
+        let applied = RepairApplyReport {
+            step: Some(RepairAppliedStep {
+                agent: AgentKind::Codex,
+                link_path: plan.link_path.clone(),
+                outcome: RepairStepOutcome::RemovedUnreplaced("permission denied".to_owned()),
+            }),
+        };
+        let outcome = RepairOutcome::new(plan, applied, VerifyReport::default());
+
+        assert_eq!(outcome.status(), RepairStatus::PartiallyApplied);
     }
 }

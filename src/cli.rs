@@ -146,7 +146,9 @@ pub fn exit_code_for_repair(status: RepairStatus) -> ExitCodeKind {
     match status {
         RepairStatus::NothingToRepair | RepairStatus::Repaired => ExitCodeKind::Success,
         RepairStatus::NotApplied => ExitCodeKind::Blocked,
-        RepairStatus::RepairedUnrecorded => ExitCodeKind::PartialApply,
+        RepairStatus::PartiallyApplied | RepairStatus::RepairedUnrecorded => {
+            ExitCodeKind::PartialApply
+        }
         RepairStatus::VerificationFailed => ExitCodeKind::VerificationFailed,
     }
 }
@@ -583,6 +585,12 @@ fn write_repair_report(output: &mut dyn Write, outcome: &RepairOutcome) -> std::
                 "link replaced, but Skilled could not record owning it: {}",
                 safe(error)
             ),
+            RepairStepOutcome::RemovedUnreplaced(error) => {
+                format!(
+                    "original link removed without replacement — {}",
+                    safe(error)
+                )
+            }
             RepairStepOutcome::Failed(reason) => format!("not written — {}", safe(reason)),
         };
         writeln!(output, "  {:<12} {verdict}", step.agent().display_name())?;
