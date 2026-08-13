@@ -616,6 +616,14 @@ fn write_repository_update_plan(
     for name in &plan.affected().added {
         writeln!(output, "    added upstream, not installed · {}", safe(name))?;
     }
+    for (installed, skill) in &plan.affected().restored {
+        writeln!(
+            output,
+            "    dangling link gains its target · {} -> {}",
+            safe(installed),
+            safe(skill)
+        )?;
+    }
     for (old, new) in &plan.affected().renamed {
         writeln!(output, "    renamed · {} -> {}", safe(old), safe(new))?;
     }

@@ -345,6 +345,57 @@ impl Store {
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
+    /// Hand out `count` update-check generations no other allocation will
+    /// reuse, and return the first of them.
+    ///
+    /// The generation both dates a check and orders it: the conditional upsert
+    /// behind a recorded check keeps an older result from displacing a newer
+    /// one, so two checks that share a value make one of them disappear into a
+    /// store that reported success. A counter held in each process cannot
+    /// prevent that — two Skilled processes running checks after the clock has
+    /// moved behind the last stored value will each hand out the same number —
+    /// so the high-water mark lives beside the data it orders and is advanced
+    /// under the same immediate transaction that reads it. `floor` is what the
+    /// wall clock offers; the reservation takes it only when it is genuinely
+    /// ahead of everything already handed out.
+    pub(crate) fn reserve_update_check_generations(
+        &mut self,
+        floor: i64,
+        count: usize,
+    ) -> Result<i64> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let reserved: Option<i64> = transaction
+            .query_row(
+                "SELECT value FROM settings WHERE key = 'update_check_generation'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .and_then(|value| value.parse().ok());
+        // The rows themselves are the other high-water mark, and on a database
+        // written before this setting existed they are the only one. Reading
+        // the setting alone would hand a store that already holds later checks
+        // an earlier generation, and the conditional upsert would then decline
+        // every new check while reporting that it succeeded.
+        let recorded: Option<i64> = transaction.query_row(
+            "SELECT MAX(checked_at) FROM source_update_checks",
+            [],
+            |row| row.get(0),
+        )?;
+        let held = reserved.unwrap_or(0).max(recorded.unwrap_or(0));
+        let first = floor.max(held.saturating_add(1));
+        let last = first.saturating_add(i64::try_from(count.max(1)).unwrap_or(i64::MAX) - 1);
+        transaction.execute(
+            "INSERT INTO settings (key, value) VALUES ('update_check_generation', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![last.to_string()],
+        )?;
+        transaction.commit()?;
+        Ok(first)
+    }
+
     pub(crate) fn record_update_check(&self, check: &CachedUpdateCheck) -> Result<()> {
         self.connection.execute(
             UPDATE_CHECK_UPSERT,
@@ -627,6 +678,71 @@ mod tests {
             result,
             Err(Error::UnrepresentablePath(path)) if path == link_path
         ));
+    }
+
+    /// Two Skilled processes checking the same registry must not be handed the
+    /// same generation, or the conditional upsert drops whichever finishes
+    /// second while telling it the write succeeded. Two stores over one data
+    /// directory are the two processes: the reservation is the only shared
+    /// state ordering them, and a clock that has moved backwards — the floor
+    /// here — must not be able to hand out a value twice.
+    #[test]
+    fn reserved_generations_are_never_handed_out_twice() {
+        let temporary = tempfile::tempdir().expect("temporary data directory");
+        let mut first = Store::open(temporary.path()).expect("open store");
+        let mut second = Store::open(temporary.path()).expect("open second store");
+
+        let a = first
+            .reserve_update_check_generations(1_000, 3)
+            .expect("first reservation");
+        let b = second
+            .reserve_update_check_generations(1_000, 2)
+            .expect("second reservation");
+        let c = first
+            .reserve_update_check_generations(500, 1)
+            .expect("reservation behind the clock");
+
+        assert_eq!(a, 1_000);
+        assert!(b > a + 2, "{b} overlaps the block starting at {a}");
+        assert!(c > b + 1, "{c} overlaps the block starting at {b}");
+    }
+
+    /// A database written before the reservation setting existed still holds
+    /// the generations its checks were recorded under, and they are the only
+    /// high-water mark there is. Reading the setting alone would hand the
+    /// first reservation after the upgrade an earlier value, and the
+    /// conditional upsert would then decline every new check while reporting
+    /// that it had been stored.
+    #[test]
+    fn a_reservation_never_falls_behind_the_checks_already_recorded() {
+        let temporary = tempfile::tempdir().expect("temporary data directory");
+        let mut store = Store::open(temporary.path()).expect("open store");
+        store
+            .connection
+            .execute(
+                "INSERT INTO source_repositories
+                    (id, label, canonical_path, head_revision, dirty, dirty_known, last_scan_at)
+                 VALUES (1, 'source', '/source', 'head', 0, 1, 0)",
+                [],
+            )
+            .expect("source fixture");
+        store
+            .connection
+            .execute(
+                "INSERT INTO source_update_checks
+                    (source_id, checked_at, local_revision, ahead, behind, dirty, dirty_known,
+                     verdict, detail)
+                 VALUES (1, 9_000, 'head', 0, 0, 0, 1, 'up_to_date', '')",
+                [],
+            )
+            .expect("check recorded before the setting existed");
+
+        // The clock is well behind what the stored check was written under.
+        let reserved = store
+            .reserve_update_check_generations(100, 1)
+            .expect("reservation");
+
+        assert!(reserved > 9_000, "{reserved} is not past the recorded 9000");
     }
 
     #[test]

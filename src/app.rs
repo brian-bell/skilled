@@ -326,6 +326,15 @@ fn wrapped_index(current: usize, delta: i8, count: usize) -> usize {
 /// The highest generation this process has handed out or seen recorded.
 static GENERATION: AtomicI64 = AtomicI64::new(0);
 
+/// The wall clock, as the nanosecond value a generation starts from.
+fn wall_clock() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos()
+        .min(i64::MAX as u128) as i64
+}
+
 /// When a check ran, as a value later checks are guaranteed to exceed.
 ///
 /// The conditional upsert behind a recorded check keeps an older result from
@@ -337,12 +346,14 @@ static GENERATION: AtomicI64 = AtomicI64::new(0);
 /// ran — but it is never allowed to fall to or below one already handed out.
 /// [`note_generation`] seeds the floor from what the store already holds, so a
 /// clock that moved back between runs cannot silence the next run's first check.
+///
+/// This orders one process against itself. Ordering it against another Skilled
+/// process is the store's job, because only shared state can do it:
+/// [`SkilledApp::reserve_generations`] allocates from
+/// [`Store::reserve_update_check_generations`] and falls back here only when
+/// that reservation cannot be made at all.
 fn now() -> i64 {
-    let wall = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos()
-        .min(i64::MAX as u128) as i64;
+    let wall = wall_clock();
     let mut floor = GENERATION.load(Ordering::Acquire);
     loop {
         let next = wall.max(floor.saturating_add(1));
@@ -1636,6 +1647,16 @@ impl SkilledApp {
                 Effect::RecordUpdateChecks(checks) => self.persist_update_checks(checks),
                 Effect::FinishUpdateCheck => self.finish_update_check(),
                 Effect::PlanRepositoryUpdate => {
+                    // The plan names which installed skills the fast-forward
+                    // touches, and derives them from the inventory. A link into
+                    // this source made while the application stayed open is
+                    // absent from the last scan, so the confirmation would omit
+                    // an installation the update changes and the post-apply
+                    // rescan would then report that pre-existing link as having
+                    // appeared undisclosed. The scan is filesystem work, so it
+                    // happens here at the effect boundary rather than in the
+                    // reducer.
+                    self.rescan_installations();
                     self.pending_update = Some(self.build_repository_update_preview());
                     self.reset_detail_scroll();
                 }
@@ -1645,12 +1666,51 @@ impl SkilledApp {
         Ok(())
     }
 
+    /// Reserve `count` consecutive generations across every Skilled process,
+    /// and return the first.
+    ///
+    /// The store is the only thing that can order this process against another,
+    /// so a reservation it refuses is a failure rather than something to route
+    /// around: a process-local value handed out instead is exactly the
+    /// collision this exists to prevent, and the conditional upsert would then
+    /// drop a result while reporting that it was stored. Callers either refuse
+    /// the work or carry the failure into what they report.
+    fn reserve_generations(&mut self, count: usize) -> std::result::Result<i64, String> {
+        let span = i64::try_from(count.max(1)).unwrap_or(i64::MAX) - 1;
+        // `now()` rather than the bare clock: it carries this process's own
+        // floor, which a clock that moved backwards mid-session would fall
+        // below. The store contributes what every process has recorded; this
+        // contributes what this one has handed out.
+        let first = self
+            .store
+            .reserve_update_check_generations(now(), count)
+            .map_err(|error| format!("update check generations could not be reserved: {error}"))?;
+        note_generation(first.saturating_add(span));
+        Ok(first)
+    }
+
     fn start_update_check(&mut self) {
         if self.update_check_run.is_some() {
             return;
         }
         self.update_check_error = None;
         let sources = self.sources.clone();
+        // The whole run's generations are taken before any of it starts, so
+        // every check this run records is ordered ahead of anything another
+        // process reserved and behind anything it reserves next. The worker
+        // thread has no store of its own to allocate from.
+        //
+        // A refusal ends the run here. The store that cannot hand out an
+        // ordered generation is the store that would have to accept the
+        // results, so reaching the network first would spend it on a check
+        // nothing could safely record.
+        let first_generation = match self.reserve_generations(sources.len()) {
+            Ok(first) => first,
+            Err(error) => {
+                self.update_check_error = Some(error);
+                return;
+            }
+        };
         let cancelled = Arc::new(AtomicBool::new(false));
         let child = Arc::new(Mutex::new(None));
         let (sender, receiver) = mpsc::channel();
@@ -1678,7 +1738,11 @@ impl SkilledApp {
                         let _ = sender.send(UpdateCheckMessage::Cancelled);
                         return;
                     };
-                    checks.push(cached_update_check(source, &probe, now()));
+                    checks.push(cached_update_check(
+                        source,
+                        &probe,
+                        first_generation.saturating_add(i64::try_from(index).unwrap_or(i64::MAX)),
+                    ));
                     if worker_cancelled.load(Ordering::Acquire) {
                         let _ = sender.send(UpdateCheckMessage::Cancelled);
                         return;
@@ -1862,6 +1926,12 @@ impl SkilledApp {
         let before_inventory = self.inventory.clone();
         let (apply_result, write_attempted) = apply_repository_update_attempt(&plan);
         let apply_error = apply_result.err().map(|error| error.to_string());
+        // Asked before the first read that follows the write, because every
+        // one of them reads objects and a disclosed hook has already had its
+        // turn. Refreshing the registered source runs `status` and
+        // `cat-file`; the rescan resolves links into the checkout; and
+        // verification reads HEAD. None of them may run against a repository
+        // that has become able to fetch on their behalf.
         self.sources = match self.store.registered_sources() {
             Ok(sources) => sources,
             Err(error) => {
@@ -1877,21 +1947,36 @@ impl SkilledApp {
         };
         self.rescan_installations();
         let verification = verify_repository_update(&plan, &before_inventory, &self.inventory);
-        let checked_at = self
-            .update_check_for(plan.source_id())
-            .map_or_else(now, |check| check.checked_at);
-        let check = if write_attempted {
-            self.repository_verification_check(&plan, &verification, checked_at)
-        } else {
-            self.superseded_repository_check(plan.source_id(), checked_at)
+        // A generation of its own, always. This record is a later observation
+        // than the check it followed, and reusing that check's generation
+        // would leave it losing the conditional upsert to anything another
+        // process recorded while the preview was open — a store that reports
+        // success and keeps the pre-update verdict, taking a verification
+        // failure with it.
+        //
+        // The write has already happened, so a refused reservation cannot end
+        // the operation the way it ends a check — but it does end the caching.
+        // A process-local value is one another process may already own, and
+        // recording under it would let this row displace theirs or theirs
+        // displace this one, which is the corruption the reservation exists to
+        // prevent. The report still states the verification either way; only
+        // the cache goes without, and it says so.
+        let persistence_error = match self.reserve_generations(1) {
+            Err(error) => Some(error),
+            Ok(checked_at) => {
+                let check = if write_attempted {
+                    self.repository_verification_check(&plan, &verification, checked_at)
+                } else {
+                    self.superseded_repository_check(plan.source_id(), checked_at)
+                };
+                self.store
+                    .record_update_check(&check)
+                    .and_then(|()| self.store.update_checks())
+                    .map(|checks| self.update_checks = checks)
+                    .err()
+                    .map(|error| format!("verified update state could not be cached: {error}"))
+            }
         };
-        let persistence_error = self
-            .store
-            .record_update_check(&check)
-            .and_then(|()| self.store.update_checks())
-            .map(|checks| self.update_checks = checks)
-            .err()
-            .map(|error| format!("verified update state could not be cached: {error}"));
         self.update_check_error = persistence_error.clone();
         self.pending_update = Some(RepositoryUpdatePrompt::Report {
             plan,
@@ -1912,8 +1997,15 @@ impl SkilledApp {
             .find(|source| source.id() == source_id)
             .cloned()
             .ok_or_else(|| "no registered source has that identifier".to_owned())?;
+        // Reserved before the probe, exactly as `start_update_check` does it.
+        // The probe fetches, which is the slow part, and a generation taken
+        // afterwards would order this check by when its network call happened
+        // to return rather than by when it was asked for — letting a check
+        // that began earlier, and therefore describes an older upstream,
+        // displace one that began later.
+        let generation = self.reserve_generations(1)?;
         let probe = probe_repository_update(&source, true);
-        let check = cached_update_check(&source, &probe, now());
+        let check = cached_update_check(&source, &probe, generation);
         self.store
             .record_update_check(&check)
             .map_err(|error| error.to_string())?;
@@ -1921,6 +2013,15 @@ impl SkilledApp {
             .store
             .update_checks()
             .map_err(|error| error.to_string())?;
+        // Read after the probe, which fetched and may have taken a while. The
+        // plan is about to state which installations the update affects, and
+        // the roots it derives that from must be the roots as they are now:
+        // this is the same reading `Effect::PlanRepositoryUpdate` takes, and
+        // the same reading the post-apply verification will be compared
+        // against. Doing it here also gives that comparison two snapshots of
+        // equal standing, so a command run before setup completes reports what
+        // it verified rather than withholding the answer.
+        self.rescan_installations();
         plan_repository_update(&source, &probe, &self.inventory).map_err(|error| error.to_string())
     }
 
@@ -1954,21 +2055,24 @@ impl SkilledApp {
         };
         self.rescan_installations();
         let verification = verify_repository_update(plan, &before_inventory, &self.inventory);
-        let checked_at = self
-            .update_check_for(plan.source_id())
-            .map_or_else(now, |check| check.checked_at);
-        let check = if write_attempted {
-            self.repository_verification_check(plan, &verification, checked_at)
-        } else {
-            self.superseded_repository_check(plan.source_id(), checked_at)
+        // The same fresh generation the screens take, and the same refusal to
+        // cache under one no other process can be held off from reusing.
+        let bookkeeping_error = match self.reserve_generations(1) {
+            Err(error) => Some(error),
+            Ok(checked_at) => {
+                let check = if write_attempted {
+                    self.repository_verification_check(plan, &verification, checked_at)
+                } else {
+                    self.superseded_repository_check(plan.source_id(), checked_at)
+                };
+                self.store
+                    .record_update_check(&check)
+                    .and_then(|()| self.store.update_checks())
+                    .map(|checks| self.update_checks = checks)
+                    .err()
+                    .map(|error| format!("post-attempt update state could not be cached: {error}"))
+            }
         };
-        let bookkeeping_error = self
-            .store
-            .record_update_check(&check)
-            .and_then(|()| self.store.update_checks())
-            .map(|checks| self.update_checks = checks)
-            .err()
-            .map(|error| format!("post-attempt update state could not be cached: {error}"));
         RepositoryApplyOutcome {
             verification: Some(verification),
             apply_error,

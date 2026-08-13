@@ -148,13 +148,62 @@ signal needs both, because colour alone is not an acceptable cue.
   tracked separately.
 - Repository updates write through Git only inside the canonical checkout the
   user registered. They begin only after an explicit check, fast-forward to the
-  exact previewed object, and never reset, rebase, stash, commit, or push.
+  exact previewed object, and never reset, rebase, stash, commit, or push. The
+  checkout's filesystem identity is re-read as the last guard before the write
+  and again during verification, so a checkout replaced under the pathname is
+  identified rather than silently written to and reported as a pass. Binding
+  the Git process itself to the proven checkout is `skilled-2k3.8.5.1`; until
+  it lands, the gap between that final guard and `merge` remains open, the
+  update counterpart of `skilled-cb2`.
+- An explicit check runs no repository code. Hooks are pointed at the null
+  device, `core.fsmonitor` is turned off on every inspection — it is an
+  executable Git runs for `status` and `fetch` alike, and `core.hooksPath` does
+  not reach it — and the partial-clone refusal is re-asked before the preview's
+  object reads and again in the apply guard, rather than remembered from the
+  check, so neither can make Git fetch lazily. Reads that follow the write are
+  not covered; `skilled-cbq` has that. The transport half of the claim is a
+  refusal rather than a suppression: a checkout that names a program for Git
+  to run while fetching — `core.sshCommand`, `core.askPass`, `core.gitProxy`,
+  `core.alternateRefsCommand`, a credential helper,
+  `remote.<name>.uploadpack`, `remote.<name>.vcs`, `protocol.<scheme>.command`,
+  or a URL naming a transport helper — blocks the check with
+  `source.repository_transport_unsupported` instead. The URL is the one
+  `ls-remote --get-url` reports, because `insteadOf` rewrites the configured
+  value on the way to the transport and a remote with several URLs is fetched
+  from the first while `--get` answers with the last. A setting the checkout
+  goes on to disable is not a refusal: an empty credential helper resets the
+  list and a scalar's last value wins. Scope is the
+  whole distinction, and `--show-scope` is what draws it: the same key in the
+  user's own global or system configuration is theirs and keeps working, while
+  the same key inside the checkout is refused. There is no documented way to
+  turn a credential helper or an upload-pack program off the way there is for
+  a hook, and reconstructing which of the user's scopes was meant would be
+  guessing at their intent. The fast-forward is the opposite case by design:
+  it is handed the repository's configuration, and the plan discloses the
+  hooks, the monitor, and the checkout filters it may run.
+- The fetch never names a user-controllable ref as its destination. Git
+  dereferences a symbolic ref when it updates one, so a tracking ref
+  substituted after the preflight refusal would send a forced refspec into
+  whatever it points at, a local branch included. The fetch lands in a
+  per-invocation `refs/skilled/fetch/` name instead, deleted immediately before
+  and after; the tracking ref is published from it with `update-ref --no-deref`
+  and an expected old value, so a ref another fetch advanced meanwhile is
+  refused rather than rolled back — unless it already holds the very object
+  that was staged, which is nothing to refuse. The staging name is derived
+  rather than unguessable, so the substitution race is narrowed and reported
+  rather than closed; `skilled-q59` tracks a fetch that writes no
+  dereferenceable ref at all. A check may not report success over a staging
+  ref it failed to remove.
 - Cached update findings exist only after an explicit check. A changed `HEAD`
   or changed known dirtiness supersedes the cached verdict; opening Updates is
-  therefore a metadata-only operation and never performs network access.
+  therefore a metadata-only operation and never performs network access. A
+  recorded verification finding is exempt: it is an observation of the state it
+  would otherwise be superseded by, and Doctor must not lose it.
 - Repository update verification keeps the same three answers as installation
-  verification. The confirmation gate covers the complete plan statement;
-  the untruncated changed-file listing is non-gating evidence below it.
+  verification. The confirmation gate covers the complete plan statement, the
+  incoming commit summaries included, because those are what the fast-forward
+  brings in; the untruncated changed-file listing is non-gating evidence below
+  it.
 - Text from the filesystem — names, paths, link targets, operating-system error
   messages — is escaped through `components::terminal_safe` before it reaches a
   terminal, on every surface. The screens and `skilled install` write to the

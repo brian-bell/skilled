@@ -1593,7 +1593,16 @@ fn a_guard_refusal_caches_the_current_blocker_not_a_failed_postcondition() {
         .expect("observe guard refusal");
 
     let findings = fixture.app.update_checks()[0].findings();
-    assert_eq!(fixture.app.update_checks()[0].checked_at, checked_at);
+    // The guard re-read the checkout and found it changed, which is a later
+    // observation than the check it refused on behalf of. Recording it under
+    // the earlier generation would leave it losing the conditional upsert to
+    // anything another process wrote in between, and the blocker would be
+    // dropped by a store that reported success.
+    assert!(
+        fixture.app.update_checks()[0].checked_at > checked_at,
+        "{} is not later than {checked_at}",
+        fixture.app.update_checks()[0].checked_at
+    );
     assert!(findings.iter().any(|finding| {
         finding.code() == "source.changed_after_preview"
             && finding.evidence().contains("check updates again")
@@ -2228,4 +2237,937 @@ fn a_rewritten_upstream_is_diverged_at_the_explicitly_fetched_tracking_ref() {
         git(&fixture.clone, &["rev-parse", "refs/remotes/origin/main"]),
         git(&rewritten, &["rev-parse", "HEAD"])
     );
+}
+
+/// Git consults `core.fsmonitor` by running the program it names, and
+/// `core.hooksPath` does not reach it. A check is offered as reading a
+/// repository, so no inspection it performs may execute one.
+#[test]
+fn an_update_check_runs_no_fsmonitor_hook() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = fixture();
+    let sentinel = fixture._temporary.path().join("fsmonitor-ran");
+    let monitor = fixture._temporary.path().join("fsmonitor.sh");
+    std::fs::write(
+        &monitor,
+        format!("#!/bin/sh\ntouch '{}'\nexit 1\n", sentinel.display()),
+    )
+    .expect("fsmonitor fixture");
+    let mut permissions = std::fs::metadata(&monitor)
+        .expect("fsmonitor metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&monitor, permissions).expect("executable fsmonitor");
+    git(
+        &fixture.clone,
+        &["config", "core.fsmonitor", monitor.to_str().unwrap()],
+    );
+    let target = push_update(&fixture, "skills/demo/new.txt");
+
+    let probe = probe_repository_update(&fixture.app.sources()[0], true);
+    let (verdict, _) = classify_repository_update(&probe);
+
+    assert_eq!(verdict, RepositoryUpdateVerdict::Available);
+    assert!(!sentinel.exists(), "the check ran the fsmonitor hook");
+    assert_eq!(
+        git(&fixture.clone, &["rev-parse", "refs/remotes/origin/main"]),
+        target
+    );
+}
+
+/// What the fast-forward may run is agreed to rather than suppressed, so the
+/// plan has to name the monitor beside the hooks and the filters.
+#[test]
+fn the_plan_discloses_the_fsmonitor_hook_the_fast_forward_may_run() {
+    let fixture = fixture();
+    push_update(&fixture, "skills/demo/new.txt");
+    let source = fixture.app.sources()[0].clone();
+    let probe = probe_repository_update(&source, true);
+
+    let plan =
+        plan_repository_update(&source, &probe, fixture.app.inventory()).expect("plan update");
+
+    assert!(
+        plan.hooks_disclosure().contains("core.fsmonitor"),
+        "{}",
+        plan.hooks_disclosure()
+    );
+}
+
+/// The commits are what the fast-forward brings in, so they belong inside the
+/// gate rather than beside the changed-file evidence below it.
+#[test]
+fn commit_summaries_extend_the_confirmation_gate() {
+    let mut fixture = fixture();
+    for index in 0..60 {
+        std::fs::write(
+            fixture.seed.join("rolling.txt"),
+            format!("revision {index}\n"),
+        )
+        .expect("rolling file");
+        commit(&fixture.seed, &format!("upstream commit {index:03}"));
+    }
+    git(&fixture.seed, &["push"]);
+    fixture
+        .app
+        .perform_effects(&[Effect::CheckUpdates])
+        .expect("start check");
+    finish_update_check(&mut fixture.app);
+    fixture
+        .app
+        .perform_effects(&[Effect::PlanRepositoryUpdate])
+        .expect("plan update");
+
+    let backend = TestBackend::new(80, 24);
+    let mut terminal = Terminal::new(backend).expect("terminal");
+    let mut feedback = tui::RenderFeedback::default();
+    terminal
+        .draw(|frame| feedback = tui::render(frame, &fixture.app))
+        .expect("render preview");
+
+    // One changed file, sixty commits: anything the gate still measured only
+    // over the statement would already be satisfied here.
+    assert_eq!(feedback.update_preview_fully_seen(), Some(false));
+    let buffer = terminal.backend().buffer();
+    let footer = (buffer.area.x..buffer.area.x + buffer.area.width)
+        .map(|x| buffer[(x, buffer.area.y + buffer.area.height - 1)].symbol())
+        .collect::<String>();
+    assert!(!footer.contains("Enter Apply"), "{footer}");
+    fixture
+        .app
+        .note_update_preview_fully_seen(feedback.update_preview_fully_seen());
+    assert_eq!(
+        fixture
+            .app
+            .update(Action::ConfirmRepositoryUpdate)
+            .effects(),
+        &[]
+    );
+
+    // Reading to the end of the commit list is what unlocks it.
+    for _ in 0..200 {
+        fixture.app.update(Action::ScrollDetail(1));
+        terminal
+            .draw(|frame| feedback = tui::render(frame, &fixture.app))
+            .expect("render preview");
+        fixture
+            .app
+            .note_detail_max_scroll(feedback.detail_max_scroll());
+        fixture
+            .app
+            .note_update_preview_fully_seen(feedback.update_preview_fully_seen());
+        if fixture.app.update_preview_fully_seen() {
+            break;
+        }
+    }
+    assert!(fixture.app.update_preview_fully_seen());
+    assert_eq!(
+        fixture
+            .app
+            .update(Action::ConfirmRepositoryUpdate)
+            .effects(),
+        &[Effect::ApplyRepositoryUpdate]
+    );
+}
+
+/// A dangling link already aimed at a directory the update creates becomes a
+/// resolved installation the moment the fast-forward lands. Left out of the
+/// plan it would be previewed as merely added upstream, and verification would
+/// then read the link resolving as an undisclosed change and fail an update
+/// that did exactly what it said.
+#[test]
+fn a_dangling_link_an_update_revives_is_disclosed_and_verified() {
+    let mut fixture = fixture();
+    let root = fixture._temporary.path().join("home/.claude/skills");
+    std::fs::create_dir_all(&root).expect("agent root");
+    std::os::unix::fs::symlink(fixture.clone.join("skills/added"), root.join("added"))
+        .expect("dangling link");
+
+    std::fs::create_dir_all(fixture.seed.join("skills/added")).expect("added skill directory");
+    std::fs::write(
+        fixture.seed.join("skills/added/SKILL.md"),
+        "---\nname: added\ndescription: fixture\n---\n",
+    )
+    .expect("added skill");
+    commit(&fixture.seed, "add the skill the link points at");
+    git(&fixture.seed, &["push"]);
+
+    fixture
+        .app
+        .perform_effects(&[Effect::CheckUpdates])
+        .expect("start check");
+    finish_update_check(&mut fixture.app);
+    fixture
+        .app
+        .perform_effects(&[Effect::PlanRepositoryUpdate])
+        .expect("plan update");
+
+    let Some(RepositoryUpdatePrompt::Preview(plan)) = fixture.app.pending_update().cloned() else {
+        panic!("expected a preview: {:?}", fixture.app.pending_update());
+    };
+    assert_eq!(
+        plan.affected().restored,
+        vec![("added".to_owned(), "added".to_owned())]
+    );
+    assert!(plan.affected().added.is_empty(), "{:?}", plan.affected());
+
+    fixture
+        .app
+        .perform_effects(&[Effect::ApplyRepositoryUpdate])
+        .expect("apply update");
+
+    let Some(RepositoryUpdatePrompt::Report {
+        verification,
+        apply_error,
+        ..
+    }) = fixture.app.pending_update()
+    else {
+        panic!("expected a report: {:?}", fixture.app.pending_update());
+    };
+    assert!(apply_error.is_none(), "{apply_error:?}");
+    assert!(verification.is_verified(), "{:?}", verification.failures());
+    assert!(root.join("added").join("SKILL.md").is_file());
+}
+
+/// The explicit check refused a partial clone before reading any object, but
+/// that refusal is not evidence about the preview that follows it: a promisor
+/// remote configured in between would let the preview's own object reads fetch
+/// lazily, outside the one step entitled to reach the network.
+#[test]
+fn a_partial_clone_configured_after_the_check_blocks_the_preview() {
+    let mut fixture = fixture();
+    push_update(&fixture, "skills/demo/new.txt");
+    fixture
+        .app
+        .perform_effects(&[Effect::CheckUpdates])
+        .expect("start check");
+    finish_update_check(&mut fixture.app);
+    assert_eq!(
+        fixture.app.update_checks()[0].verdict,
+        RepositoryUpdateVerdict::Available
+    );
+
+    git(
+        &fixture.clone,
+        &["config", "remote.origin.promisor", "true"],
+    );
+    fixture
+        .app
+        .perform_effects(&[Effect::PlanRepositoryUpdate])
+        .expect("plan update");
+
+    match fixture.app.pending_update() {
+        Some(RepositoryUpdatePrompt::Preview(plan)) => assert!(
+            plan.findings()
+                .iter()
+                .any(|finding| finding.code() == "source.partial_clone_unsupported"),
+            "{:?}",
+            plan.findings()
+        ),
+        other => panic!("expected a blocked preview: {other:?}"),
+    }
+}
+
+/// A verification finding reports on the checkout as it stood after a write,
+/// and the checkout failing to be read is one of the states it reports on. If
+/// the source failing supersedes the record, Doctor loses the only statement
+/// anywhere that a write was not verified.
+#[test]
+fn a_verification_finding_outlives_the_source_failure_it_reports() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut fixture = fixture();
+    let root = fixture._temporary.path().join("home/.claude/skills");
+    std::fs::create_dir_all(&root).expect("agent root");
+    std::os::unix::fs::symlink(fixture.clone.join("skills/demo"), root.join("demo"))
+        .expect("installed skill");
+    push_update(&fixture, "skills/demo/new.txt");
+
+    // A disclosed hook that installs something nobody agreed to: the write
+    // succeeds and verification refuses to call it verified.
+    let hook = fixture.clone.join(".git/hooks/post-merge");
+    std::fs::write(
+        &hook,
+        format!(
+            "#!/bin/sh\nln -s '{}' '{}'\n",
+            fixture.clone.join("skills/other").display(),
+            root.join("other").display()
+        ),
+    )
+    .expect("post-merge hook");
+    let mut permissions = std::fs::metadata(&hook)
+        .expect("hook metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&hook, permissions).expect("executable hook");
+
+    fixture
+        .app
+        .perform_effects(&[Effect::CheckUpdates])
+        .expect("start check");
+    finish_update_check(&mut fixture.app);
+    fixture
+        .app
+        .perform_effects(&[Effect::PlanRepositoryUpdate, Effect::ApplyRepositoryUpdate])
+        .expect("apply update");
+    let check = fixture.app.update_checks()[0].clone();
+    assert_eq!(check.verdict, RepositoryUpdateVerdict::Blocked);
+    assert!(
+        check
+            .findings()
+            .iter()
+            .any(|finding| finding.code() == "update.verification_failed"),
+        "{:?}",
+        check.findings()
+    );
+
+    // Now the checkout goes away, exactly as a hook that moves it would leave
+    // things. The recorded failure is the observation of that, not something
+    // it replaces.
+    std::fs::rename(
+        &fixture.clone,
+        fixture._temporary.path().join("moved-aside"),
+    )
+    .expect("move the checkout aside");
+
+    // Reopened, because that is when a superseded record disappears: the
+    // report is gone and only what the store holds still speaks for the write.
+    let reopened = SkilledApp::open(AppEnvironment::new(
+        fixture._temporary.path().join("home"),
+        fixture._temporary.path().join("data"),
+        "",
+    ))
+    .expect("reopen app");
+    let source = reopened.sources()[0].clone();
+
+    assert!(source.source_error().is_some());
+    assert!(!check.superseded_by(&source));
+    assert!(
+        reopened
+            .doctor_findings()
+            .iter()
+            .any(|entry| entry.finding().code() == "update.verification_failed"),
+        "the recorded verification failure did not survive the source failing"
+    );
+}
+
+/// The staging destination is Skilled's own bookkeeping, not state the user's
+/// repository should be left holding.
+#[test]
+fn an_update_check_leaves_no_staging_ref_behind() {
+    let fixture = fixture();
+    let target = push_update(&fixture, "skills/demo/new.txt");
+
+    let probe = probe_repository_update(&fixture.app.sources()[0], true);
+    let (verdict, _) = classify_repository_update(&probe);
+
+    assert_eq!(verdict, RepositoryUpdateVerdict::Available);
+    assert_eq!(
+        git(&fixture.clone, &["rev-parse", "refs/remotes/origin/main"]),
+        target
+    );
+    assert_eq!(
+        git(
+            &fixture.clone,
+            &["for-each-ref", "--format=%(refname)", "refs/skilled/"]
+        ),
+        ""
+    );
+}
+
+/// The verification record is a later observation than the check it followed,
+/// so it must outrank anything another Skilled process recorded while the
+/// preview was open. Reusing the earlier check's generation would have the
+/// conditional upsert decline it and report success, and the failure would
+/// exist nowhere once the report is dismissed.
+#[test]
+fn a_verification_failure_outranks_a_check_another_process_ran_meanwhile() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut fixture = fixture();
+    let environment = AppEnvironment::new(
+        fixture._temporary.path().join("home"),
+        fixture._temporary.path().join("data"),
+        "",
+    );
+    let root = fixture._temporary.path().join("home/.claude/skills");
+    std::fs::create_dir_all(&root).expect("agent root");
+    std::os::unix::fs::symlink(fixture.clone.join("skills/demo"), root.join("demo"))
+        .expect("installed skill");
+    push_update(&fixture, "skills/demo/new.txt");
+
+    let hook = fixture.clone.join(".git/hooks/post-merge");
+    std::fs::write(
+        &hook,
+        format!(
+            "#!/bin/sh\nln -s '{}' '{}'\n",
+            fixture.clone.join("skills/other").display(),
+            root.join("other").display()
+        ),
+    )
+    .expect("post-merge hook");
+    let mut permissions = std::fs::metadata(&hook)
+        .expect("hook metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&hook, permissions).expect("executable hook");
+
+    fixture
+        .app
+        .perform_effects(&[Effect::CheckUpdates])
+        .expect("start check");
+    finish_update_check(&mut fixture.app);
+    fixture
+        .app
+        .perform_effects(&[Effect::PlanRepositoryUpdate])
+        .expect("plan update");
+
+    // Another Skilled process checks the same registry while this preview is
+    // open, and reserves a generation past the one behind the plan.
+    let mut other = SkilledApp::open(environment.clone()).expect("second process");
+    other
+        .perform_effects(&[Effect::CheckUpdates])
+        .expect("second process check");
+    finish_update_check(&mut other);
+    let meanwhile = other.update_checks()[0].checked_at;
+
+    fixture
+        .app
+        .perform_effects(&[Effect::ApplyRepositoryUpdate])
+        .expect("apply update");
+
+    let reopened = SkilledApp::open(environment).expect("reopen app");
+    let stored = &reopened.update_checks()[0];
+    assert!(
+        stored.checked_at > meanwhile,
+        "{} did not outrank {meanwhile}",
+        stored.checked_at
+    );
+    assert_eq!(stored.verdict, RepositoryUpdateVerdict::Blocked);
+    assert!(
+        stored
+            .findings()
+            .iter()
+            .any(|finding| finding.code() == "update.verification_failed"),
+        "{:?}",
+        stored.findings()
+    );
+}
+
+/// A relative link target is not ambiguous: the operating system resolves it
+/// against the directory holding the link. Declining to resolve it would leave
+/// the revival out of the plan and have verification report it as undisclosed
+/// after the write had already landed.
+#[test]
+fn a_relative_dangling_link_an_update_revives_is_disclosed_and_verified() {
+    let mut fixture = fixture();
+    let root = fixture._temporary.path().join("home/.claude/skills");
+    std::fs::create_dir_all(&root).expect("agent root");
+    // `home/.claude/skills/added -> ../../../clone/skills/added`
+    std::os::unix::fs::symlink("../../../clone/skills/added", root.join("added"))
+        .expect("relative dangling link");
+
+    std::fs::create_dir_all(fixture.seed.join("skills/added")).expect("added skill directory");
+    std::fs::write(
+        fixture.seed.join("skills/added/SKILL.md"),
+        "---\nname: added\ndescription: fixture\n---\n",
+    )
+    .expect("added skill");
+    commit(&fixture.seed, "add the skill the relative link points at");
+    git(&fixture.seed, &["push"]);
+
+    fixture
+        .app
+        .perform_effects(&[Effect::CheckUpdates])
+        .expect("start check");
+    finish_update_check(&mut fixture.app);
+    fixture
+        .app
+        .perform_effects(&[Effect::PlanRepositoryUpdate])
+        .expect("plan update");
+
+    let Some(RepositoryUpdatePrompt::Preview(plan)) = fixture.app.pending_update().cloned() else {
+        panic!("expected a preview: {:?}", fixture.app.pending_update());
+    };
+    assert_eq!(
+        plan.affected().restored,
+        vec![("added".to_owned(), "added".to_owned())]
+    );
+    assert!(plan.affected().added.is_empty(), "{:?}", plan.affected());
+
+    fixture
+        .app
+        .perform_effects(&[Effect::ApplyRepositoryUpdate])
+        .expect("apply update");
+
+    let Some(RepositoryUpdatePrompt::Report { verification, .. }) = fixture.app.pending_update()
+    else {
+        panic!("expected a report: {:?}", fixture.app.pending_update());
+    };
+    assert!(verification.is_verified(), "{:?}", verification.failures());
+    assert!(root.join("added").join("SKILL.md").is_file());
+}
+
+/// A checkout the user did not author carries its own configuration, and Git
+/// takes an upload-pack program from it for a local or SSH remote. The check
+/// is described to the user as reading, so it refuses the repository rather
+/// than running what the repository chose.
+///
+/// The wrapper here would leave a marker if it ran, which is what makes this a
+/// proof rather than an assertion about the finding alone.
+#[test]
+fn a_repository_configured_upload_pack_is_refused_without_running_it() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = fixture();
+    push_update(&fixture, "skills/demo/new.txt");
+
+    let marker = fixture._temporary.path().join("UPLOAD_PACK_RAN");
+    let uploadpack = fixture._temporary.path().join("uploadpack.sh");
+    std::fs::write(
+        &uploadpack,
+        format!(
+            "#!/bin/sh\ntouch '{}'\nexec git-upload-pack \"$@\"\n",
+            marker.display()
+        ),
+    )
+    .expect("upload-pack wrapper");
+    let mut permissions = std::fs::metadata(&uploadpack)
+        .expect("wrapper metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&uploadpack, permissions).expect("executable wrapper");
+    git(
+        &fixture.clone,
+        &[
+            "config",
+            "remote.origin.uploadpack",
+            uploadpack.to_str().unwrap(),
+        ],
+    );
+
+    let probe = probe_repository_update(&fixture.app.sources()[0], true);
+    let (verdict, findings) = classify_repository_update(&probe);
+
+    assert_eq!(verdict, RepositoryUpdateVerdict::Blocked, "{findings:?}");
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.code() == "source.repository_transport_unsupported"),
+        "{findings:?}"
+    );
+    assert!(
+        !marker.exists(),
+        "the repository's upload-pack program ran during the check"
+    );
+}
+
+/// A dangling link is followed through intermediate aliases to find what it
+/// means to point at, so the alias — not the agent's own link — is where a
+/// restoration can be redirected. A disclosed post-merge hook that retargets
+/// one leaves the agent link's raw target untouched and still resolving into
+/// the updated source, so nothing but the skill's own identity disagrees with
+/// what the preview promised.
+#[test]
+fn a_restoration_redirected_to_another_skill_is_not_verified() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut fixture = fixture();
+    let root = fixture._temporary.path().join("home/.claude/skills");
+    std::fs::create_dir_all(&root).expect("agent root");
+    // The alias lives outside the checkout, so retargeting it is not a change
+    // to the worktree that would block the update on its own.
+    let alias = fixture._temporary.path().join("alias");
+    std::os::unix::fs::symlink(fixture.clone.join("skills/added"), &alias)
+        .expect("intermediate alias");
+    // Named for the skill the hook will redirect it to, so that resolving to
+    // that skill raises no finding of its own: the only thing left to notice
+    // the substitution is the identity the preview disclosed.
+    std::os::unix::fs::symlink(&alias, root.join("other")).expect("aliased dangling link");
+
+    std::fs::create_dir_all(fixture.seed.join("skills/added")).expect("added skill directory");
+    std::fs::write(
+        fixture.seed.join("skills/added/SKILL.md"),
+        "---\nname: added\ndescription: fixture\n---\n",
+    )
+    .expect("added skill");
+    commit(&fixture.seed, "add the skill the link points at");
+    git(&fixture.seed, &["push"]);
+
+    // The disclosed repository code, doing exactly what it is disclosed as
+    // being able to do: it swings the alias at a different skill in the very
+    // same registered source.
+    let hooks = fixture.clone.join(".git/hooks");
+    std::fs::create_dir_all(&hooks).expect("hooks directory");
+    let hook = hooks.join("post-merge");
+    std::fs::write(
+        &hook,
+        format!(
+            "#!/bin/sh\nln -sfn '{}' '{}'\n",
+            fixture.clone.join("skills/other").display(),
+            alias.display()
+        ),
+    )
+    .expect("post-merge hook");
+    let mut permissions = std::fs::metadata(&hook)
+        .expect("hook metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&hook, permissions).expect("executable hook");
+
+    fixture
+        .app
+        .perform_effects(&[Effect::CheckUpdates])
+        .expect("start check");
+    finish_update_check(&mut fixture.app);
+    fixture
+        .app
+        .perform_effects(&[Effect::PlanRepositoryUpdate])
+        .expect("plan update");
+
+    let Some(RepositoryUpdatePrompt::Preview(plan)) = fixture.app.pending_update().cloned() else {
+        panic!("expected a preview: {:?}", fixture.app.pending_update());
+    };
+    assert_eq!(
+        plan.affected().restored,
+        vec![("other".to_owned(), "added".to_owned())]
+    );
+
+    fixture
+        .app
+        .perform_effects(&[Effect::ApplyRepositoryUpdate])
+        .expect("apply update");
+
+    let Some(RepositoryUpdatePrompt::Report { verification, .. }) = fixture.app.pending_update()
+    else {
+        panic!("expected a report: {:?}", fixture.app.pending_update());
+    };
+    // The link resolves, into the right source, from an unchanged target — and
+    // to the wrong skill. Only the disclosed identity catches that.
+    assert!(
+        !verification.is_verified(),
+        "a redirected restoration was reported as verified"
+    );
+    assert!(
+        verification
+            .failures()
+            .iter()
+            .any(|failure| failure.contains("other") && failure.contains("added")),
+        "{:?}",
+        verification.failures()
+    );
+}
+
+/// `refs/skilled` is an ordinary name a user may already hold, and Git cannot
+/// have a ref and a directory of refs at once. Skilled's own choice of staging
+/// name must not turn that into a repository it can never check again.
+#[test]
+fn a_ref_occupying_the_staging_namespace_does_not_break_the_check() {
+    let fixture = fixture();
+    let target = push_update(&fixture, "skills/demo/new.txt");
+    let head = git(&fixture.clone, &["rev-parse", "HEAD"]);
+    // The conflicting ref, at the exact name a staging ref would nest under.
+    git(
+        &fixture.clone,
+        &["update-ref", "--no-deref", "refs/skilled", &head],
+    );
+
+    let probe = probe_repository_update(&fixture.app.sources()[0], true);
+    let (verdict, findings) = classify_repository_update(&probe);
+
+    assert_eq!(verdict, RepositoryUpdateVerdict::Available, "{findings:?}");
+    assert_eq!(
+        git(&fixture.clone, &["rev-parse", "refs/remotes/origin/main"]),
+        target
+    );
+    // The user's ref is untouched, and no staging ref was left behind.
+    assert_eq!(git(&fixture.clone, &["rev-parse", "refs/skilled"]), head);
+    assert_eq!(
+        git(
+            &fixture.clone,
+            &[
+                "for-each-ref",
+                "--format=%(refname)",
+                "refs/skilled-fetch-*"
+            ]
+        ),
+        ""
+    );
+}
+
+/// `core.alternateRefsCommand` is shell-executed to advertise the tips of an
+/// alternate object store during fetch negotiation, which makes it a program
+/// the checkout chooses and the check would otherwise run.
+#[test]
+fn a_repository_configured_alternate_refs_command_is_refused_without_running_it() {
+    let fixture = fixture();
+    push_update(&fixture, "skills/demo/new.txt");
+
+    let marker = fixture._temporary.path().join("ALTERNATE_REFS_RAN");
+    git(
+        &fixture.clone,
+        &[
+            "config",
+            "core.alternateRefsCommand",
+            &format!("touch {}; true", marker.display()),
+        ],
+    );
+    // The alternate object store that makes Git ask for those tips at all.
+    let alternates = fixture.clone.join(".git/objects/info/alternates");
+    std::fs::create_dir_all(alternates.parent().expect("objects/info"))
+        .expect("alternates directory");
+    std::fs::write(
+        &alternates,
+        format!("{}\n", fixture.remote.join("objects").display()),
+    )
+    .expect("alternates file");
+
+    let probe = probe_repository_update(&fixture.app.sources()[0], true);
+    let (verdict, findings) = classify_repository_update(&probe);
+
+    assert_eq!(verdict, RepositoryUpdateVerdict::Blocked, "{findings:?}");
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.code() == "source.repository_transport_unsupported"),
+        "{findings:?}"
+    );
+    assert!(
+        !marker.exists(),
+        "the repository's alternate-refs command ran during the check"
+    );
+}
+
+/// `core.sshCommand` is the setting Skilled itself used to read out of the
+/// checkout and export as `GIT_SSH_COMMAND`, so the refusal matters most here.
+#[test]
+fn a_repository_configured_ssh_command_is_refused() {
+    let fixture = fixture();
+    git(
+        &fixture.clone,
+        &["config", "core.sshCommand", "/nonexistent/ssh.sh"],
+    );
+
+    let probe = probe_repository_update(&fixture.app.sources()[0], true);
+    let (verdict, findings) = classify_repository_update(&probe);
+
+    assert_eq!(verdict, RepositoryUpdateVerdict::Blocked, "{findings:?}");
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.code() == "source.repository_transport_unsupported"),
+        "{findings:?}"
+    );
+}
+
+/// A credential helper is a program per URL pattern, and a URL-scoped key is
+/// the same refusal as the bare one.
+#[test]
+fn a_repository_configured_credential_helper_is_refused() {
+    let fixture = fixture();
+    git(
+        &fixture.clone,
+        &[
+            "config",
+            "credential.https://example.test.helper",
+            "/nonexistent/credential.sh",
+        ],
+    );
+
+    let probe = probe_repository_update(&fixture.app.sources()[0], true);
+    let (verdict, findings) = classify_repository_update(&probe);
+
+    assert_eq!(verdict, RepositoryUpdateVerdict::Blocked, "{findings:?}");
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.code() == "source.repository_transport_unsupported"),
+        "{findings:?}"
+    );
+}
+
+/// The configured URL is not the URL Git fetches. `url.<base>.insteadOf`
+/// rewrites it on the way to the transport, so reading `remote.<name>.url`
+/// would see an ordinary path while the fetch launched a command.
+#[test]
+fn a_remote_url_rewritten_into_a_helper_is_refused() {
+    let fixture = fixture();
+    let marker = fixture._temporary.path().join("REWRITTEN_RAN");
+    let original = git(&fixture.clone, &["config", "--get", "remote.origin.url"]);
+    git(
+        &fixture.clone,
+        &[
+            "config",
+            &format!("url.ext::sh -c touch% {}% --.insteadOf", marker.display()),
+            &original,
+        ],
+    );
+
+    let probe = probe_repository_update(&fixture.app.sources()[0], true);
+    let (verdict, findings) = classify_repository_update(&probe);
+
+    assert_eq!(verdict, RepositoryUpdateVerdict::Blocked, "{findings:?}");
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.code() == "source.repository_transport_unsupported"),
+        "{findings:?}"
+    );
+    assert!(!marker.exists(), "the rewritten transport command ran");
+}
+
+/// A remote may list several URLs; Git fetches the first while `--get`
+/// answers with the last, so a safe-looking last value must not decide this.
+#[test]
+fn the_first_of_several_remote_urls_decides_the_refusal() {
+    let fixture = fixture();
+    let original = git(&fixture.clone, &["config", "--get", "remote.origin.url"]);
+    // The helper first, an ordinary path second: a naive read sees only the
+    // second, while the fetch would use the first.
+    git(
+        &fixture.clone,
+        &["config", "remote.origin.url", "ext::sh -c whoami"],
+    );
+    git(
+        &fixture.clone,
+        &["config", "--add", "remote.origin.url", &original],
+    );
+
+    let probe = probe_repository_update(&fixture.app.sources()[0], true);
+    let (verdict, findings) = classify_repository_update(&probe);
+
+    assert_eq!(verdict, RepositoryUpdateVerdict::Blocked, "{findings:?}");
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.code() == "source.repository_transport_unsupported"),
+        "{findings:?}"
+    );
+}
+
+/// A repository that explicitly disables a helper names no program to run,
+/// and refusing it would block a check for nothing.
+#[test]
+fn a_transport_setting_disabled_by_value_does_not_block_the_check() {
+    let fixture = fixture();
+    let target = push_update(&fixture, "skills/demo/new.txt");
+    git(&fixture.clone, &["config", "credential.helper", ""]);
+    git(&fixture.clone, &["config", "core.gitProxy", "none"]);
+
+    let probe = probe_repository_update(&fixture.app.sources()[0], true);
+    let (verdict, findings) = classify_repository_update(&probe);
+
+    assert_eq!(verdict, RepositoryUpdateVerdict::Available, "{findings:?}");
+    assert_eq!(
+        git(&fixture.clone, &["rev-parse", "refs/remotes/origin/main"]),
+        target
+    );
+}
+
+/// An `ext::` URL is not an address but a command line. There is nothing to
+/// suppress, so the scheme itself is refused.
+#[test]
+fn an_executable_remote_url_is_refused() {
+    let fixture = fixture();
+    let marker = fixture._temporary.path().join("EXT_RAN");
+    git(
+        &fixture.clone,
+        &[
+            "config",
+            "remote.origin.url",
+            &format!("ext::sh -c touch% {}", marker.display()),
+        ],
+    );
+
+    let probe = probe_repository_update(&fixture.app.sources()[0], true);
+    let (verdict, findings) = classify_repository_update(&probe);
+
+    assert_eq!(verdict, RepositoryUpdateVerdict::Blocked, "{findings:?}");
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.code() == "source.repository_transport_unsupported"),
+        "{findings:?}"
+    );
+    assert!(!marker.exists(), "the ext:: transport command ran");
+}
+
+/// A link may be installed under a name other than the directory it points at,
+/// and several links may point at one directory. The plan states the
+/// installation that starts loading, because that is what the user is
+/// confirming and what verification will check.
+#[test]
+fn a_restoration_names_the_installations_that_start_loading() {
+    let mut fixture = fixture();
+    let root = fixture._temporary.path().join("home/.claude/skills");
+    std::fs::create_dir_all(&root).expect("agent root");
+    std::os::unix::fs::symlink(fixture.clone.join("skills/added"), root.join("legacy"))
+        .expect("aliased dangling link");
+    let codex_root = fixture._temporary.path().join("home/.agents/skills");
+    std::fs::create_dir_all(&codex_root).expect("codex root");
+    std::os::unix::fs::symlink(
+        fixture.clone.join("skills/added"),
+        codex_root.join("another"),
+    )
+    .expect("second aliased dangling link");
+
+    std::fs::create_dir_all(fixture.seed.join("skills/added")).expect("added skill directory");
+    std::fs::write(
+        fixture.seed.join("skills/added/SKILL.md"),
+        "---\nname: added\ndescription: fixture\n---\n",
+    )
+    .expect("added skill");
+    commit(&fixture.seed, "add the skill both links point at");
+    git(&fixture.seed, &["push"]);
+
+    fixture
+        .app
+        .perform_effects(&[Effect::CheckUpdates])
+        .expect("start check");
+    finish_update_check(&mut fixture.app);
+    fixture
+        .app
+        .perform_effects(&[Effect::PlanRepositoryUpdate])
+        .expect("plan update");
+
+    let Some(RepositoryUpdatePrompt::Preview(plan)) = fixture.app.pending_update().cloned() else {
+        panic!("expected a preview: {:?}", fixture.app.pending_update());
+    };
+    // Both installations are named, under the names their roots hold, beside
+    // the upstream skill each will load.
+    assert_eq!(
+        plan.affected().restored,
+        vec![
+            ("another".to_owned(), "added".to_owned()),
+            ("legacy".to_owned(), "added".to_owned()),
+        ]
+    );
+    assert!(plan.affected().added.is_empty(), "{:?}", plan.affected());
+
+    fixture
+        .app
+        .perform_effects(&[Effect::ApplyRepositoryUpdate])
+        .expect("apply update");
+
+    let Some(RepositoryUpdatePrompt::Report { verification, .. }) = fixture.app.pending_update()
+    else {
+        panic!("expected a report: {:?}", fixture.app.pending_update());
+    };
+    // A link that loads a skill declaring another name gains a mismatch
+    // finding by starting to resolve, and the plan disclosed the loading
+    // rather than the fault. Verification says so, under the names the roots
+    // hold — which is the point: the disclosure and the postcondition are
+    // about the same installations.
+    assert!(!verification.is_verified());
+    for name in ["legacy", "another"] {
+        assert!(
+            verification
+                .failures()
+                .iter()
+                .any(|failure| failure.contains(name) && failure.contains("skill.name_mismatch")),
+            "{name} missing from {:?}",
+            verification.failures()
+        );
+    }
 }

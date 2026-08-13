@@ -121,15 +121,17 @@ fn a_clean_behind_clone_is_previewed_fast_forwarded_and_verified() {
     let reflog = git(&clone, &["reflog", "-1", "--format=%gs"]);
     assert!(reflog.contains("Fast-forward"), "{reflog}");
     let output = String::from_utf8(output).expect("utf-8 output");
+    // A typed command reads the agent roots whether or not setup has run, both
+    // before the plan and after the write, exactly as `skilled install` does.
+    // Two snapshots of equal standing are what let it state a verified result
+    // instead of withholding one, so nothing here is partial.
     assert!(
-        output.contains(
-            "affected installations: partial — installation inventory has not been scanned; setup may not be complete"
-        ),
+        output.contains("affected installations: complete"),
         "{output}"
     );
     assert!(output.contains("branch refs/heads/main"), "{output}");
     assert!(
-        output.contains("Verified as far as it could be."),
+        output.contains("Verified: HEAD is the previewed revision."),
         "{output}"
     );
 
@@ -137,12 +139,10 @@ fn a_clean_behind_clone_is_previewed_fast_forwarded_and_verified() {
     assert_eq!(reopened.update_checks().len(), 1);
     assert_eq!(
         reopened.update_checks()[0].verdict,
-        RepositoryUpdateVerdict::Blocked
+        RepositoryUpdateVerdict::UpToDate
     );
     assert!(
-        reopened.update_checks()[0]
-            .detail
-            .starts_with("update.verification_incomplete|"),
+        reopened.update_checks()[0].detail.is_empty(),
         "{}",
         reopened.update_checks()[0].detail
     );

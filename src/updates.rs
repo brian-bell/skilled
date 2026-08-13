@@ -92,6 +92,25 @@ pub struct CachedUpdateCheck {
 impl CachedUpdateCheck {
     pub fn superseded_by(&self, source: &RegisteredSource) -> bool {
         let findings = self.findings();
+        // A verification finding reports on the checkout as it stood after a
+        // write, and the states it reports on are exactly the ones that would
+        // otherwise supersede it: a disclosed post-merge hook that moves the
+        // checkout aside produces a source error, one that leaves the checkout
+        // unreadable leaves the recorded revision disagreeing with what the
+        // next launch reads, and a fast-forward that moved HEAD is meant to
+        // have. Letting any of those replace the record would take a failed or
+        // unfinished update out of Doctor the moment the report is dismissed,
+        // leaving nothing anywhere that says a write was not verified. It says
+        // something no observation of the current state can answer, so only a
+        // later check may replace it.
+        if findings.iter().any(|finding| {
+            matches!(
+                finding.code(),
+                "update.verification_failed" | "update.verification_incomplete"
+            )
+        }) {
+            return false;
+        }
         let observed_missing = findings
             .iter()
             .any(|finding| finding.code() == "source.missing");
@@ -103,7 +122,9 @@ impl CachedUpdateCheck {
         let observed_reference = !findings.iter().any(|finding| {
             matches!(
                 finding.code(),
-                "source.missing" | "source.partial_clone_unsupported"
+                "source.missing"
+                    | "source.partial_clone_unsupported"
+                    | "source.repository_transport_unsupported"
             )
         });
         let reference_changed = match (self.local_reference.as_deref(), source.branch()) {
@@ -139,6 +160,7 @@ impl CachedUpdateCheck {
                 finding.code(),
                 "source.fetch_failed"
                     | "source.partial_clone_unsupported"
+                    | "source.repository_transport_unsupported"
                     | "source.submodule_update_unsupported"
                     | "source.changed_after_preview"
                     | "source.no_upstream"
@@ -300,6 +322,7 @@ fn leak_code(code: &str) -> &'static str {
         "source.no_upstream" => "source.no_upstream",
         "source.fetch_failed" => "source.fetch_failed",
         "source.partial_clone_unsupported" => "source.partial_clone_unsupported",
+        "source.repository_transport_unsupported" => "source.repository_transport_unsupported",
         "source.submodule_update_unsupported" => "source.submodule_update_unsupported",
         "source.changed_after_preview" => "source.changed_after_preview",
         "update.verification_failed" => "update.verification_failed",
@@ -390,6 +413,15 @@ fn probe_existing_cancellable(
     if partial_clone {
         return Ok(Some(partial_clone_probe(path)));
     }
+    let Some(transport_code) =
+        git::repository_transport_code_cancellable(path, cancelled, child_slot)
+            .map_err(ProbeFailure::Inspect)?
+    else {
+        return Ok(None);
+    };
+    if let Some(setting) = transport_code {
+        return Ok(Some(transport_code_probe(path, &setting)));
+    }
     let Some(local) =
         git::head_state_cancellable(path, cancelled, child_slot).map_err(ProbeFailure::Inspect)?
     else {
@@ -411,6 +443,18 @@ fn probe_existing_cancellable(
     let revision = if upstream.remote() == "." {
         upstream.revision().to_owned()
     } else {
+        // The URL Git would actually fetch, after `insteadOf` rewrites and
+        // over a remote that may list several.
+        let key = format!("remote.{}.url", upstream.remote());
+        let Some(url) =
+            git::effective_remote_url_cancellable(path, upstream.remote(), cancelled, child_slot)
+                .map_err(ProbeFailure::Inspect)?
+        else {
+            return Ok(None);
+        };
+        if url.as_deref().is_some_and(git::remote_url_runs_a_helper) {
+            return Ok(Some(transport_code_probe(path, &key)));
+        }
         match git::fetch_upstream_cancellable(path, &upstream, cancelled, child_slot) {
             Ok(Some(revision)) => revision,
             Ok(None) => return Ok(None),
@@ -607,6 +651,28 @@ fn partial_clone_probe(path: &Path) -> RepositoryUpdateProbe {
     }
 }
 
+/// The refusal a checkout earns by configuring a program for Git to run.
+///
+/// `setting` is named because the user is the one who has to act on it, and
+/// the name is the only part of the configuration that is safe to repeat: a
+/// value is a command line the checkout wrote, and printing it would put that
+/// text on the user's terminal.
+fn transport_code_probe(path: &Path, setting: &str) -> RepositoryUpdateProbe {
+    RepositoryUpdateProbe {
+        path: path.into(),
+        local: None,
+        upstream: None,
+        merge_base: None,
+        ahead: 0,
+        behind: 0,
+        worktree: None,
+        changed_files: Vec::new(),
+        error: Some(format!(
+            "source.repository_transport_unsupported|the registered checkout configures {setting}, which would run a program it chose during the check"
+        )),
+    }
+}
+
 fn registered_checkout_path_is_current(source: &RegisteredSource) -> bool {
     let path = source.git_top_level();
     let Ok(metadata) = std::fs::symlink_metadata(path) else {
@@ -656,6 +722,14 @@ fn probe_existing_against(
     expected_upstream_ref: &str,
     upstream_revision: &str,
 ) -> Result<RepositoryUpdateProbe> {
+    // Re-asked, not remembered. The explicit check refused a partial clone
+    // before reading any object, but a promisor remote configured since then
+    // would let `merge-base`, `diff-tree`, and `rev-list` below fetch missing
+    // objects lazily — network access while the user is merely opening a
+    // preview, outside the one step that was agreed to reach the network.
+    if git::repository_is_partial_clone(path)? {
+        return Ok(partial_clone_probe(path));
+    }
     let local = git::head_state(path)?;
     let worktree = git::worktree_state(path)?;
     let Some(upstream) = git::upstream_of(path, &local)? else {
@@ -682,6 +756,12 @@ fn probe_existing(
     if git::repository_is_partial_clone(path).map_err(ProbeFailure::Inspect)? {
         return Ok(partial_clone_probe(path));
     }
+    // Asked before anything else the check does, because the answer decides
+    // whether the check may run at all rather than how one of its steps
+    // behaves.
+    if let Some(setting) = git::repository_transport_code(path).map_err(ProbeFailure::Inspect)? {
+        return Ok(transport_code_probe(path, &setting));
+    }
     let local = git::head_state(path).map_err(ProbeFailure::Inspect)?;
     let worktree = git::worktree_state(path).map_err(ProbeFailure::Inspect)?;
     let mut upstream = git::upstream_of(path, &local).map_err(ProbeFailure::Inspect)?;
@@ -689,6 +769,20 @@ fn probe_existing(
         && let Some(value) = &upstream
         && value.remote() != "."
     {
+        // The URL is the remaining way a checkout names a program, and it has
+        // to be the URL Git would actually fetch rather than the one a plain
+        // read reports: `insteadOf` rewrites the value on the way to the
+        // transport, and a remote with several URLs is fetched from the first
+        // while `--get` answers with the last.
+        if let Some(url) =
+            git::effective_remote_url(path, value.remote()).map_err(ProbeFailure::Inspect)?
+            && git::remote_url_runs_a_helper(&url)
+        {
+            return Ok(transport_code_probe(
+                path,
+                &format!("remote.{}.url", value.remote()),
+            ));
+        }
         let revision = git::fetch_upstream(path, value).map_err(ProbeFailure::Fetch)?;
         upstream = Some(value.with_revision(revision));
     }
@@ -866,10 +960,35 @@ pub struct AffectedInstallations {
     pub updated: Vec<String>,
     pub removed: Vec<String>,
     pub added: Vec<String>,
+    /// Installations a dangling link holds that the update gives a target to,
+    /// as the name the agent root holds and the upstream directory it will
+    /// point into. The two differ whenever a link was installed under another
+    /// name.
+    ///
+    /// That the target will exist is what has been established, and it is all
+    /// that is claimed: whether the directory the update creates validates as
+    /// a skill is not read here, so a link may gain a target and still be
+    /// unloadable. Verification reads the result and reports that on its own
+    /// account, the same as for any other installation.
+    pub restored: Vec<(String, String)>,
     pub renamed: Vec<(String, String)>,
     pub complete: bool,
     pub incomplete_reason: Option<String>,
     expected_dangling: Vec<(String, usize)>,
+    /// The installations the plan said this update gives a target to, as the
+    /// row and agent that will start loading and the upstream skill it was
+    /// disclosed as loading.
+    ///
+    /// The variant's own path inside the source is carried because the raw
+    /// link target is not enough to identify what the link resolves to. The
+    /// planner follows intermediate symbolic links to find a dangling link's
+    /// destination, so a hook or a concurrent process can retarget one of
+    /// those aliases at a different variant in the same registered source: the
+    /// agent link's own target is unchanged and the source still matches, and
+    /// without this there is nothing left to disagree with the plan. The path
+    /// rather than the name, because one source can hold same-named variants
+    /// in different catalog roots or agent editions.
+    expected_revival: Vec<(String, usize, String, PathBuf)>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1004,14 +1123,17 @@ pub fn plan_repository_update(
         changed_files,
         affected,
         findings,
-        // Filters belong beside the hooks. `git::fast_forward` deliberately
-        // hands Git the repository's own configuration, so materialising the
-        // updated paths can run a configured smudge or process filter — local
-        // commands, and in the case of Git LFS further network access. The
-        // check suppresses repository code precisely because it was not agreed
-        // to; what the fast-forward runs is agreed to, which requires saying so.
-        hooks_disclosure: "Git may run your post-merge and reference-transaction hooks, and any \
-             checkout filters this repository configures, during this fast-forward."
+        // Filters belong beside the hooks, and so does the filesystem monitor.
+        // `git::fast_forward` deliberately hands Git the repository's own
+        // configuration, so materialising the updated paths can run a
+        // configured smudge or process filter — local commands, and in the case
+        // of Git LFS further network access — and a `core.fsmonitor` hook runs
+        // several times over the same merge. The check suppresses repository
+        // code precisely because it was not agreed to; what the fast-forward
+        // runs is agreed to, which requires naming all of it.
+        hooks_disclosure: "Git may run your post-merge and reference-transaction hooks, your \
+             core.fsmonitor hook, and any checkout filters this repository configures, during \
+             this fast-forward."
             .into(),
     })
 }
@@ -1202,6 +1324,8 @@ fn affected_catalog_skills(
     let mut updated = Vec::new();
     let mut removed_changes = Vec::new();
     let mut added_changes = Vec::new();
+    let mut restored = Vec::new();
+    let mut expected_revival = Vec::new();
     for ((catalog_path, name), change) in &changes {
         let key = (catalog_path.clone(), name.clone());
         if confirmed_renames
@@ -1216,9 +1340,49 @@ fn affected_catalog_skills(
         // stated as added upstream; a catalog whose skill is its root always
         // has one, so nothing about it is ever reported that way.
         let skill_is_new = !candidate_exists(current_revision, &change.candidate_path)?;
+        // A dangling link resolves to nothing, so it carries no variant and
+        // none of the passes above can see it. It is still an installation,
+        // and one aimed at exactly the directory this update creates: after
+        // the fast-forward it loads, which is a change to what an agent reads
+        // and has to be disclosed. Left out, the preview would call the skill
+        // uninstalled and verification would then read the link resolving as
+        // an undisclosed change, failing an update that did precisely what it
+        // said.
+        //
+        // Asked before anything about what is installed under the name, and
+        // independently of it. `installed` is keyed by the name a root holds,
+        // and one root's link under that name may already resolve to another
+        // variant entirely while another root's link of the same name dangles
+        // at the directory being created. What decides a revival is the
+        // directory appearing, not what some other agent's link happens to
+        // answer to.
+        let revived = if change.added && target_keeps_skill && skill_is_new {
+            revived_by_added_skill(
+                inventory,
+                &absolute_candidate_path(repository, &change.candidate_path),
+            )
+        } else {
+            Vec::new()
+        };
+        if !revived.is_empty() {
+            // The installation that starts loading is the one the root holds,
+            // which need not be named after the directory it points at. Naming
+            // the upstream skill alone would have the user confirm a plan that
+            // does not mention the installation it changes, and would collapse
+            // several links aimed at one directory into a single line.
+            restored.extend(revived.iter().map(|(row, _)| (row.clone(), name.clone())));
+            expected_revival.extend(revived.iter().map(|(row, agent)| {
+                (
+                    row.clone(),
+                    *agent,
+                    name.clone(),
+                    change.candidate_path.clone(),
+                )
+            }));
+        }
         let installed_agents = installed.get(&(catalog_path.clone(), name.clone()));
         if installed_agents.is_none() {
-            if change.added && target_keeps_skill && skill_is_new {
+            if change.added && target_keeps_skill && skill_is_new && revived.is_empty() {
                 added_changes.push((name.clone(), change.clone()));
             }
             continue;
@@ -1255,6 +1419,29 @@ fn affected_catalog_skills(
     added.dedup();
     let mut renamed = Vec::new();
     for ((catalog_path, old), (_, new)) in confirmed_renames {
+        // The destination of a rename is a directory the update creates, so a
+        // dangling link already aimed there is revived by it exactly as one
+        // aimed at a plain addition is. Both sides of a rename are skipped by
+        // the loop above, so this is the only place that can see it — and the
+        // two are independent: the same update can leave the old skill's link
+        // dangling and make another link at the new path start loading.
+        if let Some(new_change) = changes.get(&(catalog_path.clone(), new.clone())) {
+            let revived = revived_by_added_skill(
+                inventory,
+                &absolute_candidate_path(repository, &new_change.candidate_path),
+            );
+            restored.extend(revived.iter().map(|(row, _)| (row.clone(), new.clone())));
+            expected_revival.extend(
+                revived.into_iter().map(|(row, agent)| {
+                    (row, agent, new.clone(), new_change.candidate_path.clone())
+                }),
+            );
+        }
+        // A rename nothing is installed from changes nothing about what any
+        // agent loads, so it is not an affected installation and saying so
+        // would claim an effect on the user's agents that will not happen. A
+        // link revived at the destination is a separate fact, and `restored`
+        // above is where it is stated.
         let Some(agents) = installed.get(&(catalog_path, old.clone())) else {
             continue;
         };
@@ -1265,10 +1452,15 @@ fn affected_catalog_skills(
     renamed.dedup();
     expected_dangling.sort();
     expected_dangling.dedup();
+    restored.sort();
+    restored.dedup();
+    expected_revival.sort();
+    expected_revival.dedup();
     Ok(AffectedInstallations {
         updated,
         removed,
         added,
+        restored,
         renamed,
         complete: inventory.counts_are_complete() && inventory.registry_is_complete(),
         incomplete_reason: if inventory.counts_are_complete() && inventory.registry_is_complete() {
@@ -1281,8 +1473,119 @@ fn affected_catalog_skills(
             Some("one or more installation roots could not be fully read".into())
         },
         expected_dangling,
+        expected_revival,
     })
 }
+
+/// Where a catalog candidate sits in the checkout, as an absolute path.
+///
+/// A catalog whose skill is its root has `.` for a candidate path, and the
+/// directory it names is the repository itself.
+fn absolute_candidate_path(repository: &Path, candidate: &Path) -> PathBuf {
+    if candidate == Path::new(".") {
+        repository.to_path_buf()
+    } else {
+        repository.join(candidate)
+    }
+}
+
+/// The dangling links aimed at `directory`, which would therefore start
+/// resolving once the update creates it, as the row name and agent each was
+/// observed under.
+///
+/// The row name is carried rather than the upstream skill's, because a link
+/// may be installed under a different name than the directory it points at and
+/// verification looks the installation up by the name the root holds.
+///
+/// The link's recorded target is compared as it was read, exactly as repair
+/// compares one against a receipt. Nothing here consults a receipt or claims
+/// ownership: this is a statement about what an agent will load after the
+/// fast-forward, which the scan can see from the target alone.
+fn revived_by_added_skill(inventory: &InventorySnapshot, directory: &Path) -> Vec<(String, usize)> {
+    let Some(wanted) = absent_directory_key(None, directory) else {
+        return Vec::new();
+    };
+    let mut revived = Vec::new();
+    for row in inventory.rows() {
+        for observation in row.observations() {
+            let crate::inventory::InstallationObject::Symlink { target } = observation.object()
+            else {
+                continue;
+            };
+            if absent_directory_key(observation.path().parent(), target).as_ref() == Some(&wanted)
+                && observation
+                    .findings()
+                    .iter()
+                    .any(|finding| finding.code() == "install.dangling_symlink")
+            {
+                revived.push((row.name().to_owned(), observation.agent().index()));
+            }
+        }
+    }
+    revived.sort();
+    revived.dedup();
+    revived
+}
+
+/// A comparable identity for a directory that does not exist yet.
+///
+/// `canonicalize` needs the path to be there, and the whole point of both
+/// sides here is that it is not: the update has yet to create the skill, and
+/// the link pointing at it dangles. The parent does exist, so the pair of the
+/// resolved parent and the final component names the same directory whichever
+/// spelling each side was recorded with — a temporary directory reached as
+/// `/var` on one side and `/private/var` on the other, or a checkout reached
+/// through a symbolic link.
+///
+/// A relative target is not ambiguous either: the operating system resolves it
+/// against the directory holding the link, so `base` is that directory and the
+/// answer is the one the kernel would reach. Declining to resolve it would not
+/// be the conservative choice — the link would be left out of the plan, the
+/// preview would call the skill uninstalled, and verification would then read
+/// the revival as an undisclosed change after the write had already landed.
+///
+/// The final component is compared byte-for-byte, which is what every other
+/// surface here does with a path component. On a case-insensitive filesystem
+/// that misses a link differing only in case from the directory the update
+/// creates; the answer is one comparison rule for the whole codebase rather
+/// than filesystem semantics in this helper alone, and it is `skilled-jgu`.
+fn absent_directory_key(
+    base: Option<&Path>,
+    directory: &Path,
+) -> Option<(PathBuf, std::ffi::OsString)> {
+    let mut resolved = if directory.is_absolute() {
+        directory.to_path_buf()
+    } else {
+        base?.join(directory)
+    };
+    // The name a link points at may be a link of its own. `canonicalize` would
+    // follow the whole chain in one step if the end of it existed, and the end
+    // of this one is the directory the update has yet to create — so the chain
+    // is walked by hand until it reaches a name that is not a link, which is
+    // the name that actually does not exist. Stopping at the first hop would
+    // key an agent's link on the alias it goes through rather than on the
+    // directory it ends at, and the two sides would never meet.
+    for _ in 0..MAX_TARGET_LINK_HOPS {
+        let is_link = std::fs::symlink_metadata(&resolved)
+            .is_ok_and(|metadata| metadata.file_type().is_symlink());
+        if !is_link {
+            break;
+        }
+        let next = std::fs::read_link(&resolved).ok()?;
+        resolved = if next.is_absolute() {
+            next
+        } else {
+            resolved.parent()?.join(next)
+        };
+    }
+    let parent = resolved.parent()?.canonicalize().ok()?;
+    Some((parent, resolved.file_name()?.to_owned()))
+}
+
+/// How far a dangling target is followed through links of its own before the
+/// chain is treated as one this cannot describe. A cycle terminates here
+/// rather than looping, and the caller then declines to predict a revival.
+const MAX_TARGET_LINK_HOPS: usize = 16;
 
 fn catalog_candidate_for_change(
     catalog: &CatalogProposal,
@@ -1373,15 +1676,11 @@ fn validate_repository_update(plan: &RepositoryUpdatePlan) -> Result<()> {
     if plan.is_blocked() {
         return Err(crate::Error::SourceChangedAfterPreview);
     }
-    let metadata = std::fs::symlink_metadata(&plan.path)
-        .map_err(|_| crate::Error::SourceChangedAfterPreview)?;
-    if metadata.file_type().is_symlink()
-        || !metadata.is_dir()
-        || plan.path.canonicalize().ok().as_deref() != Some(plan.path.as_path())
-    {
-        return Err(crate::Error::SourceChangedAfterPreview);
-    }
-    if repository_identity(&plan.path).ok().as_ref() != Some(&plan.repository_identity) {
+    checkout_is_the_planned_repository(plan)?;
+    // The preview's refusal is not evidence about now. Every guard below reads
+    // objects, and a promisor remote configured since the preview would let
+    // them fetch lazily on the way into a write.
+    if git::repository_is_partial_clone(&plan.path)? {
         return Err(crate::Error::SourceChangedAfterPreview);
     }
     let head = git::head_state(&plan.path)?;
@@ -1404,6 +1703,30 @@ fn validate_repository_update(plan: &RepositoryUpdatePlan) -> Result<()> {
     if incoming_untracked_collision(&state, &plan.changed_files).is_some() {
         return Err(crate::Error::SourceChangedAfterPreview);
     }
+    // Read again, last. Every guard above is a Git process against a pathname,
+    // and each one is another moment in which the checkout could be moved aside
+    // and replaced. Re-reading the identity here does not close that window —
+    // `skilled-2k3.8.5.1` tracks binding the write itself to the proven
+    // checkout — but it shrinks the window to the single gap before `merge`
+    // rather than leaving the whole guard sequence inside it.
+    checkout_is_the_planned_repository(plan)
+}
+
+/// Whether `plan.path` is still the exact directory the plan was made against:
+/// not a symbolic link, not reached through one, and the same repository by
+/// filesystem identity rather than by name.
+fn checkout_is_the_planned_repository(plan: &RepositoryUpdatePlan) -> Result<()> {
+    let metadata = std::fs::symlink_metadata(&plan.path)
+        .map_err(|_| crate::Error::SourceChangedAfterPreview)?;
+    if metadata.file_type().is_symlink()
+        || !metadata.is_dir()
+        || plan.path.canonicalize().ok().as_deref() != Some(plan.path.as_path())
+    {
+        return Err(crate::Error::SourceChangedAfterPreview);
+    }
+    if repository_identity(&plan.path).ok().as_ref() != Some(&plan.repository_identity) {
+        return Err(crate::Error::SourceChangedAfterPreview);
+    }
     Ok(())
 }
 
@@ -1414,29 +1737,47 @@ pub fn verify_repository_update(
 ) -> RepositoryVerifyReport {
     let mut failures = Vec::new();
     let mut withheld = Vec::new();
-    match git::head_state(&plan.path) {
-        Ok(head)
-            if head.reference() == Some(plan.current_reference.as_str())
-                && head.revision() == plan.target_revision => {}
-        Ok(head) => failures.push(format!(
-            "HEAD is {} at {}, expected {} at {}",
-            head.revision(),
-            head.reference().unwrap_or("detached HEAD"),
-            plan.target_revision,
-            plan.current_reference
+    // Establish what is standing at the path before believing anything read
+    // through it. The guards and the write are separate processes over a
+    // pathname, so a checkout replaced in between would answer every question
+    // below on behalf of a repository the plan was never about — a HEAD that
+    // matches would then read as a pass for a write that landed elsewhere.
+    match repository_identity(&plan.path) {
+        Ok(identity) if identity == plan.repository_identity => {
+            match git::head_state(&plan.path) {
+                Ok(head)
+                    if head.reference() == Some(plan.current_reference.as_str())
+                        && head.revision() == plan.target_revision => {}
+                Ok(head) => failures.push(format!(
+                    "HEAD is {} at {}, expected {} at {}",
+                    head.revision(),
+                    head.reference().unwrap_or("detached HEAD"),
+                    plan.target_revision,
+                    plan.current_reference
+                )),
+                Err(error) => withheld.push(format!("HEAD could not be checked: {error}")),
+            }
+            match git::worktree_state(&plan.path) {
+                Ok(state) if state.tracked_dirty() => failures.push(
+                    "the repository has tracked changes after the fast-forward operation".into(),
+                ),
+                Ok(state) if !state.worktree_dirty_known => withheld.push(
+                    "post-update worktree cleanliness could not be determined without running configured filters"
+                        .into(),
+                ),
+                Ok(_) => {}
+                Err(error) => {
+                    withheld.push(format!("worktree cleanliness could not be checked: {error}"));
+                }
+            }
+        }
+        Ok(_) => failures.push(format!(
+            "{} is no longer the repository the update was planned against, so nothing read there answers for it",
+            plan.path.display()
         )),
-        Err(error) => withheld.push(format!("HEAD could not be checked: {error}")),
-    }
-    match git::worktree_state(&plan.path) {
-        Ok(state) if state.tracked_dirty() => failures.push(
-            "the repository has tracked changes after the fast-forward operation".into(),
-        ),
-        Ok(state) if !state.worktree_dirty_known => withheld.push(
-            "post-update worktree cleanliness could not be determined without running configured filters"
-                .into(),
-        ),
-        Ok(_) => {}
-        Err(error) => withheld.push(format!("worktree cleanliness could not be checked: {error}")),
+        Err(error) => withheld.push(format!(
+            "the updated repository could not be identified, so its state was not checked: {error}"
+        )),
     }
 
     let inventory_complete = |snapshot: &InventorySnapshot| {
@@ -1452,6 +1793,14 @@ pub fn verify_repository_update(
             .iter()
             .map(|(name, agent)| (name.as_str(), *agent))
             .collect::<std::collections::BTreeSet<_>>();
+        let expected_revival = plan
+            .affected
+            .expected_revival
+            .iter()
+            .map(|(name, agent, skill, path)| {
+                ((name.as_str(), *agent), (skill.as_str(), path.as_path()))
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
         for row in before.rows() {
             for observation in row
                 .observations()
@@ -1477,6 +1826,45 @@ pub fn verify_repository_update(
                             row.name(),
                             observation.agent().display_name()
                         ));
+                    }
+                    continue;
+                }
+                // The disclosed counterpart of a removal: a link the plan said
+                // this update would give a target to. What was disclosed is
+                // that *this* link starts resolving, so the link has to be the
+                // same one — the recorded target unchanged — and it has to
+                // resolve into the updated source, no worse off than it was.
+                // Accepting any improvement into the same source would let a
+                // hook retarget the link at different content there and still
+                // be reported as the restoration that was agreed to — so the
+                // skill it resolves to has to be the one the plan named, not
+                // merely something in the same repository. The link's own
+                // target being unchanged does not settle that: the planner
+                // follows intermediate aliases to find the destination, and
+                // retargeting one of those leaves this link untouched.
+                if let Some((expected_skill, expected_path)) =
+                    expected_revival.get(&(row.name(), observation.agent().index()))
+                {
+                    match after_observation {
+                        Some(after)
+                            if after.object() == observation.object()
+                                && after.health() <= observation.health()
+                                && after.resolution().is_some_and(|variant| {
+                                    variant.source_id() == plan.source_id
+                                        && variant.variant_relative_path() == *expected_path
+                                }) => {}
+                        Some(_) => failures.push(format!(
+                            "the disclosed restoration of {} for {} did not leave the link pointing where it did and resolving to {} in {}",
+                            row.name(),
+                            observation.agent().display_name(),
+                            expected_skill,
+                            plan.source_label
+                        )),
+                        None => failures.push(format!(
+                            "installation {} for {} disappeared without disclosure",
+                            row.name(),
+                            observation.agent().display_name()
+                        )),
                     }
                     continue;
                 }

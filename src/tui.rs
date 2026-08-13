@@ -2093,6 +2093,10 @@ fn finding_consequence(entry: &DoctorItem<'_>) -> &'static str {
             "Git may fetch missing objects here outside an explicit check, so Skilled does \
              not update this repository."
         }
+        "source.repository_transport_unsupported" => {
+            "This checkout configures a program for Git to run while fetching, so checking \
+             it would run code the repository chose rather than only reading."
+        }
         "source.submodule_update_unsupported" => {
             "Advancing this checkout would move a submodule Skilled does not manage, so the \
              update is refused."
@@ -3405,9 +3409,6 @@ fn update_prompt_lines(prompt: &RepositoryUpdatePrompt) -> Vec<Line<'static>> {
         ],
         RepositoryUpdatePrompt::Preview(plan) => {
             let mut lines = update_plan_statement_lines(prompt);
-            for commit in plan.commits() {
-                lines.push(Line::raw(format!("  commit · {}", terminal_safe(commit))));
-            }
             for path in plan.changed_files() {
                 lines.push(if let Some(old) = path.renamed_from() {
                     Line::raw(format!(
@@ -3514,6 +3515,13 @@ fn update_plan_statement_lines(prompt: &RepositoryUpdatePrompt) -> Vec<Line<'sta
             terminal_safe(name)
         )));
     }
+    for (installed, skill) in &plan.affected().restored {
+        lines.push(Line::raw(format!(
+            "  dangling link gains its target · {} → {}",
+            terminal_safe(installed),
+            terminal_safe(skill)
+        )));
+    }
     for (old, new) in &plan.affected().renamed {
         lines.push(Line::raw(format!(
             "  renamed · {} → {}",
@@ -3527,6 +3535,13 @@ fn update_plan_statement_lines(prompt: &RepositoryUpdatePrompt) -> Vec<Line<'sta
             finding.code(),
             terminal_safe(finding.evidence())
         )));
+    }
+    // The commits are what the fast-forward brings in, so they are part of what
+    // is being agreed to rather than evidence under it: the gate measures these
+    // rows too, and Enter stays unavailable until the last of them has been on
+    // screen. Only the changed-file listing below is non-gating.
+    for commit in plan.commits() {
+        lines.push(Line::raw(format!("  commit · {}", terminal_safe(commit))));
     }
     lines
 }
@@ -3584,7 +3599,12 @@ fn render_update_prompt(
         Paragraph::new(components::rule(regions.divider.width)),
         regions.divider,
     );
+    // The commit summaries gate the confirmation, so what is still below the
+    // viewport is not always evidence. Naming it evidence while gating rows
+    // are unread would say the plan has been shown when Enter is still
+    // withheld — the opposite of what the gate is for.
     let status = match extent {
+        Some(max) if scroll < max && !fully_seen => "Plan continues below",
         Some(max) if scroll < max => "Changed-file evidence continues below",
         Some(max) if max > 0 => "Changed-file evidence ends here",
         _ => "Complete plan and evidence shown",

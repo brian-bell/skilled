@@ -709,6 +709,7 @@ pub(crate) fn doctor_order(code: &str) -> u8 {
         | "source.no_upstream"
         | "source.fetch_failed"
         | "source.partial_clone_unsupported"
+        | "source.repository_transport_unsupported"
         | "source.submodule_update_unsupported"
         | "update.verification_failed"
         | "update.verification_incomplete" => 5,
