@@ -48,6 +48,17 @@ pub enum ExitCodeKind {
     PartialApply,
     /// Everything was written, and the scan afterwards did not bear it out.
     VerificationFailed,
+    /// Everything was written, nothing disagreed with the plan, and at least
+    /// one postcondition could not be checked at all.
+    ///
+    /// Distinct from [`Self::VerificationFailed`], which is a disagreement, and
+    /// from [`Self::Success`], which would present an update whose core
+    /// postconditions were never established as an ordinary success. The three
+    /// answers `VerifyReport` keeps apart survive into the exit status, because
+    /// a script reads only this. Repository updates report it today; aligning
+    /// `install` and `repair`, which still exit `0` over a withheld check, is
+    /// `skilled-exm`.
+    VerificationIncomplete,
 }
 
 impl ExitCodeKind {
@@ -59,6 +70,7 @@ impl ExitCodeKind {
             Self::Blocked => 3,
             Self::PartialApply => 4,
             Self::VerificationFailed => 5,
+            Self::VerificationIncomplete => 6,
         }
     }
 }
@@ -577,6 +589,8 @@ fn execute_update(
     }
     Ok(if bookkeeping_failed || apply_failed {
         ExitCodeKind::PartialApply
+    } else if !verification.is_complete() {
+        ExitCodeKind::VerificationIncomplete
     } else {
         ExitCodeKind::Success
     })
@@ -624,8 +638,15 @@ fn write_repository_update_plan(
             safe(skill)
         )?;
     }
-    for (old, new) in &plan.affected().renamed {
+    for (old, new, aliases) in &plan.affected().renamed {
         writeln!(output, "    renamed · {} -> {}", safe(old), safe(new))?;
+        // A link installed under a name of its own is not named by the pair
+        // above, and naming it is not enough either: what the rename does to it
+        // is leave it with nothing to resolve to, and that is the outcome
+        // verification will hold this update to.
+        for alias in aliases {
+            writeln!(output, "      loses its target · {}", safe(alias))?;
+        }
     }
     for commit in plan.commits() {
         writeln!(output, "    commit · {}", safe(commit))?;

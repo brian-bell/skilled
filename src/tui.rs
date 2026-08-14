@@ -2085,6 +2085,10 @@ fn finding_consequence(entry: &DoctorItem<'_>) -> &'static str {
             "The branch tracks nothing, so there is no upstream to check against or to \
              fast-forward to."
         }
+        "source.upstream_unfetched" => {
+            "The branch tracks an upstream whose remote-tracking ref is not here, so a check \
+             has to fetch it before an update can be judged."
+        }
         "source.fetch_failed" => {
             "The check could not reach the upstream, so whether an update exists is not \
              known."
@@ -2100,6 +2104,11 @@ fn finding_consequence(entry: &DoctorItem<'_>) -> &'static str {
         "source.submodule_update_unsupported" => {
             "Advancing this checkout would move a submodule Skilled does not manage, so the \
              update is refused."
+        }
+        "source.removal_leaves_content" => {
+            "The update takes a skill away but leaves its directory standing, so the \
+             installation would resolve to something that is not a skill rather than losing \
+             its target."
         }
         "source.changed_after_preview" => {
             "The repository moved after its plan was previewed, so that plan was abandoned \
@@ -3522,12 +3531,22 @@ fn update_plan_statement_lines(prompt: &RepositoryUpdatePrompt) -> Vec<Line<'sta
             terminal_safe(skill)
         )));
     }
-    for (old, new) in &plan.affected().renamed {
+    for (old, new, aliases) in &plan.affected().renamed {
         lines.push(Line::raw(format!(
             "  renamed · {} → {}",
             terminal_safe(old),
             terminal_safe(new)
         )));
+        // A link installed under a name of its own is not named by the pair
+        // above, and naming it is not enough either: what the rename does to it
+        // is leave it with nothing to resolve to, and that is the outcome
+        // verification will hold this update to.
+        for alias in aliases {
+            lines.push(Line::raw(format!(
+                "    loses its target · {}",
+                terminal_safe(alias)
+            )));
+        }
     }
     for finding in plan.findings() {
         lines.push(Line::raw(format!(

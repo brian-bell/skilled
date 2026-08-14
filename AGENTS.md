@@ -180,7 +180,12 @@ signal needs both, because colour alone is not an acceptable cue.
   a hook, and reconstructing which of the user's scopes was meant would be
   guessing at their intent. The fast-forward is the opposite case by design:
   it is handed the repository's configuration, and the plan discloses the
-  hooks, the monitor, and the checkout filters it may run.
+  hooks, the monitor, the checkout filters, and the signature program it may
+  run. That last one is disclosed rather than suppressed on purpose:
+  `merge.verifySignatures` is a policy, and passing `--no-verify-signatures`
+  would overrule it wherever the user set it — fast-forwarding to an unsigned
+  tip Git had been told to refuse. Re-reading the object the preview named
+  settles which object is merged, not who vouches for it.
 - The fetch never names a user-controllable ref as its destination. Git
   dereferences a symbolic ref when it updates one, so a tracking ref
   substituted after the preflight refusal would send a forced refspec into
@@ -203,7 +208,51 @@ signal needs both, because colour alone is not an acceptable cue.
   verification. The confirmation gate covers the complete plan statement, the
   incoming commit summaries included, because those are what the fast-forward
   brings in; the untruncated changed-file listing is non-gating evidence below
-  it.
+  it. A disclosed removal is verified as the same link, raw target included,
+  and not merely as some dangling entry under the same name.
+- An update's affected installations are decided by the variant each
+  installation resolves to, never by the name a root holds. A link installed as
+  `alias` pointing at skill `demo` is matched under `demo` and disclosed as
+  `alias`: matching on the root entry's own name would leave it out of the
+  preview and let verification report its lost resolution, after the write, as
+  a regression nobody was shown.
+- A candidate is a skill by virtue of its `SKILL.md`, not its directory.
+  Classification asks the target revision for that document as a regular file —
+  Git records a symbolic link as a blob too, and the scanner and portable
+  validation both refuse a linked skill document — so a deleted or relinked
+  skill document is a removal even where a tracked file stays beside it, and a
+  catalog whose skill is the repository root is no longer retained by
+  definition. A candidate the update was disclosed as emptying — a removal, or
+  the old side of a rename — whose path would still hold anything afterwards
+  blocks with `source.removal_leaves_content`. Three ways it can: the root
+  catalog, which no update removes; the target tree, which may keep an entry
+  there or turn an ancestor into a symbolic link `ls-tree` will not walk
+  through, redirecting the path without ever appearing at it; and the worktree,
+  where anything the update does not delete stays — including an empty
+  directory, which Git's untracked and ignored lists never name because they
+  name files. The link would then resolve to something that is not a skill
+  rather than losing its target, so the preview cannot state what the write
+  would do. The worktree half is a live read, so the apply guard asks it again
+  over the worktree as it then stands: an occupant that arrived after the
+  preview refuses the write rather than being applied. `cached_update_check`
+  decides it too, as it already does for the incoming-collision and submodule
+  findings — the cached check is what Updates advertises and what Doctor reads,
+  so a finding only the preview raises would leave the list offering an update
+  the preview then refuses. It is one local Git process per candidate the
+  update touches, so it takes the check's cancellation flag and returns no
+  answer at all rather than a partial one: a cancelled analysis records no
+  check. Both `Effect::CheckUpdates` and `Effect::PlanRepositoryUpdate` rescan
+  the roots first, because a check and the preview that follows it decide the
+  same installation-dependent findings and a link made while the application
+  stayed open would otherwise be in one and not the other. Whether the document
+  the target keeps is a *valid* skill is not read — `skilled-3o5` has that. A
+  rename names the installations it leaves without a target alongside the pair
+  of skill names, because a link installed under a name of its own is not named
+  by the pair and verification holds it to that outcome regardless.
+- A configured upstream whose remote-tracking ref is absent is not an
+  unconfigured one. `Upstream::revision` is optional for exactly that state,
+  and the explicit check fetches it rather than reporting `source.no_upstream`
+  and leaving the repository unable to update until the user fetched by hand.
 - Text from the filesystem — names, paths, link targets, operating-system error
   messages — is escaped through `components::terminal_safe` before it reaches a
   terminal, on every surface. The screens and `skilled install` write to the
@@ -212,7 +261,10 @@ signal needs both, because colour alone is not an acceptable cue.
   nothing disagreed with the plan; `is_complete` means every postcondition was
   also checked. A root the scan could not read leaves its check withheld, which
   no surface may report as a pass. This is the inventory's own rule applied to
-  the operation that follows it.
+  the operation that follows it. The exit status is such a surface: `skilled
+  update` reports an incomplete verification as its own status rather than as
+  success, because a script reads only that. Install and repair still exit `0`
+  there; `skilled-exm` has it.
 - `--yes` removes the confirmation and nothing else. Install requires
   `--source`, `--skill`, and `--agents` explicitly; repair requires `--skill`
   and `--agent`. Every ownership, collision, path, apply, rescan, and

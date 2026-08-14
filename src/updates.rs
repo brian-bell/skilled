@@ -185,9 +185,12 @@ impl CachedUpdateCheck {
 pub(crate) fn cached_update_check(
     source: &RegisteredSource,
     probe: &RepositoryUpdateProbe,
+    inventory: &InventorySnapshot,
     checked_at: i64,
-) -> CachedUpdateCheck {
+    cancelled: &AtomicBool,
+) -> Option<CachedUpdateCheck> {
     let (mut verdict, mut findings) = classify_repository_update(probe);
+    let planned = planned_revisions(source, probe, verdict);
     if let Some(finding) = incoming_collision_finding(probe) {
         findings.push(finding);
         verdict = RepositoryUpdateVerdict::Blocked;
@@ -195,6 +198,34 @@ pub(crate) fn cached_update_check(
     if let Some(finding) = changed_submodule_catalog_finding(source, probe) {
         findings.push(finding);
         verdict = RepositoryUpdateVerdict::Blocked;
+    }
+    // Every finding the preview would block on is decided here as well, because
+    // the cached check is what Updates advertises and what Doctor reads. A
+    // finding the preview raises alone would leave the list saying an update is
+    // available that the preview then refuses, and Doctor never hearing of it.
+    //
+    // Reading the target's trees and the candidate's worktree can fail, and an
+    // error is left to the plan rather than turned into a check finding of its
+    // own: nothing is written on the strength of a check, and the plan asks the
+    // same questions again before anything can be.
+    let (local, target, changed_files) = planned;
+    match affected_catalog_skills(
+        source,
+        inventory,
+        &changed_files,
+        &probe.path,
+        &local,
+        &target,
+        cancelled,
+    ) {
+        // A cancelled analysis has no answer, and a check recorded without one
+        // would be a verdict this source was never actually judged on.
+        Ok(None) => return None,
+        Ok(Some((_, removal_findings))) if !removal_findings.is_empty() => {
+            findings.extend(removal_findings);
+            verdict = RepositoryUpdateVerdict::Blocked;
+        }
+        Ok(Some(_)) | Err(_) => {}
     }
     let detail = encode_findings(&findings);
     let observed_dirty = probe.worktree.as_ref().and_then(|state| {
@@ -212,7 +243,7 @@ pub(crate) fn cached_update_check(
     // read of the source would then supersede the check for disagreeing with
     // it, taking the blocked finding out of Doctor on the way.
     let dirtiness_withheld = probe.worktree.is_some() && observed_dirty.is_none();
-    CachedUpdateCheck {
+    Some(CachedUpdateCheck {
         source_id: source.id(),
         checked_at,
         local_revision: probe
@@ -233,7 +264,7 @@ pub(crate) fn cached_update_check(
         upstream_revision: probe
             .upstream
             .as_ref()
-            .map(|upstream| upstream.revision().to_owned()),
+            .and_then(|upstream| upstream.revision().map(str::to_owned)),
         merge_base: probe.merge_base.clone(),
         ahead: probe.ahead,
         behind: probe.behind,
@@ -241,7 +272,7 @@ pub(crate) fn cached_update_check(
         dirty_known: !dirtiness_withheld && (observed_dirty.is_some() || source.dirty().is_some()),
         verdict,
         detail,
-    }
+    })
 }
 
 const FINDINGS_DETAIL_PREFIX: &str = "findings-v1;";
@@ -320,10 +351,12 @@ fn leak_code(code: &str) -> &'static str {
         "source.missing" => "source.missing",
         "source.detached_head" => "source.detached_head",
         "source.no_upstream" => "source.no_upstream",
+        "source.upstream_unfetched" => "source.upstream_unfetched",
         "source.fetch_failed" => "source.fetch_failed",
         "source.partial_clone_unsupported" => "source.partial_clone_unsupported",
         "source.repository_transport_unsupported" => "source.repository_transport_unsupported",
         "source.submodule_update_unsupported" => "source.submodule_update_unsupported",
+        "source.removal_leaves_content" => "source.removal_leaves_content",
         "source.changed_after_preview" => "source.changed_after_preview",
         "update.verification_failed" => "update.verification_failed",
         "update.verification_incomplete" => "update.verification_incomplete",
@@ -441,7 +474,14 @@ fn probe_existing_cancellable(
         return Ok(Some(no_upstream_probe(path, local, worktree)));
     };
     let revision = if upstream.remote() == "." {
-        upstream.revision().to_owned()
+        // A local upstream has no fetch to populate its ref, so `upstream_of`
+        // already declined to report one whose revision is absent.
+        let Some(revision) = upstream.revision() else {
+            return Ok(Some(unfetched_upstream_probe(
+                path, local, worktree, upstream,
+            )));
+        };
+        revision.to_owned()
     } else {
         // The URL Git would actually fetch, after `insteadOf` rewrites and
         // over a remote that may list several.
@@ -473,26 +513,16 @@ fn probe_existing_cancellable(
             }
         }
     };
-    let upstream = upstream.with_revision(revision);
-    let Some(base) = git::merge_base_cancellable(
-        path,
-        local.revision(),
-        upstream.revision(),
-        cancelled,
-        child_slot,
-    )
-    .map_err(ProbeFailure::Inspect)?
+    let upstream = upstream.with_revision(revision.clone());
+    let Some(base) =
+        git::merge_base_cancellable(path, local.revision(), &revision, cancelled, child_slot)
+            .map_err(ProbeFailure::Inspect)?
     else {
         return Ok(None);
     };
-    let Some(counts) = git::ahead_behind_cancellable(
-        path,
-        local.revision(),
-        upstream.revision(),
-        cancelled,
-        child_slot,
-    )
-    .map_err(ProbeFailure::Inspect)?
+    let Some(counts) =
+        git::ahead_behind_cancellable(path, local.revision(), &revision, cancelled, child_slot)
+            .map_err(ProbeFailure::Inspect)?
     else {
         return Ok(None);
     };
@@ -500,7 +530,7 @@ fn probe_existing_cancellable(
         let Some(files) = git::changed_paths_cancellable(
             path,
             local.revision(),
-            upstream.revision(),
+            &revision,
             cancelled,
             child_slot,
         )
@@ -738,7 +768,9 @@ fn probe_existing_against(
     if upstream.tracking_ref() != expected_upstream_ref {
         return Ok(no_upstream_probe(path, local, worktree));
     }
-    if upstream.revision() != upstream_revision {
+    // An absent tracking ref reads the same way a moved one does: the object
+    // the plan was previewed against is not what the ref names now.
+    if upstream.revision() != Some(upstream_revision) {
         return Err(crate::Error::SourceChangedAfterPreview);
     }
     finish_probe(
@@ -810,16 +842,48 @@ fn no_upstream_probe(
     }
 }
 
+/// A configured upstream whose remote-tracking ref this probe did not fetch.
+///
+/// Distinct from [`no_upstream_probe`], which says the branch tracks nothing:
+/// here the remote, the merge ref, and the fetch mapping are all configured and
+/// only the ref's object is missing. Saying "no upstream" would send the user
+/// to reconfigure a branch that is configured correctly, and would hide that an
+/// explicit check is the thing that would resolve it.
+fn unfetched_upstream_probe(
+    path: &Path,
+    local: HeadState,
+    worktree: WorktreeState,
+    upstream: Upstream,
+) -> RepositoryUpdateProbe {
+    RepositoryUpdateProbe {
+        path: path.into(),
+        error: Some(format!(
+            "source.upstream_unfetched|{} names no object here yet",
+            upstream.tracking_ref()
+        )),
+        local: Some(local),
+        upstream: Some(upstream),
+        merge_base: None,
+        ahead: 0,
+        behind: 0,
+        worktree: Some(worktree),
+        changed_files: Vec::new(),
+    }
+}
+
 fn finish_probe(
     path: &Path,
     local: HeadState,
     worktree: WorktreeState,
     upstream: Upstream,
 ) -> Result<RepositoryUpdateProbe> {
-    let base = git::merge_base(path, local.revision(), upstream.revision())?;
-    let counts = git::ahead_behind(path, local.revision(), upstream.revision())?;
+    let Some(revision) = upstream.revision().map(str::to_owned) else {
+        return Ok(unfetched_upstream_probe(path, local, worktree, upstream));
+    };
+    let base = git::merge_base(path, local.revision(), &revision)?;
+    let counts = git::ahead_behind(path, local.revision(), &revision)?;
     let changed_files = if counts.behind > 0 {
-        git::changed_paths(path, local.revision(), upstream.revision())?
+        git::changed_paths(path, local.revision(), &revision)?
     } else {
         Vec::new()
     };
@@ -971,7 +1035,11 @@ pub struct AffectedInstallations {
     /// unloadable. Verification reads the result and reports that on its own
     /// account, the same as for any other installation.
     pub restored: Vec<(String, String)>,
-    pub renamed: Vec<(String, String)>,
+    /// One upstream skill moving to another name, beside the installations the
+    /// move leaves without a target that the pair does not already name. Every
+    /// surface states that consequence rather than only the name: it is what
+    /// verification holds the update to, so it is what the confirmation covers.
+    pub renamed: Vec<(String, String, Vec<String>)>,
     pub complete: bool,
     pub incomplete_reason: Option<String>,
     expected_dangling: Vec<(String, usize)>,
@@ -989,6 +1057,14 @@ pub struct AffectedInstallations {
     /// rather than the name, because one source can hold same-named variants
     /// in different catalog roots or agent editions.
     expected_revival: Vec<(String, usize, String, PathBuf)>,
+    /// Every candidate this update was disclosed as emptying, relative to the
+    /// checkout, whether by removal or as the old side of a rename.
+    ///
+    /// The occupant check that cleared them is a preview-time read, so the
+    /// guard before the write re-reads them from fresh worktree state: a file
+    /// dropped into one between the preview and the confirmation would leave
+    /// the directory standing and the confirmed outcome unmet.
+    vacating_candidates: Vec<PathBuf>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1050,39 +1126,56 @@ impl RepositoryUpdatePlan {
     }
 }
 
-pub fn plan_repository_update(
+/// What an update would move between, and what it would change on the way.
+///
+/// A verdict other than `Available` has no target to state, so the update is
+/// described as going nowhere and changing nothing rather than as advancing to
+/// an upstream the classifier already refused. Shared with
+/// [`cached_update_check`], which has to reach the same answer from the same
+/// probe or the check and the preview would disagree about what the update is.
+fn planned_revisions(
     source: &RegisteredSource,
     probe: &RepositoryUpdateProbe,
-    inventory: &InventorySnapshot,
-) -> Result<RepositoryUpdatePlan> {
-    let (verdict, mut findings) = classify_repository_update(probe);
+    verdict: RepositoryUpdateVerdict,
+) -> (String, String, Vec<ChangedPath>) {
     let local = probe
         .local
         .as_ref()
         .map(HeadState::revision)
         .unwrap_or(source.head())
         .to_owned();
-    let target = if verdict == RepositoryUpdateVerdict::Available {
+    let available = verdict == RepositoryUpdateVerdict::Available;
+    let target = if available {
         probe
             .upstream
             .as_ref()
-            .map(Upstream::revision)
+            .and_then(Upstream::revision)
             .unwrap_or(&local)
     } else {
         &local
     }
     .to_owned();
+    let changed_files = if available {
+        probe.changed_files.clone()
+    } else {
+        Vec::new()
+    };
+    (local, target, changed_files)
+}
+
+pub fn plan_repository_update(
+    source: &RegisteredSource,
+    probe: &RepositoryUpdateProbe,
+    inventory: &InventorySnapshot,
+) -> Result<RepositoryUpdatePlan> {
+    let (verdict, mut findings) = classify_repository_update(probe);
+    let (local, target, changed_files) = planned_revisions(source, probe, verdict);
     let upstream_ref = probe
         .upstream
         .as_ref()
         .map(Upstream::tracking_ref)
         .unwrap_or("")
         .to_owned();
-    let changed_files = if verdict == RepositoryUpdateVerdict::Available {
-        probe.changed_files.clone()
-    } else {
-        Vec::new()
-    };
     let commits = if verdict == RepositoryUpdateVerdict::Available {
         git::commit_summaries(&probe.path, &local, &target)?
     } else {
@@ -1094,14 +1187,19 @@ pub fn plan_repository_update(
     if let Some(finding) = changed_submodule_catalog_finding(source, probe) {
         findings.push(finding);
     }
-    let affected = affected_catalog_skills(
+    // Uncancellable by construction: planning is the step a confirmation is
+    // about to be asked for, and it runs where an effect may block.
+    let (affected, removal_findings) = affected_catalog_skills(
         source,
         inventory,
         &changed_files,
         &probe.path,
         &local,
         &target,
-    )?;
+        &AtomicBool::new(false),
+    )?
+    .expect("a flag that is never set cannot cancel this analysis");
+    findings.extend(removal_findings);
     Ok(RepositoryUpdatePlan {
         source_id: source.id(),
         source_label: source.label().into(),
@@ -1131,8 +1229,16 @@ pub fn plan_repository_update(
         // several times over the same merge. The check suppresses repository
         // code precisely because it was not agreed to; what the fast-forward
         // runs is agreed to, which requires naming all of it.
+        //
+        // Signature verification belongs in the same sentence and for the same
+        // reason. `merge.verifySignatures` runs the configured `gpg.program`
+        // over the incoming tip, and the merge is not given a flag either way:
+        // the setting is a policy, one Skilled has no standing to overrule
+        // where the user set it themselves, so what it may run is named rather
+        // than turned off.
         hooks_disclosure: "Git may run your post-merge and reference-transaction hooks, your \
-             core.fsmonitor hook, and any checkout filters this repository configures, during \
+             core.fsmonitor hook, any checkout filters this repository configures, and — where \
+             signature verification is configured — the signature program it names, during \
              this fast-forward."
             .into(),
     })
@@ -1160,6 +1266,12 @@ fn incoming_untracked_collision<'a>(
         })
 }
 
+/// `Ok(None)` is a cancelled analysis, not an empty one. The tree reads below
+/// are one local Git process each and there is one for every candidate the
+/// update touches, so a large update spends real time here; the explicit check
+/// runs it on the cancellable worker, and a Cancel that had to wait for all of
+/// it would not be a cancel. Nothing partial is ever returned — a caller that
+/// sees `None` has no answer to record.
 fn affected_catalog_skills(
     source: &RegisteredSource,
     inventory: &InventorySnapshot,
@@ -1167,7 +1279,8 @@ fn affected_catalog_skills(
     repository: &Path,
     current_revision: &str,
     target_revision: &str,
-) -> Result<AffectedInstallations> {
+    cancelled: &AtomicBool,
+) -> Result<Option<(AffectedInstallations, Vec<Finding>)>> {
     #[derive(Clone, Default)]
     struct Changes {
         catalog_path: PathBuf,
@@ -1236,13 +1349,15 @@ fn affected_catalog_skills(
         }
     }
 
-    // A catalog whose skill is its root is the repository itself: it exists at
-    // every revision, so nothing can add it, move it away, or leave it behind.
-    let candidate_exists = |revision: &str, path: &Path| -> Result<bool> {
-        if path == Path::new(".") {
-            return Ok(true);
-        }
-        git::tree_directory_exists(repository, revision, path)
+    // A directory is not a skill; the `SKILL.md` in it is. Asking whether the
+    // directory exists calls a candidate retained after upstream deleted its
+    // skill document and left another tracked file beside it, and for a catalog
+    // whose skill is the repository root it can only ever answer yes. The
+    // preview would then say "updated in place" about an installation the
+    // update stops an agent from loading, and only verification, after the
+    // write, would find out.
+    let candidate_holds_skill = |revision: &str, path: &Path| -> Result<bool> {
+        git::tree_regular_file_exists(repository, revision, &candidate_skill_document(path))
     };
 
     // A rename is stated only when Git proved every path in both changed
@@ -1250,6 +1365,9 @@ fn affected_catalog_skills(
     // the conservative removed-plus-added pair.
     let mut rename_candidates = Vec::new();
     for ((catalog_path, old_name, new_name), pairs) in &rename_evidence {
+        if is_cancelled(cancelled) {
+            return Ok(None);
+        }
         let old_key = (catalog_path.clone(), old_name.clone());
         let new_key = (catalog_path.clone(), new_name.clone());
         let Some(old_change) = changes.get(&old_key) else {
@@ -1285,8 +1403,8 @@ fn affected_catalog_skills(
             // skill that keeps its SKILL.md would otherwise be stated as a
             // rename, and verification would then expect a link to dangle for
             // a skill that is still there.
-            && !candidate_exists(target_revision, &old_change.candidate_path)?
-            && !candidate_exists(current_revision, &new_change.candidate_path)?
+            && !candidate_holds_skill(target_revision, &old_change.candidate_path)?
+            && !candidate_holds_skill(current_revision, &new_change.candidate_path)?
         {
             rename_candidates.push((old_key, new_key));
         }
@@ -1302,8 +1420,16 @@ fn affected_catalog_skills(
         .filter(|(old, new)| old_counts.get(old) == Some(&1) && new_counts.get(new) == Some(&1))
         .collect::<Vec<_>>();
 
-    let mut installed =
-        std::collections::BTreeMap::<(PathBuf, String), std::collections::BTreeSet<usize>>::new();
+    // Keyed by the variant an installation resolves to, because that is what an
+    // upstream change is about; the name the root holds is carried in the value
+    // instead. A link installed as `alias` pointing at skill `demo` is keyed
+    // under `demo` here and disclosed as `alias`, where keying by the root
+    // entry's own name would have matched neither and left the installation out
+    // of the preview altogether.
+    let mut installed = std::collections::BTreeMap::<
+        (PathBuf, String),
+        std::collections::BTreeSet<(String, usize)>,
+    >::new();
     for row in inventory.rows() {
         for observation in row.observations() {
             let Some(variant) = observation
@@ -1315,10 +1441,10 @@ fn affected_catalog_skills(
             installed
                 .entry((
                     variant.catalog_relative_path().to_path_buf(),
-                    row.name().to_owned(),
+                    variant.skill_name().to_owned(),
                 ))
                 .or_default()
-                .insert(observation.agent().index());
+                .insert((row.name().to_owned(), observation.agent().index()));
         }
     }
     let mut updated = Vec::new();
@@ -1327,6 +1453,9 @@ fn affected_catalog_skills(
     let mut restored = Vec::new();
     let mut expected_revival = Vec::new();
     for ((catalog_path, name), change) in &changes {
+        if is_cancelled(cancelled) {
+            return Ok(None);
+        }
         let key = (catalog_path.clone(), name.clone());
         if confirmed_renames
             .iter()
@@ -1334,12 +1463,12 @@ fn affected_catalog_skills(
         {
             continue;
         }
-        let target_keeps_skill = candidate_exists(target_revision, &change.candidate_path)?;
+        let target_keeps_skill = candidate_holds_skill(target_revision, &change.candidate_path)?;
         // A file added inside a skill that was already there does not make the
         // skill new. Only a candidate the current revision does not have can be
         // stated as added upstream; a catalog whose skill is its root always
         // has one, so nothing about it is ever reported that way.
-        let skill_is_new = !candidate_exists(current_revision, &change.candidate_path)?;
+        let skill_is_new = !candidate_holds_skill(current_revision, &change.candidate_path)?;
         // A dangling link resolves to nothing, so it carries no variant and
         // none of the passes above can see it. It is still an installation,
         // and one aimed at exactly the directory this update creates: after
@@ -1394,31 +1523,51 @@ fn affected_catalog_skills(
                 installed_agents.cloned().unwrap_or_default(),
             ));
         } else {
-            updated.push(name.clone());
+            updated.extend(
+                installed_agents
+                    .into_iter()
+                    .flatten()
+                    .map(|(row, _)| row.clone()),
+            );
         }
     }
 
     let mut expected_dangling = Vec::new();
-    let removed = removed_changes
-        .into_iter()
-        .map(|(name, _, agents)| {
-            expected_dangling.extend(agents.into_iter().map(|agent| (name.clone(), agent)));
-            name
-        })
-        .collect();
+    let mut surviving_removals = Vec::new();
+    let mut vacating_candidates = Vec::new();
+    let mut removed = Vec::new();
+    let deleted = deleted_paths(files);
+    for (name, change, entries) in removed_changes {
+        if is_cancelled(cancelled) {
+            return Ok(None);
+        }
+        vacating_candidates.push(change.candidate_path.clone());
+        if let Some(occupant) = surviving_removal(
+            repository,
+            target_revision,
+            &change.candidate_path,
+            &deleted,
+        )? {
+            surviving_removals.push((name.clone(), occupant));
+        }
+        expected_dangling.extend(entries.iter().map(|(row, agent)| (row.clone(), *agent)));
+        removed.extend(entries.into_iter().map(|(row, _)| row));
+    }
     let mut added = added_changes
         .into_iter()
         .map(|(name, _)| name)
         .collect::<Vec<_>>();
     updated.sort();
     updated.dedup();
-    let mut removed: Vec<String> = removed;
     removed.sort();
     removed.dedup();
     added.sort();
     added.dedup();
     let mut renamed = Vec::new();
     for ((catalog_path, old), (_, new)) in confirmed_renames {
+        if is_cancelled(cancelled) {
+            return Ok(None);
+        }
         // The destination of a rename is a directory the update creates, so a
         // dangling link already aimed there is revived by it exactly as one
         // aimed at a plain addition is. Both sides of a rename are skipped by
@@ -1442,11 +1591,40 @@ fn affected_catalog_skills(
         // would claim an effect on the user's agents that will not happen. A
         // link revived at the destination is a separate fact, and `restored`
         // above is where it is stated.
-        let Some(agents) = installed.get(&(catalog_path, old.clone())) else {
+        let Some(entries) = installed.get(&(catalog_path.clone(), old.clone())) else {
             continue;
         };
-        expected_dangling.extend(agents.iter().map(|agent| (old.clone(), *agent)));
-        renamed.push((old, new));
+        // The old side of a rename empties its candidate exactly as a removal
+        // does, and is disclosed as the same outcome — an installation left
+        // without a target — so a local occupant that keeps the old directory
+        // standing breaks the same promise, and is refused the same way.
+        if let Some(old_change) = changes.get(&(catalog_path, old.clone())) {
+            vacating_candidates.push(old_change.candidate_path.clone());
+            if let Some(occupant) = surviving_removal(
+                repository,
+                target_revision,
+                &old_change.candidate_path,
+                &deleted,
+            )? {
+                surviving_removals.push((old.clone(), occupant));
+            }
+        }
+        // Stated as the repository fact it is — one upstream skill moving to
+        // another name — beside the installations it leaves without a target.
+        // Those are carried by the name each root holds, which is what
+        // verification looks one up by, and a link installed under a name of
+        // its own would otherwise be held to an outcome the confirmation never
+        // mentioned. A name equal to the old skill's is already stated by the
+        // pair, so only the ones the pair does not name are listed.
+        expected_dangling.extend(entries.iter().map(|(row, agent)| (row.clone(), *agent)));
+        let mut aliases = entries
+            .iter()
+            .map(|(row, _)| row.clone())
+            .filter(|row| *row != old)
+            .collect::<Vec<_>>();
+        aliases.sort();
+        aliases.dedup();
+        renamed.push((old, new, aliases));
     }
     renamed.sort();
     renamed.dedup();
@@ -1456,25 +1634,183 @@ fn affected_catalog_skills(
     restored.dedup();
     expected_revival.sort();
     expected_revival.dedup();
-    Ok(AffectedInstallations {
-        updated,
-        removed,
-        added,
-        restored,
-        renamed,
-        complete: inventory.counts_are_complete() && inventory.registry_is_complete(),
-        incomplete_reason: if inventory.counts_are_complete() && inventory.registry_is_complete() {
-            None
-        } else if inventory.scan_pending() {
-            Some("installation inventory has not been scanned; setup may not be complete".into())
-        } else if inventory.no_agent_configured() {
-            Some("no agent is configured for installation scanning".into())
-        } else {
-            Some("one or more installation roots could not be fully read".into())
+    let findings = surviving_removals
+        .into_iter()
+        .map(|(name, occupant)| {
+            Finding::new(
+                "source.removal_leaves_content",
+                FindingSeverity::Warning,
+                format!(
+                    "the update stops {} being a skill, and {} would still be standing \
+                     afterwards, so the installation would resolve to something that is not \
+                     a skill rather than losing its target",
+                    name,
+                    occupant.display()
+                ),
+            )
+        })
+        .collect();
+    Ok(Some((
+        AffectedInstallations {
+            updated,
+            removed,
+            added,
+            restored,
+            renamed,
+            complete: inventory.counts_are_complete() && inventory.registry_is_complete(),
+            incomplete_reason: if inventory.counts_are_complete()
+                && inventory.registry_is_complete()
+            {
+                None
+            } else if inventory.scan_pending() {
+                Some(
+                    "installation inventory has not been scanned; setup may not be complete".into(),
+                )
+            } else if inventory.no_agent_configured() {
+                Some("no agent is configured for installation scanning".into())
+            } else {
+                Some("one or more installation roots could not be fully read".into())
+            },
+            expected_dangling,
+            expected_revival,
+            vacating_candidates,
         },
-        expected_dangling,
-        expected_revival,
-    })
+        findings,
+    )))
+}
+
+fn is_cancelled(cancelled: &AtomicBool) -> bool {
+    cancelled.load(std::sync::atomic::Ordering::Acquire)
+}
+
+/// The skill document a catalog candidate is a skill by virtue of holding.
+///
+/// A catalog whose skill is its root has `.` for a candidate path, and the
+/// document it is a skill by is the repository's own `SKILL.md`.
+fn candidate_skill_document(candidate: &Path) -> PathBuf {
+    if candidate == Path::new(".") {
+        PathBuf::from("SKILL.md")
+    } else {
+        candidate.join("SKILL.md")
+    }
+}
+
+/// What would still be standing where a disclosed removal takes a skill away.
+///
+/// `merge --ff-only` deletes the tracked files under a removed directory and
+/// removes the directory only once nothing is left in it. Three things leave it
+/// standing: a catalog whose skill is the repository root, which no update can
+/// remove; another tracked path the target revision still keeps under the
+/// candidate; and a local untracked or ignored file sitting in it, which Git
+/// leaves exactly where it is. In each case the installed link keeps resolving
+/// — to a directory that is no longer a skill — so the dangling link the
+/// preview would promise is not what the write produces. That is a plan that
+/// cannot state its own outcome, and it blocks rather than being applied and
+/// discovered afterwards.
+///
+/// A directory the walk could not read cannot rule an occupant out, so it is
+/// treated as one. So is one too large to walk within [`OCCUPANT_BUDGET`]:
+/// understating what is standing there is the error that gets a write applied.
+fn surviving_removal(
+    repository: &Path,
+    target_revision: &str,
+    candidate: &Path,
+    deleted: &std::collections::BTreeSet<PathBuf>,
+) -> Result<Option<PathBuf>> {
+    if candidate == Path::new(".") {
+        return Ok(Some(repository.to_path_buf()));
+    }
+    // Any entry, not only a directory: an update that replaces the skill
+    // directory with a regular file or a symbolic link leaves the installed
+    // link resolving to that object rather than losing its target, which is the
+    // same promise broken in the same way.
+    if git::tree_entry_exists(repository, target_revision, candidate)? {
+        return Ok(Some(candidate.to_path_buf()));
+    }
+    // And an ancestor the update turns into a symbolic link redirects the path
+    // without ever appearing at it: `ls-tree` does not walk through a link, so
+    // the candidate reads as absent while the installed link would follow the
+    // new ancestor to wherever upstream aimed it — outside the registered
+    // checkout, for all this can tell. An ancestor the update deletes outright
+    // is nothing to redirect through, so absence keeps looking upward rather
+    // than settling the question.
+    for ancestor in candidate.ancestors().skip(1) {
+        if ancestor.as_os_str().is_empty() {
+            continue;
+        }
+        if git::tree_directory_entry(repository, target_revision, ancestor)? == Some(false) {
+            return Ok(Some(ancestor.to_path_buf()));
+        }
+    }
+    let mut budget = OCCUPANT_BUDGET;
+    surviving_worktree_entry(&repository.join(candidate), candidate, deleted, &mut budget)
+}
+
+/// How many worktree entries [`surviving_removal`] reads before giving up and
+/// reporting that it could not establish the candidate would go away.
+const OCCUPANT_BUDGET: usize = 4096;
+
+/// The first live path under `directory` that this update does not delete, and
+/// which therefore keeps the directory standing.
+///
+/// Git's untracked and ignored lists cannot answer this on their own: they name
+/// files, and a directory with no files anywhere beneath it appears in neither
+/// while Git leaves it exactly where it is. A directory that holds only paths
+/// the update deletes is removed once they are gone; a directory that is
+/// already empty is not, because the update deletes nothing in it. Both fall
+/// out of asking, at every level, whether anything here is not on the way out.
+///
+/// Symbolic links are read as entries, never followed: what a link points at is
+/// not under this directory, and following one could leave the walk going in a
+/// circle.
+fn surviving_worktree_entry(
+    directory: &Path,
+    relative: &Path,
+    deleted: &std::collections::BTreeSet<PathBuf>,
+    budget: &mut usize,
+) -> Result<Option<PathBuf>> {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return Ok(Some(relative.to_path_buf()));
+    };
+    let mut empty = true;
+    for entry in entries {
+        empty = false;
+        if *budget == 0 {
+            return Ok(Some(relative.to_path_buf()));
+        }
+        *budget -= 1;
+        let Ok(entry) = entry else {
+            return Ok(Some(relative.to_path_buf()));
+        };
+        let path = relative.join(entry.file_name());
+        let Ok(file_type) = entry.file_type() else {
+            return Ok(Some(path));
+        };
+        if file_type.is_dir() {
+            if let Some(occupant) = surviving_worktree_entry(&entry.path(), &path, deleted, budget)?
+            {
+                return Ok(Some(occupant));
+            }
+        } else if !deleted.contains(&path) {
+            return Ok(Some(path));
+        }
+    }
+    Ok(empty.then(|| relative.to_path_buf()))
+}
+
+/// The paths an update deletes from the worktree, rename sources included.
+fn deleted_paths(files: &[ChangedPath]) -> std::collections::BTreeSet<PathBuf> {
+    files
+        .iter()
+        .flat_map(|file| {
+            file.renamed_from()
+                .map(Path::to_path_buf)
+                .into_iter()
+                .chain(
+                    matches!(file.kind(), ChangeKind::Deleted).then(|| file.path().to_path_buf()),
+                )
+        })
+        .collect()
 }
 
 /// Where a catalog candidate sits in the checkout, as an absolute path.
@@ -1691,7 +2027,7 @@ fn validate_repository_update(plan: &RepositoryUpdatePlan) -> Result<()> {
     }
     let upstream = git::upstream_of(&plan.path, &head)?;
     if upstream.as_ref().map(Upstream::tracking_ref) != Some(plan.upstream_ref.as_str())
-        || upstream.as_ref().map(Upstream::revision) != Some(plan.target_revision.as_str())
+        || upstream.as_ref().and_then(Upstream::revision) != Some(plan.target_revision.as_str())
         || !git::commit_exists(&plan.path, &plan.target_revision)?
     {
         return Err(crate::Error::SourceChangedAfterPreview);
@@ -1702,6 +2038,18 @@ fn validate_repository_update(plan: &RepositoryUpdatePlan) -> Result<()> {
     }
     if incoming_untracked_collision(&state, &plan.changed_files).is_some() {
         return Err(crate::Error::SourceChangedAfterPreview);
+    }
+    // The occupant check that cleared this plan's removals read the worktree at
+    // preview time, and `incoming_untracked_collision` above deliberately says
+    // nothing about deleted paths. A file or directory dropped into a vacating
+    // candidate since then would leave it standing, so the dangling links the
+    // user confirmed would not be what the write produces — asked again here,
+    // against the worktree as it stands now.
+    let deleted = deleted_paths(&plan.changed_files);
+    for candidate in &plan.affected.vacating_candidates {
+        if surviving_removal(&plan.path, &plan.target_revision, candidate, &deleted)?.is_some() {
+            return Err(crate::Error::SourceChangedAfterPreview);
+        }
     }
     // Read again, last. Every guard above is a Git process against a pathname,
     // and each one is another moment in which the checkout could be moved aside
@@ -1815,14 +2163,24 @@ pub fn verify_repository_update(
                 if belongs_to_updated_source
                     && expected_dangling.contains(&(row.name(), observation.agent().index()))
                 {
+                    // What was disclosed is that *this* link loses its target,
+                    // so the link has to be the same one. A finding code alone
+                    // does not say that: a disclosed hook can remove the link
+                    // and leave a different dangling symlink under the same
+                    // name, which carries `install.dangling_symlink` just as
+                    // readily while having mutated a path outside the plan.
+                    // The object carries the raw target, so comparing it is
+                    // what distinguishes the two — the same test the disclosed
+                    // restoration below already applies.
                     if !after_observation.is_some_and(|after| {
-                        after
-                            .findings()
-                            .iter()
-                            .any(|finding| finding.code() == "install.dangling_symlink")
+                        after.object() == observation.object()
+                            && after
+                                .findings()
+                                .iter()
+                                .any(|finding| finding.code() == "install.dangling_symlink")
                     }) {
                         failures.push(format!(
-                            "the disclosed removal of {} was not observed as a dangling installation for {}",
+                            "the disclosed removal of {} was not observed as the same installation left dangling for {}",
                             row.name(),
                             observation.agent().display_name()
                         ));

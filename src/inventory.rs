@@ -707,10 +707,12 @@ pub(crate) fn doctor_order(code: &str) -> u8 {
         | "source.missing"
         | "source.detached_head"
         | "source.no_upstream"
+        | "source.upstream_unfetched"
         | "source.fetch_failed"
         | "source.partial_clone_unsupported"
         | "source.repository_transport_unsupported"
         | "source.submodule_update_unsupported"
+        | "source.removal_leaves_content"
         | "update.verification_failed"
         | "update.verification_incomplete" => 5,
         // 7. Missing or ambiguous provenance.

@@ -1695,6 +1695,20 @@ impl SkilledApp {
         }
         self.update_check_error = None;
         let sources = self.sources.clone();
+        // The roots as they stand now, for the same reason
+        // `Effect::PlanRepositoryUpdate` reads them again: a check decides the
+        // findings the preview decides, and both of them turn on which
+        // installations resolve into this source. Handing the worker the last
+        // completed scan would let a link made while the application stayed
+        // open be missing from the cached verdict and present in the preview —
+        // Updates offering an update the preview then refuses, which is the
+        // contradiction caching these findings exists to close. The scan is
+        // filesystem work and this is the effect boundary, where it belongs.
+        self.rescan_installations();
+        // Carried into the worker rather than read there: the worker has no
+        // application state, and reading agent roots is not what a cancellable
+        // repository check is for.
+        let inventory = self.inventory.clone();
         // The whole run's generations are taken before any of it starts, so
         // every check this run records is ordered ahead of anything another
         // process reserved and behind anything it reserves next. The worker
@@ -1738,11 +1752,17 @@ impl SkilledApp {
                         let _ = sender.send(UpdateCheckMessage::Cancelled);
                         return;
                     };
-                    checks.push(cached_update_check(
+                    let Some(check) = cached_update_check(
                         source,
                         &probe,
+                        &inventory,
                         first_generation.saturating_add(i64::try_from(index).unwrap_or(i64::MAX)),
-                    ));
+                        &worker_cancelled,
+                    ) else {
+                        let _ = sender.send(UpdateCheckMessage::Cancelled);
+                        return;
+                    };
+                    checks.push(check);
                     if worker_cancelled.load(Ordering::Acquire) {
                         let _ = sender.send(UpdateCheckMessage::Cancelled);
                         return;
@@ -2005,14 +2025,6 @@ impl SkilledApp {
         // displace one that began later.
         let generation = self.reserve_generations(1)?;
         let probe = probe_repository_update(&source, true);
-        let check = cached_update_check(&source, &probe, generation);
-        self.store
-            .record_update_check(&check)
-            .map_err(|error| error.to_string())?;
-        self.update_checks = self
-            .store
-            .update_checks()
-            .map_err(|error| error.to_string())?;
         // Read after the probe, which fetched and may have taken a while. The
         // plan is about to state which installations the update affects, and
         // the roots it derives that from must be the roots as they are now:
@@ -2021,7 +2033,29 @@ impl SkilledApp {
         // against. Doing it here also gives that comparison two snapshots of
         // equal standing, so a command run before setup completes reports what
         // it verified rather than withholding the answer.
+        //
+        // Before the check is recorded, not after: the check states the same
+        // installation-affecting findings the plan does, and deriving them from
+        // an older reading than the plan's would cache a verdict this very
+        // command then contradicts.
         self.rescan_installations();
+        // A typed command has nothing to cancel it, so the analysis behind the
+        // check cannot be interrupted and always has an answer.
+        let check = cached_update_check(
+            &source,
+            &probe,
+            &self.inventory,
+            generation,
+            &AtomicBool::new(false),
+        )
+        .expect("a flag that is never set cannot cancel this check");
+        self.store
+            .record_update_check(&check)
+            .map_err(|error| error.to_string())?;
+        self.update_checks = self
+            .store
+            .update_checks()
+            .map_err(|error| error.to_string())?;
         plan_repository_update(&source, &probe, &self.inventory).map_err(|error| error.to_string())
     }
 

@@ -166,14 +166,18 @@ does not yet uninstall.
   untruncated changed-file listing as evidence. Skilled fast-forwards only:
   it never resets, rebases, stashes, commits, or pushes, and a dirty,
   diverged, detached, partial-clone, submodule-changing, or upstream-less
-  checkout blocks the update instead of being worked around.
+  checkout blocks the update instead of being worked around. So does an
+  update that would take a skill away while leaving its directory standing:
+  the installed link would resolve to something that is not a skill rather
+  than losing its target, which is not a removal the preview can state.
 - A rescan and postcondition check after every fast-forward, with the same
   three answers installation verification gives: verified, not verified, or
   verified as far as the roots Skilled could read allow.
 - `skilled install`, `skilled repair`, and `skilled update` as non-interactive
   commands over the same planners, guards, rescans, and verification the
-  screens run, with distinguishable exit statuses. `--yes` removes the
-  confirmation and nothing else.
+  screens run, with distinguishable exit statuses — `skilled update` keeps a
+  verification it could not complete apart from a plain success. `--yes`
+  removes the confirmation and nothing else.
 
 Uninstall, adoption of unproven links, and network operations beyond the
 explicit update check are still future work. Registration, inventory, and

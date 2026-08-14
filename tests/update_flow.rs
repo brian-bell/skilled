@@ -1168,7 +1168,11 @@ fn an_exact_directory_move_is_reported_as_a_rename() {
 
     assert_eq!(
         plan.affected().renamed,
-        [("demo".to_owned(), "renamed".to_owned())]
+        [(
+            "demo".to_owned(),
+            "renamed".to_owned(),
+            Vec::<String>::new()
+        )]
     );
     assert!(plan.affected().removed.is_empty());
     assert!(plan.affected().added.is_empty());
@@ -1625,7 +1629,10 @@ fn a_changed_checkout_still_fetches_during_an_explicit_check() {
     let probe = probe_repository_update(&fixture.app.sources()[0], true);
 
     assert_eq!(
-        probe.upstream.as_ref().map(|upstream| upstream.revision()),
+        probe
+            .upstream
+            .as_ref()
+            .and_then(|upstream| upstream.revision()),
         Some(target.as_str())
     );
     assert_eq!(probe.behind, 1);
@@ -3170,4 +3177,556 @@ fn a_restoration_names_the_installations_that_start_loading() {
             verification.failures()
         );
     }
+}
+
+/// A disclosed removal names one link. `install.dangling_symlink` on the same
+/// row afterwards is not the same fact: a hook that removes the disclosed link
+/// and puts a different dangling one in its place satisfies the code while
+/// having mutated a path outside the plan. The restoration branch already
+/// compares the object itself, and a removal deserves the same.
+#[test]
+fn a_hook_that_substitutes_a_different_dangling_link_fails_verification() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut fixture = fixture();
+    let root = fixture._temporary.path().join("home/.claude/skills");
+    std::fs::create_dir_all(&root).expect("agent root");
+    std::os::unix::fs::symlink(fixture.clone.join("skills/demo"), root.join("demo"))
+        .expect("installed skill");
+    fixture
+        .app
+        .perform_effects(&[Effect::ScanInstallations])
+        .expect("scan before update");
+    let before = fixture.app.inventory().clone();
+
+    std::fs::remove_dir_all(fixture.seed.join("skills/demo")).expect("remove skill upstream");
+    commit(&fixture.seed, "remove demo");
+    git(&fixture.seed, &["push"]);
+    let source = fixture.app.sources()[0].clone();
+    let probe = probe_repository_update(&source, true);
+    let plan = plan_repository_update(&source, &probe, &before).expect("plan removal");
+    assert_eq!(plan.affected().removed, ["demo"]);
+
+    let hook = fixture.clone.join(".git/hooks/post-merge");
+    std::fs::write(
+        &hook,
+        format!(
+            "#!/bin/sh\nrm -f '{link}'\nln -s '{elsewhere}' '{link}'\n",
+            link = root.join("demo").display(),
+            elsewhere = fixture.clone.join("skills/never-existed").display(),
+        ),
+    )
+    .expect("post-merge hook");
+    let mut permissions = std::fs::metadata(&hook)
+        .expect("hook metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&hook, permissions).expect("executable hook");
+
+    apply_repository_update(&plan).expect("fast-forward");
+    fixture
+        .app
+        .perform_effects(&[Effect::ScanInstallations])
+        .expect("scan after update");
+    let report = verify_repository_update(&plan, &before, fixture.app.inventory());
+
+    assert!(!report.is_verified(), "{:?}", report.failures());
+    assert!(
+        report
+            .failures()
+            .iter()
+            .any(|failure| failure.contains("demo")),
+        "{:?}",
+        report.failures()
+    );
+}
+
+/// A pruned or deleted remote-tracking ref does not unconfigure the upstream.
+/// `branch.<name>.remote`, `branch.<name>.merge`, and the fetch mapping are all
+/// still there, and a fetch is exactly what would put the ref back — so
+/// reporting `source.no_upstream` and skipping the fetch leaves the repository
+/// unable to check or apply an update until the user fetches by hand.
+#[test]
+fn a_check_fetches_a_configured_upstream_whose_tracking_ref_was_deleted() {
+    let mut fixture = fixture();
+    let target = push_update(&fixture, "skills/demo/new.txt");
+    git(
+        &fixture.clone,
+        &["update-ref", "-d", "refs/remotes/origin/main"],
+    );
+    assert!(
+        Command::new("git")
+            .arg("-C")
+            .arg(&fixture.clone)
+            .args(["rev-parse", "--verify", "refs/remotes/origin/main"])
+            .output()
+            .expect("invoke git")
+            .status
+            .code()
+            != Some(0),
+        "the fixture must start without a tracking ref"
+    );
+
+    let source = fixture.app.sources()[0].clone();
+    let probe = probe_repository_update(&source, true);
+    let (verdict, findings) = classify_repository_update(&probe);
+
+    let codes = findings
+        .iter()
+        .map(skilled::inventory::Finding::code)
+        .collect::<Vec<_>>();
+    assert!(!codes.contains(&"source.no_upstream"), "{codes:?}");
+    assert_eq!(verdict, RepositoryUpdateVerdict::Available, "{codes:?}");
+    let plan = plan_repository_update(&source, &probe, fixture.app.inventory())
+        .expect("plan the fetched update");
+    assert_eq!(plan.target_revision(), target);
+    apply_repository_update(&plan).expect("fast-forward");
+    assert!(fixture.clone.join("skills/demo/new.txt").is_file());
+    fixture
+        .app
+        .perform_effects(&[Effect::ScanInstallations])
+        .expect("scan after update");
+}
+
+/// A root entry need not be named after the skill it points at. Matching the
+/// upstream change against the name the root holds therefore misses an
+/// installation entirely: the preview says nothing about it, the fast-forward
+/// runs, and verification reports its lost resolution afterwards as an
+/// undisclosed regression. What decides whether an installation is affected is
+/// the variant it resolves to.
+#[test]
+fn an_installation_named_apart_from_its_skill_is_matched_by_what_it_resolves_to() {
+    let mut fixture = fixture();
+    let root = fixture._temporary.path().join("home/.claude/skills");
+    std::fs::create_dir_all(&root).expect("agent root");
+    std::os::unix::fs::symlink(fixture.clone.join("skills/demo"), root.join("alias"))
+        .expect("installed under another name");
+    fixture
+        .app
+        .perform_effects(&[Effect::ScanInstallations])
+        .expect("scan before update");
+    let before = fixture.app.inventory().clone();
+
+    std::fs::remove_dir_all(fixture.seed.join("skills/demo")).expect("remove skill upstream");
+    commit(&fixture.seed, "remove demo");
+    git(&fixture.seed, &["push"]);
+    let source = fixture.app.sources()[0].clone();
+    let probe = probe_repository_update(&source, true);
+    let plan = plan_repository_update(&source, &probe, &before).expect("plan removal");
+
+    assert!(!plan.is_blocked(), "{:?}", plan.findings());
+    assert!(plan.affected().updated.is_empty(), "{:?}", plan.affected());
+    assert_eq!(plan.affected().removed, ["alias"], "{:?}", plan.affected());
+
+    apply_repository_update(&plan).expect("fast-forward");
+    fixture
+        .app
+        .perform_effects(&[Effect::ScanInstallations])
+        .expect("scan after update");
+    let report = verify_repository_update(&plan, &before, fixture.app.inventory());
+    assert!(report.is_verified(), "{:?}", report.failures());
+    assert!(report.is_complete(), "{:?}", report.withheld());
+}
+
+/// A directory is not a skill; its `SKILL.md` is. Upstream can delete the
+/// document and leave a tracked file beside it, and for a catalog whose skill
+/// is the repository root the directory is there at every revision no matter
+/// what. Classifying on directory existence calls both "updated in place",
+/// applies the fast-forward, and only then finds that the installation no
+/// longer loads.
+#[test]
+fn deleting_a_candidates_skill_document_is_not_an_update_in_place() {
+    let mut fixture = fixture();
+    let root = fixture._temporary.path().join("home/.claude/skills");
+    std::fs::create_dir_all(&root).expect("agent root");
+    std::os::unix::fs::symlink(fixture.clone.join("skills/demo"), root.join("demo"))
+        .expect("installed skill");
+    fixture
+        .app
+        .perform_effects(&[Effect::ScanInstallations])
+        .expect("scan before update");
+    let before = fixture.app.inventory().clone();
+
+    std::fs::remove_file(fixture.seed.join("skills/demo/SKILL.md")).expect("remove skill document");
+    commit(&fixture.seed, "demo is no longer a skill");
+    git(&fixture.seed, &["push"]);
+    let source = fixture.app.sources()[0].clone();
+    let probe = probe_repository_update(&source, true);
+    let plan = plan_repository_update(&source, &probe, &before).expect("plan the document removal");
+
+    assert!(plan.affected().updated.is_empty(), "{:?}", plan.affected());
+    assert_eq!(plan.affected().removed, ["demo"], "{:?}", plan.affected());
+    // `skills/demo/old.txt` keeps the directory standing, so the link would
+    // not dangle: the plan cannot state the removal it would have to state.
+    let codes = plan
+        .findings()
+        .iter()
+        .map(skilled::inventory::Finding::code)
+        .collect::<Vec<_>>();
+    assert!(
+        codes.contains(&"source.removal_leaves_content"),
+        "{codes:?}"
+    );
+    assert!(plan.is_blocked());
+}
+
+/// `merge --ff-only` deletes the tracked files under a removed directory and
+/// leaves the directory itself where a local untracked or ignored file still
+/// sits in it. The disclosed dangling link would then resolve to a directory
+/// that is not a skill, so the preview promises something the write does not
+/// produce.
+#[test]
+fn an_untracked_file_under_a_removed_skill_blocks_the_update() {
+    let mut fixture = fixture();
+    let root = fixture._temporary.path().join("home/.claude/skills");
+    std::fs::create_dir_all(&root).expect("agent root");
+    std::os::unix::fs::symlink(fixture.clone.join("skills/demo"), root.join("demo"))
+        .expect("installed skill");
+    fixture
+        .app
+        .perform_effects(&[Effect::ScanInstallations])
+        .expect("scan before update");
+    let before = fixture.app.inventory().clone();
+
+    std::fs::remove_dir_all(fixture.seed.join("skills/demo")).expect("remove skill upstream");
+    commit(&fixture.seed, "remove demo");
+    git(&fixture.seed, &["push"]);
+    std::fs::write(fixture.clone.join("skills/demo/notes.txt"), "mine\n").expect("local occupant");
+
+    let source = fixture.app.sources()[0].clone();
+    let probe = probe_repository_update(&source, true);
+    let plan = plan_repository_update(&source, &probe, &before).expect("plan removal");
+
+    let codes = plan
+        .findings()
+        .iter()
+        .map(skilled::inventory::Finding::code)
+        .collect::<Vec<_>>();
+    assert!(
+        codes.contains(&"source.removal_leaves_content"),
+        "{codes:?}"
+    );
+    assert!(plan.is_blocked());
+}
+
+/// A tree entry is a tree entry. Replacing an installed skill directory with a
+/// regular file leaves the link resolving to that file rather than dangling, so
+/// the removal the preview would promise is not what the write produces — the
+/// same reason a surviving directory blocks.
+#[test]
+fn replacing_a_removed_skill_directory_with_a_file_blocks_the_update() {
+    let mut fixture = fixture();
+    let root = fixture._temporary.path().join("home/.claude/skills");
+    std::fs::create_dir_all(&root).expect("agent root");
+    std::os::unix::fs::symlink(fixture.clone.join("skills/demo"), root.join("demo"))
+        .expect("installed skill");
+    fixture
+        .app
+        .perform_effects(&[Effect::ScanInstallations])
+        .expect("scan before update");
+    let before = fixture.app.inventory().clone();
+
+    std::fs::remove_dir_all(fixture.seed.join("skills/demo")).expect("remove skill directory");
+    std::fs::write(fixture.seed.join("skills/demo"), "not a skill directory\n")
+        .expect("replacement file");
+    commit(&fixture.seed, "replace skill directory with file");
+    git(&fixture.seed, &["push"]);
+    let source = fixture.app.sources()[0].clone();
+    let probe = probe_repository_update(&source, true);
+    let plan = plan_repository_update(&source, &probe, &before).expect("plan replacement");
+
+    let codes = plan
+        .findings()
+        .iter()
+        .map(skilled::inventory::Finding::code)
+        .collect::<Vec<_>>();
+    assert!(
+        codes.contains(&"source.removal_leaves_content"),
+        "{codes:?}"
+    );
+    assert!(plan.is_blocked());
+}
+
+/// A rename empties the old candidate exactly as a removal does, so a local
+/// occupant leaves the old directory standing there too. The old side of a
+/// rename is disclosed as an installation losing its target, which is the same
+/// promise, and it has to be checked the same way.
+#[test]
+fn an_untracked_file_under_a_renamed_skill_blocks_the_update() {
+    let mut fixture = fixture();
+    let root = fixture._temporary.path().join("home/.claude/skills");
+    std::fs::create_dir_all(&root).expect("agent root");
+    std::os::unix::fs::symlink(fixture.clone.join("skills/demo"), root.join("demo"))
+        .expect("installed skill");
+    fixture
+        .app
+        .perform_effects(&[Effect::ScanInstallations])
+        .expect("scan before update");
+    let before = fixture.app.inventory().clone();
+
+    std::fs::rename(
+        fixture.seed.join("skills/demo"),
+        fixture.seed.join("skills/renamed"),
+    )
+    .expect("rename skill upstream");
+    commit(&fixture.seed, "rename demo");
+    git(&fixture.seed, &["push"]);
+    std::fs::write(fixture.clone.join("skills/demo/notes.txt"), "mine\n").expect("local occupant");
+
+    let source = fixture.app.sources()[0].clone();
+    let probe = probe_repository_update(&source, true);
+    let plan = plan_repository_update(&source, &probe, &before).expect("plan rename");
+
+    assert_eq!(
+        plan.affected().renamed,
+        [(
+            "demo".to_owned(),
+            "renamed".to_owned(),
+            Vec::<String>::new()
+        )],
+        "{:?}",
+        plan.affected()
+    );
+    let codes = plan
+        .findings()
+        .iter()
+        .map(skilled::inventory::Finding::code)
+        .collect::<Vec<_>>();
+    assert!(
+        codes.contains(&"source.removal_leaves_content"),
+        "{codes:?}"
+    );
+    assert!(plan.is_blocked());
+}
+
+/// The occupant check is a preview-time read, and the guard before the write
+/// re-reads everything the plan rests on. An untracked file dropped into a
+/// removed skill after the preview would otherwise let the fast-forward run and
+/// leave the directory standing, against the postcondition that was confirmed.
+#[test]
+fn an_occupant_arriving_after_the_preview_blocks_apply() {
+    let mut fixture = fixture();
+    let root = fixture._temporary.path().join("home/.claude/skills");
+    std::fs::create_dir_all(&root).expect("agent root");
+    std::os::unix::fs::symlink(fixture.clone.join("skills/demo"), root.join("demo"))
+        .expect("installed skill");
+    fixture
+        .app
+        .perform_effects(&[Effect::ScanInstallations])
+        .expect("scan before update");
+    let before = fixture.app.inventory().clone();
+
+    std::fs::remove_dir_all(fixture.seed.join("skills/demo")).expect("remove skill upstream");
+    commit(&fixture.seed, "remove demo");
+    git(&fixture.seed, &["push"]);
+    let source = fixture.app.sources()[0].clone();
+    let probe = probe_repository_update(&source, true);
+    let plan = plan_repository_update(&source, &probe, &before).expect("plan removal");
+    assert!(!plan.is_blocked(), "{:?}", plan.findings());
+    let head = git(&fixture.clone, &["rev-parse", "HEAD"]);
+
+    // After the preview and after the confirmation the plan would have carried.
+    std::fs::write(fixture.clone.join("skills/demo/notes.txt"), "mine\n").expect("late occupant");
+
+    assert!(apply_repository_update(&plan).is_err());
+    assert_eq!(git(&fixture.clone, &["rev-parse", "HEAD"]), head);
+}
+
+/// The confirmation covers what the update changes, and a link installed under
+/// another name is one of those things. Naming only the upstream skills a
+/// rename moves between leaves an alias that loses its target unmentioned,
+/// while verification goes on holding it to that outcome.
+#[test]
+fn a_rename_discloses_the_aliases_it_leaves_without_a_target() {
+    let mut fixture = fixture();
+    let root = fixture._temporary.path().join("home/.claude/skills");
+    std::fs::create_dir_all(&root).expect("agent root");
+    std::os::unix::fs::symlink(fixture.clone.join("skills/demo"), root.join("alias"))
+        .expect("installed under another name");
+    fixture
+        .app
+        .perform_effects(&[Effect::ScanInstallations])
+        .expect("scan before update");
+    let before = fixture.app.inventory().clone();
+
+    std::fs::rename(
+        fixture.seed.join("skills/demo"),
+        fixture.seed.join("skills/renamed"),
+    )
+    .expect("rename skill upstream");
+    commit(&fixture.seed, "rename demo");
+    git(&fixture.seed, &["push"]);
+    let source = fixture.app.sources()[0].clone();
+    let probe = probe_repository_update(&source, true);
+    let plan = plan_repository_update(&source, &probe, &before).expect("plan rename");
+
+    assert_eq!(
+        plan.affected().renamed,
+        [(
+            "demo".to_owned(),
+            "renamed".to_owned(),
+            vec!["alias".to_owned()]
+        )],
+        "{:?}",
+        plan.affected()
+    );
+    assert!(!plan.is_blocked(), "{:?}", plan.findings());
+}
+
+/// Git records a symbolic link as a blob, and both the source scanner and
+/// portable validation require a skill document to be a regular file that is
+/// not a link. Reading only the object type would call a `SKILL.md` replaced by
+/// a symbolic link a retained skill, apply the fast-forward, and leave the scan
+/// afterwards reporting an installation the preview said was updated in place.
+#[test]
+fn replacing_a_skill_document_with_a_symlink_is_not_an_update_in_place() {
+    let mut fixture = fixture();
+    let root = fixture._temporary.path().join("home/.claude/skills");
+    std::fs::create_dir_all(&root).expect("agent root");
+    std::os::unix::fs::symlink(fixture.clone.join("skills/demo"), root.join("demo"))
+        .expect("installed skill");
+    fixture
+        .app
+        .perform_effects(&[Effect::ScanInstallations])
+        .expect("scan before update");
+    let before = fixture.app.inventory().clone();
+
+    std::fs::write(
+        fixture.seed.join("skills/elsewhere.md"),
+        "---\nname: demo\ndescription: fixture\n---\n",
+    )
+    .expect("link destination");
+    std::fs::remove_file(fixture.seed.join("skills/demo/SKILL.md")).expect("remove skill document");
+    std::os::unix::fs::symlink("../elsewhere.md", fixture.seed.join("skills/demo/SKILL.md"))
+        .expect("symlinked skill document");
+    commit(&fixture.seed, "symlink the skill document");
+    git(&fixture.seed, &["push"]);
+
+    let source = fixture.app.sources()[0].clone();
+    let probe = probe_repository_update(&source, true);
+    let plan = plan_repository_update(&source, &probe, &before).expect("plan the replacement");
+
+    assert!(plan.affected().updated.is_empty(), "{:?}", plan.affected());
+    assert_eq!(plan.affected().removed, ["demo"], "{:?}", plan.affected());
+    let codes = plan
+        .findings()
+        .iter()
+        .map(skilled::inventory::Finding::code)
+        .collect::<Vec<_>>();
+    assert!(
+        codes.contains(&"source.removal_leaves_content"),
+        "{codes:?}"
+    );
+    assert!(plan.is_blocked());
+}
+
+/// `ls-tree` does not walk through a symbolic link, so a candidate under one
+/// reads as absent while the installed link would follow the new ancestor to
+/// wherever upstream aimed it — outside the registered checkout, for all the
+/// plan can tell. The candidate's own absence is therefore not enough to
+/// promise a link loses its target.
+#[test]
+fn replacing_a_removed_skills_ancestor_with_a_symlink_blocks_the_update() {
+    let mut fixture = fixture();
+    let root = fixture._temporary.path().join("home/.claude/skills");
+    std::fs::create_dir_all(&root).expect("agent root");
+    std::os::unix::fs::symlink(fixture.clone.join("skills/demo"), root.join("demo"))
+        .expect("installed skill");
+    fixture
+        .app
+        .perform_effects(&[Effect::ScanInstallations])
+        .expect("scan before update");
+    let before = fixture.app.inventory().clone();
+
+    std::fs::create_dir_all(fixture.seed.join("elsewhere/demo")).expect("link destination");
+    std::fs::write(
+        fixture.seed.join("elsewhere/demo/SKILL.md"),
+        "---\nname: demo\ndescription: elsewhere\n---\n",
+    )
+    .expect("destination skill");
+    std::fs::remove_dir_all(fixture.seed.join("skills")).expect("remove catalog directory");
+    std::os::unix::fs::symlink("elsewhere", fixture.seed.join("skills")).expect("catalog symlink");
+    commit(
+        &fixture.seed,
+        "replace the catalog directory with a symlink",
+    );
+    git(&fixture.seed, &["push"]);
+
+    let source = fixture.app.sources()[0].clone();
+    let probe = probe_repository_update(&source, true);
+    let plan = plan_repository_update(&source, &probe, &before).expect("plan the replacement");
+
+    let codes = plan
+        .findings()
+        .iter()
+        .map(skilled::inventory::Finding::code)
+        .collect::<Vec<_>>();
+    assert!(
+        codes.contains(&"source.removal_leaves_content"),
+        "{codes:?}"
+    );
+    assert!(plan.is_blocked());
+}
+
+/// Git's untracked and ignored lists name files, and an empty untracked
+/// directory has none. The fast-forward deletes the tracked files under the
+/// removed skill and then cannot remove the directory, so the link the preview
+/// promised would dangle keeps resolving to a directory that is not a skill.
+#[test]
+fn an_empty_untracked_directory_under_a_removed_skill_blocks_the_update() {
+    let mut fixture = fixture();
+    let root = fixture._temporary.path().join("home/.claude/skills");
+    std::fs::create_dir_all(&root).expect("agent root");
+    std::os::unix::fs::symlink(fixture.clone.join("skills/demo"), root.join("demo"))
+        .expect("installed skill");
+    fixture
+        .app
+        .perform_effects(&[Effect::ScanInstallations])
+        .expect("scan before update");
+    let before = fixture.app.inventory().clone();
+
+    std::fs::remove_dir_all(fixture.seed.join("skills/demo")).expect("remove skill upstream");
+    commit(&fixture.seed, "remove demo");
+    git(&fixture.seed, &["push"]);
+    std::fs::create_dir_all(fixture.clone.join("skills/demo/scratch")).expect("empty occupant");
+    assert!(
+        git(&fixture.clone, &["status", "--porcelain"]).is_empty(),
+        "an empty directory must not show in Git's own status"
+    );
+
+    let source = fixture.app.sources()[0].clone();
+    let probe = probe_repository_update(&source, true);
+    let plan = plan_repository_update(&source, &probe, &before).expect("plan removal");
+
+    let codes = plan
+        .findings()
+        .iter()
+        .map(skilled::inventory::Finding::code)
+        .collect::<Vec<_>>();
+    assert!(
+        codes.contains(&"source.removal_leaves_content"),
+        "{codes:?}"
+    );
+    assert!(plan.is_blocked());
+}
+
+/// `merge.verifySignatures` runs the configured signature program over the
+/// incoming tip. Skilled does not pass a flag either way — the setting is the
+/// user's policy wherever they put it — so the program it may run has to be
+/// named in what the confirmation covers, like the hooks and filters beside it.
+#[test]
+fn the_plan_discloses_the_signature_program_the_fast_forward_may_run() {
+    let fixture = fixture();
+    push_update(&fixture, "skills/demo/new.txt");
+    let source = fixture.app.sources()[0].clone();
+    let probe = probe_repository_update(&source, true);
+
+    let plan =
+        plan_repository_update(&source, &probe, fixture.app.inventory()).expect("plan update");
+
+    assert!(
+        plan.hooks_disclosure().contains("signature program"),
+        "{}",
+        plan.hooks_disclosure()
+    );
 }

@@ -85,7 +85,16 @@ pub struct Upstream {
     remote: String,
     merge_ref: String,
     tracking_ref: String,
-    revision: String,
+    /// The object the tracking ref names, when it names one.
+    ///
+    /// `None` is a configured upstream whose remote-tracking ref is not there:
+    /// pruned, deleted, or never fetched. That is not "no upstream" — the
+    /// remote, the merge ref, and the fetch mapping are all still configured,
+    /// and the fetch an explicit check performs is precisely what puts the ref
+    /// back. Treating the absent revision as an unconfigured upstream would
+    /// skip that fetch and leave the repository unable to check or apply an
+    /// update until the user fetched by hand.
+    revision: Option<String>,
 }
 
 impl Upstream {
@@ -101,13 +110,13 @@ impl Upstream {
     pub fn tracking_ref(&self) -> &str {
         &self.tracking_ref
     }
-    pub fn revision(&self) -> &str {
-        &self.revision
+    pub fn revision(&self) -> Option<&str> {
+        self.revision.as_deref()
     }
 
     pub(crate) fn with_revision(&self, revision: String) -> Self {
         let mut fetched = self.clone();
-        fetched.revision = revision;
+        fetched.revision = Some(revision);
         fetched
     }
 }
@@ -208,7 +217,7 @@ enum UpdateOp {
     ChangedPaths(String, String),
     CommitSummaries(String, String),
     CatFile(String),
-    TreeEntry {
+    TreeEntryMode {
         revision: String,
         path: PathBuf,
     },
@@ -247,7 +256,7 @@ impl UpdateOp {
             Self::AheadBehind(_, _) | Self::CommitSummaries(_, _) => "rev-list",
             Self::ChangedPaths(_, _) => "diff-tree",
             Self::CatFile(_) => "cat-file",
-            Self::TreeEntry { .. } => "ls-tree",
+            Self::TreeEntryMode { .. } => "ls-tree",
             Self::Status => "status",
             Self::Fetch { .. } => "fetch",
             Self::RemoteUrl(_) => "ls-remote",
@@ -364,11 +373,12 @@ impl UpdateOp {
                 reference.into(),
             ];
         }
-        if let Self::TreeEntry { revision, path } = self {
+        // The default listing keeps the entry's mode, which is the whole point
+        // here: `--name-only` says nothing about what kind of object is at the
+        // path, and `-d` can only ever answer about a directory.
+        if let Self::TreeEntryMode { revision, path } = self {
             return vec![
                 "ls-tree".into(),
-                "-d".into(),
-                "--name-only".into(),
                 "-z".into(),
                 revision.into(),
                 "--".into(),
@@ -477,7 +487,7 @@ impl UpdateOp {
                     format!("{revision}^{{commit}}"),
                 ]
             }
-            Self::TreeEntry { .. } | Self::PublishRef { .. } | Self::DeleteRef { .. } => {
+            Self::TreeEntryMode { .. } | Self::PublishRef { .. } | Self::DeleteRef { .. } => {
                 unreachable!("tree and ref operations return above")
             }
             Self::Status => vec![
@@ -489,6 +499,16 @@ impl UpdateOp {
                 "--ignore-submodules=dirty".into(),
             ],
             Self::Fetch { .. } => unreachable!("fetch returns above"),
+            // No signature flag either way. `merge.verifySignatures` is a
+            // policy, and a policy Skilled has no standing to overrule: set in
+            // the user's own global or system configuration it is theirs, and
+            // passing `--no-verify-signatures` would fast-forward to an
+            // unsigned tip that Git had been told to refuse. Re-reading the
+            // object the preview named settles which object is merged, not who
+            // vouches for it. What the setting can drag in — a `gpg.program`
+            // the checkout names — is disclosed with the hooks, the monitor,
+            // and the filters this write already runs, because disclosing what
+            // may run is this operation's answer rather than suppressing it.
             Self::Merge(revision) => vec![
                 "-c".into(),
                 "maintenance.auto=false".into(),
@@ -512,7 +532,7 @@ impl UpdateOp {
                 ("GIT_SSH_COMMAND".into(), ssh_command.into()),
                 ("GIT_OPTIONAL_LOCKS".into(), "0".into()),
             ],
-            Self::TreeEntry { .. } => vec![
+            Self::TreeEntryMode { .. } => vec![
                 ("GIT_OPTIONAL_LOCKS".into(), "0".into()),
                 ("GIT_LITERAL_PATHSPECS".into(), "1".into()),
             ],
@@ -809,12 +829,15 @@ pub fn upstream_of(repository: &Path, head: &HeadState) -> Result<Option<Upstrea
     if remote != "." && !tracking_ref.starts_with(&format!("refs/remotes/{remote}/")) {
         return Err(Error::InvalidGitOutput);
     }
-    let Some(revision) = optional(repository, UpdateOp::RevParse(tracking_ref.clone()))?
+    // An absent tracking ref leaves the revision unknown rather than the
+    // upstream unconfigured; a local upstream (`remote = .`) has no fetch to
+    // populate it, so there the absence is the end of the matter.
+    let revision = optional(repository, UpdateOp::RevParse(tracking_ref.clone()))?
         .map(text)
-        .filter(|value| !value.is_empty())
-    else {
+        .filter(|value| !value.is_empty());
+    if revision.is_none() && remote == "." {
         return Ok(None);
-    };
+    }
     Ok(Some(Upstream {
         branch,
         remote,
@@ -896,9 +919,12 @@ pub(crate) fn upstream_of_cancellable(
     else {
         return Ok(None);
     };
-    let Some(revision) = revision.map(text).filter(|value| !value.is_empty()) else {
+    // As in `upstream_of`: an absent tracking ref leaves the revision unknown,
+    // and only a local upstream has no fetch that could supply it.
+    let revision = revision.map(text).filter(|value| !value.is_empty());
+    if revision.is_none() && remote == "." {
         return Ok(Some(None));
-    };
+    }
     Ok(Some(Some(Upstream {
         branch,
         remote,
@@ -1985,17 +2011,82 @@ pub fn commit_exists(repository: &Path, revision: &str) -> Result<bool> {
     Ok(optional(repository, UpdateOp::CatFile(revision.into()))?.is_some())
 }
 
-/// Whether `path` names a directory in the exact commit tree. Literal
-/// pathspec handling keeps catalog names from becoming Git pattern syntax.
-pub fn tree_directory_exists(repository: &Path, revision: &str, path: &Path) -> Result<bool> {
-    Ok(!required(
+/// The mode of the entry `path` names in the exact commit tree, if it names
+/// one. Literal pathspec handling keeps catalog names from becoming Git
+/// pattern syntax.
+fn tree_entry_mode(repository: &Path, revision: &str, path: &Path) -> Result<Option<Vec<u8>>> {
+    let bytes = required(
         repository,
-        UpdateOp::TreeEntry {
+        UpdateOp::TreeEntryMode {
             revision: revision.into(),
             path: path.into(),
         },
-    )?
-    .is_empty())
+    )?;
+    // `<mode> SP <type> SP <object> TAB <name>`, NUL-terminated per record.
+    Ok(bytes
+        .split(|byte| *byte == 0)
+        .filter(|record| !record.is_empty())
+        .find_map(|record| {
+            record
+                .split(|byte| *byte == b'\t')
+                .next()
+                .and_then(|attributes| attributes.split(|byte| *byte == b' ').next())
+                .map(<[u8]>::to_vec)
+        }))
+}
+
+/// Whether `path` names a regular file — not a directory, and not a symbolic
+/// link — in the exact commit tree.
+///
+/// Asked of a candidate's `SKILL.md`, this is what decides whether a revision
+/// still holds a skill there. Directory existence cannot answer it: upstream
+/// can delete a candidate's skill document while leaving another tracked file
+/// beside it, and a catalog whose skill is the repository root has a directory
+/// at every revision no matter what the root contains.
+///
+/// The object type cannot answer it either. Git records a symbolic link as a
+/// blob, and both the source scanner and portable validation require the skill
+/// document to be a regular file that is not a link, so a `SKILL.md` replaced
+/// by a symbolic link would read as a retained skill here while the scan that
+/// follows the write reports the installation as no longer loadable. The mode
+/// is what distinguishes them: `100644` and `100755` are regular files, and
+/// `120000` is a link.
+pub fn tree_regular_file_exists(repository: &Path, revision: &str, path: &Path) -> Result<bool> {
+    Ok(tree_entry_mode(repository, revision, path)?.is_some_and(|mode| mode.starts_with(b"100")))
+}
+
+/// Whether the exact commit tree holds anything at all at `path`.
+///
+/// A directory, a regular file, a symbolic link, or a submodule: what matters
+/// where a removal was disclosed is only whether an installed link would still
+/// have something to resolve to.
+pub fn tree_entry_exists(repository: &Path, revision: &str, path: &Path) -> Result<bool> {
+    Ok(tree_entry_mode(repository, revision, path)?.is_some())
+}
+
+/// Whether `path` names a directory in the exact commit tree, if it names
+/// anything.
+///
+/// `None` is "nothing there", which is not the same as "there but not a
+/// directory": an ancestor the update turns into a symbolic link redirects
+/// every path under it, while an ancestor the update deletes outright leaves
+/// nothing to redirect.
+pub fn tree_directory_entry(
+    repository: &Path,
+    revision: &str,
+    path: &Path,
+) -> Result<Option<bool>> {
+    Ok(tree_entry_mode(repository, revision, path)?.map(|mode| {
+        // Git prints a directory as `040000`; the rest of the modes it records
+        // are files (`100644`, `100755`), symbolic links (`120000`), and
+        // submodules (`160000`).
+        let mode = mode
+            .iter()
+            .position(|byte| *byte != b'0')
+            .map_or(&[][..], |start| &mode[start..])
+            .to_vec();
+        mode == b"40000"
+    }))
 }
 
 pub fn worktree_state(repository: &Path) -> Result<WorktreeState> {
@@ -2279,9 +2370,9 @@ pub fn update_operation_fixtures() -> Vec<OperationFixture> {
         UpdateOp::ChangedPaths("a".into(), "b".into()),
         UpdateOp::CommitSummaries("a".into(), "b".into()),
         UpdateOp::CatFile("abc".into()),
-        UpdateOp::TreeEntry {
+        UpdateOp::TreeEntryMode {
             revision: "abc".into(),
-            path: "skills/demo".into(),
+            path: "skills/demo/SKILL.md".into(),
         },
         UpdateOp::Status,
         UpdateOp::Fetch {
@@ -2292,7 +2383,7 @@ pub fn update_operation_fixtures() -> Vec<OperationFixture> {
                     remote: "origin".into(),
                     merge_ref: "refs/heads/main".into(),
                     tracking_ref: "refs/remotes/origin/main".into(),
-                    revision: String::new(),
+                    revision: None,
                 },
                 &staging_ref_name(),
             ),
@@ -2710,7 +2801,7 @@ mod tests {
             merge_ref: "refs/heads/main".into(),
             tracking_ref: "refs/remotes/origin/main".into(),
             branch: "main".into(),
-            revision: first.clone(),
+            revision: Some(first.clone()),
         };
         run_git(&[
             "update-ref",
@@ -2776,6 +2867,31 @@ mod tests {
                 .arguments
                 .iter()
                 .any(|arg| arg == OsStr::new("core.untrackedCache=false"))
+        );
+    }
+
+    /// `merge.verifySignatures` is the user's policy wherever they set it, and
+    /// `--no-verify-signatures` would overrule it — fast-forwarding to an
+    /// unsigned tip Git had been told to refuse. The program it can pull in is
+    /// disclosed in the plan instead, which is how this operation answers for
+    /// everything else it may run.
+    #[test]
+    fn merge_does_not_overrule_a_configured_signature_policy() {
+        let merge = update_operation_fixtures()
+            .into_iter()
+            .find(|fixture| fixture.subcommand == "merge")
+            .expect("merge fixture");
+        assert!(
+            !merge
+                .arguments
+                .iter()
+                .any(|argument| argument == OsStr::new("--no-verify-signatures"))
+        );
+        assert!(
+            !merge
+                .arguments
+                .iter()
+                .any(|argument| argument == OsStr::new("--verify-signatures"))
         );
     }
 
