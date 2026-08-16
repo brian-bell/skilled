@@ -178,7 +178,31 @@ signal needs both, because colour alone is not an acceptable cue.
   the same key inside the checkout is refused. There is no documented way to
   turn a credential helper or an upload-pack program off the way there is for
   a hook, and reconstructing which of the user's scopes was meant would be
-  guessing at their intent. The fast-forward is the opposite case by design:
+  guessing at their intent. A refusal is a read, though, and the fetch it
+  guards is a later process, so the refusal is re-asked immediately before the
+  fetch rather than remembered from the top of the probe — and the two settings
+  that can be bound instead of trusted are. Git is handed the transport
+  allowlist itself as `GIT_ALLOW_PROTOCOL`, which overrides any `protocol.*`
+  permission the checkout grants itself, so a helper URL, an `insteadOf`
+  rewrite, or a `remote.<name>.vcs` written in after the refusal reaches no
+  program. That list is a ceiling and never a grant: it overrides the user's
+  `protocol.*` policy as readily as the checkout's, so what is handed over is
+  the ceiling narrowed by an inherited `GIT_ALLOW_PROTOCOL` and by the user's
+  own policy — `protocol.file.allow=never` is a hardening people apply, and
+  re-enabling it would be the bypass. Git's three states are all kept: `user`
+  is not `always`, so `GIT_PROTOCOL_FROM_USER=0` still refuses the transports
+  that sit at that policy, `file`, `ftp`, and `ftps` by default among them; a
+  policy value Git would abort on refuses rather than permits; and the
+  inherited list is split and matched exactly the way Git matches it, with an
+  unreadable one leaving nothing. Narrowing to nothing is a real answer there
+  rather than a reason to fall back. The checkout's scopes are left out
+  of that reading, so a repository can neither widen the ceiling nor deny
+  someone else's fetch. `core.sshCommand` is the one setting Skilled reads and exports
+  itself, so it is read with `--show-scope` at the moment of use and the
+  checkout's scopes are struck out of the answer, whenever the value arrived.
+  The rest are read by Git out of the repository configuration when the fetch
+  starts, and closing that gap by reproducing each vetted value as a `-c`
+  override is `skilled-88j`. The fast-forward is the opposite case by design:
   it is handed the repository's configuration, and the plan discloses the
   hooks, the monitor, the checkout filters, and the signature program it may
   run. That last one is disclosed rather than suppressed on purpose:
@@ -209,7 +233,13 @@ signal needs both, because colour alone is not an acceptable cue.
   incoming commit summaries included, because those are what the fast-forward
   brings in; the untruncated changed-file listing is non-gating evidence below
   it. A disclosed removal is verified as the same link, raw target included,
-  and not merely as some dangling entry under the same name.
+  and not merely as some dangling entry under the same name. Every other
+  installation is held to the same test: a fast-forward writes inside the
+  repository and nowhere near an agent root, so a link whose raw target changed
+  was rewritten by something outside the plan, and health and resolution cannot
+  see it when the new target reaches the same variant by another route. Repair
+  proves ownership by comparing a raw target against a receipt byte for byte,
+  so a retarget passed off as verified costs that link its evidence too.
 - An update's affected installations are decided by the variant each
   installation resolves to, never by the name a root holds. A link installed as
   `alias` pointing at skill `demo` is matched under `demo` and disclosed as

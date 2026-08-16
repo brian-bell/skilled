@@ -207,6 +207,8 @@ enum UpdateOp {
     RefState(String),
     ConfigGet(String),
     TransportSettings,
+    TransportPolicy,
+    UserSshCommand,
     RefsPresent(Vec<String>),
     RemoteUrl(String),
     FilterSettings,
@@ -226,6 +228,7 @@ enum UpdateOp {
         remote: String,
         refspec: String,
         ssh_command: String,
+        allowed_protocols: String,
         hooks_path: PathBuf,
     },
     PublishRef {
@@ -250,7 +253,9 @@ impl UpdateOp {
             Self::ConfigGet(_)
             | Self::FilterSettings
             | Self::PromisorSettings
-            | Self::TransportSettings => "config",
+            | Self::TransportSettings
+            | Self::TransportPolicy
+            | Self::UserSshCommand => "config",
             Self::CheckAttr => "check-attr",
             Self::MergeBase(_, _) => "merge-base",
             Self::AheadBehind(_, _) | Self::CommitSummaries(_, _) => "rev-list",
@@ -429,6 +434,27 @@ impl UpdateOp {
                 "--get-regexp".into(),
                 TRANSPORT_CODE_PATTERN.into(),
             ],
+            // Which transports the user permits, read with the scope that says
+            // the permission is theirs. The fetch's allowlist may only narrow
+            // against this, never restore something it turned off.
+            Self::TransportPolicy => vec![
+                "config".into(),
+                "--show-scope".into(),
+                "--null".into(),
+                "--get-regexp".into(),
+                TRANSPORT_POLICY_PATTERN.into(),
+            ],
+            // Read the same shape as the refusal above, for the same reason:
+            // the scope is what says whose command this is. A plain
+            // `--get` would answer with the value Git would use, which is
+            // precisely the checkout's own when the checkout has set one.
+            Self::UserSshCommand => vec![
+                "config".into(),
+                "--show-scope".into(),
+                "--null".into(),
+                "--get-regexp".into(),
+                SSH_COMMAND_PATTERN.into(),
+            ],
             Self::FilterSettings => vec![
                 "config".into(),
                 "--null".into(),
@@ -525,11 +551,33 @@ impl UpdateOp {
     fn environment(&self) -> Vec<(OsString, OsString)> {
         match self {
             Self::Merge(_) => Vec::new(),
-            Self::Fetch { ssh_command, .. } => vec![
+            // `GIT_ALLOW_PROTOCOL` is the one half of the transport claim the
+            // fetch enforces for itself rather than inheriting from a reading
+            // that came before it. Git treats it as `protocol.allow=never`
+            // with each listed protocol allowed, and it overrides the
+            // configuration outright — so a `remote.<name>.url`, an
+            // `insteadOf` rewrite, or a `remote.<name>.vcs` written into the
+            // checkout after the preflight refusal has read it cannot put a
+            // helper behind this fetch. The preflight read still runs, because
+            // refusing with `source.repository_transport_unsupported` says
+            // more than a fetch failure does; what it no longer has to be is
+            // the only thing standing between a config edit and a program.
+            //
+            // Because it overrides configuration outright, the list is
+            // [`narrowed_transports`]'s answer rather than [`HANDLED_BY_GIT`]
+            // itself: an inherited allowlist and the user's own `protocol.*`
+            // policy each subtract from it, so enforcing a ceiling here cannot
+            // hand back a transport somebody else had already refused.
+            Self::Fetch {
+                ssh_command,
+                allowed_protocols,
+                ..
+            } => vec![
                 ("GIT_TERMINAL_PROMPT".into(), "0".into()),
                 ("GIT_ASKPASS".into(), "".into()),
                 ("SSH_ASKPASS_REQUIRE".into(), "never".into()),
                 ("GIT_SSH_COMMAND".into(), ssh_command.into()),
+                ("GIT_ALLOW_PROTOCOL".into(), allowed_protocols.into()),
                 ("GIT_OPTIONAL_LOCKS".into(), "0".into()),
             ],
             Self::TreeEntryMode { .. } => vec![
@@ -979,6 +1027,34 @@ pub(crate) fn repository_is_partial_clone(repository: &Path) -> Result<bool> {
 /// spells them.
 const TRANSPORT_CODE_PATTERN: &str = r"^(core\.(sshcommand|askpass|gitproxy|alternaterefscommand)|credential(\..*)?\.helper|remote\..*\.(uploadpack|vcs)|protocol(\..*)?\.command)$";
 
+/// The transports Git reaches itself, without running a program the repository
+/// named.
+///
+/// `ftp` and `ftps` are deprecated but Git fetches them through its bundled
+/// curl support, so they are transports it implements rather than ones a
+/// repository supplied. Everything absent from this list — `ext::` most
+/// plainly, but any `git-remote-<name>` helper — is a program, and the fetch
+/// is given the list as `GIT_ALLOW_PROTOCOL` rather than merely being checked
+/// against it beforehand.
+///
+/// It is a ceiling and never a grant. `GIT_ALLOW_PROTOCOL` overrides every
+/// `protocol.*` setting Git would otherwise read, so handing this list over
+/// unconditionally would re-enable a transport the user had turned off — and
+/// `protocol.file.allow=never` is a hardening people really do apply. What the
+/// fetch is given is this list narrowed by the user's own policy and by any
+/// `GIT_ALLOW_PROTOCOL` already in the environment; the checkout's scopes are
+/// left out of that reading, so a repository can neither widen the ceiling nor
+/// narrow someone else's fetch.
+const HANDLED_BY_GIT: [&str; 7] = ["https", "http", "ssh", "git", "file", "ftp", "ftps"];
+
+/// `protocol.allow` and every `protocol.<name>.allow`, which together say which
+/// transports the user permits at all.
+const TRANSPORT_POLICY_PATTERN: &str = r"^protocol\.(.*\.)?allow$";
+
+/// The one transport setting Skilled reads out of the checkout itself, so the
+/// one whose scope it can decide at the moment of use rather than in advance.
+const SSH_COMMAND_PATTERN: &str = r"^core\.sshcommand$";
+
 /// A transport setting the registered checkout itself configures, if any.
 ///
 /// An explicit check is described to the user as reading. Git, though, takes
@@ -1028,6 +1104,289 @@ pub(crate) fn repository_transport_code_cancellable(
         return Err(git_error(repository, &arguments, &output));
     }
     Ok(Some(parse_transport_settings(output.stdout)))
+}
+
+/// The transport allowlist to hand this fetch, narrowed to what the caller and
+/// the user already permit.
+///
+/// Three sources, and every one of them may only take a transport away:
+/// [`HANDLED_BY_GIT`] is the ceiling, an inherited `GIT_ALLOW_PROTOCOL` is a
+/// caller's boundary this process has no standing to widen, and the user's own
+/// `protocol.*` policy is theirs the same way `merge.verifySignatures` is. The
+/// checkout's scopes are read out of that last one, so a repository can neither
+/// grant itself a transport nor deny the user one.
+fn permitted_transports(repository: &Path) -> Result<String> {
+    Ok(narrowed_transports(
+        &transport_policy(repository)?,
+        &inherited_transport_boundary(),
+    ))
+}
+
+fn permitted_transports_cancellable(
+    repository: &Path,
+    cancelled: &AtomicBool,
+    child_slot: &Mutex<Option<Child>>,
+) -> Result<Option<String>> {
+    let Some(policy) = transport_policy_cancellable(repository, cancelled, child_slot)? else {
+        return Ok(None);
+    };
+    Ok(Some(narrowed_transports(
+        &policy,
+        &inherited_transport_boundary(),
+    )))
+}
+
+fn transport_policy(repository: &Path) -> Result<TransportPolicy> {
+    let op = UpdateOp::TransportPolicy;
+    let arguments = op.arguments();
+    let output = run(repository, op)?;
+    if !output.status.success() {
+        // Nothing configured anywhere, so every protocol keeps Git's own
+        // default.
+        if output.status.code() == Some(1) && output.stdout.is_empty() {
+            return Ok(TransportPolicy::default());
+        }
+        return Err(git_error(repository, &arguments, &output));
+    }
+    Ok(parse_transport_policy(output.stdout))
+}
+
+fn transport_policy_cancellable(
+    repository: &Path,
+    cancelled: &AtomicBool,
+    child_slot: &Mutex<Option<Child>>,
+) -> Result<Option<TransportPolicy>> {
+    let op = UpdateOp::TransportPolicy;
+    let arguments = op.arguments();
+    let Some(output) = run_cancellable(repository, &op, cancelled, child_slot)? else {
+        return Ok(None);
+    };
+    if !output.status.success() {
+        if output.status.code() == Some(1) && output.stdout.is_empty() {
+            return Ok(Some(TransportPolicy::default()));
+        }
+        return Err(git_error(repository, &arguments, &output));
+    }
+    Ok(Some(parse_transport_policy(output.stdout)))
+}
+
+/// The user's own `protocol.*` settings, keyed as Git spells them.
+///
+/// `protocol.<name>.allow` decides a single transport and `protocol.allow` is
+/// the default for the rest; both are scalars whose last value wins, and both
+/// are read only from the scopes that are the user's.
+#[derive(Debug, Default)]
+struct TransportPolicy(std::collections::BTreeMap<String, String>);
+
+/// What Git does with a transport, spelled the way `protocol.<name>.allow` is.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TransportVerdict {
+    Always,
+    /// Permitted only when the operation came from the user rather than from
+    /// Git recursing into one — `GIT_PROTOCOL_FROM_USER` is what says which.
+    UserOnly,
+    Never,
+    /// A value Git does not recognise, which makes it abort rather than pick a
+    /// side. Nothing here can abort a user's fetch on that account, so it
+    /// refuses the transport instead: a policy that cannot be read is not a
+    /// policy that permits.
+    Unreadable,
+}
+
+impl TransportPolicy {
+    /// Resolved exactly as Git resolves it: the per-protocol key, then the
+    /// blanket default, then Git's own built-in for that protocol.
+    fn verdict(&self, protocol: &str) -> TransportVerdict {
+        self.0
+            .get(&format!("protocol.{protocol}.allow"))
+            .or_else(|| self.0.get("protocol.allow"))
+            .map_or_else(
+                || Self::builtin(protocol),
+                |value| match value.as_str() {
+                    "always" => TransportVerdict::Always,
+                    "user" => TransportVerdict::UserOnly,
+                    "never" => TransportVerdict::Never,
+                    _ => TransportVerdict::Unreadable,
+                },
+            )
+    }
+
+    /// Git's built-in policy for the transports it implements. `http`, `https`,
+    /// `git`, and `ssh` are its "known safe" set; everything else it does not
+    /// name falls to user-only, which is where `file`, `ftp`, and `ftps` land.
+    fn builtin(protocol: &str) -> TransportVerdict {
+        match protocol {
+            "http" | "https" | "git" | "ssh" => TransportVerdict::Always,
+            _ => TransportVerdict::UserOnly,
+        }
+    }
+}
+
+fn parse_transport_policy(bytes: Vec<u8>) -> TransportPolicy {
+    let mut records = bytes
+        .split(|byte| *byte == 0)
+        .filter(|record| !record.is_empty())
+        .map(String::from_utf8_lossy);
+    let mut policy = std::collections::BTreeMap::new();
+    while let (Some(scope), Some(entry)) = (records.next(), records.next()) {
+        if matches!(scope.as_ref(), "local" | "worktree") {
+            continue;
+        }
+        let (name, value) = entry
+            .split_once('\n')
+            .map_or((entry.as_ref(), ""), |(name, value)| (name, value));
+        // Lowered but not trimmed. Git compares these case-insensitively and
+        // whole: a quoted `"always "` keeps its space through the config
+        // parser and makes Git abort, so trimming it here would turn a policy
+        // Git refuses to read into permission.
+        policy.insert(name.to_owned(), value.to_ascii_lowercase());
+    }
+    TransportPolicy(policy)
+}
+
+/// The boundary the environment this process was started in already draws.
+///
+/// Two variables, read the way Git reads them. `GIT_ALLOW_PROTOCOL` is an
+/// allowlist a caller set, and `GIT_PROTOCOL_FROM_USER=0` says this is not a
+/// user-initiated operation, which is what makes Git's `user` policy a refusal
+/// — including for `file`, `ftp`, and `ftps`, whose built-in policy that is.
+struct TransportBoundary {
+    allowed: Option<std::ffi::OsString>,
+    from_user: bool,
+}
+
+fn inherited_transport_boundary() -> TransportBoundary {
+    TransportBoundary {
+        allowed: env::var_os("GIT_ALLOW_PROTOCOL"),
+        from_user: git_environment_boolean(env::var_os("GIT_PROTOCOL_FROM_USER").as_deref()),
+    }
+}
+
+/// A boolean spelled the way Git spells one in the environment.
+///
+/// Absent is true, which is Git's default for `GIT_PROTOCOL_FROM_USER`. Then
+/// the textual spellings, and then any integer, where every way of writing
+/// zero — `0`, `00`, `+0`, `-0` — is false. Git aborts on anything else, and
+/// nothing here is entitled to abort a user's fetch, so an unreadable value
+/// reads as false instead: that only ever narrows the allowlist, which is the
+/// single direction a misreading may go.
+fn git_environment_boolean(value: Option<&std::ffi::OsStr>) -> bool {
+    let Some(value) = value else {
+        return true;
+    };
+    let Some(value) = value.to_str() else {
+        return false;
+    };
+    match value.to_ascii_lowercase().as_str() {
+        "true" | "yes" | "on" => true,
+        "" | "false" | "no" | "off" => false,
+        number => number.parse::<i64>().is_ok_and(|number| number != 0),
+    }
+}
+
+/// [`HANDLED_BY_GIT`] with everything the user's policy or the caller's
+/// environment already refuses taken out of it.
+///
+/// An empty result is a real answer rather than a fallback: it says every
+/// transport this fetch could use is one somebody turned off, and Git refusing
+/// the fetch is the honest outcome. Widening back to the full list there would
+/// be the bypass this exists to prevent — which is also why an inherited
+/// allowlist this cannot read leaves nothing rather than everything.
+///
+/// The inherited list is compared the way Git compares it: split on `:` and
+/// matched exactly, with no trimming and no case folding, because `HTTPS` and
+/// ` https` are entries Git would not match either and treating them as
+/// `https` would grant a transport the caller did not.
+fn narrowed_transports(policy: &TransportPolicy, boundary: &TransportBoundary) -> String {
+    let inherited = match &boundary.allowed {
+        None => None,
+        Some(value) => match value.to_str() {
+            Some(value) => Some(value.split(':').collect::<Vec<_>>()),
+            None => return String::new(),
+        },
+    };
+    HANDLED_BY_GIT
+        .iter()
+        .filter(|protocol| match policy.verdict(protocol) {
+            TransportVerdict::Always => true,
+            TransportVerdict::UserOnly => boundary.from_user,
+            TransportVerdict::Never | TransportVerdict::Unreadable => false,
+        })
+        .filter(|protocol| {
+            inherited
+                .as_ref()
+                .is_none_or(|allowed| allowed.contains(protocol))
+        })
+        .copied()
+        .collect::<Vec<_>>()
+        .join(":")
+}
+
+/// The `core.sshCommand` the *user* configured, ignoring the checkout's own.
+///
+/// A repository-scoped value here is already a refusal, but that refusal is
+/// read once and the fetch is spawned several processes later — and this is
+/// the value Skilled itself exports as `GIT_SSH_COMMAND`, so a command written
+/// into the checkout in between would be read here and run. Asking for the
+/// scope alongside the value closes that rather than narrowing it: what this
+/// returns is the user's own by construction, whatever the checkout does
+/// meanwhile. The check still refuses a repository-scoped value, because a
+/// checkout that names a program is a thing to report and not merely to
+/// disregard.
+fn user_ssh_command(repository: &Path) -> Result<Option<String>> {
+    let op = UpdateOp::UserSshCommand;
+    let arguments = op.arguments();
+    let output = run(repository, op)?;
+    if !output.status.success() {
+        // Nothing configured anywhere, which is the ordinary answer.
+        if output.status.code() == Some(1) && output.stdout.is_empty() {
+            return Ok(None);
+        }
+        return Err(git_error(repository, &arguments, &output));
+    }
+    Ok(parse_user_ssh_command(output.stdout))
+}
+
+fn user_ssh_command_cancellable(
+    repository: &Path,
+    cancelled: &AtomicBool,
+    child_slot: &Mutex<Option<Child>>,
+) -> Result<Option<Option<String>>> {
+    let op = UpdateOp::UserSshCommand;
+    let arguments = op.arguments();
+    let Some(output) = run_cancellable(repository, &op, cancelled, child_slot)? else {
+        return Ok(None);
+    };
+    if !output.status.success() {
+        if output.status.code() == Some(1) && output.stdout.is_empty() {
+            return Ok(Some(None));
+        }
+        return Err(git_error(repository, &arguments, &output));
+    }
+    Ok(Some(parse_user_ssh_command(output.stdout)))
+}
+
+/// The surviving `core.sshCommand` from the scopes that are the user's.
+///
+/// The records alternate the same way [`parse_transport_settings`] reads them:
+/// a scope, then the key and its value separated by a newline. `core.sshCommand`
+/// is a scalar, so the last value Git read wins — with the checkout's own
+/// scopes struck out rather than allowed to be that last value. An empty value
+/// is the documented way to configure nothing, and reads as nothing here.
+fn parse_user_ssh_command(bytes: Vec<u8>) -> Option<String> {
+    let mut records = bytes
+        .split(|byte| *byte == 0)
+        .filter(|record| !record.is_empty())
+        .map(String::from_utf8_lossy);
+    let mut command = None;
+    while let (Some(scope), Some(entry)) = (records.next(), records.next()) {
+        if matches!(scope.as_ref(), "local" | "worktree") {
+            continue;
+        }
+        let value = entry.split_once('\n').map_or("", |(_, value)| value);
+        command = Some(value.trim().to_owned());
+    }
+    command.filter(|command| !command.is_empty())
 }
 
 /// The first repository-scoped setting that actually names a program.
@@ -1173,11 +1532,16 @@ pub(crate) fn effective_remote_url_cancellable(
 /// A `::` that appears after a slash is part of a path rather than a
 /// transport, and a plain path or an scp-style `user@host:path` names no
 /// scheme at all.
+///
+/// The same list is handed to the fetch as `GIT_ALLOW_PROTOCOL`, so this
+/// answer decides the refusal's wording while Git enforces it. That is also
+/// why the scheme is matched exactly rather than case-insensitively: URL
+/// schemes are case-insensitive to read but Git is not one of their readers.
+/// It compares the spelling literally, so `FILE://` is not the `file`
+/// transport it implements — it is `git-remote-FILE`, a helper, and observably
+/// runs as one. Folding the case here would call that built-in and let the
+/// preflight wave through the very thing it exists to refuse.
 pub(crate) fn remote_url_runs_a_helper(url: &str) -> bool {
-    // `ftp` and `ftps` are deprecated but Git fetches them itself through its
-    // bundled curl helpers, so they are transports it implements rather than
-    // ones a repository supplied.
-    const HANDLED_BY_GIT: [&str; 7] = ["https", "http", "ssh", "git", "file", "ftp", "ftps"];
     let url = url.trim();
     if let Some(index) = url.find("::")
         && !url[..index].contains('/')
@@ -1187,7 +1551,7 @@ pub(crate) fn remote_url_runs_a_helper(url: &str) -> bool {
     if let Some((scheme, _)) = url.split_once("://")
         && !scheme.contains('/')
     {
-        return !HANDLED_BY_GIT.contains(&scheme.to_ascii_lowercase().as_str());
+        return !HANDLED_BY_GIT.contains(&scheme);
     }
     false
 }
@@ -1550,31 +1914,46 @@ fn publish_ref_cancellable(
     }))
 }
 
-fn fetch_op(upstream: &Upstream, ssh_command: String, destination: &str) -> UpdateOp {
+/// What the fetch may run and reach, settled before it starts.
+///
+/// Both are decided here rather than left to Git's reading of the repository
+/// configuration, which is the whole point: these are the two halves of the
+/// transport claim a checkout could otherwise rewrite between the refusal that
+/// vetted it and the process that acts on it.
+struct FetchTransport {
+    ssh_command: String,
+    allowed_protocols: String,
+}
+
+fn fetch_op(upstream: &Upstream, transport: FetchTransport, destination: &str) -> UpdateOp {
     UpdateOp::Fetch {
         remote: upstream.remote.clone(),
         // The explicit refspec fetches this branch even when the user's
         // ordinary fetch refspec excludes it. The leading `+` is required to
         // observe and classify a rewritten upstream as diverged.
         refspec: upstream_refspec(upstream, destination),
-        ssh_command,
+        ssh_command: transport.ssh_command,
+        allowed_protocols: transport.allowed_protocols,
         hooks_path: SUPPRESSED_HOOKS_PATH.into(),
     }
 }
 
 pub fn fetch_upstream(repository: &Path, upstream: &Upstream) -> Result<String> {
     reject_symbolic_tracking_ref(repository, upstream)?;
-    let ssh_command = force_ssh_batch_mode(
-        &env::var("GIT_SSH_COMMAND")
-            .ok()
-            .or(config_get(repository, "core.sshCommand")?)
-            .unwrap_or_else(|| "ssh".into()),
-    )?;
+    let transport = FetchTransport {
+        ssh_command: force_ssh_batch_mode(
+            &env::var("GIT_SSH_COMMAND")
+                .ok()
+                .or(user_ssh_command(repository)?)
+                .unwrap_or_else(|| "ssh".into()),
+        )?,
+        allowed_protocols: permitted_transports(repository)?,
+    };
     // Read before the fetch, so the publication below can say what it expected
     // to be replacing rather than overwriting whatever arrived meanwhile.
     let before = direct_ref_object(repository, &upstream.tracking_ref)?;
     let staging = staging_ref(repository)?;
-    let fetched = fetch_into_staging(repository, upstream, ssh_command, &staging);
+    let fetched = fetch_into_staging(repository, upstream, transport, &staging);
     let published = fetched.and_then(|revision| {
         // Refused rather than clobbered: a tracking ref the user made symbolic
         // is theirs, and `--no-deref` would overwrite it in place. The check
@@ -1595,11 +1974,11 @@ pub fn fetch_upstream(repository: &Path, upstream: &Upstream) -> Result<String> 
 fn fetch_into_staging(
     repository: &Path,
     upstream: &Upstream,
-    ssh_command: String,
+    transport: FetchTransport,
     staging: &str,
 ) -> Result<String> {
     delete_ref(repository, staging)?;
-    let op = fetch_op(upstream, ssh_command, staging);
+    let op = fetch_op(upstream, transport, staging);
     let arguments = op.arguments();
     let output = run_bounded(repository, &op, MAX_FETCH_OUTPUT_BYTES)?;
     if !output.status.success() {
@@ -1674,14 +2053,20 @@ pub(crate) fn fetch_upstream_cancellable(
     let configured_ssh = if env::var("GIT_SSH_COMMAND").is_ok() {
         env::var("GIT_SSH_COMMAND").ok()
     } else {
-        let Some(value) =
-            config_get_cancellable(repository, "core.sshCommand", cancelled, child_slot)?
-        else {
+        let Some(value) = user_ssh_command_cancellable(repository, cancelled, child_slot)? else {
             return Ok(None);
         };
         value
     };
-    let ssh_command = force_ssh_batch_mode(configured_ssh.as_deref().unwrap_or("ssh"))?;
+    let Some(allowed_protocols) =
+        permitted_transports_cancellable(repository, cancelled, child_slot)?
+    else {
+        return Ok(None);
+    };
+    let transport = FetchTransport {
+        ssh_command: force_ssh_batch_mode(configured_ssh.as_deref().unwrap_or("ssh"))?,
+        allowed_protocols,
+    };
     let Some(before) =
         direct_ref_object_cancellable(repository, &upstream.tracking_ref, cancelled, child_slot)?
     else {
@@ -1689,12 +2074,7 @@ pub(crate) fn fetch_upstream_cancellable(
     };
     let staging = staging_ref(repository)?;
     let fetched = fetch_into_staging_cancellable(
-        repository,
-        upstream,
-        ssh_command,
-        &staging,
-        cancelled,
-        child_slot,
+        repository, upstream, transport, &staging, cancelled, child_slot,
     );
     let published = fetched.and_then(|revision| {
         let Some(revision) = revision else {
@@ -1753,7 +2133,7 @@ pub(crate) fn fetch_upstream_cancellable(
 fn fetch_into_staging_cancellable(
     repository: &Path,
     upstream: &Upstream,
-    ssh_command: String,
+    transport: FetchTransport,
     staging: &str,
     cancelled: &AtomicBool,
     child_slot: &Mutex<Option<Child>>,
@@ -1761,7 +2141,7 @@ fn fetch_into_staging_cancellable(
     if delete_ref_cancellable(repository, staging, cancelled, child_slot)?.is_none() {
         return Ok(None);
     }
-    let op = fetch_op(upstream, ssh_command, staging);
+    let op = fetch_op(upstream, transport, staging);
     let arguments = op.arguments();
     let child = command(repository, &op)
         .stdin(Stdio::null())
@@ -2362,6 +2742,9 @@ pub fn update_operation_fixtures() -> Vec<OperationFixture> {
         UpdateOp::SymbolicRef("refs/remotes/origin/main".into()),
         UpdateOp::UpstreamRef("refs/heads/main".into()),
         UpdateOp::ConfigGet("core.sshCommand".into()),
+        UpdateOp::UserSshCommand,
+        UpdateOp::TransportSettings,
+        UpdateOp::TransportPolicy,
         UpdateOp::FilterSettings,
         UpdateOp::PromisorSettings,
         UpdateOp::CheckAttr,
@@ -2388,6 +2771,15 @@ pub fn update_operation_fixtures() -> Vec<OperationFixture> {
                 &staging_ref_name(),
             ),
             ssh_command: "ssh -o BatchMode=yes".into(),
+            // What an unrestricted environment and an unset policy narrow to,
+            // which is the ceiling itself.
+            allowed_protocols: narrowed_transports(
+                &TransportPolicy::default(),
+                &TransportBoundary {
+                    allowed: None,
+                    from_user: true,
+                },
+            ),
             hooks_path: SUPPRESSED_HOOKS_PATH.into(),
         },
         UpdateOp::PublishRef {
@@ -2549,6 +2941,16 @@ mod tests {
         assert!(remote_url_runs_a_helper("anything::somewhere"));
         // An unrecognised scheme runs a helper too.
         assert!(remote_url_runs_a_helper("xyz://example.test/repo.git"));
+        // Including one that is only unrecognised by its capitals. A URL
+        // scheme is case-insensitive to read, but Git is not one of its
+        // readers: it compares the spelling literally, so `FILE://` sends it
+        // looking for `git-remote-FILE` and it says so — "'remote-FILE' is not
+        // a git command". Treating that as the built-in transport would let
+        // the preflight pass a helper through, and the fetch's own allowlist
+        // names the lower-case spellings only.
+        assert!(remote_url_runs_a_helper("HTTPS://example.test/repo.git"));
+        assert!(remote_url_runs_a_helper("FILE:///var/tmp/checkout"));
+        assert!(remote_url_runs_a_helper("Ssh://git@example.test/repo.git"));
 
         for handled in [
             "https://example.test/repo.git",
@@ -2556,7 +2958,6 @@ mod tests {
             "ssh://git@example.test/repo.git",
             "git://example.test/repo.git",
             "file:///var/tmp/checkout",
-            "HTTPS://example.test/repo.git",
             // Deprecated, but Git fetches these itself.
             "ftp://example.test/repo.git",
             "ftps://example.test/repo.git",
@@ -2919,6 +3320,242 @@ mod tests {
             "{destination}"
         );
         assert!(!refspec.contains("refs/remotes/"), "{refspec}");
+    }
+
+    /// The transport claim's URL half is enforced by the fetch rather than
+    /// carried over from a reading that preceded it. `GIT_ALLOW_PROTOCOL`
+    /// overrides `protocol.*` configuration outright, so a helper URL, an
+    /// `insteadOf` rewrite, or a permission the checkout grants itself between
+    /// the preflight read and this process cannot put a program behind it.
+    #[test]
+    fn the_fetch_carries_its_own_transport_allowlist() {
+        let fetch = update_operation_fixtures()
+            .into_iter()
+            .find(|fixture| fixture.subcommand == "fetch")
+            .expect("fetch fixture");
+        let (_, allowed) = fetch
+            .environment
+            .iter()
+            .find(|(key, _)| key == OsStr::new("GIT_ALLOW_PROTOCOL"))
+            .expect("transport allowlist");
+        let allowed = allowed.to_str().expect("allowlist text");
+
+        // The same answer `remote_url_runs_a_helper` gives, so a transport
+        // cannot be refused by one and permitted by the other.
+        for protocol in allowed.split(':') {
+            assert!(
+                !remote_url_runs_a_helper(&format!("{protocol}://host/repository.git")),
+                "{protocol} is allowed here but refused as a URL"
+            );
+        }
+        assert!(!allowed.split(':').any(|protocol| protocol == "ext"));
+    }
+
+    /// The allowlist overrides every `protocol.*` Git would read, so it may
+    /// only ever subtract. A caller's inherited restriction and the user's own
+    /// policy each narrow it; the checkout's scopes reach neither, so a
+    /// repository can neither grant itself a transport nor take one away.
+    #[test]
+    fn the_transport_allowlist_only_ever_narrows() {
+        let unset = TransportPolicy::default();
+        assert_eq!(
+            narrowed_transports(&unset, &boundary(None, true)),
+            HANDLED_BY_GIT.join(":")
+        );
+
+        // An inherited boundary this process has no standing to widen.
+        assert_eq!(
+            narrowed_transports(&unset, &boundary(Some("https"), true)),
+            "https"
+        );
+        assert_eq!(
+            narrowed_transports(&unset, &boundary(Some("https:ext"), true)),
+            "https"
+        );
+        // An inherited allowlist that permits nothing leaves nothing, rather
+        // than falling back to the ceiling.
+        assert_eq!(narrowed_transports(&unset, &boundary(Some(""), true)), "");
+        // Git splits the raw value and matches exactly, so neither of these
+        // names a transport it would have permitted either.
+        assert_eq!(
+            narrowed_transports(&unset, &boundary(Some("HTTPS"), true)),
+            ""
+        );
+        assert_eq!(
+            narrowed_transports(&unset, &boundary(Some(" https"), true)),
+            ""
+        );
+
+        // `protocol.file.allow=never` is a real hardening, and re-enabling it
+        // would be the bypass.
+        let refused = policy(&record("global", "protocol.file.allow", "never"));
+        assert!(!narrowed_transports(&refused, &boundary(None, true)).contains("file"));
+        // The blanket default decides the transports no key names, and a named
+        // permission outranks it — the order Git resolves them in.
+        let excepted = policy(&format!(
+            "{}{}",
+            record("global", "protocol.allow", "never"),
+            record("global", "protocol.https.allow", "always")
+        ));
+        assert_eq!(
+            narrowed_transports(&excepted, &boundary(None, true)),
+            "https"
+        );
+        // A value Git would abort on permits nothing here, rather than being
+        // read as consent — including one that is only a recognised spelling
+        // once whitespace a quoted value kept is taken off it.
+        for unreadable in ["sometimes", "always "] {
+            assert_eq!(
+                narrowed_transports(
+                    &policy(&record("global", "protocol.allow", unreadable)),
+                    &boundary(None, true)
+                ),
+                "",
+                "{unreadable:?} was read as permission"
+            );
+        }
+        // The checkout's own policy is nobody's boundary: it neither widens
+        // the ceiling nor narrows a fetch on the user's behalf.
+        let checkout = policy(&record("local", "protocol.allow", "never"));
+        assert_eq!(
+            narrowed_transports(&checkout, &boundary(None, true)),
+            HANDLED_BY_GIT.join(":")
+        );
+    }
+
+    /// `user` is not `always`. Git permits a user-only transport exactly when
+    /// the operation came from the user, and `file`, `ftp`, and `ftps` sit at
+    /// that policy by default — so exporting them unconditionally would turn a
+    /// caller's `GIT_PROTOCOL_FROM_USER=0` into permission.
+    #[test]
+    fn a_user_only_transport_follows_where_the_operation_came_from() {
+        let unset = TransportPolicy::default();
+        assert_eq!(
+            narrowed_transports(&unset, &boundary(None, false)),
+            "https:http:ssh:git"
+        );
+        // Named explicitly, the same policy answers the same way.
+        let named = policy(&record("global", "protocol.https.allow", "user"));
+        assert!(!narrowed_transports(&named, &boundary(None, false)).contains("https"));
+        assert!(narrowed_transports(&named, &boundary(None, true)).contains("https"));
+        // A transport the user permitted outright is unaffected by it.
+        let always = policy(&record("global", "protocol.file.allow", "always"));
+        assert!(narrowed_transports(&always, &boundary(None, false)).contains("file"));
+    }
+
+    /// The environment says whether this is a user-initiated operation in
+    /// Git's own boolean spelling, and a value Git would abort on cannot be
+    /// read here as permission.
+    #[cfg(unix)]
+    #[test]
+    fn the_operations_origin_is_read_the_way_git_reads_a_boolean() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let boolean = |value: &str| git_environment_boolean(Some(std::ffi::OsStr::new(value)));
+
+        // Absent is Git's default, and this is the only true answer that
+        // widens anything, so it is the one to be sure of.
+        assert!(git_environment_boolean(None));
+        for truthy in ["true", "YES", "on", "1", "2", "-3"] {
+            assert!(boolean(truthy), "{truthy:?}");
+        }
+        // Every spelling of zero is false, which is the whole reason not to
+        // match a short list of words.
+        for falsey in ["false", "NO", "off", "", "0", "00", "+0", "-0"] {
+            assert!(!boolean(falsey), "{falsey:?}");
+        }
+        // Git aborts on these; nothing here can, so they narrow instead.
+        for unreadable in ["maybe", "yes please"] {
+            assert!(!boolean(unreadable), "{unreadable:?}");
+        }
+        assert!(!git_environment_boolean(Some(
+            &std::ffi::OsString::from_vec(b"\xff".to_vec())
+        )));
+    }
+
+    /// An allowlist this cannot read is still a boundary somebody drew, so it
+    /// leaves nothing rather than being treated as absent.
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_inherited_allowlist_permits_nothing() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let boundary = TransportBoundary {
+            allowed: Some(std::ffi::OsString::from_vec(b"https\xff".to_vec())),
+            from_user: true,
+        };
+
+        assert_eq!(
+            narrowed_transports(&TransportPolicy::default(), &boundary),
+            ""
+        );
+    }
+
+    fn boundary(allowed: Option<&str>, from_user: bool) -> TransportBoundary {
+        TransportBoundary {
+            allowed: allowed.map(std::ffi::OsString::from),
+            from_user,
+        }
+    }
+
+    fn policy(records: &str) -> TransportPolicy {
+        parse_transport_policy(records.as_bytes().to_vec())
+    }
+
+    fn record(scope: &str, name: &str, value: &str) -> String {
+        format!("{scope}\0{name}\n{value}\0")
+    }
+
+    /// A `core.sshCommand` inside the checkout is refused before a check runs,
+    /// but the refusal and the fetch are separate processes. The value Skilled
+    /// exports is therefore chosen by scope at the moment it is read: the
+    /// user's own survives, the checkout's is struck out however late it
+    /// arrived, and an empty value configures nothing.
+    #[test]
+    fn only_the_users_own_ssh_command_is_exported() {
+        let record = |scope: &str, value: &str| format!("{scope}\0core.sshCommand\n{value}\0");
+
+        assert_eq!(
+            parse_user_ssh_command(record("global", "ssh -i key").into_bytes()),
+            Some("ssh -i key".to_owned())
+        );
+        assert_eq!(
+            parse_user_ssh_command(record("local", "/checkout/ssh.sh").into_bytes()),
+            None
+        );
+        assert_eq!(
+            parse_user_ssh_command(record("worktree", "/checkout/ssh.sh").into_bytes()),
+            None
+        );
+        // A scalar's last value wins, and the checkout's is not eligible to be
+        // it however far down the list Git read it.
+        assert_eq!(
+            parse_user_ssh_command(
+                format!(
+                    "{}{}",
+                    record("global", "ssh -i key"),
+                    record("local", "/checkout/ssh.sh")
+                )
+                .into_bytes()
+            ),
+            Some("ssh -i key".to_owned())
+        );
+        assert_eq!(
+            parse_user_ssh_command(
+                format!(
+                    "{}{}",
+                    record("system", "ssh -i system"),
+                    record("global", "ssh -i user")
+                )
+                .into_bytes()
+            ),
+            Some("ssh -i user".to_owned())
+        );
+        assert_eq!(
+            parse_user_ssh_command(record("global", "").into_bytes()),
+            None
+        );
+        assert_eq!(parse_user_ssh_command(Vec::new()), None);
     }
 
     /// Two invocations must not be able to collide on a destination, or one

@@ -3100,6 +3100,101 @@ fn an_executable_remote_url_is_refused() {
     assert!(!marker.exists(), "the ext:: transport command ran");
 }
 
+/// The preflight refusal reads the configuration once and the fetch is spawned
+/// several processes later, so a URL written into the checkout in between was
+/// never vetted by anything. Calling the fetch directly is how that is stated
+/// as a test: no check has run, so only the fetch itself can refuse.
+///
+/// `protocol.ext.allow` is the reason this is not already covered. Git refuses
+/// `ext::` by default, but a checkout may turn that default off for itself, and
+/// the key is a permission rather than a program so it is deliberately not one
+/// of the transport settings the check refuses. Handing the fetch its own
+/// allowlist is what makes the permission unreachable.
+#[test]
+fn the_fetch_refuses_a_transport_helper_no_check_ever_saw() {
+    let fixture = fixture();
+    let head = skilled::git::head_state(&fixture.clone).expect("head state");
+    let upstream = skilled::git::upstream_of(&fixture.clone, &head)
+        .expect("read upstream")
+        .expect("configured upstream");
+    let marker = fixture._temporary.path().join("LATE_EXT_RAN");
+    git(
+        &fixture.clone,
+        &[
+            "config",
+            "remote.origin.url",
+            &format!("ext::sh -c touch% {}", marker.display()),
+        ],
+    );
+    git(&fixture.clone, &["config", "protocol.ext.allow", "always"]);
+
+    let result = skilled::git::fetch_upstream(&fixture.clone, &upstream);
+
+    assert!(
+        result.is_err(),
+        "the fetch used a transport helper the checkout named"
+    );
+    assert!(!marker.exists(), "the ext:: transport command ran");
+}
+
+/// The same window over the one transport setting Skilled reads itself and
+/// exports as `GIT_SSH_COMMAND`. Scope decides it at the moment of use, so a
+/// command the checkout holds is not run even where nothing refused it first.
+#[test]
+fn the_fetch_ignores_an_ssh_command_the_checkout_holds() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = fixture();
+    let head = skilled::git::head_state(&fixture.clone).expect("head state");
+    let upstream = skilled::git::upstream_of(&fixture.clone, &head)
+        .expect("read upstream")
+        .expect("configured upstream");
+    let marker = fixture._temporary.path().join("LATE_SSH_RAN");
+    let script = fixture._temporary.path().join("checkout-ssh.sh");
+    std::fs::write(
+        &script,
+        format!("#!/bin/sh\ntouch '{}'\nexit 1\n", marker.display()),
+    )
+    .expect("ssh command fixture");
+    let mut permissions = std::fs::metadata(&script)
+        .expect("ssh command metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&script, permissions).expect("executable ssh command");
+    // An SSH remote is what makes Git reach for the command at all. Nothing
+    // listens on port 1, so the fetch fails either way and only the marker
+    // says which program ran.
+    git(
+        &fixture.clone,
+        &[
+            "config",
+            "remote.origin.url",
+            "ssh://127.0.0.1:1/remote.git",
+        ],
+    );
+    git(
+        &fixture.clone,
+        &[
+            "config",
+            "core.sshCommand",
+            script.to_str().expect("ssh command path"),
+        ],
+    );
+
+    let result = skilled::git::fetch_upstream(&fixture.clone, &upstream);
+
+    assert!(result.is_err(), "the fetch reached the unreachable remote");
+    assert!(!marker.exists(), "the checkout's ssh command ran");
+}
+
+// The other half — that the user's own `core.sshCommand` survives, so the
+// refusal does not quietly break a legitimate deploy-key setup — is
+// `git::tests::only_the_users_own_ssh_command_is_exported`. Reaching a global
+// scope from here would mean setting `GIT_CONFIG_GLOBAL` for the whole process
+// while the harness runs these tests on parallel threads, which is undefined
+// behaviour under the Rust 2024 contract for `set_var` and would leak the
+// configuration into every other test's Git invocations besides.
+
 /// A link may be installed under a name other than the directory it points at,
 /// and several links may point at one directory. The plan states the
 /// installation that starts loading, because that is what the user is
@@ -3236,6 +3331,70 @@ fn a_hook_that_substitutes_a_different_dangling_link_fails_verification() {
             .failures()
             .iter()
             .any(|failure| failure.contains("demo")),
+        "{:?}",
+        report.failures()
+    );
+}
+
+/// The ordinary case deserves the same test the disclosed removal and the
+/// disclosed restoration already apply. A fast-forward writes inside the
+/// repository and nowhere near an agent root, so a link whose raw target
+/// changed was rewritten by something outside the plan — and health and
+/// resolution alone cannot see it when the new target resolves to the same
+/// variant. The changed target also invalidates the byte-identical receipt
+/// evidence a later repair would need, so reporting this as fully verified
+/// would hide a mutation with consequences past this operation.
+#[test]
+fn a_hook_that_retargets_an_updated_installation_fails_verification() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut fixture = fixture();
+    let root = fixture._temporary.path().join("home/.claude/skills");
+    std::fs::create_dir_all(&root).expect("agent root");
+    std::os::unix::fs::symlink(fixture.clone.join("skills/demo"), root.join("demo"))
+        .expect("installed skill");
+    fixture
+        .app
+        .perform_effects(&[Effect::ScanInstallations])
+        .expect("scan before update");
+    let before = fixture.app.inventory().clone();
+
+    push_update(&fixture, "skills/demo/new.txt");
+    let source = fixture.app.sources()[0].clone();
+    let probe = probe_repository_update(&source, true);
+    let plan = plan_repository_update(&source, &probe, &before).expect("plan update");
+
+    // The same destination by a different route: healthy before and after,
+    // resolving to the same variant both times, and only the recorded target
+    // tells them apart.
+    let hook = fixture.clone.join(".git/hooks/post-merge");
+    std::fs::write(
+        &hook,
+        format!(
+            "#!/bin/sh\nrm -f '{link}'\nln -s '../../../clone/skills/demo' '{link}'\n",
+            link = root.join("demo").display(),
+        ),
+    )
+    .expect("post-merge hook");
+    let mut permissions = std::fs::metadata(&hook)
+        .expect("hook metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&hook, permissions).expect("executable hook");
+
+    apply_repository_update(&plan).expect("fast-forward");
+    fixture
+        .app
+        .perform_effects(&[Effect::ScanInstallations])
+        .expect("scan after update");
+    let report = verify_repository_update(&plan, &before, fixture.app.inventory());
+
+    assert!(!report.is_verified(), "{:?}", report.failures());
+    assert!(
+        report
+            .failures()
+            .iter()
+            .any(|failure| failure.contains("demo") && failure.contains("retargeted")),
         "{:?}",
         report.failures()
     );

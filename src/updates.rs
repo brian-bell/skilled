@@ -495,6 +495,17 @@ fn probe_existing_cancellable(
         if url.as_deref().is_some_and(git::remote_url_runs_a_helper) {
             return Ok(Some(transport_code_probe(path, &key)));
         }
+        // Re-asked immediately before the fetch, for the reason given on the
+        // same guard in `probe_existing`.
+        let Some(transport_code) =
+            git::repository_transport_code_cancellable(path, cancelled, child_slot)
+                .map_err(ProbeFailure::Inspect)?
+        else {
+            return Ok(None);
+        };
+        if let Some(setting) = transport_code {
+            return Ok(Some(transport_code_probe(path, &setting)));
+        }
         match git::fetch_upstream_cancellable(path, &upstream, cancelled, child_slot) {
             Ok(Some(revision)) => revision,
             Ok(None) => return Ok(None),
@@ -814,6 +825,19 @@ fn probe_existing(
                 path,
                 &format!("remote.{}.url", value.remote()),
             ));
+        }
+        // Re-asked immediately before the fetch, not remembered from the top of
+        // this function. Two of the keys are now settled at the moment they are
+        // used rather than in advance — Git enforces the transport allowlist
+        // itself, and `core.sshCommand` is read with its scope — but the rest
+        // are read by Git out of whatever the config holds when the fetch
+        // starts, so the head, worktree, upstream, and URL reads above must not
+        // be inside the window this answer covers. What remains is the single
+        // gap between this process and the fetch, tracked as `skilled-88j`.
+        if let Some(setting) =
+            git::repository_transport_code(path).map_err(ProbeFailure::Inspect)?
+        {
+            return Ok(transport_code_probe(path, &setting));
         }
         let revision = git::fetch_upstream(path, value).map_err(ProbeFailure::Fetch)?;
         upstream = Some(value.with_revision(revision));
@@ -2226,7 +2250,27 @@ pub fn verify_repository_update(
                     }
                     continue;
                 }
+                // An installation this update disclosed nothing about. A
+                // fast-forward writes inside the repository and nowhere near an
+                // agent root, so the link is expected to come through
+                // untouched — the *same* link, not merely one as healthy that
+                // resolves as far. Health and resolution cannot tell the
+                // difference: a disclosed hook can retarget the link at another
+                // route to the same variant and satisfy both. The object
+                // carries the raw target, which is what separates them, and the
+                // disclosed removal and restoration branches above already
+                // compare it. It is not only this report's honesty at stake —
+                // repair proves ownership by comparing a link's raw target
+                // against a receipt byte for byte, so a target rewritten here
+                // and passed off as verified costs the link that evidence.
                 match after_observation {
+                    Some(after) if after.object() != observation.object() => {
+                        failures.push(format!(
+                            "installation {} for {} was retargeted without disclosure",
+                            row.name(),
+                            observation.agent().display_name()
+                        ))
+                    }
                     Some(after)
                         if after.health() <= observation.health()
                             && after.resolution() == observation.resolution() => {}
