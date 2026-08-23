@@ -58,44 +58,15 @@ const REPOSITORY_ROUTING_ENVIRONMENT: &[&str] = &[
     "GIT_CONFIG_COUNT",
 ];
 
-// POSIX `fchdir(2)`, linked from the platform C library every build already
-// carries. Declared directly because one async-signal-safe call does not
-// justify a bindings dependency; the signature is POSIX.1-2008's.
+// `fchdir(2)` and the `open(2)` flags behind the pinned-checkout handle come
+// from `libc` rather than hand declarations: the call is POSIX everywhere,
+// but `O_DIRECTORY` and `O_NONBLOCK` are per-kernel, per-architecture ABI
+// values — Linux alone spells `O_DIRECTORY` two ways across architectures —
+// and a transcription error here silently passes some *other* flag to the
+// open that guards the trust boundary. The crate is already in every build's
+// dependency tree underneath the bundled SQLite.
 #[cfg(unix)]
-unsafe extern "C" {
-    fn fchdir(fd: std::ffi::c_int) -> std::ffi::c_int;
-}
-
-// `open(2)` flags for acquiring the pinned directory, declared per supported
-// platform for the same no-new-dependency reason as `fchdir` above. The
-// values are the kernel ABI's: Darwin defines one set for every architecture;
-// Linux takes the asm-generic values except on x86, whose `O_DIRECTORY`
-// predates them. An unlisted Unix builds with both flags absent, falling back
-// to the plain open whose post-open identity comparison still rejects a
-// non-directory — it merely loses the guarantee of not blocking on one.
-#[cfg(any(target_os = "macos", target_os = "ios"))]
-const O_DIRECTORY: i32 = 0x0010_0000;
-#[cfg(any(target_os = "macos", target_os = "ios"))]
-const O_NONBLOCK: i32 = 0x0000_0004;
-#[cfg(all(target_os = "linux", any(target_arch = "x86_64", target_arch = "x86")))]
-const O_DIRECTORY: i32 = 0o200000;
-#[cfg(all(
-    target_os = "linux",
-    not(any(target_arch = "x86_64", target_arch = "x86"))
-))]
-const O_DIRECTORY: i32 = 0o40000;
-#[cfg(target_os = "linux")]
-const O_NONBLOCK: i32 = 0o4000;
-#[cfg(all(
-    unix,
-    not(any(target_os = "macos", target_os = "ios", target_os = "linux"))
-))]
-const O_DIRECTORY: i32 = 0;
-#[cfg(all(
-    unix,
-    not(any(target_os = "macos", target_os = "ios", target_os = "linux"))
-))]
-const O_NONBLOCK: i32 = 0;
+use libc::{O_DIRECTORY, O_NONBLOCK, fchdir};
 
 /// An open handle to the checkout an operation was validated against.
 ///
