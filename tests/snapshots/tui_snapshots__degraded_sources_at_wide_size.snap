@@ -7,7 +7,7 @@ expression: "normalize_degraded(&temporary, render(&app, 120, 40))"
 ▕ ◆ skilled  global                                                                                                    ▏
 ▕▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▏
 ▕                │                │                │                │                                                  ▏
-▕ 1 Inventory ·1 │ 2 Sources      │ Updates (soon) │ 4 Doctor       │                ● degraded · metadata unavailable ▏
+▕ 1 Inventory ·1 │ 2 Sources      │ 3 Updates      │ 4 Doctor       │                ● degraded · metadata unavailable ▏
 ▕▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁│▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁│▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁│▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁│▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▏
 ▕▌ Repositories  registry unav...│   Available variants  no source             │   Details  no selection               ▏
 ▕────────────────────────────────│ ────────────────────────────────────────────│ ───────────────────────────────────── ▏

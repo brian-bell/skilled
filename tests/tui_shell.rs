@@ -718,19 +718,14 @@ fn navigation_separates_active_reachable_and_unavailable_destinations() {
     assert_eq!(reachable.fg, Some(Color::Rgb(0x84, 0x91, 0xa1)));
     assert!(!reachable.add_modifier.contains(Modifier::BOLD));
 
-    // A view without an implementation is visibly unavailable rather than
-    // absent, and offers no shortcut, because 3 is unmapped everywhere.
-    assert!(navigation.contains("Updates (soon)"), "{navigation}");
-    assert!(!navigation.contains("3 Updates"), "{navigation}");
+    assert!(navigation.contains("3 Updates"), "{navigation}");
+    assert!(!navigation.contains("Updates (soon)"), "{navigation}");
     // Doctor is implemented, so it carries its route like any other.
     assert!(navigation.contains(" 4 Doctor"), "{navigation}");
     assert!(!navigation.contains("Doctor (soon)"), "{navigation}");
 
-    // One de-emphasis mechanism, plus the word "(soon)" for anyone who cannot
-    // perceive it.
-    let unavailable = style_at(&screen, "Updates");
-    assert_eq!(unavailable.fg, Some(Color::Rgb(0x53, 0x61, 0x71)));
-    assert!(!unavailable.add_modifier.contains(Modifier::DIM));
+    let updates = style_at(&screen, "3 Updates");
+    assert_eq!(updates.fg, Some(Color::Rgb(0x84, 0x91, 0xa1)));
 }
 
 #[test]
@@ -1363,8 +1358,10 @@ fn degraded_doctor_still_reports_that_no_root_exists() {
 
 /// The metadata units recover independently, so a session degraded by a
 /// malformed completion flag can still hold a registry that was read whole.
-/// Doctor states the verdict that survived rather than withholding it, and
-/// never says a complete registry cannot be claimed complete.
+/// Doctor states the verdict that survived rather than withholding it: it never
+/// says a complete registry cannot be claimed complete, and it names the one
+/// thing that really did go with the store — the ownership receipts, without
+/// which repairability and a complete finding count cannot be stated.
 #[test]
 fn degraded_doctor_states_a_verdict_its_recovered_registry_supports() {
     let harness = Harness::new();
@@ -1388,10 +1385,22 @@ fn degraded_doctor_states_a_verdict_its_recovered_registry_supports() {
         .expect("scan for Doctor");
     let rendered = text(&buffer(&app, 120, 40));
 
-    assert!(rendered.contains("nothing to report"), "{rendered}");
-    assert!(rendered.contains("Nothing to report"), "{rendered}");
+    // The registry survived, so the reason the count is withheld is the receipt
+    // table alone — and the pane header and the body beneath it say the same.
+    assert!(
+        rendered.contains("receipts could not be read"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("Ownership receipts could not be read"),
+        "{rendered}"
+    );
     assert!(
         !rendered.contains("cannot claim the registry is complete"),
+        "{rendered}"
+    );
+    assert!(
+        !rendered.contains("A registered source could not be read"),
         "{rendered}"
     );
     // The failure is still stated, by the banner that owns it.
@@ -2400,20 +2409,9 @@ fn navigation_withholds_a_count_it_could_not_observe() {
         // The registry is not the filesystem: it is still fully known.
         assert!(navigation.contains(" 2 Sources ·0 "), "{navigation}");
 
-        // A destination this release cannot open counts nothing, and says so
-        // by rendering nothing rather than by a placeholder that reads as an
-        // empty measurement. The '·' lead-in is reserved for real counts, so
-        // an unavailable tab may not borrow it either.
-        for unavailable in ["Updates (soon)"] {
-            match after(&navigation, unavailable) {
-                None => assert!(navigation.ends_with(unavailable), "{navigation}"),
-                Some(next) => {
-                    assert!(!next.is_ascii_digit(), "{unavailable}: {navigation}");
-                    assert_ne!(next, '—', "{unavailable}: {navigation}");
-                    assert_ne!(next, '·', "{unavailable}: {navigation}");
-                }
-            }
-        }
+        // No complete set of explicit checks exists, so Updates withholds its
+        // count while keeping the route available.
+        assert_eq!(after(&navigation, "Updates"), Some(' '), "{navigation}");
         // Doctor lists findings observed from the same roots, so it withholds
         // its count in exactly the states the Inventory withholds its own.
         // Only its cell's padding may follow its title.
@@ -2701,7 +2699,7 @@ fn navigation_count_digit_cannot_read_as_a_route_key() {
     // on the left and the next tab's amber count on the right, each padded to
     // its own boxed cell.
     assert!(
-        navigation.contains(" 1 Inventory ·1 │ 2 Sources ·3   │ Updates (soon)"),
+        navigation.contains(" 1 Inventory ·1 │ 2 Sources ·3   │ 3 Updates"),
         "{navigation}"
     );
     // The bare-digit form is the collision itself, so its absence is the
@@ -2734,6 +2732,7 @@ fn navigation_count_digit_cannot_read_as_a_route_key() {
             .is_some_and(|rest| {
                 rest.starts_with("Inventory")
                     || rest.starts_with("Sources")
+                    || rest.starts_with("Updates")
                     || rest.starts_with("Doctor")
             });
         // `start` is the byte index of the run's first digit; after the
@@ -2754,19 +2753,10 @@ fn navigation_count_digit_cannot_read_as_a_route_key() {
     assert_eq!(dot_style.fg, Some(AMBER));
     assert!(!dot_style.add_modifier.contains(Modifier::BOLD));
 
-    // No count may leak onto an unavailable tab: the gap between
-    // 'Updates (soon)' and the entry after it must not start with '·'.
-    if let Some(after_updates) = navigation
-        .find("Updates (soon)")
-        .map(|position| position + "Updates (soon)".len())
-    {
-        let tail = &navigation[after_updates..];
-        let before_next = tail.find("4 Doctor").unwrap_or(tail.len());
-        assert!(
-            !tail[..before_next].contains('·'),
-            "'·' leaked onto an unavailable tab: {navigation}"
-        );
-    }
+    // An unchecked registry has no honest Updates total to state.
+    let tail = navigation.split_once("3 Updates").expect("Updates route").1;
+    let before_next = tail.find("4 Doctor").unwrap_or(tail.len());
+    assert!(!tail[..before_next].contains('·'), "{navigation}");
 
     // The lead-in survives the underline on an active tab.
     app.update(Action::OpenSources);
@@ -4479,6 +4469,28 @@ fn sources_keep_offscreen_repository_selection_visible() {
 }
 
 #[test]
+fn updates_keep_offscreen_repository_selection_visible() {
+    let harness = Harness::new();
+    let mut app = harness.completed_setup();
+    for index in 0..24 {
+        let repository = harness.directory.path().join(format!("source-{index:02}"));
+        create_source_fixture(&repository);
+        let preview = app.preview_source(&repository).expect("preview source");
+        app.confirm_source(preview).expect("register source");
+    }
+    app.update(Action::OpenUpdates);
+    for _ in 0..23 {
+        app.update(Action::MoveUpdatesSelection(1));
+    }
+
+    let rendered = text(&buffer(&app, 80, 24));
+
+    assert_eq!(app.focused_update(), 23);
+    assert!(rendered.contains("▌ source-23"), "{rendered}");
+    assert!(!rendered.contains("source-00"), "{rendered}");
+}
+
+#[test]
 fn long_wrapped_metadata_keeps_variant_identity_and_status_visible() {
     let harness = Harness::new();
     let repository = harness.directory.path().join("source");
@@ -5415,7 +5427,7 @@ fn the_install_preview_carries_each_verdict_in_words_and_in_tone() {
 fn the_install_report_states_each_step_and_the_verification_behind_it() {
     let harness = Harness::new();
     let mut app = harness.installable_source();
-    for action in [Action::BeginInstall, Action::ConfirmInstall] {
+    for action in [Action::BeginInstall, Action::ConfirmOperation] {
         // The runner draws before every key; a confirmation waits on what the
         // frame measured.
         if app.pending_install().is_some() {
@@ -5466,7 +5478,7 @@ fn the_install_report_carries_a_residual_root_in_words_and_in_tone() {
         // Nothing here can be asserted over a link that was written after all.
         return;
     }
-    for action in [Action::BeginInstall, Action::ConfirmInstall] {
+    for action in [Action::BeginInstall, Action::ConfirmOperation] {
         // The runner draws before every key; a confirmation waits on what the
         // frame measured.
         if app.pending_install().is_some() {
@@ -5546,7 +5558,7 @@ fn the_install_report_escapes_filesystem_text_in_a_failed_step() {
     // The runner draws before every key, and a confirmation waits on what the
     // frame measured.
     app.note_detail_max_scroll(feedback(&app, 100, 30).detail_max_scroll());
-    let update = app.update(Action::ConfirmInstall);
+    let update = app.update(Action::ConfirmOperation);
     app.perform_effects(update.effects())
         .expect("apply install");
 
@@ -5569,7 +5581,7 @@ fn a_withheld_postcondition_is_stated_rather_than_reported_as_verified() {
     harness.deselect_codex(&mut app);
     app.update(Action::OpenSources);
     app.update(Action::AdvanceSourcesPane);
-    for action in [Action::BeginInstall, Action::ConfirmInstall] {
+    for action in [Action::BeginInstall, Action::ConfirmOperation] {
         // The runner draws before every key; a confirmation waits on what the
         // frame measured.
         if app.pending_install().is_some() {
@@ -5660,8 +5672,8 @@ fn a_preview_taller_than_its_dialog_says_so_and_can_be_scrolled_to_its_end() {
     // The runner notes what the frame measured before reading the next key, so
     // by the time Enter could arrive the reducer refuses it too.
     app.note_detail_max_scroll(Some(measured_extent(&app, 80, 24)));
-    assert!(!app.install_preview_fully_seen());
-    assert!(app.update(Action::ConfirmInstall).effects().is_empty());
+    assert!(!app.operation_preview_fully_seen());
+    assert!(app.update(Action::ConfirmOperation).effects().is_empty());
 
     // The window moves the way it does everywhere else: the frame measures the
     // extent, the runner notes it, and the next keystroke is clamped to it.
@@ -5691,11 +5703,11 @@ fn a_preview_taller_than_its_dialog_says_so_and_can_be_scrolled_to_its_end() {
         "{rendered}"
     );
     // And a confirmation is accepted only now.
-    let update = app.update(Action::ConfirmInstall);
+    let update = app.update(Action::ConfirmOperation);
     assert!(!update.effects().is_empty(), "{rendered}");
     // Once the end has been on screen, the key the reducer would accept is the
     // key the footer offers.
-    assert!(app.install_preview_fully_seen());
+    assert!(app.operation_preview_fully_seen());
     let footer = row_text(&screen, screen.area.height - 1);
     assert!(footer.contains("Enter Install"), "{footer}");
     assert!(footer.contains("Esc Cancel"), "{footer}");

@@ -1,4 +1,7 @@
-use std::io::{self, stdout};
+use std::{
+    cell::Cell,
+    io::{self, stdout},
+};
 
 use crossterm::{
     cursor::{Hide, Show},
@@ -44,6 +47,25 @@ impl<C: TerminalControl> Drop for TerminalSession<C> {
 
 pub struct CrosstermControl;
 
+thread_local! {
+    static CAUGHT_WORKER_PANIC: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Catch a worker panic without letting the process-global default hook print
+/// into the live alternate screen. Other background threads still chain to the
+/// hook that was installed before Skilled took terminal ownership.
+pub(crate) fn catch_update_worker_panic<F, R>(operation: F) -> std::thread::Result<R>
+where
+    F: FnOnce() -> R,
+{
+    CAUGHT_WORKER_PANIC.with(|caught| {
+        caught.set(true);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(operation));
+        caught.set(false);
+        result
+    })
+}
+
 impl TerminalControl for CrosstermControl {
     fn enter(&mut self) -> io::Result<()> {
         enable_raw_mode()?;
@@ -58,11 +80,41 @@ impl TerminalControl for CrosstermControl {
     }
 }
 
+/// Restore only for a panic on the thread that owns the terminal.
+///
+/// Panic hooks are process-global and run before unwinding, so a worker panic
+/// must not tear down raw mode and the alternate screen under the still-live
+/// event loop. The prior process hook still receives every panic except an
+/// update-worker panic that its effect boundary catches and reports in-app.
 pub fn install_panic_restore_hook() {
+    let terminal_thread = std::thread::current().id();
     let previous_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic_info| {
-        let mut terminal = CrosstermControl;
-        let _ = terminal.restore();
-        previous_hook(panic_info);
+        let owns_terminal = std::thread::current().id() == terminal_thread;
+        if owns_terminal {
+            let mut terminal = CrosstermControl;
+            let _ = terminal.restore();
+        }
+        let caught_worker = CAUGHT_WORKER_PANIC.with(Cell::get);
+        if should_chain_previous_hook(owns_terminal, caught_worker) {
+            previous_hook(panic_info);
+        }
     }));
+}
+
+fn should_chain_previous_hook(owns_terminal: bool, caught_worker: bool) -> bool {
+    owns_terminal || !caught_worker
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_chain_previous_hook;
+
+    #[test]
+    fn only_caught_non_terminal_worker_panics_skip_the_previous_printer() {
+        assert!(!should_chain_previous_hook(false, true));
+        assert!(should_chain_previous_hook(false, false));
+        assert!(should_chain_previous_hook(true, true));
+        assert!(should_chain_previous_hook(true, false));
+    }
 }

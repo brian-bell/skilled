@@ -228,8 +228,8 @@ fn a_dangling_symlink_blocks_rather_than_being_replaced() {
         unreachable!("just asserted");
     };
     assert!(
-        finding.evidence().contains("does not repair or replace"),
-        "the evidence says no repair exists: {}",
+        finding.evidence().contains("separate repair operation"),
+        "the install refusal should point to eligible repair: {}",
         finding.evidence()
     );
 }
@@ -629,8 +629,8 @@ fn install_through_the_application(app: &mut SkilledApp) {
         skilled::Action::OpenSources,
         skilled::Action::AdvanceSourcesPane,
         skilled::Action::BeginInstall,
-        skilled::Action::ConfirmInstall,
-        skilled::Action::DismissInstall,
+        skilled::Action::ConfirmOperation,
+        skilled::Action::DismissOperation,
     ] {
         // Standing in the frame the runner would have drawn; see the note on
         // `dispatch` in `install_flow.rs`.

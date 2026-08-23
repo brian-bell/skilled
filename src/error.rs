@@ -64,6 +64,8 @@ pub enum Error {
     UnrepresentablePath(PathBuf),
     #[error("stored ownership receipt names an unknown agent: {0}")]
     InvalidStoredAgent(String),
+    #[error("stored ownership receipt names an unknown operation: {0}")]
+    InvalidStoredReceiptOperation(String),
     #[error("stored catalog path must be repository-relative: {0:?}")]
     UnsafeCatalogPath(PathBuf),
     #[error("stored catalog root must not be a symbolic link: {0:?}")]
@@ -80,6 +82,16 @@ pub enum Error {
     GitUnavailable(io::Error),
     #[error("git output was not valid UTF-8")]
     InvalidGitOutput,
+    /// A fetch was refused because its destination would not be the destination.
+    ///
+    /// Git resolves a symbolic ref before updating it, so fetching into one
+    /// would move whatever it points at — a local branch, in the case this
+    /// guards — during a check that is only ever allowed to advance the
+    /// configured remote-tracking ref.
+    #[error(
+        "remote-tracking ref {reference} is a symbolic ref to {target}; fetching it would move that ref instead"
+    )]
+    SymbolicTrackingRef { reference: String, target: String },
     #[error("git command failed in {repository:?}: git {arguments:?}: {stderr}")]
     GitCommand {
         repository: PathBuf,

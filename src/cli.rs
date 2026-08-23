@@ -1,4 +1,4 @@
-//! The `skilled install` command.
+//! The `skilled install`, `skilled repair`, and `skilled update` commands.
 //!
 //! One narrow surface, parsed by hand. Spec 16 asks for a handful of flags and
 //! distinguishable exit statuses, and adding a production dependency for that
@@ -22,8 +22,11 @@ use crate::{
     components::{metadata_failure_text, terminal_safe},
     operations::{
         AppliedStep, ExcludedReason, InstallOutcome, InstallPlan, InstallStatus, InstallTarget,
-        LocateFailure, StepOutcome, TargetDisposition, locate_variant,
+        LocateFailure, RepairDisposition, RepairOutcome, RepairPlan, RepairStatus,
+        RepairStepOutcome, StepOutcome, TargetDisposition, UninstallDisposition, UninstallOutcome,
+        UninstallPlan, UninstallStatus, locate_variant,
     },
+    updates::RepositoryUpdatePlan,
 };
 
 /// How the command ended.
@@ -46,6 +49,17 @@ pub enum ExitCodeKind {
     PartialApply,
     /// Everything was written, and the scan afterwards did not bear it out.
     VerificationFailed,
+    /// Everything was written, nothing disagreed with the plan, and at least
+    /// one postcondition could not be checked at all.
+    ///
+    /// Distinct from [`Self::VerificationFailed`], which is a disagreement, and
+    /// from [`Self::Success`], which would present an update whose core
+    /// postconditions were never established as an ordinary success. The three
+    /// answers `VerifyReport` keeps apart survive into the exit status, because
+    /// a script reads only this. Repository updates report it today; aligning
+    /// `install` and `repair`, which still exit `0` over a withheld check, is
+    /// `skilled-exm`.
+    VerificationIncomplete,
 }
 
 impl ExitCodeKind {
@@ -57,6 +71,7 @@ impl ExitCodeKind {
             Self::Blocked => 3,
             Self::PartialApply => 4,
             Self::VerificationFailed => 5,
+            Self::VerificationIncomplete => 6,
         }
     }
 }
@@ -64,13 +79,27 @@ impl ExitCodeKind {
 const USAGE: &str = "\
 usage: skilled install --source <id-or-path> --skill <name> \
 [--agents claude-code,codex,opencode] [--yes]
+       skilled uninstall --skill <name> --agent <agent> [--yes]
+       skilled repair --skill <name> --agent <agent> [--yes]
+       skilled update --source <id-or-path> [--yes]
 
   --source   a registered source, by the identifier Skilled gave it or by its
              checkout path
   --skill    the skill directory name to install
   --agents   which agents to install for; defaults to every configured agent
-  --yes      skip the confirmation. Requires --source, --skill, and --agents to
-             be given explicitly; every safety check still runs.
+  --yes      skip the confirmation. Install requires --source, --skill, and
+             --agents explicitly; repair requires --skill and --agent; update
+             requires --source. Every safety check still runs.
+
+Repair re-resolves the named skill from the live registry. It replaces only a
+symbolic link whose recorded target exactly matches a Skilled receipt.
+
+Update checks the registered checkout for new upstream commits and applies
+them only as a fast-forward of the exact revision it previewed.
+
+Uninstall removes only an exact matching Skilled-managed link. Its --agent is
+singular and every receipt, object-type, target, containment, and verification
+check still runs with --yes.
 
 Run skilled with no arguments for the interactive application.";
 
@@ -86,15 +115,21 @@ pub fn run(
     input: &mut dyn BufRead,
     output: &mut dyn Write,
 ) -> ExitCodeKind {
-    let request = match parse(arguments) {
-        Ok(Parsed::Install(request)) => request,
-        Ok(Parsed::Usage) => {
+    let parsed = match parse(arguments) {
+        Ok(parsed) => parsed,
+        Err(message) => return refuse(output, &message),
+    };
+    let result = match parsed {
+        Parsed::Install(request) => execute_install(&request, environment, input, output),
+        Parsed::Uninstall(request) => execute_uninstall(&request, environment, input, output),
+        Parsed::Repair(request) => execute_repair(&request, environment, input, output),
+        Parsed::Update(request) => execute_update(&request, environment, input, output),
+        Parsed::Usage => {
             let _ = writeln!(output, "{USAGE}");
             return ExitCodeKind::Success;
         }
-        Err(message) => return refuse(output, &message),
     };
-    match execute(&request, environment, input, output) {
+    match result {
         Ok(code) => code,
         Err(message) => {
             let _ = writeln!(output, "skilled: {}", safe(&message));
@@ -131,6 +166,33 @@ pub fn exit_code_for(status: InstallStatus) -> ExitCodeKind {
     }
 }
 
+/// A verified unlink is successful even when its now-inert ownership receipt
+/// could not be cleaned up. The report still states that metadata failure, but
+/// exit four would falsely describe completed filesystem work as partial and
+/// invite a retry of a link removal that has already happened.
+pub fn exit_code_for_uninstall(status: UninstallStatus) -> ExitCodeKind {
+    match status {
+        UninstallStatus::Uninstalled
+        | UninstallStatus::NothingToDo
+        | UninstallStatus::UninstalledUnrecorded => ExitCodeKind::Success,
+        UninstallStatus::PartiallyApplied | UninstallStatus::NotApplied => {
+            ExitCodeKind::PartialApply
+        }
+        UninstallStatus::VerificationFailed => ExitCodeKind::VerificationFailed,
+    }
+}
+
+pub fn exit_code_for_repair(status: RepairStatus) -> ExitCodeKind {
+    match status {
+        RepairStatus::NothingToRepair | RepairStatus::Repaired => ExitCodeKind::Success,
+        RepairStatus::NotApplied => ExitCodeKind::Blocked,
+        RepairStatus::PartiallyApplied | RepairStatus::RepairedUnrecorded => {
+            ExitCodeKind::PartialApply
+        }
+        RepairStatus::VerificationFailed => ExitCodeKind::VerificationFailed,
+    }
+}
+
 fn refuse(output: &mut dyn Write, message: &str) -> ExitCodeKind {
     let _ = writeln!(output, "skilled: {}\n\n{USAGE}", safe(message));
     ExitCodeKind::InvalidRequest
@@ -144,23 +206,47 @@ struct InstallRequest {
     assume_yes: bool,
 }
 
+struct UninstallRequest {
+    skill: String,
+    agent: AgentKind,
+    assume_yes: bool,
+}
+
+struct RepairRequest {
+    skill: String,
+    agent: AgentKind,
+    assume_yes: bool,
+}
+
+struct UpdateRequest {
+    source: String,
+    assume_yes: bool,
+}
+
 enum Parsed {
     Install(InstallRequest),
+    Uninstall(UninstallRequest),
+    Repair(RepairRequest),
+    Update(UpdateRequest),
     Usage,
 }
 
 fn parse(arguments: &[String]) -> Result<Parsed, String> {
     let mut arguments = arguments.iter();
-    match arguments.next().map(String::as_str) {
-        Some("install") => {}
+    let command = match arguments.next().map(String::as_str) {
+        Some("install") => "install",
+        Some("uninstall") => "uninstall",
+        Some("repair") => "repair",
+        Some("update") => return parse_update(arguments),
         Some("--help" | "-h" | "help") => return Ok(Parsed::Usage),
         Some(other) => return Err(format!("unknown command {other}")),
         None => return Err("no command was given".to_owned()),
-    }
+    };
 
     let mut source = None;
     let mut skill = None;
     let mut agents = None;
+    let mut agent = None;
     let mut assume_yes = false;
     while let Some(flag) = arguments.next() {
         // A value that looks like a flag is a missing value, not a value:
@@ -173,6 +259,7 @@ fn parse(arguments: &[String]) -> Result<Parsed, String> {
             "--source" => source = Some(value("--source")?),
             "--skill" => skill = Some(value("--skill")?),
             "--agents" => agents = Some(parse_agents(&value("--agents")?)?),
+            "--agent" => agent = Some(parse_agent(&value("--agent")?)?),
             "--yes" => assume_yes = true,
             "--help" | "-h" => return Ok(Parsed::Usage),
             other => return Err(format!("unknown option {other}")),
@@ -184,21 +271,94 @@ fn parse(arguments: &[String]) -> Result<Parsed, String> {
     // asks for the confirmation to be the only thing it removes, and a target
     // set Skilled chose is not a target set the user agreed to.
     if assume_yes {
-        for (flag, given) in [
-            ("--source", source.is_some()),
-            ("--skill", skill.is_some()),
-            ("--agents", agents.is_some()),
-        ] {
+        let required: &[(&str, bool)] = match command {
+            "install" => &[
+                ("--source", source.is_some()),
+                ("--skill", skill.is_some()),
+                ("--agents", agents.is_some()),
+            ],
+            // Uninstall and repair name one skill and one agent, and both are
+            // required with or without `--yes`; stating the requirement here
+            // keeps the unattended refusal about the flag that is missing.
+            _ => &[("--skill", skill.is_some()), ("--agent", agent.is_some())],
+        };
+        for (flag, given) in required {
             if !given {
                 return Err(format!("--yes requires {flag} to be given explicitly"));
             }
         }
     }
 
+    if command == "repair" {
+        if source.is_some() || agents.is_some() {
+            return Err("repair takes --agent, not --source or --agents".to_owned());
+        }
+        return Ok(Parsed::Repair(RepairRequest {
+            skill: skill.ok_or("--skill is required")?,
+            agent: agent.ok_or("--agent is required")?,
+            assume_yes,
+        }));
+    }
+
+    if command == "uninstall" {
+        if source.is_some() || agents.is_some() {
+            return Err("uninstall takes --agent, not --source or --agents".to_owned());
+        }
+        return Ok(Parsed::Uninstall(UninstallRequest {
+            skill: skill.ok_or("--skill is required")?,
+            agent: agent.ok_or("--agent is required")?,
+            assume_yes,
+        }));
+    }
+    if agent.is_some() {
+        return Err("install takes --agents, not --agent".to_owned());
+    }
     Ok(Parsed::Install(InstallRequest {
         source: source.ok_or("--source is required")?,
         skill: skill.ok_or("--skill is required")?,
         agents,
+        assume_yes,
+    }))
+}
+
+fn parse_agent(value: &str) -> Result<AgentKind, String> {
+    if value.contains(',') {
+        return Err("--agent takes exactly one agent, not a list".to_owned());
+    }
+    AgentKind::ALL
+        .into_iter()
+        .find(|agent| agent_identifier(*agent) == value)
+        .ok_or_else(|| {
+            format!(
+                "unknown agent {value}; --agent takes one of {}",
+                AgentKind::ALL.map(agent_identifier).join(", ")
+            )
+        })
+}
+
+fn parse_update<'a>(mut arguments: impl Iterator<Item = &'a String>) -> Result<Parsed, String> {
+    let mut source = None;
+    let mut assume_yes = false;
+    while let Some(flag) = arguments.next() {
+        let mut value = |flag: &str| match arguments.next() {
+            Some(value) if !value.starts_with('-') => Ok(value.clone()),
+            _ => Err(format!("{flag} needs a value")),
+        };
+        match flag.as_str() {
+            "--source" => source = Some(value("--source")?),
+            // An install flag on an update request is a request nobody wrote,
+            // and naming the command it belongs to says so plainly.
+            "--skill" | "--agents" => return Err(format!("{flag} is only valid for install")),
+            "--yes" => assume_yes = true,
+            "--help" | "-h" => return Ok(Parsed::Usage),
+            other => return Err(format!("unknown option {other}")),
+        }
+    }
+    // `--source` is required with or without `--yes`, so the fail-closed rule
+    // install states has nothing left to add here: an update names the one
+    // checkout it acts on or it is not a request.
+    Ok(Parsed::Update(UpdateRequest {
+        source: source.ok_or("--source is required")?,
         assume_yes,
     }))
 }
@@ -236,7 +396,7 @@ fn agent_identifier(agent: AgentKind) -> &'static str {
     }
 }
 
-fn execute(
+fn execute_install(
     request: &InstallRequest,
     environment: AppEnvironment,
     input: &mut dyn BufRead,
@@ -345,6 +505,400 @@ fn execute(
     Ok(exit_code_for(outcome.status()))
 }
 
+fn execute_uninstall(
+    request: &UninstallRequest,
+    environment: AppEnvironment,
+    input: &mut dyn BufRead,
+    output: &mut dyn Write,
+) -> Result<ExitCodeKind, String> {
+    if !crate::validation::valid_skill_name(&request.skill) {
+        return Ok(refuse(
+            output,
+            "the uninstall skill name must be 1-64 lowercase ASCII letters or digits with single hyphen separators",
+        ));
+    }
+    let mut app = SkilledApp::open(environment).map_err(|error| error.to_string())?;
+    let mut requested = [false; 3];
+    requested[request.agent.index()] = true;
+    let plan = app
+        .plan_uninstall_for(&request.skill, requested)
+        .map_err(|failure| failure.message().to_owned())?;
+    write_uninstall_plan(output, &plan).map_err(|error| error.to_string())?;
+    let named = plan
+        .target(request.agent)
+        .expect("every plan has one target per agent");
+    if matches!(named.disposition(), UninstallDisposition::Excluded { .. }) {
+        let _ = writeln!(
+            output,
+            "\nBlocked: nothing was removed. The named agent has no matching Skilled-managed link."
+        );
+        return Ok(ExitCodeKind::Blocked);
+    }
+    if plan.is_blocked() {
+        let _ = writeln!(output, "\nBlocked: nothing was removed.");
+        return Ok(ExitCodeKind::Blocked);
+    }
+    if !plan.is_executable() {
+        let _ = writeln!(output, "\nNothing to do.");
+        return Ok(ExitCodeKind::Success);
+    }
+    if !request.assume_yes && !confirmed(input, output)? {
+        let _ = writeln!(output, "Cancelled. Nothing was removed.");
+        return Ok(ExitCodeKind::Success);
+    }
+    let outcome = app
+        .apply_uninstall_plan(&plan)
+        .map_err(|error| error.to_string())?;
+    write_uninstall_report(output, &outcome).map_err(|error| error.to_string())?;
+    Ok(exit_code_for_uninstall(outcome.status()))
+}
+
+fn write_uninstall_plan(output: &mut dyn Write, plan: &UninstallPlan) -> std::io::Result<()> {
+    writeln!(output, "Uninstall {}:", safe(plan.skill_name()))?;
+    let blocked = plan.is_blocked();
+    for target in plan.targets() {
+        let verdict = match target.disposition() {
+            UninstallDisposition::RemoveLink {
+                link_target,
+                target_state,
+                ..
+            } => format!(
+                "{} managed link to {}{}",
+                if blocked { "would remove" } else { "remove" },
+                safe(&link_target.display()),
+                uninstall_target_suffix(target_state),
+            ),
+            UninstallDisposition::Excluded { reason } => format!("excluded: {reason:?}"),
+            UninstallDisposition::Blocked { finding } => {
+                format!("blocked: {} — {}", finding.code(), safe(finding.evidence()))
+            }
+        };
+        writeln!(output, "  {:<12} {verdict}", target.agent().display_name())?;
+        writeln!(
+            output,
+            "               {}",
+            safe(&target.link_path().display())
+        )?;
+        if let UninstallDisposition::RemoveLink { receipts, .. } = target.disposition() {
+            for receipt in receipts {
+                writeln!(
+                    output,
+                    "               receipt source {} · catalog {} · variant {}",
+                    receipt
+                        .source_id()
+                        .map_or_else(|| "unknown".to_owned(), |id| id.to_string()),
+                    receipt
+                        .catalog_relative_path()
+                        .map_or_else(|| "unknown".to_owned(), |path| safe(&path.display())),
+                    receipt
+                        .variant_relative_path()
+                        .map_or_else(|| "unknown".to_owned(), |path| safe(&path.display())),
+                )?;
+            }
+        }
+    }
+    for warning in plan.warnings() {
+        writeln!(output, "\n  warning: {}", safe(warning))?;
+    }
+    writeln!(
+        output,
+        "\nSource content and agent skill roots will not be removed."
+    )
+}
+
+fn uninstall_target_suffix(state: &crate::operations::UninstallTargetState) -> &'static str {
+    use crate::operations::UninstallTargetState;
+    match state {
+        UninstallTargetState::Directory => "",
+        UninstallTargetState::Missing => " (target no longer resolves)",
+        UninstallTargetState::NotADirectory => " (target is no longer a directory)",
+        UninstallTargetState::Unreadable(_) => " (target could not be read)",
+    }
+}
+
+fn write_uninstall_report(
+    output: &mut dyn Write,
+    outcome: &UninstallOutcome,
+) -> std::io::Result<()> {
+    writeln!(output)?;
+    for step in outcome.applied().steps() {
+        let verdict = match step.outcome() {
+            StepOutcome::Removed => "link removed".to_owned(),
+            StepOutcome::Failed(reason) => format!("not removed — {}", safe(reason)),
+            StepOutcome::Unattempted => "not attempted after an earlier failure".to_owned(),
+            other => install_step_verdict(other),
+        };
+        writeln!(output, "  {:<12} {verdict}", step.agent().display_name())?;
+        writeln!(
+            output,
+            "               {}",
+            safe(&step.link_path().display())
+        )?;
+    }
+    for withheld in outcome.verification().withheld() {
+        writeln!(
+            output,
+            "Not established: {} — {}",
+            withheld.agent().display_name(),
+            safe(withheld.reason())
+        )?;
+    }
+    for failure in outcome.verification().failures() {
+        writeln!(
+            output,
+            "Not verified: {} — {}",
+            failure.agent().display_name(),
+            safe(failure.observed())
+        )?;
+    }
+    for failure in outcome.finalized().failures() {
+        writeln!(
+            output,
+            "Ownership record remains: {} — {}",
+            failure.agent().display_name(),
+            safe(failure.reason())
+        )?;
+    }
+    writeln!(
+        output,
+        "Source content and agent skill roots were not removed."
+    )
+}
+
+fn execute_repair(
+    request: &RepairRequest,
+    environment: AppEnvironment,
+    input: &mut dyn BufRead,
+    output: &mut dyn Write,
+) -> Result<ExitCodeKind, String> {
+    let mut app = SkilledApp::open(environment).map_err(|error| error.to_string())?;
+    let plan = match app.plan_repair_for(&request.skill, request.agent) {
+        Ok(plan) => plan,
+        Err(PlanRequestFailure::Unplannable(message)) => return Ok(refuse(output, &message)),
+        // Not a request error: a different request would not fix it.
+        Err(PlanRequestFailure::Metadata(failure)) => {
+            return Err(metadata_failure_text(&failure));
+        }
+    };
+    write_repair_plan(output, &plan).map_err(|error| error.to_string())?;
+    if let Some(finding) = plan.blocking_finding() {
+        let _ = writeln!(
+            output,
+            "\nBlocked: nothing was written. {} — {}",
+            finding.code(),
+            safe(finding.evidence())
+        );
+        return Ok(ExitCodeKind::Blocked);
+    }
+    if matches!(plan.disposition(), RepairDisposition::NothingToRepair) {
+        let _ = writeln!(output, "\nNothing to repair.");
+        return Ok(ExitCodeKind::Success);
+    }
+    if !request.assume_yes && !confirmed(input, output)? {
+        let _ = writeln!(output, "Cancelled. Nothing was written.");
+        return Ok(ExitCodeKind::Success);
+    }
+    let outcome = app
+        .apply_repair_plan(&plan)
+        .map_err(|error| error.to_string())?;
+    write_repair_report(output, &outcome).map_err(|error| error.to_string())?;
+    Ok(exit_code_for_repair(outcome.status()))
+}
+
+fn execute_update(
+    request: &UpdateRequest,
+    environment: AppEnvironment,
+    input: &mut dyn BufRead,
+    output: &mut dyn Write,
+) -> Result<ExitCodeKind, String> {
+    let mut app = SkilledApp::open(environment).map_err(|error| error.to_string())?;
+    let Some(source_id) = resolve_source(&app, &request.source) else {
+        return Ok(refuse(
+            output,
+            &format!("no registered source matches {}", request.source),
+        ));
+    };
+    if let Some(error) = app
+        .sources()
+        .iter()
+        .find(|source| source.id() == source_id)
+        .and_then(|source| source.source_error())
+    {
+        return Ok(refuse(
+            output,
+            &format!("the registered source cannot be read: {error}"),
+        ));
+    }
+    let plan = app.plan_repository_update_for(source_id)?;
+    write_repository_update_plan(output, &plan).map_err(|error| error.to_string())?;
+    if plan.is_blocked() {
+        let _ = writeln!(output, "\nBlocked: nothing was written.");
+        return Ok(ExitCodeKind::Blocked);
+    }
+    if plan.current_revision() == plan.target_revision() {
+        let _ = writeln!(output, "\nNothing to do.");
+        return Ok(ExitCodeKind::Success);
+    }
+    if !request.assume_yes && !confirmed(input, output)? {
+        let _ = writeln!(output, "Cancelled. Nothing was written.");
+        return Ok(ExitCodeKind::Success);
+    }
+    let outcome = app.apply_repository_plan(&plan);
+    if let Some(guard_error) = outcome.apply_error.as_deref()
+        && !outcome.write_attempted
+    {
+        let _ = writeln!(output, "Blocked: nothing was written.");
+        let _ = writeln!(output, "Guard refusal: {}", safe(guard_error));
+        if let Some(error) = outcome.bookkeeping_error.as_deref() {
+            let label = if outcome.verification.is_none() {
+                "Post-attempt state unavailable"
+            } else {
+                "Post-attempt state was not cached"
+            };
+            let _ = writeln!(output, "{label}: {}", safe(error));
+            return Ok(ExitCodeKind::PartialApply);
+        }
+        return Ok(ExitCodeKind::Blocked);
+    }
+    let apply_failed = outcome.apply_error.is_some();
+    let bookkeeping_failed = outcome.bookkeeping_error.is_some();
+    let verification = match outcome.verification {
+        Some(report) => report,
+        None => {
+            if let Some(error) = outcome.apply_error.as_deref() {
+                let _ = writeln!(output, "Fast-forward failed: {}", safe(&error));
+            } else {
+                let _ = writeln!(output, "Fast-forward completed.");
+            }
+            if let Some(error) = outcome.bookkeeping_error.as_deref() {
+                let _ = writeln!(output, "Post-attempt state unavailable: {}", safe(&error));
+            }
+            return Ok(ExitCodeKind::PartialApply);
+        }
+    };
+    if let Some(error) = outcome.apply_error.as_deref() {
+        let _ = writeln!(output, "Fast-forward command failed: {}", safe(&error));
+    } else {
+        let _ = writeln!(output, "Fast-forward completed.");
+    }
+    if let Some(error) = outcome.bookkeeping_error.as_deref() {
+        let _ = writeln!(
+            output,
+            "Post-attempt state was not cached: {}",
+            safe(&error)
+        );
+    }
+    if !verification.is_verified() {
+        for failure in verification.failures() {
+            let _ = writeln!(output, "Not verified: {}", safe(failure));
+        }
+        return Ok(if apply_failed {
+            ExitCodeKind::PartialApply
+        } else {
+            ExitCodeKind::VerificationFailed
+        });
+    }
+    if verification.is_complete() {
+        let _ = writeln!(output, "Verified: HEAD is the previewed revision.");
+    } else {
+        let _ = writeln!(output, "Verified as far as it could be.");
+        for withheld in verification.withheld() {
+            let _ = writeln!(output, "Not established: {}", safe(withheld));
+        }
+    }
+    Ok(if bookkeeping_failed || apply_failed {
+        ExitCodeKind::PartialApply
+    } else if !verification.is_complete() {
+        ExitCodeKind::VerificationIncomplete
+    } else {
+        ExitCodeKind::Success
+    })
+}
+
+fn write_repository_update_plan(
+    output: &mut dyn Write,
+    plan: &RepositoryUpdatePlan,
+) -> std::io::Result<()> {
+    writeln!(output, "Update {}", safe(plan.source_label()))?;
+    writeln!(output, "  path {}", safe(&plan.path().display()))?;
+    writeln!(output, "  branch {}", safe(plan.current_reference()))?;
+    writeln!(output, "  current {}", safe(plan.current_revision()))?;
+    writeln!(output, "  target  {}", safe(plan.target_revision()))?;
+    writeln!(
+        output,
+        "  {} commits · {} changed files",
+        plan.commits().len(),
+        plan.changed_files().len()
+    )?;
+    writeln!(
+        output,
+        "  affected installations: {}",
+        plan.affected()
+            .incomplete_reason
+            .as_deref()
+            .map_or("complete".to_owned(), |reason| format!(
+                "partial — {reason}"
+            ),)
+    )?;
+    for name in &plan.affected().updated {
+        writeln!(output, "    updated in place · {}", safe(name))?;
+    }
+    for name in &plan.affected().removed {
+        writeln!(output, "    removed · {}", safe(name))?;
+    }
+    for name in &plan.affected().added {
+        writeln!(output, "    added upstream, not installed · {}", safe(name))?;
+    }
+    for (installed, skill) in &plan.affected().restored {
+        writeln!(
+            output,
+            "    installation starts loading · {} -> {}",
+            safe(installed),
+            safe(skill)
+        )?;
+    }
+    for (old, new, aliases) in &plan.affected().renamed {
+        writeln!(output, "    renamed · {} -> {}", safe(old), safe(new))?;
+        // A link installed under a name of its own is not named by the pair
+        // above, and naming it is not enough either: what the rename does to it
+        // is leave it with nothing to resolve to, and that is the outcome
+        // verification will hold this update to.
+        for alias in aliases {
+            writeln!(output, "      loses its target · {}", safe(alias))?;
+        }
+    }
+    for commit in plan.commits() {
+        writeln!(output, "    commit · {}", safe(commit))?;
+    }
+    for path in plan.changed_files() {
+        if let Some(old) = path.renamed_from() {
+            writeln!(
+                output,
+                "    renamed · {} -> {}",
+                safe(&old.display()),
+                safe(&path.path().display())
+            )?;
+        } else {
+            writeln!(
+                output,
+                "    {:?} · {}",
+                path.kind(),
+                safe(&path.path().display())
+            )?;
+        }
+    }
+    for finding in plan.findings() {
+        writeln!(
+            output,
+            "  blocked: {} — {}",
+            finding.code(),
+            safe(finding.evidence())
+        )?;
+    }
+    writeln!(output, "  {}", plan.hooks_disclosure())?;
+    Ok(())
+}
+
 /// A source named by the identifier the registry gave it, or by the path its
 /// checkout sits at.
 ///
@@ -420,6 +974,123 @@ fn write_plan(output: &mut dyn Write, plan: &InstallPlan, home: &Path) -> std::i
     Ok(())
 }
 
+fn write_repair_plan(output: &mut dyn Write, plan: &RepairPlan) -> std::io::Result<()> {
+    writeln!(
+        output,
+        "Repair {} for {}",
+        safe(plan.skill_name()),
+        plan.agent().display_name()
+    )?;
+    writeln!(output, "  link {}", safe(&plan.link_path().display()))?;
+    if !plan.current_target().as_os_str().is_empty() {
+        writeln!(output, "  old  {}", safe(&plan.current_target().display()))?;
+    }
+    if let Some(target) = plan.new_target() {
+        writeln!(output, "  new  {}", safe(&target.display()))?;
+    }
+    if let Some(label) = plan.old_source_label() {
+        writeln!(output, "  recorded source {}", safe(label))?;
+    } else {
+        writeln!(output, "  recorded source unavailable in this receipt")?;
+    }
+    if let Some(label) = plan.new_source_label() {
+        writeln!(output, "  selected source {}", safe(label))?;
+    }
+    if plan.source_changed() {
+        writeln!(
+            output,
+            "  source changed: the registry now selects a different source"
+        )?;
+    }
+    if let Some(outlook) = plan.opencode_outlook() {
+        writeln!(
+            output,
+            "  OpenCode after repair: {}",
+            safe(&outlook.preview_summary())
+        )?;
+    }
+    match plan.disposition() {
+        RepairDisposition::ReplaceLink { dangling: true } => {
+            writeln!(output, "  replace dangling link")?
+        }
+        RepairDisposition::ReplaceLink { dangling: false } => {
+            writeln!(output, "  replace incorrect link")?
+        }
+        RepairDisposition::NothingToRepair => {
+            writeln!(output, "  already resolves to the selected target")?
+        }
+        RepairDisposition::Blocked { finding } => writeln!(
+            output,
+            "  blocked: {} — {}",
+            finding.code(),
+            safe(finding.evidence())
+        )?,
+    }
+    for warning in plan.warnings() {
+        writeln!(output, "  warning: {}", safe(warning))?;
+    }
+    Ok(())
+}
+
+fn write_repair_report(output: &mut dyn Write, outcome: &RepairOutcome) -> std::io::Result<()> {
+    writeln!(output)?;
+    if let Some(step) = outcome.applied().step() {
+        let verdict = match step.outcome() {
+            RepairStepOutcome::Repaired => "link replaced and receipt recorded".to_owned(),
+            RepairStepOutcome::RepairedUnrecorded(error) => format!(
+                "link replaced, but Skilled could not record owning it: {}",
+                safe(error)
+            ),
+            RepairStepOutcome::RemovedUnreplaced(error) => {
+                format!(
+                    "original link removed without replacement — {}",
+                    safe(error)
+                )
+            }
+            RepairStepOutcome::ResidualTemporary { path, error } => format!(
+                "temporary link left at {} — {}",
+                safe(&path.display()),
+                safe(error)
+            ),
+            RepairStepOutcome::Failed(reason) => format!("not written — {}", safe(reason)),
+        };
+        writeln!(output, "  {:<12} {verdict}", step.agent().display_name())?;
+        writeln!(
+            output,
+            "               {}",
+            safe(&step.link_path().display())
+        )?;
+    }
+    if outcome.verification().is_complete() {
+        writeln!(
+            output,
+            "\nVerified: the repaired link was observed again and matches this plan."
+        )?;
+    } else if outcome.verification().is_verified() {
+        writeln!(
+            output,
+            "\nVerified as far as it could be: the repaired link was observed again."
+        )?;
+    }
+    for withheld in outcome.verification().withheld() {
+        writeln!(
+            output,
+            "Not established: {} — {}",
+            withheld.agent().display_name(),
+            safe(withheld.reason())
+        )?;
+    }
+    for failure in outcome.verification().failures() {
+        writeln!(
+            output,
+            "Not verified: {} — {}",
+            failure.agent().display_name(),
+            safe(failure.observed())
+        )?;
+    }
+    Ok(())
+}
+
 /// What the plan will do about one target, printed.
 ///
 /// A plan blocks whole, so a target that would have been work is not work: the
@@ -466,6 +1137,7 @@ fn target_verdict(target: &InstallTarget, plan_is_blocked: bool) -> String {
 fn install_step_verdict(outcome: &StepOutcome) -> String {
     match outcome {
         StepOutcome::Created => "link created".to_owned(),
+        StepOutcome::Removed => "link removed".to_owned(),
         StepOutcome::CreatedUnrecorded(error) => {
             format!(
                 "link created, but Skilled could not record owning it: {}",
@@ -533,8 +1205,9 @@ fn write_report(output: &mut dyn Write, outcome: &InstallOutcome) -> std::io::Re
     {
         writeln!(
             output,
-            "Skilled does not undo what it wrote. Nothing above was removed, and no repair \
-             exists in this release."
+            "Skilled does not undo a partial install automatically; uninstall is a separate \
+             confirmed operation, and repair only replaces a still-present link whose \
+             ownership can be proven."
         )?;
     }
     Ok(())

@@ -10,21 +10,29 @@ Skilled is an early Rust 2024 / Ratatui terminal application for inspecting
 and managing global coding-agent skills. First-run setup, local Git source
 registration, Sources browsing, a read-only installation inventory, OpenCode
 effective resolution across its documented roots, a read-only Doctor findings
-view, degraded read-only startup when private metadata is unavailable, and
-installation — previewed, confirmed, and verified — are implemented.
+view, degraded read-only startup when private metadata is unavailable,
+installation, receipt-backed repair of incorrect or dangling links,
+guarded uninstall, metadata-only Forget Source, and explicit repository update
+checks with guarded fast-forwards — each previewed, confirmed, rescanned, and
+verified — are implemented.
 
-Skilled performs two narrow filesystem mutations. Installation creates one
-directory symbolic link per agent, and creates an agent's documented skill root
-when its own parent already exists. A pending destructive metadata migration
-first creates one consistent, uniquely named SQLite backup beside the database;
-an occupied backup path is never overwritten. Installation never replaces,
-overwrites, unlinks, or recursively creates anything, so every occupied target
-is a refusal. Updates, repair, uninstall, adoption of links Skilled did not
-create, and every network operation are not implemented: do not turn the
-current placeholders into behavior unless the active Beads issue places that
-work in scope, and do not display a count, finding, status, or key hint the code
-cannot currently produce. Doctor lists what was observed and states that no
-repair exists; it offers no key that would perform one.
+Filesystem mutation stays narrow. Installation creates one directory symbolic
+link per agent and may create the documented skill root when its own parent
+already exists; every occupied install path is a refusal. Repair replaces one
+observed symbolic link only when its raw target is byte-identical to the newest
+matching ownership receipt and the live registry supplies a safe replacement;
+it never recreates an absent link or root. Uninstall removes only an exact
+receipted link after rechecking its type, target, root, and ownership. Forget
+Source deletes private registration/catalog/receipt metadata only after proving
+every described link inactive; it never deletes a checkout or skill content.
+A pending destructive metadata migration first creates one consistent, uniquely
+named SQLite backup beside the database; an occupied backup path is never
+overwritten. Updates perform network access only after an explicit check and
+write only through the guarded repository fast-forward. Adoption of unproven
+links and network operations beyond that explicit update check remain
+unimplemented: do not turn their placeholders into behavior unless the active
+Beads issue places that work in scope, and do not display a count, finding,
+status, or key hint the code cannot currently produce.
 
 [GitHub issue #3](https://github.com/brian-bell/skilled/issues/3) is the
 product and technical source of truth. The tracked `spec/tui-prototype.html`
@@ -36,10 +44,14 @@ changing before overriding a bound, style, or phrase it documents.
 ## Build and Test
 
 Requires stable Rust 1.97 or newer.
+Repository updates require Git 2.33 or newer and, for SSH remotes, OpenSSH 8.4
+or newer.
 
 ```bash
 cargo run
 cargo run -- install --source <id-or-path> --skill <name> --agents claude-code
+cargo run -- uninstall --skill <name> --agent claude-code
+cargo run -- repair --skill <name> --agent claude-code
 cargo build --release
 cargo test --all-targets
 cargo fmt --check
@@ -60,16 +72,24 @@ signal needs both, because colour alone is not an acceptable cue.
   conventions and non-executing detection belong here.
 - `src/source.rs`: local Git source inspection, catalog discovery, and skill
   candidate validation.
+- `src/git.rs`: typed no-shell Git boundary for repository inspection, fetch,
+  and the sole fast-forward write.
+- `src/updates.rs`: repository update probing, classification, planning,
+  guarded apply, and three-answer verification.
 - `src/inventory.rs`: read-only scan of the native agent skill roots; owns the
   finding codes, the state vocabulary, and the count-or-phrase verdict.
-- `src/operations.rs`: install planning and its guarded execution. `probe_install`
-  is the only read of the machine, `plan_install` decides everything over the
-  value it returns, `apply_install` re-reads each target immediately before
-  writing it, and `verify_install` checks a fresh scan against the plan. It
-  reuses `inventory::Finding` for the spec 18.2 collision codes.
-- `src/cli.rs`: the `skilled install` command — one hand-parsed surface over the
-  same planner, guards, rescan, and verification the Sources screen runs, with
-  distinguishable exit statuses.
+- `src/operations.rs`: sibling install, repair, uninstall, and Forget Source
+  pipelines. Their probes are the only machine reads before planning, their pure
+  planners decide over those observations, their guarded executors re-read
+  immediately before writing, and their verifiers check a fresh scan against the
+  confirmed plan. Uninstall verifies the link gone and content survived before
+  deleting its receipt, and forget rechecks the entire receipt set and link
+  liveness before its transaction. The module reuses `inventory::Finding` for
+  the spec 18.2 collision codes.
+- `src/cli.rs`: the hand-parsed `skilled install`, `skilled uninstall`,
+  `skilled repair`, and `skilled update` surfaces over the same planners,
+  guards, rescans, and
+  verification the TUI runs, with distinguishable exit statuses.
 - `src/resolution.rs`: pure per-agent variant selection and OpenCode effective
   resolution; decides which registered variant an agent resolves a name to and
   what OpenCode would load, over data the caller already holds. It states no
@@ -134,27 +154,182 @@ signal needs both, because colour alone is not an acceptable cue.
   blocks whole: one blocked target and nothing is written anywhere. Every
   target's absolute path is stated unabbreviated — the `~` spelling the rest of
   the application uses would soften the thing being agreed to.
-- Skilled writes only inside a root it established. A skill root, or any
+- Installation writes only inside a root it established. A skill root, or any
   directory between it and the home directory, that is a symbolic link is
   refused rather than followed: the path the preview stated has to be the path
-  the write lands on. One pathname window remains between the check and the
-  write; it is recorded on `apply_install` and tracked as `skilled-cb2`.
+  the write lands on. Install retains a fail-if-exists pathname window between
+  its check and `symlink`, recorded on `apply_install` and `apply_uninstall` and
+  tracked as `skilled-cb2`. Repair has a more severe
+  window between its final guard and `rename`: another object arriving there
+  could be replaced. That data-loss risk is documented on `apply_repair` and
+  tracked separately.
+- Repository updates write through Git only inside the canonical checkout the
+  user registered. They begin only after an explicit check, fast-forward to the
+  exact previewed object, and never reset, rebase, stash, commit, or push. The
+  checkout's filesystem identity is re-read as the last guard before the write
+  and again during verification, so a checkout replaced under the pathname is
+  identified rather than silently written to and reported as a pass. Binding
+  the Git process itself to the proven checkout is `skilled-2k3.8.5.1`; until
+  it lands, the gap between that final guard and `merge` remains open, the
+  update counterpart of `skilled-cb2`.
+- An explicit check runs no repository code. Hooks are pointed at the null
+  device, `core.fsmonitor` is turned off on every inspection — it is an
+  executable Git runs for `status` and `fetch` alike, and `core.hooksPath` does
+  not reach it — and the partial-clone refusal is re-asked before the preview's
+  object reads and again in the apply guard, rather than remembered from the
+  check, so neither can make Git fetch lazily. Reads that follow the write are
+  not covered; `skilled-cbq` has that. The transport half of the claim is a
+  refusal rather than a suppression: a checkout that names a program for Git
+  to run while fetching — `core.sshCommand`, `core.askPass`, `core.gitProxy`,
+  `core.alternateRefsCommand`, a credential helper,
+  `remote.<name>.uploadpack`, `remote.<name>.vcs`, `protocol.<scheme>.command`,
+  or a URL naming a transport helper — blocks the check with
+  `source.repository_transport_unsupported` instead. The URL is the one
+  `ls-remote --get-url` reports, because `insteadOf` rewrites the configured
+  value on the way to the transport and a remote with several URLs is fetched
+  from the first while `--get` answers with the last. A setting the checkout
+  goes on to disable is not a refusal: an empty credential helper resets the
+  list and a scalar's last value wins. Scope is the
+  whole distinction, and `--show-scope` is what draws it: the same key in the
+  user's own global or system configuration is theirs and keeps working, while
+  the same key inside the checkout is refused. There is no documented way to
+  turn a credential helper or an upload-pack program off the way there is for
+  a hook, and reconstructing which of the user's scopes was meant would be
+  guessing at their intent. A refusal is a read, though, and the fetch it
+  guards is a later process, so the refusal is re-asked immediately before the
+  fetch rather than remembered from the top of the probe — and the two settings
+  that can be bound instead of trusted are. Git is handed the transport
+  allowlist itself as `GIT_ALLOW_PROTOCOL`, which overrides any `protocol.*`
+  permission the checkout grants itself, so a helper URL, an `insteadOf`
+  rewrite, or a `remote.<name>.vcs` written in after the refusal reaches no
+  program. That list is a ceiling and never a grant: it overrides the user's
+  `protocol.*` policy as readily as the checkout's, so what is handed over is
+  the ceiling narrowed by an inherited `GIT_ALLOW_PROTOCOL` and by the user's
+  own policy — `protocol.file.allow=never` is a hardening people apply, and
+  re-enabling it would be the bypass. Git's three states are all kept: `user`
+  is not `always`, so `GIT_PROTOCOL_FROM_USER=0` still refuses the transports
+  that sit at that policy, `file`, `ftp`, and `ftps` by default among them; a
+  policy value Git would abort on refuses rather than permits; and the
+  inherited list is split and matched exactly the way Git matches it, with an
+  unreadable one leaving nothing. Narrowing to nothing is a real answer there
+  rather than a reason to fall back. The checkout's scopes are left out
+  of that reading, so a repository can neither widen the ceiling nor deny
+  someone else's fetch. `core.sshCommand` is the one setting Skilled reads and exports
+  itself, so it is read with `--show-scope` at the moment of use and the
+  checkout's scopes are struck out of the answer, whenever the value arrived.
+  The rest are read by Git out of the repository configuration when the fetch
+  starts, and closing that gap by reproducing each vetted value as a `-c`
+  override is `skilled-88j`. The fast-forward is the opposite case by design:
+  it is handed the repository's configuration, and the plan discloses the
+  hooks, the monitor, the checkout filters, and the signature program it may
+  run. That last one is disclosed rather than suppressed on purpose:
+  `merge.verifySignatures` is a policy, and passing `--no-verify-signatures`
+  would overrule it wherever the user set it — fast-forwarding to an unsigned
+  tip Git had been told to refuse. Re-reading the object the preview named
+  settles which object is merged, not who vouches for it.
+- The fetch never names a user-controllable ref as its destination. Git
+  dereferences a symbolic ref when it updates one, so a tracking ref
+  substituted after the preflight refusal would send a forced refspec into
+  whatever it points at, a local branch included. The fetch lands in a
+  per-invocation `refs/skilled/fetch/` name instead, deleted immediately before
+  and after; the tracking ref is published from it with `update-ref --no-deref`
+  and an expected old value, so a ref another fetch advanced meanwhile is
+  refused rather than rolled back — unless it already holds the very object
+  that was staged, which is nothing to refuse. The staging name is derived
+  rather than unguessable, so the substitution race is narrowed and reported
+  rather than closed; `skilled-q59` tracks a fetch that writes no
+  dereferenceable ref at all. A check may not report success over a staging
+  ref it failed to remove.
+- Cached update findings exist only after an explicit check. A changed `HEAD`
+  or changed known dirtiness supersedes the cached verdict; opening Updates is
+  therefore a metadata-only operation and never performs network access. A
+  recorded verification finding is exempt: it is an observation of the state it
+  would otherwise be superseded by, and Doctor must not lose it.
+- Repository update verification keeps the same three answers as installation
+  verification. The confirmation gate covers the complete plan statement, the
+  incoming commit summaries included, because those are what the fast-forward
+  brings in; the untruncated changed-file listing is non-gating evidence below
+  it. A disclosed removal is verified as the same link, raw target included,
+  and not merely as some dangling entry under the same name. Every other
+  installation is held to the same test: a fast-forward writes inside the
+  repository and nowhere near an agent root, so a link whose raw target changed
+  was rewritten by something outside the plan, and health and resolution cannot
+  see it when the new target reaches the same variant by another route. Repair
+  proves ownership by comparing a raw target against a receipt byte for byte,
+  so a retarget passed off as verified costs that link its evidence too.
+- An update's affected installations are decided by the variant each
+  installation resolves to, never by the name a root holds. A link installed as
+  `alias` pointing at skill `demo` is matched under `demo` and disclosed as
+  `alias`: matching on the root entry's own name would leave it out of the
+  preview and let verification report its lost resolution, after the write, as
+  a regression nobody was shown.
+- A candidate is a skill by virtue of its `SKILL.md`, not its directory.
+  Classification asks the target revision for that document as a regular file —
+  Git records a symbolic link as a blob too, and the scanner and portable
+  validation both refuse a linked skill document — so a deleted or relinked
+  skill document is a removal even where a tracked file stays beside it, and a
+  catalog whose skill is the repository root is no longer retained by
+  definition. A candidate the update was disclosed as emptying — a removal, or
+  the old side of a rename — whose path would still hold anything afterwards
+  blocks with `source.removal_leaves_content`. Three ways it can: the root
+  catalog, which no update removes; the target tree, which may keep an entry
+  there or turn an ancestor into a symbolic link `ls-tree` will not walk
+  through, redirecting the path without ever appearing at it; and the worktree,
+  where anything the update does not delete stays — including an empty
+  directory, which Git's untracked and ignored lists never name because they
+  name files. The link would then resolve to something that is not a skill
+  rather than losing its target, so the preview cannot state what the write
+  would do. The worktree half is a live read, so the apply guard asks it again
+  over the worktree as it then stands: an occupant that arrived after the
+  preview refuses the write rather than being applied. `cached_update_check`
+  decides it too, as it already does for the incoming-collision and submodule
+  findings — the cached check is what Updates advertises and what Doctor reads,
+  so a finding only the preview raises would leave the list offering an update
+  the preview then refuses. It is one local Git process per candidate the
+  update touches, so it takes the check's cancellation flag and returns no
+  answer at all rather than a partial one: a cancelled analysis records no
+  check. Both `Effect::CheckUpdates` and `Effect::PlanRepositoryUpdate` rescan
+  the roots first, because a check and the preview that follows it decide the
+  same installation-dependent findings and a link made while the application
+  stayed open would otherwise be in one and not the other. Whether the document
+  the target keeps is a *valid* skill is not read — `skilled-3o5` has that. A
+  rename names the installations it leaves without a target alongside the pair
+  of skill names, because a link installed under a name of its own is not named
+  by the pair and verification holds it to that outcome regardless.
+- A configured upstream whose remote-tracking ref is absent is not an
+  unconfigured one. `Upstream::revision` is optional for exactly that state,
+  and the explicit check fetches it rather than reporting `source.no_upstream`
+  and leaving the repository unable to update until the user fetched by hand.
 - Text from the filesystem — names, paths, link targets, operating-system error
   messages — is escaped through `components::terminal_safe` before it reaches a
-  terminal, on every surface. The screens and `skilled install` write to the
-  same terminal by different routes and both go through it.
+  terminal, on every surface. The screens and CLI commands write to the same
+  terminal by different routes and both go through it.
 - Verification has three answers, not two. `VerifyReport::is_verified` means
   nothing disagreed with the plan; `is_complete` means every postcondition was
   also checked. A root the scan could not read leaves its check withheld, which
   no surface may report as a pass. This is the inventory's own rule applied to
-  the operation that follows it.
-- `--yes` removes the confirmation and nothing else: it requires `--source`,
-  `--skill`, and `--agents` to be explicit, and every collision check, apply
-  guard, rescan, and verification still runs. An agent `--agents` named that the
-  plan cannot act on is a blocked request rather than a silent skip.
-- Ownership receipts are evidence, never instructions. Nothing recreates a link
-  from one, the scanner does not consult them, they outlive the source they came
-  from, and a link Skilled did not create is never adopted by writing one.
+  the operation that follows it. The exit status is such a surface: `skilled
+  update` reports an incomplete verification as its own status rather than as
+  success, because a script reads only that. Install and repair still exit `0`
+  there; `skilled-exm` has it.
+- `--yes` removes the confirmation and nothing else. Install requires
+  `--source`, `--skill`, and `--agents` explicitly; uninstall and repair each
+  require `--skill` and `--agent`. Every ownership, collision, path, apply,
+  rescan, and verification gate still runs, and a named agent the plan cannot
+  act on is a blocked request rather than a silent skip.
+- Ownership receipts are evidence, never instructions. The scanner does not
+  consult them and they outlive their source. Repair replaces a link only when
+  the link's raw target is byte-identical to a receipt for that path; it never
+  recreates a link from a receipt alone, and an unproven link is never adopted
+  by writing one. A receipt is removed only after uninstall positively verifies
+  its link gone, or Forget Source has just established the described link
+  inactive.
+- Uninstall never removes an agent root or follows the link it removes. Object
+  type, exact receipt, recorded target, and documented-root containment are
+  rechecked immediately before unlinking; one failed target stops the run.
+- Forget Source removes private metadata only. Any active or unreadable
+  receipted link, or any receipt-set change between preview and confirmation,
+  blocks the transaction; checkout and skill directories are never deleted.
 - Production dependencies require explicit review.
 
 ## Non-Interactive Shell Commands

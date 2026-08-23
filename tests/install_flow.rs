@@ -15,12 +15,15 @@ use std::{
 #[cfg(target_os = "linux")]
 use std::{ffi::OsString, os::unix::ffi::OsStringExt};
 
+use rusqlite::{Connection, TransactionBehavior};
 use skilled::{
     Action, AgentKind, AppEnvironment, SkilledApp,
     inventory::{Finding, FindingSeverity, InstallationHealth},
     operations::{
-        InstallPrompt, InstallStatus, OpenCodeOutlook, StepOutcome, TargetDisposition,
-        VerifyFailure, VerifyWithheld, verify_install,
+        ForgetApply, ForgetPrompt, ForgetStatus, ForgetVerification, InstallPrompt, InstallStatus,
+        OpenCodeOutlook, OperationPrompt, Postcondition, StepOutcome, TargetDisposition,
+        UninstallDisposition, UninstallPrompt, UninstallStatus, VerifyFailure, VerifyWithheld,
+        verify_install,
     },
     resolution::OpenCodeResolution,
 };
@@ -34,6 +37,449 @@ const ROOTS: [(AgentKind, &str); 3] = [
     (AgentKind::Codex, CODEX_ROOT),
     (AgentKind::OpenCode, OPENCODE_ROOT),
 ];
+
+#[test]
+fn uninstall_removes_only_managed_links_and_preserves_canonical_content_and_roots() {
+    let fixture = Fixture::new();
+    let repository = fixture.source("library", &["portable"]);
+    let mut app = fixture.registered(&repository);
+    fixture.create_root_parents();
+    focus_first_variant(&mut app);
+    dispatch(&mut app, Action::BeginInstall);
+    dispatch(&mut app, Action::ConfirmOperation);
+    dispatch(&mut app, Action::DismissOperation);
+    dispatch(&mut app, Action::OpenInventory);
+
+    let content = repository.join("skills/portable/SKILL.md");
+    let before = fs::read(&content).expect("canonical skill content");
+    dispatch(&mut app, Action::BeginUninstall);
+    let Some(OperationPrompt::Uninstall(UninstallPrompt::Preview(plan))) = app.pending_operation()
+    else {
+        panic!("uninstall preview expected: {:?}", app.pending_operation());
+    };
+    assert!(plan.is_executable());
+    for target in plan.targets().iter().filter(|target| target.is_work()) {
+        let UninstallDisposition::RemoveLink { receipts, .. } = target.disposition() else {
+            unreachable!("work target must remove a link");
+        };
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(receipts[0].source_id(), Some(app.sources()[0].id()));
+        assert_eq!(
+            receipts[0].catalog_relative_path(),
+            Some(Path::new("skills"))
+        );
+        assert_eq!(
+            receipts[0].variant_relative_path(),
+            Some(Path::new("skills/portable"))
+        );
+    }
+    dispatch(&mut app, Action::ConfirmOperation);
+    let Some(OperationPrompt::Uninstall(UninstallPrompt::Report(outcome))) =
+        app.pending_operation()
+    else {
+        panic!("uninstall report expected: {:?}", app.pending_operation());
+    };
+    assert_eq!(outcome.status(), UninstallStatus::Uninstalled);
+    assert!(outcome.verification().held().iter().any(|pass| {
+        pass.agent() == AgentKind::OpenCode
+            && pass.postcondition() == Postcondition::OpenCodeResolution
+    }));
+    for (agent, root) in ROOTS {
+        assert!(
+            !fixture.home().join(root).join("portable").exists(),
+            "{agent:?} link remained"
+        );
+        assert!(fixture.home().join(root).is_dir(), "agent root was removed");
+    }
+    assert_eq!(
+        fs::read(&content).expect("canonical content survives"),
+        before
+    );
+    assert!(app.receipts().expect("receipts").is_empty());
+}
+
+#[test]
+fn uninstall_withholds_opencode_when_a_consulted_root_was_not_scanned() {
+    let fixture = Fixture::new();
+    let repository = fixture.source("library", &["portable"]);
+    let mut app = fixture.registered(&repository);
+    fixture.create_root_parents();
+    deselect_codex(&mut app);
+    focus_first_variant(&mut app);
+    dispatch(&mut app, Action::BeginInstall);
+    dispatch(&mut app, Action::ConfirmOperation);
+    dispatch(&mut app, Action::DismissOperation);
+    dispatch(&mut app, Action::OpenInventory);
+
+    dispatch(&mut app, Action::BeginUninstall);
+    dispatch(&mut app, Action::ConfirmOperation);
+
+    let Some(OperationPrompt::Uninstall(UninstallPrompt::Report(outcome))) =
+        app.pending_operation()
+    else {
+        panic!("uninstall report expected");
+    };
+    assert_eq!(outcome.status(), UninstallStatus::Uninstalled);
+    assert!(!outcome.verification().is_complete());
+    assert!(outcome.verification().withheld().iter().any(|check| {
+        check.agent() == AgentKind::OpenCode
+            && check.postcondition() == Postcondition::OpenCodeResolution
+    }));
+}
+
+#[test]
+fn a_link_retargeted_after_preview_is_not_removed() {
+    let fixture = Fixture::new();
+    let repository = fixture.source("library", &["portable"]);
+    let mut app = fixture.registered(&repository);
+    fixture.create_root_parents();
+    focus_first_variant(&mut app);
+    dispatch(&mut app, Action::BeginInstall);
+    dispatch(&mut app, Action::ConfirmOperation);
+    dispatch(&mut app, Action::DismissOperation);
+    dispatch(&mut app, Action::OpenInventory);
+    dispatch(&mut app, Action::BeginUninstall);
+
+    let link = fixture.root(AgentKind::ClaudeCode).join("portable");
+    let other = fixture.path().join("other-target");
+    write_skill(&other, "other");
+    fs::remove_file(&link).expect("remove managed link for race fixture");
+    symlink(other.canonicalize().expect("other target"), &link).expect("retarget link");
+    dispatch(&mut app, Action::ConfirmOperation);
+    let Some(OperationPrompt::Uninstall(UninstallPrompt::Report(outcome))) =
+        app.pending_operation()
+    else {
+        panic!("uninstall report expected");
+    };
+    assert_eq!(outcome.status(), UninstallStatus::NotApplied);
+    assert!(
+        fs::symlink_metadata(&link)
+            .expect("retargeted link survives")
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(app.receipts().expect("receipt retained").len(), 3);
+}
+
+#[test]
+fn forget_source_removes_only_private_metadata_when_no_links_are_active() {
+    let fixture = Fixture::new();
+    let repository = fixture.source("library", &["portable"]);
+    let mut app = fixture.registered(&repository);
+    dispatch(&mut app, Action::OpenSources);
+    dispatch(&mut app, Action::BeginForgetSource);
+    let Some(OperationPrompt::Forget(ForgetPrompt::Preview(plan))) = app.pending_operation() else {
+        panic!("forget preview expected");
+    };
+    assert!(plan.is_executable());
+    dispatch(&mut app, Action::ConfirmOperation);
+    let Some(OperationPrompt::Forget(ForgetPrompt::Report(outcome))) = app.pending_operation()
+    else {
+        panic!("forget report expected");
+    };
+    assert_eq!(outcome.status(), ForgetStatus::Forgotten);
+    assert!(matches!(outcome.verification(), ForgetVerification::Held));
+    assert!(app.sources().is_empty());
+    assert!(repository.join("skills/portable/SKILL.md").is_file());
+    assert!(repository.is_dir());
+}
+
+/// Forget states one filesystem postcondition — the checkout is left alone —
+/// and that is the one it may not skip checking. A checkout that is gone when
+/// the removal is verified leaves the metadata correctly deleted and the
+/// promise unmet, which is a failed verification rather than a quiet pass.
+#[test]
+fn a_forget_whose_checkout_vanished_is_never_reported_as_verified() {
+    let fixture = Fixture::new();
+    let repository = fixture.source("library", &["portable"]);
+    let mut app = fixture.registered(&repository);
+    dispatch(&mut app, Action::OpenSources);
+    dispatch(&mut app, Action::BeginForgetSource);
+    let Some(OperationPrompt::Forget(ForgetPrompt::Preview(plan))) = app.pending_operation() else {
+        panic!("forget preview expected");
+    };
+    assert!(plan.is_executable());
+    fs::remove_dir_all(&repository).expect("remove the checkout after the preview");
+
+    dispatch(&mut app, Action::ConfirmOperation);
+
+    let Some(OperationPrompt::Forget(ForgetPrompt::Report(outcome))) = app.pending_operation()
+    else {
+        panic!("forget report expected");
+    };
+    assert_eq!(*outcome.applied(), ForgetApply::Forgotten);
+    assert_eq!(outcome.status(), ForgetStatus::VerificationFailed);
+    let ForgetVerification::Failed(reason) = outcome.verification() else {
+        panic!(
+            "an absent checkout fails verification: {:?}",
+            outcome.verification()
+        );
+    };
+    assert!(reason.contains("checkout"), "{reason}");
+    assert!(app.sources().is_empty());
+}
+
+/// A directory at the checkout's pathname is not the checkout. Verification
+/// asks for the repository and the revision it was registered at, so an empty
+/// replacement standing where the repository stood is reported for what it is
+/// rather than passing an object-type check.
+#[test]
+fn a_checkout_replaced_by_a_bare_directory_does_not_pass_forget_verification() {
+    let fixture = Fixture::new();
+    let repository = fixture.source("library", &["portable"]);
+    let mut app = fixture.registered(&repository);
+    dispatch(&mut app, Action::OpenSources);
+    dispatch(&mut app, Action::BeginForgetSource);
+    assert!(matches!(
+        app.pending_operation(),
+        Some(OperationPrompt::Forget(ForgetPrompt::Preview(plan))) if plan.is_executable()
+    ));
+    fs::remove_dir_all(&repository).expect("remove the checkout after the preview");
+    fs::create_dir(&repository).expect("stand an empty directory in its place");
+
+    dispatch(&mut app, Action::ConfirmOperation);
+
+    let Some(OperationPrompt::Forget(ForgetPrompt::Report(outcome))) = app.pending_operation()
+    else {
+        panic!("forget report expected");
+    };
+    assert_eq!(*outcome.applied(), ForgetApply::Forgotten);
+    assert_eq!(outcome.status(), ForgetStatus::VerificationFailed);
+    assert!(
+        matches!(
+            outcome.verification(),
+            ForgetVerification::Failed(reason) if reason.contains("no longer a Git checkout")
+        ),
+        "{:?}",
+        outcome.verification()
+    );
+}
+
+/// The revision lookup's other answer. A checkout that is still a repository
+/// but no longer holds the revision it was registered at is a definite failure,
+/// distinct from a checkout Git refused to answer about at all.
+#[test]
+fn a_checkout_that_no_longer_holds_its_registered_revision_fails_forget_verification() {
+    let fixture = Fixture::new();
+    let repository = fixture.source("library", &["portable"]);
+    let mut app = fixture.registered(&repository);
+    dispatch(&mut app, Action::OpenSources);
+    dispatch(&mut app, Action::BeginForgetSource);
+    assert!(matches!(
+        app.pending_operation(),
+        Some(OperationPrompt::Forget(ForgetPrompt::Preview(plan))) if plan.is_executable()
+    ));
+    // Same pathname, still a repository, different history: the registered
+    // revision is not one this one contains.
+    fs::remove_dir_all(repository.join(".git")).expect("remove the original history");
+    fs::write(repository.join("NOTES.md"), "a different history\n").expect("differing content");
+    initialize_repository(&repository);
+
+    dispatch(&mut app, Action::ConfirmOperation);
+
+    let Some(OperationPrompt::Forget(ForgetPrompt::Report(outcome))) = app.pending_operation()
+    else {
+        panic!("forget report expected");
+    };
+    assert_eq!(*outcome.applied(), ForgetApply::Forgotten);
+    assert_eq!(outcome.status(), ForgetStatus::VerificationFailed);
+    assert!(
+        matches!(
+            outcome.verification(),
+            ForgetVerification::Failed(reason) if reason.contains("registered at")
+        ),
+        "{:?}",
+        outcome.verification()
+    );
+}
+
+#[test]
+fn active_managed_links_block_forget_source() {
+    let fixture = Fixture::new();
+    let repository = fixture.source("library", &["portable"]);
+    let mut app = fixture.registered(&repository);
+    fixture.create_root_parents();
+    focus_first_variant(&mut app);
+    dispatch(&mut app, Action::BeginInstall);
+    dispatch(&mut app, Action::ConfirmOperation);
+    dispatch(&mut app, Action::DismissOperation);
+    dispatch(&mut app, Action::OpenInventory);
+    dispatch(&mut app, Action::OpenSources);
+    dispatch(&mut app, Action::BeginForgetSource);
+    let Some(OperationPrompt::Forget(ForgetPrompt::Preview(plan))) = app.pending_operation() else {
+        panic!("forget preview expected");
+    };
+    assert!(plan.is_blocked());
+    assert!(
+        plan.blocking_findings()
+            .iter()
+            .all(|finding| finding.code() == "forget.active_links")
+    );
+    dispatch(&mut app, Action::ConfirmOperation);
+    assert_eq!(app.sources().len(), 1);
+    assert_eq!(app.receipts().expect("receipts retained").len(), 3);
+}
+
+#[test]
+fn forget_that_becomes_active_after_preview_is_not_reported_as_verified() {
+    let fixture = Fixture::new();
+    let repository = fixture.source("library", &["portable"]);
+    let mut app = fixture.registered(&repository);
+    fixture.create_root_parents();
+    focus_first_variant(&mut app);
+    dispatch(&mut app, Action::BeginInstall);
+    dispatch(&mut app, Action::ConfirmOperation);
+    dispatch(&mut app, Action::DismissOperation);
+
+    let link = fixture.root(AgentKind::ClaudeCode).join("portable");
+    let target = fs::read_link(&link).expect("managed link target");
+    for (agent, _) in ROOTS {
+        fs::remove_file(fixture.root(agent).join("portable")).expect("make receipt inactive");
+    }
+    dispatch(&mut app, Action::OpenInventory);
+    dispatch(&mut app, Action::OpenSources);
+    dispatch(&mut app, Action::BeginForgetSource);
+    let Some(OperationPrompt::Forget(ForgetPrompt::Preview(plan))) = app.pending_operation() else {
+        panic!("forget preview expected");
+    };
+    assert!(plan.is_executable());
+
+    symlink(target, &link).expect("reactivate a receipted link after preview");
+    dispatch(&mut app, Action::ConfirmOperation);
+
+    let Some(OperationPrompt::Forget(ForgetPrompt::Report(outcome))) = app.pending_operation()
+    else {
+        panic!("forget report expected");
+    };
+    assert_eq!(outcome.status(), ForgetStatus::NotForgotten);
+    assert!(matches!(
+        outcome.verification(),
+        ForgetVerification::Withheld(_)
+    ));
+    assert_eq!(app.sources().len(), 1);
+    assert_eq!(app.receipts().expect("receipts retained").len(), 3);
+}
+
+#[test]
+fn unreadable_receipts_make_a_blocked_forget_plan_with_the_stable_finding() {
+    let fixture = Fixture::new();
+    let repository = fixture.source("library", &["portable"]);
+    let mut app = fixture.registered(&repository);
+    let connection = Connection::open(fixture.path().join("data/skilled.sqlite3"))
+        .expect("second metadata connection");
+    connection
+        .execute_batch("DROP TABLE operation_receipts;")
+        .expect("make receipts unreadable");
+    drop(connection);
+
+    dispatch(&mut app, Action::OpenSources);
+    dispatch(&mut app, Action::BeginForgetSource);
+
+    let Some(OperationPrompt::Forget(ForgetPrompt::Preview(plan))) = app.pending_operation() else {
+        panic!(
+            "blocked forget preview expected: {:?}",
+            app.pending_operation()
+        );
+    };
+    assert!(plan.is_blocked());
+    assert_eq!(plan.blocking_findings().len(), 1);
+    assert_eq!(
+        plan.blocking_findings()[0].code(),
+        "forget.unreadable_receipts"
+    );
+}
+
+#[test]
+fn a_stale_forget_preview_cannot_delete_a_later_sources_reused_row() {
+    let fixture = Fixture::new();
+    let original = fixture.source("original", &["portable"]);
+    let replacement = fixture.source("replacement", &["other"]);
+    let mut stale = fixture.registered(&original);
+    dispatch(&mut stale, Action::OpenSources);
+    dispatch(&mut stale, Action::BeginForgetSource);
+
+    let mut current = fixture.app();
+    dispatch(&mut current, Action::OpenSources);
+    dispatch(&mut current, Action::BeginForgetSource);
+    dispatch(&mut current, Action::ConfirmOperation);
+    let preview = current
+        .preview_source(&replacement)
+        .expect("preview replacement");
+    current
+        .confirm_source(preview)
+        .expect("register replacement");
+    let replacement_id = current.sources()[0].id();
+
+    dispatch(&mut stale, Action::ConfirmOperation);
+
+    let reopened = fixture.app();
+    assert_eq!(reopened.sources().len(), 1);
+    assert_eq!(reopened.sources()[0].id(), replacement_id);
+    assert_eq!(
+        reopened.sources()[0].git_top_level(),
+        replacement.canonicalize().expect("replacement path")
+    );
+}
+
+#[test]
+fn a_stale_forget_preview_cannot_delete_changed_source_catalog_metadata() {
+    let fixture = Fixture::new();
+    let repository = fixture.source("library", &["portable"]);
+    let mut stale = fixture.registered(&repository);
+    dispatch(&mut stale, Action::OpenSources);
+    dispatch(&mut stale, Action::BeginForgetSource);
+
+    write_skill(&repository.join(".claude/skills/special"), "special");
+    let mut current = fixture.app();
+    let preview = current
+        .preview_source(&repository)
+        .expect("preview changed registration");
+    current
+        .confirm_source(preview)
+        .expect("replace the stored catalog metadata");
+    assert_eq!(current.sources()[0].catalogs().len(), 2);
+
+    dispatch(&mut stale, Action::ConfirmOperation);
+
+    let Some(OperationPrompt::Forget(ForgetPrompt::Report(outcome))) = stale.pending_operation()
+    else {
+        panic!("forget report expected");
+    };
+    assert_eq!(outcome.status(), ForgetStatus::NotForgotten);
+    let ForgetApply::Failed(reason) = outcome.applied() else {
+        panic!("the stale forget must fail")
+    };
+    assert!(
+        reason.contains("source or catalog metadata changed"),
+        "{reason}"
+    );
+    let reopened = fixture.app();
+    assert_eq!(reopened.sources().len(), 1);
+    assert_eq!(reopened.sources()[0].catalogs().len(), 2);
+}
+
+#[test]
+fn a_concurrently_absent_source_is_refreshed_out_of_the_current_app() {
+    let fixture = Fixture::new();
+    let repository = fixture.source("library", &["portable"]);
+    let mut stale = fixture.registered(&repository);
+    dispatch(&mut stale, Action::OpenSources);
+    dispatch(&mut stale, Action::BeginForgetSource);
+
+    let mut current = fixture.app();
+    dispatch(&mut current, Action::OpenSources);
+    dispatch(&mut current, Action::BeginForgetSource);
+    dispatch(&mut current, Action::ConfirmOperation);
+
+    dispatch(&mut stale, Action::ConfirmOperation);
+
+    let Some(OperationPrompt::Forget(ForgetPrompt::Report(outcome))) = stale.pending_operation()
+    else {
+        panic!("forget report expected");
+    };
+    assert_eq!(outcome.status(), ForgetStatus::NothingToDo);
+    assert!(stale.sources().is_empty());
+}
 
 /// The acceptance criterion of this slice: one common variant reaches all three
 /// agents as individual directory symbolic links, only after a preview the user
@@ -62,7 +508,7 @@ fn a_confirmed_plan_links_every_agent_records_receipts_and_verifies_itself() {
         );
     }
 
-    dispatch(&mut app, Action::ConfirmInstall);
+    dispatch(&mut app, Action::ConfirmOperation);
 
     let Some(InstallPrompt::Report(outcome)) = app.pending_install() else {
         panic!("a report follows the apply: {:?}", app.pending_install());
@@ -116,6 +562,169 @@ fn a_confirmed_plan_links_every_agent_records_receipts_and_verifies_itself() {
     );
 }
 
+/// A second Skilled process may already be changing the same metadata. The
+/// install must acquire that mutation guard before it creates a link, because
+/// failing to record ownership after the write would strand the installation.
+#[test]
+fn an_install_that_cannot_acquire_the_metadata_guard_writes_nothing() {
+    let fixture = Fixture::new();
+    let repository = fixture.source("library", &["portable"]);
+    let mut app = fixture.registered(&repository);
+    fixture.create_root_parents();
+    focus_first_variant(&mut app);
+    dispatch(&mut app, Action::BeginInstall);
+
+    let mut blocker = Connection::open(fixture.path().join("data/skilled.sqlite3"))
+        .expect("second metadata connection");
+    let _guard = blocker
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .expect("hold the metadata mutation guard");
+
+    dispatch(&mut app, Action::ConfirmOperation);
+
+    let Some(InstallPrompt::Report(outcome)) = app.pending_install() else {
+        panic!("install report expected: {:?}", app.pending_install());
+    };
+    assert_eq!(outcome.status(), InstallStatus::NotApplied);
+    for (agent, root) in ROOTS {
+        assert!(
+            !fixture.home().join(root).join("portable").exists(),
+            "{agent:?} was written before the metadata guard was acquired"
+        );
+    }
+}
+
+/// A preview can outlive the source registration it was built from. A later
+/// confirmation must recheck that registration under the same mutation guard
+/// used for the link and receipt, rather than recreating active state after a
+/// concurrent Forget Source has completed.
+#[test]
+fn a_stale_install_preview_cannot_recreate_a_forgotten_sources_link() {
+    let fixture = Fixture::new();
+    let repository = fixture.source("library", &["portable"]);
+    let mut installing = fixture.registered(&repository);
+    fixture.create_root_parents();
+    focus_first_variant(&mut installing);
+    dispatch(&mut installing, Action::BeginInstall);
+
+    let mut forgetting = fixture.app();
+    dispatch(&mut forgetting, Action::OpenSources);
+    dispatch(&mut forgetting, Action::BeginForgetSource);
+    dispatch(&mut forgetting, Action::ConfirmOperation);
+    let Some(OperationPrompt::Forget(ForgetPrompt::Report(forgotten))) =
+        forgetting.pending_operation()
+    else {
+        panic!("forget report expected");
+    };
+    assert_eq!(forgotten.status(), ForgetStatus::Forgotten);
+    let replacement = fixture.source("replacement", &["other"]);
+    let preview = forgetting
+        .preview_source(&replacement)
+        .expect("preview replacement");
+    forgetting
+        .confirm_source(preview)
+        .expect("register replacement");
+    let replacement_id = forgetting.sources()[0].id();
+
+    dispatch(&mut installing, Action::ConfirmOperation);
+
+    let Some(InstallPrompt::Report(outcome)) = installing.pending_install() else {
+        panic!(
+            "install report expected: {:?}",
+            installing.pending_install()
+        );
+    };
+    assert_eq!(outcome.status(), InstallStatus::NotApplied);
+    for (agent, root) in ROOTS {
+        assert!(
+            !fixture.home().join(root).join("portable").exists(),
+            "{agent:?} recreated a link after its source was forgotten"
+        );
+    }
+    assert!(installing.receipts().expect("receipts").is_empty());
+    let reopened = fixture.app();
+    assert_eq!(reopened.sources()[0].id(), replacement_id);
+    assert_eq!(
+        reopened.sources()[0].git_top_level(),
+        replacement.canonicalize().expect("replacement path")
+    );
+}
+
+/// Re-registering the same checkout keeps its source identifier, so a stale
+/// preview's existence check still passes over registration metadata the live
+/// registry has replaced. The confirmed plan named a catalog, a classification,
+/// and a compatibility declaration, and the receipt it would leave behind names
+/// them too: all of it is compared under the guard before anything is written.
+#[test]
+fn a_stale_install_preview_cannot_write_a_link_the_live_registration_no_longer_offers() {
+    let fixture = Fixture::new();
+    let repository = fixture.source("library", &["portable"]);
+    let mut installing = fixture.registered(&repository);
+    fixture.create_root_parents();
+    focus_first_variant(&mut installing);
+    dispatch(&mut installing, Action::BeginInstall);
+    let Some(InstallPrompt::Preview(plan)) = installing.pending_install() else {
+        panic!("install preview expected");
+    };
+    assert!(plan.is_executable());
+    let source_id = installing.sources()[0].id();
+
+    let mut registering = fixture.app();
+    dispatch(&mut registering, Action::OpenSources);
+    dispatch(&mut registering, Action::BeginAddSource);
+    for character in repository.to_string_lossy().chars() {
+        dispatch(&mut registering, Action::AppendSourcePath(character));
+    }
+    dispatch(&mut registering, Action::SubmitSourcePath);
+    dispatch(
+        &mut registering,
+        Action::ToggleCatalogCompatibility(AgentKind::OpenCode),
+    );
+    dispatch(&mut registering, Action::ConfirmPendingSource);
+    assert_eq!(registering.sources()[0].id(), source_id);
+    assert!(
+        !registering.sources()[0].catalogs()[0]
+            .compatibility()
+            .opencode(),
+        "the re-registration must have changed the stored compatibility"
+    );
+
+    dispatch(&mut installing, Action::ConfirmOperation);
+
+    let Some(InstallPrompt::Report(outcome)) = installing.pending_install() else {
+        panic!("install report expected");
+    };
+    assert_eq!(outcome.status(), InstallStatus::NotApplied);
+    // The first target refuses on the changed registration and the plan blocks
+    // whole, so the rest are never attempted.
+    assert!(
+        matches!(
+            outcome.step(AgentKind::ClaudeCode).map(|step| step.outcome()),
+            Some(StepOutcome::Failed(reason)) if reason.contains("registration changed")
+        ),
+        "{:?}",
+        outcome
+            .step(AgentKind::ClaudeCode)
+            .map(|step| step.outcome())
+    );
+    for (agent, _) in ROOTS {
+        assert!(
+            !matches!(
+                outcome.step(agent).map(|step| step.outcome()),
+                Some(StepOutcome::Created)
+            ),
+            "{agent:?} wrote against replaced registration metadata"
+        );
+    }
+    for (agent, root) in ROOTS {
+        assert!(
+            !fixture.home().join(root).join("portable").exists(),
+            "{agent:?} was written from a stale registration"
+        );
+    }
+    assert!(installing.receipts().expect("receipts").is_empty());
+}
+
 /// A catalog that explicitly excludes OpenCode is still installable for the
 /// compatible agents. OpenCode discovers those links through its documented
 /// compatibility roots, and verification must compare that incompatible
@@ -149,7 +758,7 @@ fn incompatible_opencode_exposure_matches_the_confirmed_plan() {
             winner: fixture.root(AgentKind::Codex).join("portable")
         })
     );
-    dispatch(&mut app, Action::ConfirmInstall);
+    dispatch(&mut app, Action::ConfirmOperation);
 
     let Some(InstallPrompt::Report(outcome)) = app.pending_install() else {
         panic!("a report follows the apply: {:?}", app.pending_install());
@@ -197,7 +806,7 @@ fn a_blocked_plan_cannot_be_confirmed_and_writes_nothing_anywhere() {
         ["install.physical_path_collision"]
     );
 
-    dispatch(&mut app, Action::ConfirmInstall);
+    dispatch(&mut app, Action::ConfirmOperation);
 
     // Confirmation is refused, so the preview is still what is on screen.
     assert!(matches!(
@@ -237,7 +846,7 @@ fn an_existing_identical_link_is_neither_rewritten_nor_adopted() {
     focus_first_variant(&mut app);
 
     dispatch(&mut app, Action::BeginInstall);
-    dispatch(&mut app, Action::ConfirmInstall);
+    dispatch(&mut app, Action::ConfirmOperation);
 
     let Some(InstallPrompt::Report(outcome)) = app.pending_install() else {
         panic!("a report follows the apply");
@@ -274,7 +883,7 @@ fn a_target_that_changed_since_the_preview_stops_the_run_where_it_stands() {
     // precondition that fails is reached.
     let root = fixture.create_root(AgentKind::Codex);
     fs::write(root.join("portable"), "arrived after the preview").expect("occupy the slot");
-    dispatch(&mut app, Action::ConfirmInstall);
+    dispatch(&mut app, Action::ConfirmOperation);
 
     let Some(InstallPrompt::Report(outcome)) = app.pending_install() else {
         panic!("a report follows the apply");
@@ -325,7 +934,7 @@ fn a_root_that_appeared_since_the_preview_is_refused() {
     let root = fixture.create_root(AgentKind::ClaudeCode);
     let witness = root.join("belongs-to-someone-else");
     fs::write(&witness, "untouched").expect("mark the externally created root");
-    dispatch(&mut app, Action::ConfirmInstall);
+    dispatch(&mut app, Action::ConfirmOperation);
 
     let Some(InstallPrompt::Report(outcome)) = app.pending_install() else {
         panic!("a report follows the refused apply");
@@ -371,7 +980,7 @@ fn a_plan_with_no_work_left_reports_that_there_was_nothing_to_do() {
         TargetDisposition::AlreadyInstalled { .. }
     )));
 
-    dispatch(&mut app, Action::ConfirmInstall);
+    dispatch(&mut app, Action::ConfirmOperation);
     assert!(matches!(
         app.pending_install(),
         Some(InstallPrompt::Preview(_))
@@ -397,10 +1006,10 @@ fn the_prompt_swallows_other_actions_and_dismissal_keeps_the_fresh_inventory() {
     );
     assert_eq!(app.view(), skilled::View::Sources);
 
-    dispatch(&mut app, Action::ConfirmInstall);
-    dispatch(&mut app, Action::DismissInstall);
+    dispatch(&mut app, Action::ConfirmOperation);
+    dispatch(&mut app, Action::DismissOperation);
 
-    assert!(app.pending_install().is_none());
+    assert!(app.pending_operation().is_none());
     assert_eq!(
         app.inventory()
             .row("portable")
@@ -422,7 +1031,7 @@ fn verification_reports_a_link_that_stopped_matching_the_plan() {
     fixture.create_root_parents();
     focus_first_variant(&mut app);
     dispatch(&mut app, Action::BeginInstall);
-    dispatch(&mut app, Action::ConfirmInstall);
+    dispatch(&mut app, Action::ConfirmOperation);
     let Some(InstallPrompt::Report(outcome)) = app.pending_install() else {
         panic!("a report follows the apply");
     };
@@ -436,7 +1045,7 @@ fn verification_reports_a_link_that_stopped_matching_the_plan() {
     let elsewhere = fixture.directory.path().join("elsewhere/portable");
     write_skill(&elsewhere, "portable");
     symlink(&elsewhere, &link).expect("point it elsewhere");
-    dispatch(&mut app, Action::DismissInstall);
+    dispatch(&mut app, Action::DismissOperation);
     dispatch(&mut app, Action::OpenInventory);
 
     let report = verify_install(&plan, &applied, app.inventory());
@@ -470,7 +1079,7 @@ fn verification_withheld_for_a_written_target_is_not_verified() {
     fixture.create_root_parents();
     focus_first_variant(&mut app);
     dispatch(&mut app, Action::BeginInstall);
-    dispatch(&mut app, Action::ConfirmInstall);
+    dispatch(&mut app, Action::ConfirmOperation);
     let Some(InstallPrompt::Report(outcome)) = app.pending_install() else {
         panic!("a report follows the apply");
     };
@@ -511,7 +1120,7 @@ fn a_variant_directory_that_moved_since_the_preview_stops_the_run() {
 
     dispatch(&mut app, Action::BeginInstall);
     fs::rename(&repository, fixture.path().join("moved")).expect("move the checkout");
-    dispatch(&mut app, Action::ConfirmInstall);
+    dispatch(&mut app, Action::ConfirmOperation);
 
     let Some(InstallPrompt::Report(outcome)) = app.pending_install() else {
         panic!("a report follows the apply");
@@ -587,7 +1196,7 @@ fn a_checkout_replaced_since_the_preview_is_not_written() {
         .expect("distinguish the replacement history");
     initialize_repository(&repository);
 
-    dispatch(&mut app, Action::ConfirmInstall);
+    dispatch(&mut app, Action::ConfirmOperation);
 
     let Some(InstallPrompt::Report(outcome)) = app.pending_install() else {
         panic!("a report follows the refused apply");
@@ -646,7 +1255,7 @@ fn a_variant_that_stopped_validating_since_the_preview_is_not_written() {
     dispatch(&mut app, Action::BeginInstall);
     fs::remove_file(repository.join("skills/portable/SKILL.md"))
         .expect("invalidate the previewed skill");
-    dispatch(&mut app, Action::ConfirmInstall);
+    dispatch(&mut app, Action::ConfirmOperation);
 
     let Some(InstallPrompt::Report(outcome)) = app.pending_install() else {
         panic!("a report follows the refused apply");
@@ -695,7 +1304,7 @@ fn an_unrecordable_link_path_is_refused_before_any_write() {
     focus_first_variant(&mut app);
 
     dispatch(&mut app, Action::BeginInstall);
-    dispatch(&mut app, Action::ConfirmInstall);
+    dispatch(&mut app, Action::ConfirmOperation);
 
     let Some(InstallPrompt::Report(outcome)) = app.pending_install() else {
         panic!("a report follows the refused apply");
@@ -743,7 +1352,7 @@ fn an_unread_root_leaves_opencode_unstated_rather_than_unverified() {
         plan.warnings()
     );
 
-    dispatch(&mut app, Action::ConfirmInstall);
+    dispatch(&mut app, Action::ConfirmOperation);
 
     let Some(InstallPrompt::Report(outcome)) = app.pending_install() else {
         panic!("a report follows the apply");
@@ -798,7 +1407,7 @@ fn a_different_winner_under_the_same_classification_is_a_verification_failure() 
     );
     focus_first_variant(&mut app);
     dispatch(&mut app, Action::BeginInstall);
-    dispatch(&mut app, Action::ConfirmInstall);
+    dispatch(&mut app, Action::ConfirmOperation);
     let Some(InstallPrompt::Report(outcome)) = app.pending_install() else {
         panic!("a report follows the apply");
     };
@@ -810,7 +1419,7 @@ fn a_different_winner_under_the_same_classification_is_a_verification_failure() 
     // different slot from the one the plan named.
     fs::remove_file(fixture.home().join(OPENCODE_ROOT).join("portable"))
         .expect("remove OpenCode's link");
-    dispatch(&mut app, Action::DismissInstall);
+    dispatch(&mut app, Action::DismissOperation);
     dispatch(&mut app, Action::OpenInventory);
 
     let report = verify_install(&plan, &applied, app.inventory());
@@ -846,7 +1455,7 @@ fn an_installation_is_still_managed_and_healthy_after_a_restart() {
     fixture.create_root_parents();
     focus_first_variant(&mut app);
     dispatch(&mut app, Action::BeginInstall);
-    dispatch(&mut app, Action::ConfirmInstall);
+    dispatch(&mut app, Action::ConfirmOperation);
     drop(app);
 
     let reopened = fixture.app();
@@ -892,7 +1501,7 @@ fn deselect_codex(app: &mut SkilledApp) {
 /// so they stand in the measurement a terminal large enough to hold the dialog
 /// would report: the whole plan on screen, nothing left to scroll to.
 fn dispatch(app: &mut SkilledApp, action: Action) {
-    if app.pending_install().is_some() {
+    if app.pending_operation().is_some() {
         app.note_detail_max_scroll(Some(0));
     }
     let update = app.update(action);

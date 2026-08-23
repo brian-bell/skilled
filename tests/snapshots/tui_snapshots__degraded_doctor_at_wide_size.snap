@@ -7,7 +7,7 @@ expression: "normalize_degraded(&temporary, render(&app, 120, 40))"
 ▕ ◆ skilled  global                                                                                                    ▏
 ▕▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▏
 ▕                │                │                │                │                                                  ▏
-▕ 1 Inventory ·1 │ 2 Sources      │ Updates (soon) │ 4 Doctor       │                ● degraded · metadata unavailable ▏
+▕ 1 Inventory ·1 │ 2 Sources      │ 3 Updates      │ 4 Doctor       │                ● degraded · metadata unavailable ▏
 ▕▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁│▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁│▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁│▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁│▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▏
 ▕▌ Doctor  1 listed · metadata unavailable                                     │   Details  portable                   ▏
 ▕× metadata unavailable:                                                       │ ───────────────────────────────────── ▏
@@ -30,10 +30,10 @@ expression: "normalize_degraded(&temporary, render(&app, 120, 40))"
 ▕                                                                              │ ───────────────────────────────────── ▏
 ▕                                                                              │ Path: ~/.claude/skills/portable       ▏
 ▕                                                                              │ Object: directory                     ▏
-▕                                                                              │ Repair: not offered in this release   ▏
-▕                                                                              │                                       ▏
-▕                                                                              │                                       ▏
-▕                                                                              │                                       ▏
+▕                                                                              │ Repair: not offered: the ownership    ▏
+▕                                                                              │ receipts could not be read: the       ▏
+▕                                                                              │ application metadata is unavailable   ▏
+▕                                                                              │ this session                          ▏
 ▕                                                                              │                                       ▏
 ▕                                                                              │                                       ▏
 ▕                                                                              │                                       ▏

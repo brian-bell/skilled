@@ -3,6 +3,7 @@ pub mod app;
 pub mod cli;
 mod components;
 pub mod error;
+pub mod git;
 pub mod input;
 pub mod inventory;
 pub mod operations;
@@ -14,13 +15,14 @@ mod store;
 pub mod terminal;
 mod theme;
 pub mod tui;
+pub mod updates;
 pub mod validation;
 mod viewport;
 
 pub use agents::{AgentDetection, AgentKind};
 pub use app::{
-    Action, DoctorPane, Effect, InventoryPane, SetupStep, SkilledApp, SourcesPane, UpdateOutcome,
-    UpdateResult, View,
+    Action, DoctorItem, DoctorPane, Effect, InventoryPane, SetupStep, SkilledApp, SourcesPane,
+    UpdateOutcome, UpdateResult, UpdatesPane, View,
 };
 pub use error::{Error, MetadataFailure, Result};
 pub use inventory::RegistryAvailability;

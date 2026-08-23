@@ -1,6 +1,5 @@
 use std::{
     collections::HashSet,
-    env,
     ffi::{OsStr, OsString},
     fs,
     io::{self, BufRead, BufReader, Read, Write},
@@ -19,6 +18,17 @@ const MAX_SCAN_DEPTH: usize = 12;
 const MAX_CATALOG_CANDIDATES: usize = 4_096;
 const MAX_FILTERED_STATUS_PATHS: usize = 4_096;
 const MAX_FILTERED_STATUS_PATH_BYTES: usize = 4 * 1024 * 1024;
+const REPOSITORY_ROUTING_ENVIRONMENT: &[&str] = &[
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_COMMON_DIR",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_CEILING_DIRECTORIES",
+    "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+    "GIT_CONFIG_COUNT",
+];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CatalogClassification {
@@ -365,6 +375,10 @@ impl RegisteredSource {
         self.source_error.as_deref()
     }
 
+    pub(crate) fn repository_identity(&self) -> Option<&RepositoryIdentity> {
+        self.inspected.repository_identity()
+    }
+
     pub(crate) fn new(
         id: i64,
         label: String,
@@ -387,6 +401,7 @@ impl RegisteredSource {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InspectedSource {
     git_top_level: PathBuf,
+    repository_identity: Option<RepositoryIdentity>,
     branch: Option<String>,
     head: String,
     remote_url: Option<String>,
@@ -396,6 +411,10 @@ pub struct InspectedSource {
 impl InspectedSource {
     pub fn git_top_level(&self) -> &Path {
         &self.git_top_level
+    }
+
+    pub(crate) fn repository_identity(&self) -> Option<&RepositoryIdentity> {
+        self.repository_identity.as_ref()
     }
 
     pub fn branch(&self) -> Option<&str> {
@@ -438,9 +457,11 @@ pub fn inspect_local_source(path: &Path) -> Result<InspectedSource> {
     let remote_url = optional_git_output(&git_top_level, &["remote", "get-url", "origin"])?
         .map(|url| sanitize_remote_url(&url));
     let dirty = git_status_dirty(&git_top_level)?;
+    let repository_identity = Some(repository_identity(&git_top_level)?);
 
     Ok(InspectedSource {
         git_top_level,
+        repository_identity,
         branch,
         head: strip_record_terminator(&head).to_owned(),
         remote_url,
@@ -448,11 +469,64 @@ pub fn inspect_local_source(path: &Path) -> Result<InspectedSource> {
     })
 }
 
-pub(crate) fn contains_revision(repository: &Path, revision: &str) -> Result<bool> {
+/// What one revision lookup settled, keeping "not there" apart from "Git would
+/// not say".
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum RevisionLookup {
+    Present,
+    Absent,
+    /// Git ran and refused to answer: not a repository, ownership declined,
+    /// objects unreadable. The message is carried so a caller can state it.
+    Undetermined(String),
+}
+
+/// Ask whether a repository holds one revision, separating "it is not there"
+/// from "Git could not look".
+///
+/// A failed lookup alone cannot tell those apart: Git answers a missing object
+/// and a directory that is no longer a repository with the same kind of
+/// nonzero exit, and a declined ownership check or an unreadable object store
+/// joins them. So a failure is followed by one question with a known answer —
+/// resolve this repository's own `HEAD` — and only a repository that can still
+/// answer that is one whose "no" is evidence. A caller deciding whether to
+/// write may treat every failure as a refusal, but a caller *reporting* what it
+/// found may not: "this is not the checkout" and "nothing could be established"
+/// are different answers, and only one of them is a finding.
+///
+/// One case this does not separate, stated rather than hidden: an object store
+/// that can still produce `HEAD` while the older object the caller asked about
+/// is unreadable rather than absent reads as [`RevisionLookup::Absent`].
+/// Telling those apart means matching Git's own English error text, which is a
+/// worse dependency than the residual, and it is tracked as `skilled-syn`.
+pub(crate) fn look_up_revision(repository: &Path, revision: &str) -> Result<RevisionLookup> {
     let commit = format!("{revision}^{{commit}}");
-    Ok(run_git(repository, &["cat-file", "-e", &commit])?
-        .status
-        .success())
+    let output = run_git(repository, &["cat-file", "-e", &commit])?;
+    if output.status.success() {
+        return Ok(RevisionLookup::Present);
+    }
+    let readable = run_git(
+        repository,
+        &["rev-parse", "--verify", "--quiet", "HEAD^{commit}"],
+    )?;
+    if readable.status.success() {
+        return Ok(RevisionLookup::Absent);
+    }
+    let message = String::from_utf8_lossy(&output.stderr);
+    let message = strip_record_terminator(message.trim_end()).trim();
+    Ok(RevisionLookup::Undetermined(if message.is_empty() {
+        "Git could not read this repository".to_owned()
+    } else {
+        message.to_owned()
+    }))
+}
+
+/// The fail-closed reading of [`look_up_revision`], for the guards that write.
+///
+/// A lookup Git would not answer is not a revision Skilled may act on, so it
+/// counts as absent here. Nothing reporting a verdict to the reader may use
+/// this.
+pub(crate) fn contains_revision(repository: &Path, revision: &str) -> Result<bool> {
+    Ok(look_up_revision(repository, revision)? == RevisionLookup::Present)
 }
 
 pub fn preview_local_source(path: &Path) -> Result<SourcePreview> {
@@ -507,11 +581,90 @@ impl InspectedSource {
     ) -> Self {
         Self {
             git_top_level,
+            repository_identity: None,
             branch,
             head,
             remote_url: remote_url.map(|url| sanitize_remote_url(&url)),
             dirty,
         }
+    }
+}
+
+/// Identity of the Git directory behind a registered worktree. The canonical
+/// path alone is insufficient because another checkout can replace the
+/// directory at the same pathname while Skilled is running.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct RepositoryIdentity {
+    git_dir: PathBuf,
+    #[cfg(unix)]
+    device: u64,
+    #[cfg(unix)]
+    inode: u64,
+    #[cfg(windows)]
+    volume: Option<u32>,
+    #[cfg(windows)]
+    file_index: Option<u64>,
+}
+
+impl RepositoryIdentity {
+    /// Opaque value persisted with a registration so replacing a checkout at
+    /// the same pathname is still detected after Skilled restarts.
+    pub(crate) fn storage_key(&self) -> Result<String> {
+        let git_dir = self
+            .git_dir
+            .to_str()
+            .ok_or_else(|| Error::InvalidSourcePath(self.git_dir.clone()))?;
+        #[cfg(unix)]
+        {
+            Ok(format!("unix:{}:{}:{git_dir}", self.device, self.inode))
+        }
+        #[cfg(windows)]
+        {
+            Ok(format!(
+                "windows:{:?}:{:?}:{git_dir}",
+                self.volume, self.file_index
+            ))
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            Ok(format!("path:{git_dir}"))
+        }
+    }
+}
+
+pub(crate) fn repository_identity(repository: &Path) -> Result<RepositoryIdentity> {
+    let git_dir = git_path_from_output(required_git_bytes(
+        repository,
+        &["rev-parse", "--absolute-git-dir"],
+    )?)?
+    .canonicalize()?;
+    repository_identity_from_git_dir(git_dir)
+}
+
+pub(crate) fn repository_identity_from_git_dir(git_dir: PathBuf) -> Result<RepositoryIdentity> {
+    let git_dir = git_dir.canonicalize()?;
+    let metadata = fs::symlink_metadata(&git_dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        Ok(RepositoryIdentity {
+            git_dir,
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        })
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        Ok(RepositoryIdentity {
+            git_dir,
+            volume: metadata.volume_serial_number(),
+            file_index: metadata.file_index(),
+        })
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        Ok(RepositoryIdentity { git_dir })
     }
 }
 
@@ -828,20 +981,10 @@ fn git_status_dirty(repository: &Path) -> Result<Option<bool>> {
         "--ignore-submodules=dirty",
     ];
     let filter_settings = configured_filter_settings(repository)?;
-    let inherited_config_count = env::var("GIT_CONFIG_COUNT")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(0);
     let mut command = git_command(repository, &arguments);
-    command.env(
-        "GIT_CONFIG_COUNT",
-        inherited_config_count
-            .checked_add(filter_settings.len())
-            .ok_or(Error::InvalidGitOutput)?
-            .to_string(),
-    );
+    command.env("GIT_CONFIG_COUNT", filter_settings.len().to_string());
     for (offset, (key, value)) in filter_settings.iter().enumerate() {
-        let index = inherited_config_count + offset;
+        let index = offset;
         command
             .env(format!("GIT_CONFIG_KEY_{index}"), key)
             .env(format!("GIT_CONFIG_VALUE_{index}"), value);
@@ -1079,6 +1222,9 @@ fn run_git(repository: &Path, arguments: &[&str]) -> Result<Output> {
 
 fn git_command(repository: &Path, arguments: &[&str]) -> Command {
     let mut command = Command::new("git");
+    for key in REPOSITORY_ROUTING_ENVIRONMENT {
+        command.env_remove(key);
+    }
     command
         .env("GIT_OPTIONAL_LOCKS", "0")
         .args([

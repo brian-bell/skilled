@@ -3,7 +3,7 @@ source: tests/tui_snapshots.rs
 expression: "normalize_degraded(&temporary, render(&app, 80, 24))"
 ---
  ◆ skilled  global                            ● degraded · metadata unavailable
- 1 Inventory ·1 │ 2 Sources      │ Updates (soon) │ 4 Doctor       │
+ 1 Inventory ·1 │ 2 Sources      │ 3 Updates      │ 4 Doctor       │
 
 ▌ Global inventory  1 skill
 × metadata unavailable:

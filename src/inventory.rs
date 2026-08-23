@@ -67,8 +67,8 @@ impl InstallationObject {
 
 /// How much attention a finding demands.
 ///
-/// Skilled never repairs anything in this release, so severity orders the
-/// display and nothing else.
+/// Severity orders findings for display. Whether a particular finding offers
+/// repair is decided separately from the read-only inventory scan.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum FindingSeverity {
     Info,
@@ -631,6 +631,19 @@ pub struct DoctorEntry<'a> {
 }
 
 impl<'a> DoctorEntry<'a> {
+    pub(crate) fn from_observation(
+        skill_name: &'a str,
+        finding: &'a Finding,
+        observation: &'a InstalledSkillObservation,
+    ) -> Self {
+        Self {
+            skill_name,
+            agent: observation.agent(),
+            finding,
+            observation: Some(observation),
+            variants: &[],
+        }
+    }
     pub fn skill_name(&self) -> &'a str {
         self.skill_name
     }
@@ -675,19 +688,35 @@ impl<'a> DoctorEntry<'a> {
 /// stable code that is not listed here would silently sort last rather than
 /// wrongly: the fallback is the informational group, which is where an
 /// unclassified observation belongs until someone places it deliberately.
-fn doctor_order(code: &str) -> u8 {
+pub(crate) fn doctor_order(code: &str) -> u8 {
     match code {
         // 1. Broken or dangling installations.
         "install.dangling_symlink"
         | "install.unresolvable_symlink"
         | "install.unreadable_entry" => 0,
         // 2. Conflicting duplicates and incorrect effective resolution.
-        "variant.duplicate_for_agent" => 1,
+        "variant.duplicate_for_agent" | "install.wrong_managed_target" => 1,
         // 3. Invalid SKILL.md content or frontmatter.
         code if code.starts_with("skill.") => 2,
         // 4. Wrong, foreign, or explicitly incompatible agent variant.
         "variant.foreign_opencode_exposure" | "variant.incompatible_for_opencode" => 3,
-        // 5 and 6 — disabled skills, blocked updates — have no codes yet.
+        // 5. Disabled skills has no code yet.
+        // 6. Blocked repository updates, recorded only after an explicit check.
+        "source.dirty"
+        | "source.diverged"
+        | "source.missing"
+        | "source.detached_head"
+        | "source.no_upstream"
+        | "source.upstream_unfetched"
+        | "source.fetch_failed"
+        | "source.partial_clone_unsupported"
+        | "source.repository_transport_unsupported"
+        | "source.submodule_update_unsupported"
+        | "source.removal_leaves_content"
+        | "source.revival_name_mismatch"
+        | "update.apply_failed"
+        | "update.verification_failed"
+        | "update.verification_incomplete" => 5,
         // 7. Missing or ambiguous provenance.
         "install.provenance_unverified" => 6,
         // 8. Unmanaged installations and informational benign aliases. Stray
@@ -1209,7 +1238,7 @@ fn opencode_findings(name: &str, resolution: &OpenCodeResolution, rule: &str) ->
 
 /// Whether every registered source, and every catalog Skilled was asked to
 /// include, could be read this pass.
-fn whole_registry(sources: &[RegisteredSource]) -> bool {
+pub(crate) fn whole_registry(sources: &[RegisteredSource]) -> bool {
     sources.iter().all(|source| {
         source.source_error().is_none()
             && source

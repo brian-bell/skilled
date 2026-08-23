@@ -8,17 +8,20 @@ use ratatui::{
 };
 
 use crate::{
-    AgentKind, DoctorPane, InventoryPane, RegistryAvailability, SessionIdentity, SetupStep,
-    SkilledApp, SourcesPane, View,
+    AgentKind, DoctorItem, DoctorPane, InventoryPane, RegistryAvailability, SessionIdentity,
+    SetupStep, SkilledApp, SourcesPane, UpdatesPane, View,
     app::{MAX_INVENTORY_FILTER, SourceRow, catalog_rows},
     components::{self, KeyHint, terminal_safe},
     inventory::{
-        DoctorEntry, Finding, FindingSeverity, InstallationHealth, InstallationObject,
+        Finding, FindingSeverity, InstallationHealth, InstallationObject,
         InstalledSkillObservation, InventoryRow, RootScan, RootStatus, RowProvenance, RowVerdict,
     },
     operations::{
-        AppliedStep, ExcludedReason, InstallOutcome, InstallPlan, InstallPrompt, InstallStatus,
-        InstallTarget, StepOutcome, TargetDisposition,
+        AppliedStep, ExcludedReason, ForgetApply, ForgetPrompt, ForgetReceiptState, ForgetStatus,
+        ForgetVerification, InstallOutcome, InstallPlan, InstallPrompt, InstallStatus,
+        InstallTarget, OperationPrompt, RepairDisposition, RepairOfferStatus, RepairOutcome,
+        RepairPlan, RepairPrompt, RepairStatus, RepairStepOutcome, StepOutcome, TargetDisposition,
+        UninstallDisposition, UninstallPrompt, UninstallStatus,
     },
     resolution::{OpenCodeEntry, OpenCodeResolution, UnknownCause},
     source::{
@@ -26,6 +29,7 @@ use crate::{
         SkillValidation,
     },
     theme::{self, Tone},
+    updates::{RepositoryUpdatePrompt, RepositoryUpdateVerdict},
     viewport,
 };
 
@@ -42,6 +46,7 @@ pub const MINIMUM_HEIGHT: u16 = 24;
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct RenderFeedback {
     detail_max_scroll: Option<usize>,
+    update_preview_fully_seen: Option<bool>,
 }
 
 impl RenderFeedback {
@@ -51,6 +56,10 @@ impl RenderFeedback {
     /// measured nothing.
     pub fn detail_max_scroll(self) -> Option<usize> {
         self.detail_max_scroll
+    }
+
+    pub fn update_preview_fully_seen(self) -> Option<bool> {
+        self.update_preview_fully_seen
     }
 }
 
@@ -109,6 +118,7 @@ pub fn render(frame: &mut Frame<'_>, app: &SkilledApp) -> RenderFeedback {
         _ => Vec::new(),
     };
     let detail_extent = detail_scroll_extent(app, area, workspace, &findings);
+    let update_preview_seen = update_preview_fully_seen(app, area);
     // The grid's rules answer to the same height the chrome bars measure, so
     // the workspace and the bars agree about which terminal is tall.
     let airy = viewport::airy_rows(area.height);
@@ -116,21 +126,58 @@ pub fn render(frame: &mut Frame<'_>, app: &SkilledApp) -> RenderFeedback {
         View::Setup(step) => render_setup(frame, body, app, step),
         View::Inventory => render_inventory(frame, body, app, airy),
         View::Sources => render_sources(frame, body, app),
+        View::Updates => render_updates(frame, body, app),
         View::Doctor => render_doctor(frame, body, app, &findings),
         View::Settings => {
             render_inventory(frame, body, app, airy);
             render_settings(frame, body, app);
         }
     }
-    if let Some(prompt) = app.pending_install() {
-        render_install_prompt(
+    if let Some(prompt) = app.pending_operation() {
+        match prompt {
+            OperationPrompt::Install(prompt) => render_install_prompt(
+                frame,
+                area,
+                prompt,
+                app.home(),
+                app.detail_scroll(),
+                detail_extent,
+                operation_preview_fully_seen(app, detail_extent),
+            ),
+            OperationPrompt::Uninstall(prompt) => render_uninstall_prompt(
+                frame,
+                area,
+                prompt,
+                app.detail_scroll(),
+                detail_extent,
+                operation_preview_fully_seen(app, detail_extent),
+            ),
+            OperationPrompt::Forget(prompt) => render_forget_prompt(
+                frame,
+                area,
+                prompt,
+                app.detail_scroll(),
+                detail_extent,
+                operation_preview_fully_seen(app, detail_extent),
+            ),
+        }
+    } else if let Some(prompt) = app.pending_repair() {
+        render_repair_prompt(
             frame,
             area,
             prompt,
-            app.home(),
             app.detail_scroll(),
             detail_extent,
-            install_preview_fully_seen(app, detail_extent),
+            preview_fully_seen(app, detail_extent),
+        );
+    } else if let Some(prompt) = app.pending_update() {
+        render_update_prompt(
+            frame,
+            area,
+            prompt,
+            app.detail_scroll(),
+            detail_extent,
+            app.update_preview_fully_seen() || update_preview_seen == Some(true),
         );
     } else if app.source_path_input_active() {
         render_source_path_entry(frame, area, app);
@@ -138,11 +185,19 @@ pub fn render(frame: &mut Frame<'_>, app: &SkilledApp) -> RenderFeedback {
         render_catalog_confirmation(frame, area, app);
     }
     if let Some(context) = app.help_context() {
-        render_help(frame, area, context, app, detail_extent);
+        render_help(frame, area, context, app, &findings, detail_extent);
     }
-    render_footer(frame, key_hints, app, detail_extent);
+    render_footer(
+        frame,
+        key_hints,
+        app,
+        &findings,
+        detail_extent,
+        update_preview_seen,
+    );
     RenderFeedback {
         detail_max_scroll: detail_extent,
+        update_preview_fully_seen: update_preview_seen,
     }
 }
 
@@ -268,7 +323,8 @@ fn session_status_on_nav_row(app: &SkilledApp, area: Rect) -> bool {
 /// in the same precedence, that [`render`] draws overlays under, plus the
 /// help modal that can sit over any of them.
 fn overlay_open(app: &SkilledApp) -> bool {
-    app.pending_install().is_some()
+    app.pending_operation().is_some()
+        || app.pending_repair().is_some()
         || app.source_path_input_active()
         || (app.pending_source().is_some() && app.view() == View::Sources)
         || app.help_context().is_some()
@@ -611,6 +667,9 @@ fn keyboard_owner(app: &SkilledApp) -> Option<(String, &'static str)> {
     if app.help_context().is_some() {
         return Some(("Keyboard reference".to_owned(), DIALOG_NOTE));
     }
+    if app.pending_update().is_some() {
+        return Some(("Repository update".to_owned(), DIALOG_NOTE));
+    }
 
     let in_setup = matches!(app.view(), View::Setup(_));
     let note = if in_setup { SETUP_NOTE } else { DIALOG_NOTE };
@@ -633,7 +692,7 @@ fn keyboard_owner(app: &SkilledApp) -> Option<(String, &'static str)> {
     match app.view() {
         View::Setup(step) => Some((format!("Setup · {}", step.title()), note)),
         View::Settings => Some(("Settings".to_owned(), note)),
-        View::Inventory | View::Sources | View::Doctor => None,
+        View::Inventory | View::Sources | View::Updates | View::Doctor => None,
     }
 }
 
@@ -672,7 +731,7 @@ impl Destination {
     }
 
     fn is_available(self) -> bool {
-        matches!(self, Self::Inventory | Self::Sources | Self::Doctor)
+        true
     }
 
     /// What this destination can honestly say it holds, if anything.
@@ -692,8 +751,8 @@ impl Destination {
                 .then(|| app.sources().len()),
             // Findings are observations of the same roots the inventory reads,
             // so the same verdict decides whether either may be stated.
-            Self::Doctor => app.inventory().stated_finding_count(),
-            Self::Updates => None,
+            Self::Doctor => app.stated_finding_count(),
+            Self::Updates => app.stated_update_count(),
         }
     }
 
@@ -702,7 +761,7 @@ impl Destination {
             Self::Inventory => matches!(view, View::Inventory | View::Settings),
             Self::Sources => view == View::Sources,
             Self::Doctor => view == View::Doctor,
-            Self::Updates => false,
+            Self::Updates => view == View::Updates,
         }
     }
 }
@@ -1642,12 +1701,7 @@ fn inventory_empty_state(app: &SkilledApp) -> (String, String) {
 }
 
 /// Doctor: every finding the last scan holds, and what one of them is about.
-fn render_doctor(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    app: &SkilledApp,
-    findings: &[DoctorEntry<'_>],
-) {
+fn render_doctor(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp, findings: &[DoctorItem<'_>]) {
     match viewport::workspace_regions(area) {
         (primary, Some(detail)) => {
             render_doctor_findings(frame, primary, app, findings);
@@ -1699,7 +1753,7 @@ fn render_doctor_findings(
     frame: &mut Frame<'_>,
     area: Rect,
     app: &SkilledApp,
-    findings: &[DoctorEntry<'_>],
+    findings: &[DoctorItem<'_>],
 ) {
     let body = if let Some(line) = metadata_failure_line(app, area.width) {
         render_pane_scaffold_with_status(
@@ -1775,7 +1829,7 @@ fn doctor_subtitle(app: &SkilledApp, listed: usize) -> String {
     // The banner above this subtitle states the failure either way, so a
     // stateable number is never spent on repeating it.
     let degraded = app.metadata_failure().is_some();
-    match inventory.stated_finding_count() {
+    match app.stated_finding_count() {
         Some(0) => "nothing to report".to_owned(),
         Some(1) => "1 finding".to_owned(),
         Some(findings) => format!("{findings} findings"),
@@ -1789,11 +1843,22 @@ fn doctor_subtitle(app: &SkilledApp, listed: usize) -> String {
         None if !read_a_root(inventory) && listed > 0 => format!("{listed} listed · no root read"),
         None if !read_a_root(inventory) => "no root read".to_owned(),
         // Behind every answer the roots have, for the same reason the empty
-        // state puts it last: this one is already on screen in the banner.
-        None if degraded && listed > 0 => format!("{listed} listed · metadata unavailable"),
-        None if degraded => "metadata unavailable".to_owned(),
-        None if listed > 0 => format!("{listed} listed · a source could not be read"),
-        None => "a source could not be read".to_owned(),
+        // state puts it last: this one is already on screen in the banner. And
+        // narrowed the same way `doctor_empty_state` narrows it, so the pane
+        // header and the body beneath it lead with the same reason: a session
+        // degraded by a malformed completion flag can still hold a registry
+        // that was read whole, and there the receipt table is what is actually
+        // missing.
+        None if degraded && !inventory.registry_is_complete() && listed > 0 => {
+            format!("{listed} listed · metadata unavailable")
+        }
+        None if degraded && !inventory.registry_is_complete() => "metadata unavailable".to_owned(),
+        None if !inventory.registry_is_complete() && listed > 0 => {
+            format!("{listed} listed · a source could not be read")
+        }
+        None if !inventory.registry_is_complete() => "a source could not be read".to_owned(),
+        None if listed > 0 => format!("{listed} listed · receipts could not be read"),
+        None => "receipts could not be read".to_owned(),
     }
 }
 
@@ -1819,7 +1884,7 @@ fn doctor_column_headings(columns: DoctorColumns) -> Line<'static> {
 }
 
 fn doctor_row_line(
-    entry: &DoctorEntry<'_>,
+    entry: &DoctorItem<'_>,
     columns: DoctorColumns,
     selected: bool,
     width: u16,
@@ -1833,7 +1898,7 @@ fn doctor_row_line(
         Span::raw(" ".repeat(padding)),
         Span::raw(padded(entry.finding().code(), columns.code)),
         Span::raw(padded(&terminal_safe(entry.skill_name()), columns.skill)),
-        Span::raw(entry.agent().display_name()),
+        Span::raw(entry.agent_option().map_or("", AgentKind::display_name)),
     ];
     components::list_row(spans, selected, width)
 }
@@ -1927,6 +1992,14 @@ fn doctor_empty_state(app: &SkilledApp) -> (&'static str, String, String) {
                 .to_owned(),
         );
     }
+    if !app.repair_receipts_readable() {
+        return (
+            "·",
+            "Ownership receipts could not be read".to_owned(),
+            "The installation roots and registry were read, but Skilled cannot state repairability or a complete finding count without its ownership evidence."
+                .to_owned(),
+        );
+    }
     (
         "✓",
         "Nothing to report".to_owned(),
@@ -1941,7 +2014,7 @@ fn render_doctor_detail(
     frame: &mut Frame<'_>,
     area: Rect,
     app: &SkilledApp,
-    findings: &[DoctorEntry<'_>],
+    findings: &[DoctorItem<'_>],
     beside_the_table: bool,
 ) {
     let selected = findings.get(app.focused_finding());
@@ -1974,13 +2047,14 @@ fn render_doctor_detail(
     render_detail_window(
         frame,
         body,
-        doctor_detail_lines(entry, app.home(), body.width),
+        doctor_detail_lines(app, entry, body.width),
         app.detail_scroll(),
         rows_below_advice(app),
     );
 }
 
-fn doctor_detail_lines(entry: &DoctorEntry<'_>, home: &Path, width: u16) -> Vec<Line<'static>> {
+fn doctor_detail_lines(app: &SkilledApp, entry: &DoctorItem<'_>, width: u16) -> Vec<Line<'static>> {
+    let home = app.home();
     let severity = entry.finding().severity();
     let mut lines = Vec::new();
     push_detail_section(&mut lines, "FINDING", width);
@@ -1992,7 +2066,15 @@ fn doctor_detail_lines(entry: &DoctorEntry<'_>, home: &Path, width: u16) -> Vec<
     // The pane header above already names the skill; the agent is named
     // nowhere else in the region and a finding that did not say which agent it
     // concerns would be half a finding.
-    lines.push(detail_field("Agent", entry.agent().display_name()));
+    if let Some(agent) = entry.agent_option() {
+        lines.push(detail_field("Agent", agent.display_name()));
+    } else if let Some(source) = entry.source() {
+        lines.push(detail_field("Source", &terminal_safe(source.label())));
+        lines.push(detail_field(
+            "Path",
+            &terminal_safe(&source.git_top_level().display().to_string()),
+        ));
+    }
 
     push_detail_section(&mut lines, "OBSERVED", width);
     lines.push(Line::from(Span::raw(terminal_safe_bounded_start(
@@ -2040,12 +2122,18 @@ fn doctor_detail_lines(entry: &DoctorEntry<'_>, home: &Path, width: u16) -> Vec<
         );
     }
 
-    // Spec 9.5 asks every finding to say whether the application can repair it.
-    // None of them can here, and saying so plainly is what keeps the absence of
-    // a repair key from reading as an oversight. One field rather than a
-    // section: the answer is the same for every finding, and a region this
-    // narrow cannot spend four rows on a constant.
-    lines.push(detail_field("Repair", "not offered in this release"));
+    let repair = entry.observation().map_or_else(
+        || "not offered: this finding does not concern one installed link".to_owned(),
+        |observation| match app.repair_offer(observation.path()) {
+            RepairOfferStatus::Offered => {
+                "offered: Skilled holds an exact matching receipt; press r to preview".to_owned()
+            }
+            RepairOfferStatus::NotOffered { reason } => {
+                format!("not offered: {}", terminal_safe(&reason))
+            }
+        },
+    );
+    lines.push(detail_field("Repair", &repair));
     lines
 }
 
@@ -2061,11 +2149,11 @@ fn doctor_detail_lines(entry: &DoctorEntry<'_>, home: &Path, width: u16) -> Vec<
 /// picked anything and the complaint is that nothing can. Keying on the code
 /// alone would state one of those beside the evidence for the other.
 ///
-/// [`DoctorEntry::concerns_the_registry`] is what tells them apart. Neither
+/// [`DoctorItem::concerns_the_registry`] is what tells them apart. Neither
 /// finding hangs off an installation — an effective resolution is a fact about
 /// several roots at once, so it is filed on the row — so the observation cannot
 /// be asked; the competing variants can.
-fn finding_consequence(entry: &DoctorEntry<'_>) -> &'static str {
+fn finding_consequence(entry: &DoctorItem<'_>) -> &'static str {
     match entry.finding().code() {
         "variant.duplicate_for_agent" if !entry.concerns_the_registry() => {
             "The highest-precedence root wins and the other definition is never \
@@ -2073,6 +2161,9 @@ fn finding_consequence(entry: &DoctorEntry<'_>) -> &'static str {
         }
         "install.dangling_symlink" => {
             "The agent finds a link with nothing behind it, so the skill does not load."
+        }
+        "install.wrong_managed_target" => {
+            "The skill loads, but this agent now selects a different registered variant under the same name."
         }
         "install.unresolvable_symlink" | "install.unreadable_entry" => {
             "Skilled could not follow what is installed here, so what the agent loads \
@@ -2107,6 +2198,70 @@ fn finding_consequence(entry: &DoctorEntry<'_>) -> &'static str {
         }
         code if code.starts_with("skill.") => {
             "An agent cannot load a skill whose SKILL.md fails the portable core."
+        }
+        "source.dirty" => {
+            "The checkout has changes of its own, so Skilled will not advance it over them."
+        }
+        "source.diverged" => {
+            "Local commits are not on the upstream branch, so no fast-forward exists. \
+             Skilled does not rebase or merge."
+        }
+        "source.missing" => {
+            "The registered checkout could not be read, so nothing can be said about what \
+             it holds or whether it is current."
+        }
+        "source.detached_head" => {
+            "HEAD is not on a branch here, so there is no branch for a fast-forward to \
+             advance."
+        }
+        "source.no_upstream" => {
+            "The branch tracks nothing, so there is no upstream to check against or to \
+             fast-forward to."
+        }
+        "source.upstream_unfetched" => {
+            "The branch tracks an upstream whose remote-tracking ref is not here, so a check \
+             has to fetch it before an update can be judged."
+        }
+        "source.fetch_failed" => {
+            "The check could not reach the upstream, so whether an update exists is not \
+             known."
+        }
+        "source.partial_clone_unsupported" => {
+            "Git may fetch missing objects here outside an explicit check, so Skilled does \
+             not update this repository."
+        }
+        "source.repository_transport_unsupported" => {
+            "This checkout configures a program for Git to run while fetching, so checking \
+             it would run code the repository chose rather than only reading."
+        }
+        "source.submodule_update_unsupported" => {
+            "Advancing this checkout would move a submodule Skilled does not manage, so the \
+             update is refused."
+        }
+        "source.removal_leaves_content" => {
+            "The update takes a skill away but leaves its directory standing, so the \
+             installation would resolve to something that is not a skill rather than losing \
+             its target."
+        }
+        "source.revival_name_mismatch" => {
+            "The link uses a different installation name, so the updated skill would still \
+             fail validation there."
+        }
+        "source.changed_after_preview" => {
+            "The repository moved after its plan was previewed, so that plan was abandoned \
+             without writing. Check again for the current state."
+        }
+        "update.apply_failed" => {
+            "Git failed after Skilled reached the fast-forward command, so the checkout was \
+             rescanned but the write is not reported as applied or verified."
+        }
+        "update.verification_failed" => {
+            "A fast-forward was applied and the result disagreed with the plan, so what this \
+             source holds is not what was agreed to."
+        }
+        "update.verification_incomplete" => {
+            "Something the plan promised could not be re-read after the fast-forward, so the \
+             update is not reported as verified."
         }
         _ => "Skilled has no account of what this costs.",
     }
@@ -2385,7 +2540,20 @@ fn render_inventory_detail(
     // exist, so content that does not fit is reported as missing rather than
     // dropped off the bottom without a trace — and, where the region has the
     // keyboard, reached by scrolling rather than only reported.
-    let lines = inventory_detail_lines(row, app.inventory().roots(), app.home(), body.width);
+    let overlay_findings = row
+        .observations()
+        .filter_map(|observation| {
+            app.repair_overlay_finding(observation.path())
+                .map(|finding| (observation.agent(), finding))
+        })
+        .collect::<Vec<_>>();
+    let lines = inventory_detail_lines(
+        row,
+        app.inventory().roots(),
+        app.home(),
+        body.width,
+        &overlay_findings,
+    );
     render_detail_window(
         frame,
         body,
@@ -2409,6 +2577,7 @@ fn rows_below_advice(app: &SkilledApp) -> RowsBelow {
     let focused = match app.view() {
         View::Inventory => app.inventory_pane() == InventoryPane::Details,
         View::Doctor => app.doctor_pane() == DoctorPane::Details,
+        View::Updates => app.updates_pane() == UpdatesPane::Details,
         _ => false,
     };
     if app.help_context().is_some() || app.inventory_filter_active() {
@@ -2602,13 +2771,13 @@ fn detail_scroll_extent(
     app: &SkilledApp,
     area: Rect,
     workspace: Rect,
-    findings: &[DoctorEntry<'_>],
+    findings: &[DoctorItem<'_>],
 ) -> Option<usize> {
     // The install dialog is drawn over the workspace and owns the window while
     // it is open, so it is measured instead of whatever is behind it. The
     // reducer keeps one offset because only one scrollable thing is ever on
     // screen, and a modal is exactly that.
-    if let Some(prompt) = app.pending_install() {
+    if let Some(prompt) = app.pending_operation() {
         let body = install_prompt_regions(area, 0).body;
         if body.width == 0 {
             return None;
@@ -2621,10 +2790,36 @@ fn detail_scroll_extent(
         // shared with the detail regions because only one scrollable thing is
         // ever on screen — the renderer measures the unit, and the reducer
         // only ever clamps to what it was told.
-        let rows: usize = install_prompt_lines(prompt, app.home(), body.width)
+        let lines = match prompt {
+            OperationPrompt::Install(prompt) => {
+                install_prompt_lines(prompt, app.home(), body.width)
+            }
+            OperationPrompt::Uninstall(prompt) => uninstall_prompt_lines(prompt),
+            OperationPrompt::Forget(prompt) => forget_prompt_lines(prompt),
+        };
+        let rows: usize = lines
             .iter()
             .map(|line| wrapped_line_count(line, body.width))
             .sum();
+        return Some(rows.saturating_sub(usize::from(body.height)));
+    }
+    if let Some(prompt) = app.pending_repair() {
+        let body = install_prompt_regions(area, 0).body;
+        if body.width == 0 {
+            return None;
+        }
+        let rows: usize = repair_prompt_lines(prompt, body.width)
+            .iter()
+            .map(|line| wrapped_line_count(line, body.width))
+            .sum();
+        return Some(rows.saturating_sub(usize::from(body.height)));
+    }
+    if let Some(prompt) = app.pending_update() {
+        let body = update_prompt_regions(area, 0).body;
+        if body.width == 0 {
+            return None;
+        }
+        let rows = update_prompt_rows(prompt, body.width).len();
         return Some(rows.saturating_sub(usize::from(body.height)));
     }
     let (primary, detail) = viewport::workspace_regions(workspace);
@@ -2647,9 +2842,22 @@ fn detail_scroll_extent(
             let Some(row) = app.selected_installation() else {
                 return Some(0);
             };
+            let overlay_findings = row
+                .observations()
+                .filter_map(|observation| {
+                    app.repair_overlay_finding(observation.path())
+                        .map(|finding| (observation.agent(), finding))
+                })
+                .collect::<Vec<_>>();
             (
                 body,
-                inventory_detail_lines(row, app.inventory().roots(), app.home(), body.width),
+                inventory_detail_lines(
+                    row,
+                    app.inventory().roots(),
+                    app.home(),
+                    body.width,
+                    &overlay_findings,
+                ),
             )
         }
         View::Doctor => {
@@ -2660,7 +2868,17 @@ fn detail_scroll_extent(
             let Some(entry) = findings.get(app.focused_finding()) else {
                 return Some(0);
             };
-            (body, doctor_detail_lines(entry, app.home(), body.width))
+            (body, doctor_detail_lines(app, entry, body.width))
+        }
+        View::Updates => {
+            let body = focused_alone(app.updates_pane() == UpdatesPane::Details, false)?;
+            if body.width == 0 {
+                return None;
+            }
+            let Some(source) = app.selected_update_source() else {
+                return Some(0);
+            };
+            (body, update_detail_lines(app, source))
         }
         _ => return None,
     };
@@ -2766,6 +2984,7 @@ fn inventory_detail_lines(
     roots: &[RootScan; 3],
     home: &Path,
     width: u16,
+    overlay_findings: &[(AgentKind, &Finding)],
 ) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     // Kicker, then the skill's own name as the title, then its health: the
@@ -2847,6 +3066,12 @@ fn inventory_detail_lines(
                 observation.health().label(),
             ),
             width,
+        );
+        lines.extend(
+            overlay_findings
+                .iter()
+                .filter(|(agent, _)| *agent == observation.agent())
+                .flat_map(|(_, finding)| finding_lines(finding, width)),
         );
         lines.extend(observation_lines(
             observation,
@@ -3203,6 +3428,494 @@ const MAX_VARIANT_WIDTH: usize = MAX_SKILL_WIDTH;
 /// up to the relayout at [`viewport::WIDE_MINIMUM_WIDTH`], which no pane
 /// content survives whole in any case.
 const VARIANTS_CONTENT_MAX_WIDTH: usize = 65;
+
+/// More segments than this spend the pane on separators and one-cell markers;
+/// large registries retain the exact textual count instead.
+const UPDATE_PROGRESS_SEGMENT_BUDGET: usize = 12;
+
+fn render_updates(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
+    match viewport::workspace_regions(area) {
+        (primary, Some(detail)) => {
+            render_update_candidates(frame, primary, app);
+            render_update_details(frame, detail, app, true);
+        }
+        (primary, None) => match app.updates_pane() {
+            UpdatesPane::Candidates => render_update_candidates(frame, primary, app),
+            UpdatesPane::Details => render_update_details(frame, primary, app, false),
+        },
+    }
+}
+
+fn render_update_candidates(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
+    let subtitle = app.stated_update_count().map_or_else(
+        || "network access is explicit".to_owned(),
+        |count| format!("{count} available · network access is explicit"),
+    );
+    let body = render_pane_scaffold(
+        frame,
+        area,
+        "Updates",
+        &subtitle,
+        app.updates_pane() == UpdatesPane::Candidates,
+        false,
+    );
+    if app.sources().is_empty() {
+        frame.render_widget(
+            components::empty_state(
+                "·",
+                "No registered sources",
+                "Register a local Git source before checking for repository updates.",
+                body,
+            ),
+            body,
+        );
+        return;
+    }
+    let progress = app.update_check_progress();
+    let status = if app.update_check_in_flight() {
+        progress.map_or_else(
+            || "Checking registered sources · Esc cancels".to_owned(),
+            |(completed, total)| {
+                format!(
+                    "Checking source {} of {} · Esc cancels",
+                    (completed + 1).min(total),
+                    total
+                )
+            },
+        )
+    } else {
+        "Last checked results are cached; opening this view never fetches.".to_owned()
+    };
+    let mut lines = vec![Line::styled(status, theme::pane_subtitle())];
+    if app.update_check_in_flight()
+        && let Some((completed, total)) = progress
+        && total > 0
+        && total <= UPDATE_PROGRESS_SEGMENT_BUDGET
+        && total.saturating_mul(2).saturating_sub(1) <= usize::from(body.width)
+    {
+        lines.push(components::segmented_progress(
+            (completed + 1).min(total),
+            total,
+            body.width,
+        ));
+    }
+    if let Some(error) = app.update_check_error() {
+        lines.push(Line::from(components::badge(
+            Tone::Warning,
+            &terminal_safe(error),
+        )));
+    }
+    let capacity = usize::from(body.height).saturating_sub(lines.len()).max(1);
+    let start = visible_window_start(app.focused_update(), capacity);
+    for (index, source) in app.sources().iter().enumerate().skip(start).take(capacity) {
+        let (status, tone, checked) = match app.update_check_for(source.id()) {
+            None => ("not checked".to_owned(), Tone::Inactive, String::new()),
+            Some(check) if check.superseded_by(source) => (
+                "superseded".to_owned(),
+                Tone::Warning,
+                format!(" · checked {}", format_update_timestamp(check.checked_at)),
+            ),
+            Some(check) => {
+                let status = match check.verdict {
+                    RepositoryUpdateVerdict::Available => {
+                        format!("available · {} behind", check.behind)
+                    }
+                    RepositoryUpdateVerdict::Ahead => format!("ahead · {}", check.ahead),
+                    RepositoryUpdateVerdict::UpToDate => "up to date".to_owned(),
+                    RepositoryUpdateVerdict::Blocked => "blocked".to_owned(),
+                };
+                let tone = match check.verdict {
+                    RepositoryUpdateVerdict::Available => Tone::Healthy,
+                    RepositoryUpdateVerdict::Blocked => Tone::Warning,
+                    _ => Tone::Inactive,
+                };
+                (
+                    status,
+                    tone,
+                    format!(" · checked {}", format_update_timestamp(check.checked_at)),
+                )
+            }
+        };
+        let spans = vec![
+            Span::raw(format!("{:<24}", terminal_safe(source.label()))),
+            components::badge(tone, &status),
+            Span::styled(checked, theme::pane_subtitle()),
+        ];
+        lines.push(components::list_row(
+            spans,
+            index == app.focused_update(),
+            body.width,
+        ));
+    }
+    frame.render_widget(Paragraph::new(lines), body);
+}
+
+fn render_update_details(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp, wide: bool) {
+    let body = render_pane_scaffold(
+        frame,
+        area,
+        "Update detail",
+        "cached safety state",
+        app.updates_pane() == UpdatesPane::Details,
+        wide,
+    );
+    let Some(source) = app.selected_update_source() else {
+        frame.render_widget(
+            components::empty_state(
+                "·",
+                "No source selected",
+                "There is no repository update to describe.",
+                body,
+            ),
+            body,
+        );
+        return;
+    };
+    render_detail_window(
+        frame,
+        body,
+        update_detail_lines(app, source),
+        app.detail_scroll(),
+        rows_below_advice(app),
+    );
+}
+
+fn update_detail_lines(app: &SkilledApp, source: &RegisteredSource) -> Vec<Line<'static>> {
+    let mut lines = vec![
+        Line::raw(format!("Source       {}", terminal_safe(source.label()))),
+        Line::raw(format!(
+            "Path         {}",
+            terminal_safe(&source.git_top_level().display().to_string())
+        )),
+        Line::raw("Network      explicit — press u to fetch"),
+    ];
+    if let Some(error) = app.update_check_error() {
+        lines.push(Line::raw(format!("Check error  {}", terminal_safe(error))));
+    }
+    match app.update_check_for(source.id()) {
+        None => lines.push(Line::raw("Precondition check has not run")),
+        Some(check) if check.superseded_by(source) => {
+            lines.push(Line::raw("Precondition cached result is superseded"))
+        }
+        Some(check) => {
+            lines.push(Line::raw(format!(
+                "Checked      {}",
+                format_update_timestamp(check.checked_at)
+            )));
+            lines.push(Line::raw(format!(
+                "Ahead/behind {} / {}",
+                check.ahead, check.behind
+            )));
+            for finding in check.findings() {
+                lines.push(Line::raw(format!(
+                    "Evidence     {} — {}",
+                    finding.code(),
+                    terminal_safe(finding.evidence())
+                )));
+            }
+        }
+    }
+    lines
+}
+
+fn update_prompt_lines(prompt: &RepositoryUpdatePrompt) -> Vec<Line<'static>> {
+    match prompt {
+        RepositoryUpdatePrompt::Failed(error) => vec![
+            Line::raw("Repository update could not be prepared"),
+            Line::raw(terminal_safe(error)),
+        ],
+        RepositoryUpdatePrompt::StateUnavailable {
+            apply_error,
+            write_attempted,
+            refresh_error,
+        } => {
+            let headline = if !write_attempted {
+                "Repository update was abandoned without writing"
+            } else if apply_error.is_some() {
+                "Fast-forward command failed; post-attempt state is unavailable"
+            } else {
+                "Fast-forward completed; post-attempt state is unavailable"
+            };
+            let mut lines = vec![Line::raw(headline)];
+            if let Some(error) = apply_error {
+                lines.push(Line::raw(format!(
+                    "{}: {}",
+                    if *write_attempted {
+                        "Command failure"
+                    } else {
+                        "Guard refusal"
+                    },
+                    terminal_safe(error)
+                )));
+            }
+            lines.push(Line::raw(format!(
+                "Post-attempt state unavailable: {}",
+                terminal_safe(refresh_error)
+            )));
+            lines
+        }
+        RepositoryUpdatePrompt::Preview(plan) => {
+            let mut lines = update_plan_statement_lines(prompt);
+            for path in plan.changed_files() {
+                lines.push(if let Some(old) = path.renamed_from() {
+                    Line::raw(format!(
+                        "  renamed · {} → {}",
+                        terminal_safe(&old.display().to_string()),
+                        terminal_safe(&path.path().display().to_string())
+                    ))
+                } else {
+                    Line::raw(format!(
+                        "  {:?} · {}",
+                        path.kind(),
+                        terminal_safe(&path.path().display().to_string())
+                    ))
+                });
+            }
+            lines
+        }
+        RepositoryUpdatePrompt::Report {
+            verification,
+            apply_error,
+            write_attempted,
+            persistence_error,
+            ..
+        } => {
+            let headline = if !write_attempted {
+                "Repository update was abandoned without writing"
+            } else if apply_error.is_some() && verification.is_verified() {
+                "Fast-forward command failed; the previewed target was nevertheless verified"
+            } else if apply_error.is_some() {
+                "Fast-forward failed and the post-attempt state was not verified"
+            } else if verification.is_complete() && verification.is_verified() {
+                "Fast-forward verified"
+            } else if verification.is_verified() {
+                "Fast-forward verified as far as it could be"
+            } else {
+                "Fast-forward was not verified"
+            };
+            let mut lines = vec![Line::raw(headline)];
+            if let Some(error) = apply_error {
+                lines.push(Line::raw(format!(
+                    "{}: {}",
+                    if *write_attempted {
+                        "Command failure"
+                    } else {
+                        "Guard refusal"
+                    },
+                    terminal_safe(error)
+                )));
+            }
+            lines.extend(
+                verification
+                    .failures()
+                    .iter()
+                    .map(|value| Line::raw(format!("Not verified: {}", terminal_safe(value)))),
+            );
+            lines.extend(
+                verification
+                    .withheld()
+                    .iter()
+                    .map(|value| Line::raw(format!("Not established: {}", terminal_safe(value)))),
+            );
+            if let Some(error) = persistence_error {
+                lines.push(Line::raw(format!(
+                    "Metadata warning: {}",
+                    terminal_safe(error)
+                )));
+            }
+            lines
+        }
+    }
+}
+
+fn update_plan_statement_lines(prompt: &RepositoryUpdatePrompt) -> Vec<Line<'static>> {
+    let RepositoryUpdatePrompt::Preview(plan) = prompt else {
+        return Vec::new();
+    };
+    let mut lines = vec![
+        Line::raw(format!("Source: {}", terminal_safe(plan.source_label()))),
+        Line::raw(format!(
+            "Path: {}",
+            terminal_safe(&plan.path().display().to_string())
+        )),
+        Line::raw(format!(
+            "Branch: {}",
+            terminal_safe(plan.current_reference())
+        )),
+        Line::raw(format!("Current: {}", plan.current_revision())),
+        Line::raw(format!("Target: {}", plan.target_revision())),
+        Line::raw(format!(
+            "Commits: {} · changed files: {}",
+            plan.commits().len(),
+            plan.changed_files().len()
+        )),
+        Line::raw(plan.hooks_disclosure().to_owned()),
+        Line::raw(plan.affected().incomplete_reason.as_deref().map_or_else(
+            || "Affected installations: complete".to_owned(),
+            |reason| format!("Affected installations: partial — {reason}"),
+        )),
+    ];
+    for name in &plan.affected().updated {
+        lines.push(Line::raw(format!(
+            "  updated in place · {}",
+            terminal_safe(name)
+        )));
+    }
+    for name in &plan.affected().removed {
+        lines.push(Line::raw(format!("  removed · {}", terminal_safe(name))));
+    }
+    for name in &plan.affected().added {
+        lines.push(Line::raw(format!(
+            "  added upstream, not installed · {}",
+            terminal_safe(name)
+        )));
+    }
+    for (installed, skill) in &plan.affected().restored {
+        lines.push(Line::raw(format!(
+            "  installation starts loading · {} → {}",
+            terminal_safe(installed),
+            terminal_safe(skill)
+        )));
+    }
+    for (old, new, aliases) in &plan.affected().renamed {
+        lines.push(Line::raw(format!(
+            "  renamed · {} → {}",
+            terminal_safe(old),
+            terminal_safe(new)
+        )));
+        // A link installed under a name of its own is not named by the pair
+        // above, and naming it is not enough either: what the rename does to it
+        // is leave it with nothing to resolve to, and that is the outcome
+        // verification will hold this update to.
+        for alias in aliases {
+            lines.push(Line::raw(format!(
+                "    loses its target · {}",
+                terminal_safe(alias)
+            )));
+        }
+    }
+    for finding in plan.findings() {
+        lines.push(Line::raw(format!(
+            "Blocked: {} — {}",
+            finding.code(),
+            terminal_safe(finding.evidence())
+        )));
+    }
+    // The commits are what the fast-forward brings in, so they are part of what
+    // is being agreed to rather than evidence under it: the gate measures these
+    // rows too, and Enter stays unavailable until the last of them has been on
+    // screen. Only the changed-file listing below is non-gating.
+    for commit in plan.commits() {
+        lines.push(Line::raw(format!("  commit · {}", terminal_safe(commit))));
+    }
+    lines
+}
+
+fn update_prompt_regions(area: Rect, action_width: u16) -> components::DialogRegions {
+    let popup = install_prompt_popup(area);
+    let block = components::dialog_frame("Repository update", "fast-forward only");
+    components::dialog_regions(block.inner(popup), action_width)
+}
+
+fn update_preview_fully_seen(app: &SkilledApp, area: Rect) -> Option<bool> {
+    let prompt = app.pending_update()?;
+    if !matches!(prompt, RepositoryUpdatePrompt::Preview(_)) {
+        return None;
+    }
+    let body = update_prompt_regions(area, 0).body;
+    if body.width == 0 || body.height == 0 {
+        return None;
+    }
+    let rows = visual_rows(update_plan_statement_lines(prompt), body.width).len();
+    let required = rows.saturating_sub(usize::from(body.height));
+    Some(app.detail_scroll() >= required)
+}
+
+fn render_update_prompt(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    prompt: &RepositoryUpdatePrompt,
+    scroll: usize,
+    extent: Option<usize>,
+    fully_seen: bool,
+) {
+    let popup = install_prompt_popup(area);
+    frame.render_widget(Clear, popup);
+    let block = components::dialog_frame("Repository update", "fast-forward only");
+    let hint = match prompt {
+        RepositoryUpdatePrompt::Preview(plan) if !plan.is_blocked() && fully_seen => {
+            "Enter Apply · Esc Cancel"
+        }
+        RepositoryUpdatePrompt::Preview(_) => "j/k Read plan · Esc Cancel",
+        _ => "Esc Close",
+    };
+    let regions = update_prompt_regions(
+        area,
+        u16::try_from(hint.chars().count()).unwrap_or(u16::MAX),
+    );
+    frame.render_widget(block, popup);
+    let rows = update_prompt_rows(prompt, regions.body.width);
+    let end = scroll
+        .saturating_add(usize::from(regions.body.height))
+        .min(rows.len());
+    let visible = rows.get(scroll.min(rows.len())..end).unwrap_or_default();
+    frame.render_widget(Paragraph::new(visible.to_vec()), regions.body);
+    frame.render_widget(
+        Paragraph::new(components::rule(regions.divider.width)),
+        regions.divider,
+    );
+    // The commit summaries gate the confirmation, so what is still below the
+    // viewport is not always evidence. Naming it evidence while gating rows
+    // are unread would say the plan has been shown when Enter is still
+    // withheld — the opposite of what the gate is for.
+    let status = match extent {
+        Some(max) if scroll < max && !fully_seen => "Plan continues below",
+        Some(max) if scroll < max => "Changed-file evidence continues below",
+        Some(max) if max > 0 => "Changed-file evidence ends here",
+        _ => "Complete plan and evidence shown",
+    };
+    frame.render_widget(Paragraph::new(status), regions.status);
+    frame.render_widget(Paragraph::new(hint).right_aligned(), regions.actions);
+}
+
+fn update_prompt_rows(prompt: &RepositoryUpdatePrompt, width: u16) -> Vec<Line<'static>> {
+    visual_rows(update_prompt_lines(prompt), width)
+}
+
+/// Materialize the update dialog as terminal rows. Unlike `Paragraph::scroll`,
+/// this keeps the logical offset as `usize`, so complete evidence remains
+/// reachable after row 65,535 instead of wrapping through a `u16` cast.
+fn visual_rows(lines: Vec<Line<'static>>, width: u16) -> Vec<Line<'static>> {
+    if width == 0 {
+        return Vec::new();
+    }
+    let width = usize::from(width);
+    let mut rows = Vec::new();
+    for line in lines {
+        let text = line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        if text.is_empty() {
+            rows.push(Line::raw(String::new()));
+            continue;
+        }
+        let mut row = String::new();
+        let mut row_width = 0_usize;
+        for character in text.chars() {
+            let character_width = Span::raw(character.to_string()).width();
+            if !row.is_empty() && row_width.saturating_add(character_width) > width {
+                rows.push(Line::raw(std::mem::take(&mut row)));
+                row_width = 0;
+            }
+            row.push(character);
+            row_width = row_width.saturating_add(character_width);
+        }
+        rows.push(Line::raw(row));
+    }
+    rows
+}
 
 fn render_sources(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
     match viewport::workspace_regions(area) {
@@ -3756,6 +4469,10 @@ fn format_scan_timestamp(seconds: i64) -> String {
     let hour = second_of_day / 3_600;
     let minute = (second_of_day % 3_600) / 60;
     format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02} UTC")
+}
+
+fn format_update_timestamp(generation: i64) -> String {
+    format_scan_timestamp(generation.div_euclid(1_000_000_000))
 }
 
 /// The civil date `days` after 1970-01-01, by Hinnant's algorithm: shift the
@@ -4556,6 +5273,464 @@ fn render_install_prompt(
     frame.render_widget(Paragraph::new(actions.right_aligned()), regions.actions);
 }
 
+fn render_uninstall_prompt(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    prompt: &UninstallPrompt,
+    scroll: usize,
+    extent: Option<usize>,
+    fully_seen: bool,
+) {
+    let popup = install_prompt_popup(area);
+    frame.render_widget(Clear, popup);
+    let (title, scope) = match prompt {
+        UninstallPrompt::Preview(_) | UninstallPrompt::Failed(_) => {
+            ("Uninstall skill", "managed links only")
+        }
+        UninstallPrompt::Report(_) => ("Uninstall result", "already applied"),
+    };
+    let confirm =
+        fully_seen && matches!(prompt, UninstallPrompt::Preview(plan) if plan.is_executable());
+    let mut spans = Vec::new();
+    if confirm {
+        spans.extend([
+            Span::styled("Enter", theme::key_cap()),
+            Span::raw(" "),
+            Span::styled("Uninstall", theme::key_label()),
+            Span::raw("   "),
+        ]);
+    }
+    spans.extend([
+        Span::styled("Esc", theme::key_cap()),
+        Span::raw(" "),
+        Span::styled(if confirm { "Cancel" } else { "Close" }, theme::key_label()),
+    ]);
+    let actions = Line::from(spans);
+    let regions = install_prompt_regions(area, u16::try_from(actions.width()).unwrap_or(u16::MAX));
+    frame.render_widget(components::dialog_frame(title, scope), popup);
+    frame.render_widget(
+        Paragraph::new(uninstall_prompt_lines(prompt))
+            .wrap(Wrap { trim: false })
+            .scroll((u16::try_from(scroll).unwrap_or(u16::MAX), 0)),
+        regions.body,
+    );
+    frame.render_widget(
+        Paragraph::new(components::rule(regions.divider.width)),
+        regions.divider,
+    );
+    let mut status = uninstall_prompt_verdict(prompt);
+    if let Some(extent) = extent.filter(|extent| *extent > 0) {
+        let where_to = match (scroll > 0, scroll < extent) {
+            (true, true) => "more above and below",
+            (true, false) => "more above",
+            _ => "more below",
+        };
+        status.push_str(" · ");
+        status.push_str(where_to);
+    }
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(status, theme::key_label()))),
+        regions.status,
+    );
+    frame.render_widget(Paragraph::new(actions.right_aligned()), regions.actions);
+}
+
+fn uninstall_prompt_verdict(prompt: &UninstallPrompt) -> String {
+    match prompt {
+        UninstallPrompt::Preview(plan) if plan.is_blocked() => {
+            "Blocked — nothing will be removed".to_owned()
+        }
+        UninstallPrompt::Preview(plan) if plan.is_executable() => {
+            let count = plan
+                .targets()
+                .iter()
+                .filter(|target| target.is_work())
+                .count();
+            format!(
+                "{count} managed link{} to remove",
+                if count == 1 { "" } else { "s" }
+            )
+        }
+        UninstallPrompt::Preview(_) => "Nothing left to do".to_owned(),
+        UninstallPrompt::Report(outcome) => match outcome.status() {
+            UninstallStatus::Uninstalled if outcome.verification().is_complete() => {
+                "Uninstalled and verified".to_owned()
+            }
+            UninstallStatus::Uninstalled => "Uninstalled · not fully verified".to_owned(),
+            UninstallStatus::NothingToDo | UninstallStatus::NotApplied => {
+                "Nothing was removed".to_owned()
+            }
+            UninstallStatus::PartiallyApplied => "Partly applied".to_owned(),
+            UninstallStatus::VerificationFailed => "Removed, but not verified".to_owned(),
+            UninstallStatus::UninstalledUnrecorded => {
+                "Removed, but ownership metadata remains".to_owned()
+            }
+        },
+        UninstallPrompt::Failed(_) => "No plan was made".to_owned(),
+    }
+}
+
+fn uninstall_prompt_lines(prompt: &UninstallPrompt) -> Vec<Line<'static>> {
+    match prompt {
+        UninstallPrompt::Failed(message) => vec![Line::from(components::badge(
+            Tone::Critical,
+            &terminal_safe(message),
+        ))],
+        UninstallPrompt::Preview(plan) => {
+            let blocked = plan.is_blocked();
+            let mut lines = vec![
+                Line::styled(
+                    format!("Skill: {}", terminal_safe(plan.skill_name())),
+                    theme::section_title(),
+                ),
+                Line::default(),
+                Line::styled("Targets", theme::section_title()),
+            ];
+            for target in plan.targets() {
+                let (tone, verdict, evidence) = match target.disposition() {
+                    UninstallDisposition::RemoveLink {
+                        link_target,
+                        target_state,
+                        receipts,
+                    } => (
+                        if blocked {
+                            Tone::Unmanaged
+                        } else {
+                            Tone::Warning
+                        },
+                        if blocked {
+                            "would remove the managed link"
+                        } else {
+                            "remove the managed link"
+                        }
+                        .to_owned(),
+                        {
+                            let mut evidence = vec![format!(
+                                "receipt target: {}{}",
+                                terminal_safe(&link_target.display().to_string()),
+                                uninstall_target_suffix(target_state)
+                            )];
+                            evidence.extend(receipts.iter().map(|receipt| {
+                                format!(
+                                    "receipt source {} · catalog {} · variant {}",
+                                    receipt
+                                        .source_id()
+                                        .map_or_else(|| "unknown".to_owned(), |id| id.to_string()),
+                                    receipt.catalog_relative_path().map_or_else(
+                                        || "unknown".to_owned(),
+                                        |path| terminal_safe(&path.display().to_string())
+                                    ),
+                                    receipt.variant_relative_path().map_or_else(
+                                        || "unknown".to_owned(),
+                                        |path| terminal_safe(&path.display().to_string())
+                                    ),
+                                )
+                            }));
+                            evidence
+                        },
+                    ),
+                    UninstallDisposition::Excluded { reason } => (
+                        Tone::Unmanaged,
+                        format!("excluded: {:?}", reason),
+                        Vec::new(),
+                    ),
+                    UninstallDisposition::Blocked { finding } => (
+                        Tone::Critical,
+                        format!("blocked: {}", finding.code()),
+                        vec![terminal_safe(finding.evidence())],
+                    ),
+                };
+                lines.push(Line::from(components::badge(
+                    tone,
+                    &format!("{} · {verdict}", target.agent().display_name()),
+                )));
+                lines.push(Line::from(format!(
+                    "  {}",
+                    terminal_safe(&target.link_path().display().to_string())
+                )));
+                for evidence in evidence {
+                    lines.push(Line::from(format!("  {evidence}")));
+                }
+            }
+            if !plan.warnings().is_empty() {
+                lines.push(Line::default());
+                lines.push(Line::styled("Before you confirm", theme::section_title()));
+                for warning in plan.warnings() {
+                    lines.push(Line::from(components::badge(
+                        Tone::Warning,
+                        &terminal_safe(warning),
+                    )));
+                }
+            }
+            lines.push(Line::default());
+            lines.push(Line::styled(
+                "Source content and agent skill roots are not removed.",
+                theme::key_label(),
+            ));
+            lines
+        }
+        UninstallPrompt::Report(outcome) => {
+            let mut lines = vec![Line::styled(
+                format!("Skill: {}", terminal_safe(outcome.plan().skill_name())),
+                theme::section_title(),
+            )];
+            for step in outcome.applied().steps() {
+                let (tone, verdict) = uninstall_step_verdict(step.outcome());
+                lines.push(Line::from(components::badge(
+                    tone,
+                    &format!("{} · {verdict}", step.agent().display_name()),
+                )));
+                lines.push(Line::from(format!(
+                    "  {}",
+                    terminal_safe(&step.link_path().display().to_string())
+                )));
+            }
+            for withheld in outcome.verification().withheld() {
+                lines.push(Line::from(components::badge(
+                    Tone::Warning,
+                    &format!(
+                        "Not established: {} — {}",
+                        withheld.agent().display_name(),
+                        terminal_safe(withheld.reason())
+                    ),
+                )));
+            }
+            for failure in outcome.verification().failures() {
+                lines.push(Line::from(components::badge(
+                    Tone::Critical,
+                    &format!(
+                        "Not verified: {} — {}",
+                        failure.agent().display_name(),
+                        terminal_safe(failure.observed())
+                    ),
+                )));
+            }
+            for failure in outcome.finalized().failures() {
+                lines.push(Line::from(components::badge(
+                    Tone::Warning,
+                    &format!(
+                        "Ownership record remains for {} — {}",
+                        failure.agent().display_name(),
+                        terminal_safe(failure.reason())
+                    ),
+                )));
+            }
+            lines.push(Line::default());
+            lines.push(Line::styled(
+                "Source content and agent skill roots were not removed.",
+                theme::key_label(),
+            ));
+            lines
+        }
+    }
+}
+
+fn uninstall_target_suffix(state: &crate::operations::UninstallTargetState) -> &'static str {
+    use crate::operations::UninstallTargetState;
+    match state {
+        UninstallTargetState::Directory => "",
+        UninstallTargetState::Missing => " (no longer resolves)",
+        UninstallTargetState::NotADirectory => " (no longer a directory)",
+        UninstallTargetState::Unreadable(_) => " (could not be read)",
+    }
+}
+
+fn render_forget_prompt(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    prompt: &ForgetPrompt,
+    scroll: usize,
+    extent: Option<usize>,
+    fully_seen: bool,
+) {
+    let popup = install_prompt_popup(area);
+    frame.render_widget(Clear, popup);
+    let report = matches!(prompt, ForgetPrompt::Report(_));
+    let confirm =
+        fully_seen && matches!(prompt, ForgetPrompt::Preview(plan) if plan.is_executable());
+    let mut spans = Vec::new();
+    if confirm {
+        spans.extend([
+            Span::styled("Enter", theme::key_cap()),
+            Span::raw(" "),
+            Span::styled("Forget", theme::key_label()),
+            Span::raw("   "),
+        ]);
+    }
+    spans.extend([
+        Span::styled("Esc", theme::key_cap()),
+        Span::raw(" "),
+        Span::styled(if confirm { "Cancel" } else { "Close" }, theme::key_label()),
+    ]);
+    let actions = Line::from(spans);
+    let regions = install_prompt_regions(area, u16::try_from(actions.width()).unwrap_or(u16::MAX));
+    frame.render_widget(
+        components::dialog_frame(
+            if report {
+                "Forget result"
+            } else {
+                "Forget source"
+            },
+            if report {
+                "already applied"
+            } else {
+                "metadata only"
+            },
+        ),
+        popup,
+    );
+    frame.render_widget(
+        Paragraph::new(forget_prompt_lines(prompt))
+            .wrap(Wrap { trim: false })
+            .scroll((u16::try_from(scroll).unwrap_or(u16::MAX), 0)),
+        regions.body,
+    );
+    frame.render_widget(
+        Paragraph::new(components::rule(regions.divider.width)),
+        regions.divider,
+    );
+    let mut status = match prompt {
+        ForgetPrompt::Preview(plan) if plan.is_blocked() => {
+            "Blocked — no metadata will be removed".to_owned()
+        }
+        ForgetPrompt::Preview(_) => "Ready to forget source metadata".to_owned(),
+        ForgetPrompt::Report(outcome) => match outcome.status() {
+            ForgetStatus::Forgotten => "Source forgotten and verified".to_owned(),
+            ForgetStatus::NothingToDo => "Nothing was removed".to_owned(),
+            ForgetStatus::NotForgotten => "Source was not forgotten".to_owned(),
+            ForgetStatus::VerificationFailed => "Forgotten, but not verified".to_owned(),
+        },
+        ForgetPrompt::Failed(_) => "No plan was made".to_owned(),
+    };
+    if let Some(extent) = extent.filter(|extent| *extent > 0) {
+        status.push_str(if scroll < extent {
+            " · more below"
+        } else {
+            " · more above"
+        });
+    }
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(status, theme::key_label()))),
+        regions.status,
+    );
+    frame.render_widget(Paragraph::new(actions.right_aligned()), regions.actions);
+}
+
+fn forget_prompt_lines(prompt: &ForgetPrompt) -> Vec<Line<'static>> {
+    match prompt {
+        ForgetPrompt::Failed(message) => vec![Line::from(components::badge(
+            Tone::Critical,
+            &terminal_safe(message),
+        ))],
+        ForgetPrompt::Preview(plan) => {
+            let source = plan.source();
+            let mut lines = vec![
+                Line::styled(
+                    format!("Source: {}", terminal_safe(source.label())),
+                    theme::section_title(),
+                ),
+                Line::from(format!(
+                    "Checkout left untouched: {}",
+                    terminal_safe(&source.git_top_level().display().to_string())
+                )),
+                Line::default(),
+                Line::styled("Metadata to remove", theme::section_title()),
+                Line::from("source registration and cached scan state"),
+            ];
+            for catalog in source.catalogs() {
+                lines.push(Line::from(format!(
+                    "catalog: {}",
+                    terminal_safe(&catalog.relative_path().display().to_string())
+                )));
+            }
+            for item in plan.receipts() {
+                let receipt = item.receipt();
+                match item.state() {
+                    ForgetReceiptState::Active => lines.push(Line::from(components::badge(
+                        Tone::Critical,
+                        &format!(
+                            "active link blocks: {}",
+                            terminal_safe(&receipt.link_path().display().to_string())
+                        ),
+                    ))),
+                    ForgetReceiptState::Inactive { reason } => lines.push(Line::from(format!(
+                        "inactive receipt: {} — {}",
+                        terminal_safe(&receipt.link_path().display().to_string()),
+                        terminal_safe(reason)
+                    ))),
+                    ForgetReceiptState::Unreadable { reason } => {
+                        lines.push(Line::from(components::badge(
+                            Tone::Critical,
+                            &format!(
+                                "unreadable receipt: {} — {}",
+                                terminal_safe(&receipt.link_path().display().to_string()),
+                                terminal_safe(reason)
+                            ),
+                        )))
+                    }
+                }
+            }
+            if plan.receipts().is_empty() {
+                for finding in plan.blocking_findings() {
+                    lines.push(Line::from(components::badge(
+                        Tone::Critical,
+                        &format!(
+                            "blocked: {} — {}",
+                            finding.code(),
+                            terminal_safe(finding.evidence())
+                        ),
+                    )));
+                }
+            }
+            lines.push(Line::default());
+            lines.push(Line::styled(
+                "Skilled writes nothing to the checkout or any skill directory.",
+                theme::key_label(),
+            ));
+            lines
+        }
+        ForgetPrompt::Report(outcome) => {
+            let mut lines = vec![Line::styled(
+                format!("Source: {}", terminal_safe(outcome.plan().source().label())),
+                theme::section_title(),
+            )];
+            match outcome.applied() {
+                ForgetApply::Forgotten => lines.push(Line::from(components::badge(
+                    Tone::Healthy,
+                    "private metadata removed",
+                ))),
+                ForgetApply::NothingToDo => {
+                    lines.push(Line::from("the source row was already absent"))
+                }
+                ForgetApply::Failed(reason) => lines.push(Line::from(components::badge(
+                    Tone::Critical,
+                    &format!("not forgotten — {}", terminal_safe(reason)),
+                ))),
+            }
+            match outcome.verification() {
+                ForgetVerification::Held => lines.push(Line::from(
+                    "Verified: source, catalogs, and receipts are absent; the registered \
+                     checkout is still there.",
+                )),
+                ForgetVerification::Failed(reason) => lines.push(Line::from(components::badge(
+                    Tone::Critical,
+                    &terminal_safe(reason),
+                ))),
+                ForgetVerification::Withheld(reason) => lines.push(Line::from(components::badge(
+                    Tone::Warning,
+                    &terminal_safe(reason),
+                ))),
+            }
+            lines.push(Line::default());
+            lines.push(Line::styled(
+                "Skilled wrote nothing to the checkout or any skill directory.",
+                theme::key_label(),
+            ));
+            lines
+        }
+    }
+}
+
 /// The keys the dialog offers, which are exactly the ones the reducer honours
 /// in this state: a plan with no executable work accepts no confirmation, and
 /// neither does one whose last row has not been on screen, so neither
@@ -4655,6 +5830,235 @@ fn install_prompt_lines(prompt: &InstallPrompt, home: &Path, width: u16) -> Vec<
         InstallPrompt::Preview(plan) => install_plan_lines(plan, home, width),
         InstallPrompt::Report(outcome) => install_report_lines(outcome),
     }
+}
+
+fn render_repair_prompt(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    prompt: &RepairPrompt,
+    scroll: usize,
+    extent: Option<usize>,
+    fully_seen: bool,
+) {
+    let popup = install_prompt_popup(area);
+    frame.render_widget(Clear, popup);
+    let (title, scope) = match prompt {
+        RepairPrompt::Preview(_) | RepairPrompt::Failed(_) => {
+            ("Repair skill", "nothing written yet")
+        }
+        RepairPrompt::Report(_) => ("Repair result", "already applied"),
+    };
+    let actions = repair_prompt_actions(prompt, fully_seen);
+    let regions = install_prompt_regions(area, u16::try_from(actions.width()).unwrap_or(u16::MAX));
+    frame.render_widget(components::dialog_frame(title, scope), popup);
+    frame.render_widget(
+        Paragraph::new(repair_prompt_lines(prompt, regions.body.width))
+            .wrap(Wrap { trim: false })
+            .scroll((u16::try_from(scroll).unwrap_or(u16::MAX), 0)),
+        regions.body,
+    );
+    frame.render_widget(
+        Paragraph::new(components::rule(regions.divider.width)),
+        regions.divider,
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            repair_prompt_status(prompt, scroll, extent),
+            theme::key_label(),
+        ))),
+        regions.status,
+    );
+    frame.render_widget(Paragraph::new(actions.right_aligned()), regions.actions);
+}
+
+fn repair_prompt_actions(prompt: &RepairPrompt, fully_seen: bool) -> Line<'static> {
+    let confirm =
+        fully_seen && matches!(prompt, RepairPrompt::Preview(plan) if plan.is_executable());
+    let mut spans = Vec::new();
+    if confirm {
+        spans.extend([
+            Span::styled("Enter", theme::key_cap()),
+            Span::raw(" "),
+            Span::styled("Repair", theme::key_label()),
+            Span::raw("   "),
+        ]);
+    }
+    spans.extend([
+        Span::styled("Esc", theme::key_cap()),
+        Span::raw(" "),
+        Span::styled(if confirm { "Cancel" } else { "Close" }, theme::key_label()),
+    ]);
+    Line::from(spans)
+}
+
+fn repair_prompt_status(prompt: &RepairPrompt, scroll: usize, extent: Option<usize>) -> String {
+    let verdict = match prompt {
+        RepairPrompt::Preview(plan) if plan.blocking_finding().is_some() => {
+            "Blocked — nothing will be written".to_owned()
+        }
+        RepairPrompt::Preview(plan) if plan.is_executable() => "1 link to replace".to_owned(),
+        RepairPrompt::Preview(_) => "Nothing to repair".to_owned(),
+        RepairPrompt::Report(outcome) => match outcome.status() {
+            RepairStatus::NothingToRepair => "Nothing was written".to_owned(),
+            RepairStatus::Repaired if outcome.verification().is_complete() => {
+                "Repaired and verified".to_owned()
+            }
+            RepairStatus::Repaired => "Repaired · not fully verified".to_owned(),
+            RepairStatus::NotApplied => "Nothing was written".to_owned(),
+            RepairStatus::PartiallyApplied => "Partly applied · manual recovery needed".to_owned(),
+            RepairStatus::RepairedUnrecorded => {
+                "Repaired, but not recorded as Skilled's".to_owned()
+            }
+            RepairStatus::VerificationFailed => "Repaired, but not verified".to_owned(),
+        },
+        RepairPrompt::Failed(_) => "No plan was made".to_owned(),
+    };
+    match extent {
+        Some(extent) if extent > 0 => {
+            let where_to = match (scroll > 0, scroll < extent) {
+                (true, true) => "more above and below",
+                (true, false) => "more above",
+                _ => "more below",
+            };
+            format!("{verdict} · {where_to}")
+        }
+        _ => verdict,
+    }
+}
+
+fn repair_prompt_lines(prompt: &RepairPrompt, _width: u16) -> Vec<Line<'static>> {
+    match prompt {
+        RepairPrompt::Failed(message) => vec![Line::from(components::badge(
+            Tone::Critical,
+            &terminal_safe(message),
+        ))],
+        RepairPrompt::Preview(plan) => repair_plan_lines(plan),
+        RepairPrompt::Report(outcome) => repair_report_lines(outcome),
+    }
+}
+
+fn repair_plan_lines(plan: &RepairPlan) -> Vec<Line<'static>> {
+    let mut lines = vec![
+        Line::styled(
+            format!(
+                "Skill: {} · {}",
+                terminal_safe(plan.skill_name()),
+                plan.agent().display_name()
+            ),
+            theme::section_title(),
+        ),
+        Line::from(format!(
+            "Link: {}",
+            terminal_safe(&plan.link_path().display().to_string())
+        )),
+    ];
+    if !plan.current_target().as_os_str().is_empty() {
+        lines.push(Line::from(format!(
+            "Old target: {}",
+            terminal_safe(&plan.current_target().display().to_string())
+        )));
+    }
+    if let Some(target) = plan.new_target() {
+        lines.push(Line::from(format!(
+            "New target: {}",
+            terminal_safe(&target.display().to_string())
+        )));
+    }
+    if let Some(label) = plan.old_source_label() {
+        lines.push(Line::from(format!(
+            "Recorded source: {}",
+            terminal_safe(label)
+        )));
+    } else {
+        lines.push(Line::from("Recorded source: unavailable in this receipt"));
+    }
+    if let Some(label) = plan.new_source_label() {
+        lines.push(Line::from(format!(
+            "Selected source: {}",
+            terminal_safe(label)
+        )));
+    }
+    if plan.source_changed() {
+        lines.push(Line::from(components::badge(
+            Tone::Warning,
+            "The registry now selects a different source.",
+        )));
+    }
+    if let Some(outlook) = plan.opencode_outlook() {
+        lines.push(Line::from(format!(
+            "OpenCode after repair: {}",
+            terminal_safe(&outlook.preview_summary())
+        )));
+    }
+    match plan.disposition() {
+        RepairDisposition::ReplaceLink { dangling: true } => lines.push(Line::from(
+            "Action: atomically replace the dangling symbolic link where supported",
+        )),
+        RepairDisposition::ReplaceLink { dangling: false } => lines.push(Line::from(
+            "Action: atomically replace the incorrect symbolic link where supported",
+        )),
+        RepairDisposition::NothingToRepair => {
+            lines.push(Line::from("Action: nothing; this link is already correct"))
+        }
+        RepairDisposition::Blocked { finding } => lines.push(Line::from(components::badge(
+            Tone::Critical,
+            &format!("{} — {}", finding.code(), terminal_safe(finding.evidence())),
+        ))),
+    }
+    for warning in plan.warnings() {
+        lines.push(Line::from(components::badge(
+            Tone::Warning,
+            &terminal_safe(warning),
+        )));
+    }
+    lines
+}
+
+fn repair_report_lines(outcome: &RepairOutcome) -> Vec<Line<'static>> {
+    let mut lines = vec![Line::styled(
+        format!("Result: {:?}", outcome.status()),
+        theme::section_title(),
+    )];
+    if let Some(step) = outcome.applied().step() {
+        let text = match step.outcome() {
+            RepairStepOutcome::Repaired => "link replaced and receipt recorded".to_owned(),
+            RepairStepOutcome::RepairedUnrecorded(error) => format!(
+                "link replaced, but its receipt failed: {}",
+                terminal_safe(error)
+            ),
+            RepairStepOutcome::RemovedUnreplaced(error) => format!(
+                "original link removed without replacement: {}",
+                terminal_safe(error)
+            ),
+            RepairStepOutcome::ResidualTemporary { path, error } => format!(
+                "temporary link left at {}: {}",
+                terminal_safe(&path.display().to_string()),
+                terminal_safe(error)
+            ),
+            RepairStepOutcome::Failed(reason) => {
+                format!("nothing written: {}", terminal_safe(reason))
+            }
+        };
+        lines.push(Line::from(text));
+        lines.push(Line::from(terminal_safe(
+            &step.link_path().display().to_string(),
+        )));
+    }
+    for withheld in outcome.verification().withheld() {
+        lines.push(Line::from(format!(
+            "Not established: {} — {}",
+            withheld.agent().display_name(),
+            terminal_safe(withheld.reason())
+        )));
+    }
+    for failure in outcome.verification().failures() {
+        lines.push(Line::from(format!(
+            "Not verified: {} — {}",
+            failure.agent().display_name(),
+            terminal_safe(failure.observed())
+        )));
+    }
+    lines
 }
 
 fn install_plan_lines(plan: &InstallPlan, home: &Path, width: u16) -> Vec<Line<'static>> {
@@ -4836,6 +6240,7 @@ fn excluded_reason(reason: &ExcludedReason) -> (String, Option<String>) {
 fn install_step_verdict(outcome: &StepOutcome) -> (Tone, String) {
     match outcome {
         StepOutcome::Created => (Tone::Healthy, "link created".to_owned()),
+        StepOutcome::Removed => (Tone::Healthy, "link removed".to_owned()),
         StepOutcome::CreatedUnrecorded(error) => (
             Tone::Warning,
             format!(
@@ -4858,6 +6263,21 @@ fn install_step_verdict(outcome: &StepOutcome) -> (Tone, String) {
             Tone::Unmanaged,
             "not attempted, because an earlier step stopped the run".to_owned(),
         ),
+    }
+}
+
+fn uninstall_step_verdict(outcome: &StepOutcome) -> (Tone, String) {
+    match outcome {
+        StepOutcome::Removed => (Tone::Healthy, "link removed".to_owned()),
+        StepOutcome::Failed(reason) => (
+            Tone::Critical,
+            format!("not removed — {}", terminal_safe(reason)),
+        ),
+        StepOutcome::Unattempted => (
+            Tone::Unmanaged,
+            "not attempted, because an earlier step stopped the run".to_owned(),
+        ),
+        other => install_step_verdict(other),
     }
 }
 
@@ -4933,8 +6353,9 @@ fn install_report_lines(outcome: &InstallOutcome) -> Vec<Line<'static>> {
     {
         lines.push(Line::default());
         lines.push(Line::from(
-            "Skilled does not undo what it wrote. Nothing above was removed, and no repair \
-             exists in this release.",
+            "Skilled does not undo a partial install automatically; uninstall is a separate \
+             confirmed operation, and repair only replaces a still-present link whose \
+             ownership can be proven.",
         ));
     }
     lines
@@ -5366,6 +6787,7 @@ fn render_help(
     area: Rect,
     context: View,
     app: &SkilledApp,
+    findings: &[DoctorItem<'_>],
     detail_extent: Option<usize>,
 ) {
     let viewport = viewport::classify(area);
@@ -5379,7 +6801,7 @@ fn render_help(
     let block = components::dialog_frame("Keyboard reference", &scope);
     let regions = components::dialog_regions(block.inner(popup), 11);
     frame.render_widget(block, popup);
-    let commands = help_commands(context, app, detail_extent);
+    let commands = help_commands(context, app, findings, detail_extent);
     match viewport {
         viewport::Viewport::Compact => {
             let mut lines = vec![
@@ -5468,6 +6890,7 @@ struct HelpCommand {
 fn help_commands(
     context: View,
     app: &SkilledApp,
+    findings: &[DoctorItem<'_>],
     detail_extent: Option<usize>,
 ) -> Vec<HelpCommand> {
     match context {
@@ -5562,6 +6985,13 @@ fn help_commands(
                     description: "narrow by name, source, or health",
                 });
             }
+            if app.can_uninstall_selection() {
+                commands.push(HelpCommand {
+                    key: "x",
+                    label: "Uninstall",
+                    description: "remove only matching Skilled-managed links",
+                });
+            }
             commands.extend([
                 HelpCommand {
                     key: "2",
@@ -5604,6 +7034,13 @@ fn help_commands(
                 label: "Region",
                 description: "move region focus forward or backward",
             }];
+            if app.can_forget_source() {
+                commands.push(HelpCommand {
+                    key: "x",
+                    label: "Forget",
+                    description: "remove inactive source metadata only",
+                });
+            }
             if sources_can_move_selection(app) {
                 commands.push(HelpCommand {
                     key: "Up/Down or j/k",
@@ -5661,6 +7098,64 @@ fn help_commands(
             ]);
             commands
         }
+        View::Updates => {
+            let mut commands = vec![HelpCommand {
+                key: "Tab / Shift-Tab",
+                label: "Region",
+                description: "move region focus",
+            }];
+            if !app.sources().is_empty() {
+                commands.push(HelpCommand {
+                    key: "Up/Down or j/k",
+                    label: if app.updates_pane() == UpdatesPane::Details {
+                        "Scroll"
+                    } else {
+                        "Move"
+                    },
+                    description: "move the selected source or scroll details",
+                });
+                let can_open = !app.update_check_in_flight()
+                    && (app.updates_pane() == UpdatesPane::Candidates
+                        || app.selected_update_source().is_some_and(|source| {
+                            app.update_check_for(source.id()).is_some_and(|check| {
+                                !check.superseded_by(source)
+                                    && check.verdict == RepositoryUpdateVerdict::Available
+                            })
+                        }));
+                if can_open {
+                    commands.push(HelpCommand {
+                        key: "Enter",
+                        label: "Open",
+                        description: "open details, then preview an available fast-forward",
+                    });
+                }
+                if !app.update_check_in_flight() {
+                    commands.push(HelpCommand {
+                        key: "u",
+                        label: "Check",
+                        description: "explicitly fetch every registered source",
+                    });
+                }
+            }
+            commands.extend([
+                HelpCommand {
+                    key: "Esc",
+                    label: "Back / cancel",
+                    description: "leave details, return to Inventory, or cancel an active check",
+                },
+                HelpCommand {
+                    key: "?",
+                    label: "Help",
+                    description: "open this keyboard reference",
+                },
+                HelpCommand {
+                    key: "q",
+                    label: "Quit",
+                    description: "quit when no dialog is open",
+                },
+            ]);
+            commands
+        }
         View::Doctor => {
             let mut commands = vec![HelpCommand {
                 key: "Tab / Shift-Tab",
@@ -5686,6 +7181,13 @@ fn help_commands(
                     key: "Enter",
                     label: "Open details",
                     description: "show everything observed about the finding",
+                });
+            }
+            if doctor_can_repair_selection(app, findings) {
+                commands.push(HelpCommand {
+                    key: "r",
+                    label: "Repair",
+                    description: "preview replacing this proven Skilled-owned link",
                 });
             }
             commands.extend([
@@ -5748,6 +7250,7 @@ fn help_scope(context: View) -> String {
         View::Setup(step) => format!("Setup · {}", step.title()),
         View::Inventory => "Inventory".to_owned(),
         View::Sources => "Sources".to_owned(),
+        View::Updates => "Updates".to_owned(),
         View::Doctor => "Doctor".to_owned(),
         View::Settings => "Settings".to_owned(),
     }
@@ -5757,7 +7260,9 @@ fn render_footer(
     frame: &mut Frame<'_>,
     area: Rect,
     app: &SkilledApp,
+    findings: &[DoctorItem<'_>],
     detail_extent: Option<usize>,
+    update_preview_seen: Option<bool>,
 ) {
     // The band reaches the full width, so the row reads as chrome rather than
     // as a smear the length of the hints. The hint line itself only sets
@@ -5773,7 +7278,7 @@ fn render_footer(
     };
     frame.render_widget(
         Paragraph::new(components::key_hint_line(
-            &key_hints(app, detail_extent),
+            &context_key_hints(app, findings, detail_extent, update_preview_seen),
             hints.width,
         ))
         .style(theme::chrome()),
@@ -5784,9 +7289,8 @@ fn render_footer(
 /// The commands the active context actually handles.
 ///
 /// This mirrors [`crate::input`]. A hint that is not backed by a key mapping is
-/// a promise the application cannot keep, so unimplemented commands —
-/// installation, updates, repair, uninstall, and forget — are absent by
-/// construction.
+/// a promise the application cannot keep, so unimplemented commands are absent
+/// by construction.
 ///
 /// The row is budgeted, and every context declares its routes before `?` and
 /// `q`: where they do not all fit, the route survives and the two commands the
@@ -5799,7 +7303,12 @@ fn render_footer(
 /// navigation row above already shows every route beside its own key digit,
 /// so a route shed from this row is still on screen, while `i` appears nowhere
 /// else and acts on the very row the user is standing on.
-fn key_hints(app: &SkilledApp, detail_extent: Option<usize>) -> Vec<KeyHint> {
+fn context_key_hints(
+    app: &SkilledApp,
+    findings: &[DoctorItem<'_>],
+    detail_extent: Option<usize>,
+    update_preview_seen: Option<bool>,
+) -> Vec<KeyHint> {
     if app.help_context().is_some() {
         return vec![
             KeyHint::essential("Esc", "Close"),
@@ -5808,7 +7317,7 @@ fn key_hints(app: &SkilledApp, detail_extent: Option<usize>) -> Vec<KeyHint> {
     }
     // The install dialog answers for the whole row while it is open, and only
     // offers a confirmation where the reducer would accept one.
-    if let Some(prompt) = app.pending_install() {
+    if let Some(prompt) = app.pending_operation() {
         let mut hints = Vec::new();
         if detail_extent.is_some_and(|extent| extent > 0) {
             hints.push(KeyHint::essential("j/k", "Scroll"));
@@ -5819,10 +7328,54 @@ fn key_hints(app: &SkilledApp, detail_extent: Option<usize>) -> Vec<KeyHint> {
         // so the hint cannot survive a resize that put content back under the
         // window; the runner notes the same measurement before reading the key,
         // so the two agree at the moment one is pressed.
-        if install_preview_fully_seen(app, detail_extent)
-            && matches!(prompt, InstallPrompt::Preview(plan) if plan.is_executable())
+        let (executable, label) = match prompt {
+            OperationPrompt::Install(InstallPrompt::Preview(plan)) => {
+                (plan.is_executable(), "Install")
+            }
+            OperationPrompt::Uninstall(UninstallPrompt::Preview(plan)) => {
+                (plan.is_executable(), "Uninstall")
+            }
+            OperationPrompt::Forget(ForgetPrompt::Preview(plan)) => {
+                (plan.is_executable(), "Forget")
+            }
+            OperationPrompt::Install(_) => (false, "Install"),
+            OperationPrompt::Uninstall(_) => (false, "Uninstall"),
+            OperationPrompt::Forget(_) => (false, "Forget"),
+        };
+        if operation_preview_fully_seen(app, detail_extent) && executable {
+            hints.push(KeyHint::essential("Enter", label));
+            hints.push(KeyHint::essential("Esc", "Cancel"));
+        } else {
+            hints.push(KeyHint::essential("Esc", "Close"));
+        }
+        hints.push(KeyHint::new("Ctrl-C", "Quit"));
+        return hints;
+    }
+    if let Some(prompt) = app.pending_repair() {
+        let mut hints = Vec::new();
+        if detail_extent.is_some_and(|extent| extent > 0) {
+            hints.push(KeyHint::essential("j/k", "Scroll"));
+        }
+        if preview_fully_seen(app, detail_extent)
+            && matches!(prompt, RepairPrompt::Preview(plan) if plan.is_executable())
         {
-            hints.push(KeyHint::essential("Enter", "Install"));
+            hints.push(KeyHint::essential("Enter", "Repair"));
+            hints.push(KeyHint::essential("Esc", "Cancel"));
+        } else {
+            hints.push(KeyHint::essential("Esc", "Close"));
+        }
+        hints.push(KeyHint::new("Ctrl-C", "Quit"));
+        return hints;
+    }
+    if let Some(prompt) = app.pending_update() {
+        let mut hints = Vec::new();
+        if detail_extent.is_some_and(|extent| extent > 0) {
+            hints.push(KeyHint::essential("j/k", "Scroll"));
+        }
+        if matches!(prompt, RepositoryUpdatePrompt::Preview(plan) if !plan.is_blocked())
+            && (app.update_preview_fully_seen() || update_preview_seen == Some(true))
+        {
+            hints.push(KeyHint::essential("Enter", "Apply"));
             hints.push(KeyHint::essential("Esc", "Cancel"));
         } else {
             hints.push(KeyHint::essential("Esc", "Close"));
@@ -5882,6 +7435,9 @@ fn key_hints(app: &SkilledApp, detail_extent: Option<usize>) -> Vec<KeyHint> {
         }
         View::Inventory => {
             let mut hints = vec![KeyHint::new("Tab/Shift-Tab", "Region")];
+            if app.can_uninstall_selection() {
+                hints.push(KeyHint::new("x", "Uninstall"));
+            }
             if inventory_can_move_selection(app) {
                 hints.push(KeyHint::new("j/k", "Move"));
             }
@@ -5911,6 +7467,9 @@ fn key_hints(app: &SkilledApp, detail_extent: Option<usize>) -> Vec<KeyHint> {
         }
         View::Sources => {
             let mut hints = vec![KeyHint::new("Tab/Shift-Tab", "Region")];
+            if app.can_forget_source() {
+                hints.push(KeyHint::new("x", "Forget"));
+            }
             if sources_can_move_selection(app) {
                 hints.push(KeyHint::new("j/k", "Move"));
             }
@@ -5932,6 +7491,46 @@ fn key_hints(app: &SkilledApp, detail_extent: Option<usize>) -> Vec<KeyHint> {
             ]);
             hints
         }
+        View::Updates => {
+            let mut hints = vec![KeyHint::new("Tab/Shift-Tab", "Region")];
+            if !app.sources().is_empty() {
+                hints.push(KeyHint::new(
+                    "j/k",
+                    if app.updates_pane() == UpdatesPane::Details {
+                        "Scroll"
+                    } else {
+                        "Move"
+                    },
+                ));
+                let can_open = !app.update_check_in_flight()
+                    && (app.updates_pane() == UpdatesPane::Candidates
+                        || app.selected_update_source().is_some_and(|source| {
+                            app.update_check_for(source.id()).is_some_and(|check| {
+                                !check.superseded_by(source)
+                                    && check.verdict == RepositoryUpdateVerdict::Available
+                            })
+                        }));
+                if can_open {
+                    hints.push(KeyHint::essential("Enter", "Open"));
+                }
+                if app.update_check_in_flight() {
+                    hints.push(KeyHint::essential("Esc", "Cancel check"));
+                } else {
+                    hints.push(KeyHint::essential("u", "Check"));
+                }
+            }
+            hints.extend([
+                KeyHint::new("1", "Inventory"),
+                KeyHint::new("2", "Sources"),
+                KeyHint::new("4", "Doctor"),
+                KeyHint::new("?", "Help"),
+                KeyHint::new("q", "Quit"),
+            ]);
+            if !app.update_check_in_flight() {
+                hints.push(KeyHint::essential("Esc", "Back"));
+            }
+            hints
+        }
         View::Doctor => {
             let mut hints = vec![KeyHint::new("Tab/Shift-Tab", "Region")];
             if doctor_can_move_selection(app) {
@@ -5942,6 +7541,9 @@ fn key_hints(app: &SkilledApp, detail_extent: Option<usize>) -> Vec<KeyHint> {
             }
             if doctor_can_advance(app) {
                 hints.push(KeyHint::essential("Enter", "Open"));
+            }
+            if doctor_can_repair_selection(app, findings) {
+                hints.push(KeyHint::new("r", "Repair"));
             }
             hints.extend([
                 KeyHint::new("1", "Inventory"),
@@ -5966,10 +7568,25 @@ fn key_hints(app: &SkilledApp, detail_extent: Option<usize>) -> Vec<KeyHint> {
     }
 }
 
+/// Whether the Doctor row selected in this frame offers repair.
+///
+/// `render` has already paid to merge and order the findings. Reusing that
+/// slice keeps the detail, help, and key bar on the same row without another
+/// full allocation and sort.
+fn doctor_can_repair_selection(app: &SkilledApp, findings: &[DoctorItem<'_>]) -> bool {
+    findings
+        .get(app.focused_finding())
+        .is_some_and(|entry| app.can_repair_finding(entry))
+}
+
 /// Whether every row of the open preview has been on screen, as this frame
 /// measures it.
-fn install_preview_fully_seen(app: &SkilledApp, detail_extent: Option<usize>) -> bool {
+fn operation_preview_fully_seen(app: &SkilledApp, detail_extent: Option<usize>) -> bool {
     detail_extent.is_none_or(|extent| app.detail_scroll() >= extent)
+}
+
+fn preview_fully_seen(app: &SkilledApp, detail_extent: Option<usize>) -> bool {
+    operation_preview_fully_seen(app, detail_extent)
 }
 
 /// Enter only drills in, so it advertises itself only where it can.
@@ -6084,6 +7701,15 @@ mod tests {
     }
 
     #[test]
+    fn update_dialog_rows_keep_offsets_beyond_the_paragraph_scroll_limit() {
+        let rows = visual_rows(vec![Line::raw("x".repeat(65_540))], 1);
+
+        assert_eq!(rows.len(), 65_540);
+        assert_eq!(label_text(&rows[65_536]), "x");
+        assert_eq!(label_text(&rows[65_539]), "x");
+    }
+
+    #[test]
     fn a_residual_root_is_a_critical_partial_write_in_the_install_report() {
         let (tone, verdict) = install_step_verdict(&StepOutcome::RootCreatedLinkFailed(
             "permission denied".to_owned(),
@@ -6094,6 +7720,15 @@ mod tests {
             verdict,
             "skill root created, but the link was not: permission denied"
         );
+    }
+
+    #[test]
+    fn a_failed_uninstall_step_says_not_removed() {
+        let (tone, verdict) =
+            uninstall_step_verdict(&StepOutcome::Failed("the target changed".to_owned()));
+
+        assert_eq!(tone, Tone::Critical);
+        assert_eq!(verdict, "not removed — the target changed");
     }
 
     fn identity(

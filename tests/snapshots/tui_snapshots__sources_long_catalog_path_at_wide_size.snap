@@ -1,5 +1,6 @@
 ---
 source: tests/tui_snapshots.rs
+assertion_line: 460
 expression: "normalize_sources_screen(&app, &temporary, render(&app, 120, 40))"
 ---
  ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁
@@ -7,7 +8,7 @@ expression: "normalize_sources_screen(&app, &temporary, render(&app, 120, 40))"
 ▕ ◆ skilled  global                                                                                                    ▏
 ▕▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▏
 ▕                │                │                │                │                                                  ▏
-▕ 1 Inventory    │ 2 Sources ·1   │ Updates (soon) │ 4 Doctor       │                    ● ready · 1 source registered ▏
+▕ 1 Inventory    │ 2 Sources ·1   │ 3 Updates      │ 4 Doctor       │                    ● ready · 1 source registered ▏
 ▕▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁│▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁│▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁│▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁│▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▏
 ▕▌ Repositories  1 registered    │   Available variants  1 found               │   Details  experimental               ▏
 ▕────────────────────────────────│ ────────────────────────────────────────────│ ───────────────────────────────────── ▏
@@ -40,5 +41,5 @@ expression: "normalize_sources_screen(&app, &temporary, render(&app, 120, 40))"
 ▕                                │                                             │                                       ▏
 ▕                                │                                             │                                       ▏
 ▕                                                                                                                      ▏
-▕ Tab/Shift-Tab Region   Enter Open   a Add source   1 Inventory   4 Doctor   ? Help   q Quit   Esc Back               ▏
+▕ Tab/Shift-Tab Region   x Forget   Enter Open   a Add source   1 Inventory   4 Doctor   ? Help   q Quit   Esc Back    ▏
  ▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔

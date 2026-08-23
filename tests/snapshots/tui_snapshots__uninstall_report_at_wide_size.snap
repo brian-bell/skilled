@@ -1,34 +1,35 @@
 ---
 source: tests/tui_snapshots.rs
+assertion_line: 1661
 expression: "normalize_install_screen(&temporary, render(&app, 120, 40))"
 ---
  ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁
 ▕                                                                                                                      ▏
-▕ ◆┌ Install result ─────────────────────────────────────────────────────────────────────────────── already applied ┐d ▏
+▕ ◆┌ Uninstall result ───────────────────────────────────────────────────────────────────────────── already applied ┐d ▏
 ▕▁▁│                                                                                                                │▁▁▏
 ▕  │  Skill: portable                                                                                               │  ▏
-▕ 1│  Links to: [CANONICAL]                 /src/skills/portable                                                    │  ▏
-▕▁▁│                                                                                                                │▁▁▏
-▕  │  Steps                                                                                                         │  ▏
-▕──│  × Claude Code: skill root created, but the link was not: Permission denied (os error 13)                      │─ ▏
-▕▌ │      [TEMP]                      /home/.claude/skills/portable                                                 │  ▏
-▕▌ │  U Codex: not attempted, because an earlier step stopped the run                                               │─ ▏
-▕▌ │      [TEMP]                      /home/.agents/skills/portable                                                 │  ▏
-▕  │  U OpenCode: not attempted, because an earlier step stopped the run                                            │c ▏
-▕  │      [TEMP]                      /home/.config/opencode/skills/portable                                        │  ▏
+▕ 1│  ✓ Claude Code · link removed                                                                                  │  ▏
+▕▁▁│    [TEMP]                      /home/.claude/skills/portable                                                   │▁▁▏
+▕  │  ✓ Codex · link removed                                                                                        │  ▏
+▕▌ │    [TEMP]                      /home/.agents/skills/portable                                                   │  ▏
+▕▁▁│  ✓ OpenCode · link removed                                                                                     │▁ ▏
+▕  │    [TEMP]                      /home/.config/opencode/skills/portable                                          │  ▏
 ▕  │                                                                                                                │  ▏
-▕  │  Verification                                                                                                  │  ▏
-▕  │  ✓ every link written was observed again and matches this plan                                                 │  ▏
-▕  │                                                                                                                │  ▏
-▕  │  Skilled does not undo a partial install automatically; uninstall is a separate confirmed operation, and       │─ ▏
-▕  │  repair only replaces a still-present link whose ownership can be proven.                                      │n ▏
-▕  │                                                                                                                │  ▏
-▕  │                                                                                                                │  ▏
-▕  │                                                                                                                │─ ▏
+▕  │  Source content and agent skill roots were not removed.                                                        │  ▏
 ▕  │                                                                                                                │  ▏
 ▕  │                                                                                                                │  ▏
 ▕  │                                                                                                                │  ▏
 ▕  │                                                                                                                │  ▏
+▕  │                                                                                                                │  ▏
+▕  │                                                                                                                │  ▏
+▕  │                                                                                                                │  ▏
+▕  │                                                                                                                │  ▏
+▕  │                                                                                                                │  ▏
+▕  │                                                                                                                │  ▏
+▕  │                                                                                                                │  ▏
+▕  │                                                                                                                │  ▏
+▕  │                                                                                                                │  ▏
+▕  │                                                                                                                │. ▏
 ▕  │                                                                                                                │  ▏
 ▕  │                                                                                                                │  ▏
 ▕  │                                                                                                                │  ▏
@@ -37,7 +38,7 @@ expression: "normalize_install_screen(&temporary, render(&app, 120, 40))"
 ▕  │                                                                                                                │  ▏
 ▕  │                                                                                                                │  ▏
 ▕  │  ────────────────────────────────────────────────────────────────────────────────────────────────────────────  │  ▏
-▕  │  Partly applied                                                                                     Esc Close  │  ▏
+▕  │  Uninstalled and verified                                                                           Esc Close  │  ▏
 ▕  │                                                                                                                │  ▏
 ▕  └────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘  ▏
 ▕ Esc Close   Ctrl-C Quit                                                                                              ▏
