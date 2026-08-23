@@ -3060,6 +3060,117 @@ fn a_symbolic_ref_across_the_fetch_namespace_redirects_nothing() {
     );
 }
 
+/// The syscall-level regression `skilled-2k3.8.5.1` closes out: a Git process
+/// spawned through a [`skilled::git::RepositoryHandle`] acts on the directory
+/// that was pinned when the handle opened, not on whatever the pathname names
+/// at spawn time. The pathname is retargeted at an impostor repository after
+/// the pin, and the bound process still answers for the original — while a
+/// pathname spawn, run as the contrast, answers for the impostor.
+#[test]
+fn a_pinned_checkout_survives_the_pathname_being_retargeted() {
+    let fixture = fixture();
+    let original_head = git(&fixture.clone, &["rev-parse", "HEAD"]);
+    let handle = skilled::git::RepositoryHandle::open(&fixture.clone).expect("pin the checkout");
+
+    let moved = fixture._temporary.path().join("moved-aside");
+    std::fs::rename(&fixture.clone, &moved).expect("retarget the pathname");
+    let impostor = &fixture.clone;
+    Command::new("git")
+        .args(["init", "-q", "-b", "main"])
+        .arg(impostor)
+        .output()
+        .expect("impostor repository");
+    std::fs::write(impostor.join("planted.txt"), "impostor\n").expect("impostor file");
+    commit(impostor, "impostor commit");
+    let impostor_head = git(impostor, &["rev-parse", "HEAD"]);
+    assert_ne!(original_head, impostor_head);
+
+    let bound = skilled::git::head_state((&handle).into()).expect("bound head state");
+    let by_path = skilled::git::head_state((&fixture.clone).into()).expect("pathname head state");
+
+    assert_eq!(bound.revision(), original_head, "the pin was redirected");
+    assert_eq!(by_path.revision(), impostor_head);
+    // And the handle itself reports that its pathname has moved on, which is
+    // the refusal the apply path asks for immediately before the merge.
+    assert!(handle.still_names_its_path().is_err());
+}
+
+/// A bound process accepts the repository inside the held directory and
+/// nowhere else: with `.git` deleted after the pin, Git's ordinary discovery
+/// would walk upward and answer for whatever parent repository the pathname
+/// happens to sit inside — here, an enclosing repository standing in for the
+/// attacker's. The bound spawn refuses instead.
+#[test]
+fn a_pinned_checkout_never_walks_up_into_a_parent_repository() {
+    let fixture = fixture();
+    let parent = fixture._temporary.path().join("parent");
+    let child = parent.join("child");
+    std::fs::create_dir_all(&child).expect("nested directories");
+    Command::new("git")
+        .args(["init", "-q", "-b", "main"])
+        .arg(&parent)
+        .output()
+        .expect("parent repository");
+    std::fs::write(parent.join("outer.txt"), "outer\n").expect("parent file");
+    commit(&parent, "parent commit");
+    Command::new("git")
+        .args(["init", "-q", "-b", "main"])
+        .arg(&child)
+        .output()
+        .expect("child repository");
+    std::fs::write(child.join("inner.txt"), "inner\n").expect("child file");
+    commit(&child, "child commit");
+
+    let handle = skilled::git::RepositoryHandle::open(&child).expect("pin the child");
+    std::fs::remove_dir_all(child.join(".git")).expect("remove the child repository");
+
+    assert!(
+        skilled::git::head_state((&handle).into()).is_err(),
+        "the bound process answered for an enclosing repository"
+    );
+}
+
+/// A `core.worktree` written into the pinned repository's configuration must
+/// not move a bound process's worktree — that is the one lever that could
+/// send the confirmed merge's writes outside the pinned checkout. The bound
+/// spawn reads the held directory; the pathname spawn, run as the contrast,
+/// follows the configured redirection.
+#[test]
+fn a_configured_worktree_redirection_cannot_move_a_bound_process() {
+    let fixture = fixture();
+    let elsewhere = fixture._temporary.path().join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).expect("redirection target");
+    let handle = skilled::git::RepositoryHandle::open(&fixture.clone).expect("pin the checkout");
+    git(
+        &fixture.clone,
+        &["config", "core.worktree", elsewhere.to_str().unwrap()],
+    );
+
+    let bound = skilled::git::worktree_state((&handle).into()).expect("bound worktree state");
+    let by_path =
+        skilled::git::worktree_state((&fixture.clone).into()).expect("pathname worktree state");
+
+    // The held directory holds every tracked file; the redirection target
+    // holds none of them, so a status read through it reports deletions.
+    assert!(
+        !bound.tracked_dirty(),
+        "the bound status left the held tree"
+    );
+    assert!(by_path.tracked_dirty());
+}
+
+/// A pathname that is a symbolic link is refused at the pin, before any
+/// process runs: the path the user confirmed has to be the directory itself.
+#[test]
+fn a_symlinked_checkout_path_cannot_be_pinned() {
+    let fixture = fixture();
+    let alias = fixture._temporary.path().join("alias");
+    std::os::unix::fs::symlink(&fixture.clone, &alias).expect("alias");
+
+    assert!(skilled::git::RepositoryHandle::open(&alias).is_err());
+    assert!(skilled::git::RepositoryHandle::open(&fixture.clone).is_ok());
+}
+
 /// `core.alternateRefsCommand` is shell-executed to advertise the tips of an
 /// alternate object store during fetch negotiation, which makes it a program
 /// the checkout chooses and the check would otherwise run.
@@ -3270,8 +3381,8 @@ fn an_executable_remote_url_is_refused() {
 #[test]
 fn the_fetch_refuses_a_transport_helper_no_check_ever_saw() {
     let fixture = fixture();
-    let head = skilled::git::head_state(&fixture.clone).expect("head state");
-    let upstream = skilled::git::upstream_of(&fixture.clone, &head)
+    let head = skilled::git::head_state((&fixture.clone).into()).expect("head state");
+    let upstream = skilled::git::upstream_of((&fixture.clone).into(), &head)
         .expect("read upstream")
         .expect("configured upstream");
     let marker = fixture._temporary.path().join("LATE_EXT_RAN");
@@ -3285,7 +3396,7 @@ fn the_fetch_refuses_a_transport_helper_no_check_ever_saw() {
     );
     git(&fixture.clone, &["config", "protocol.ext.allow", "always"]);
 
-    let result = skilled::git::fetch_upstream(&fixture.clone, &upstream);
+    let result = skilled::git::fetch_upstream((&fixture.clone).into(), &upstream);
 
     assert!(
         result.is_err(),
@@ -3302,8 +3413,8 @@ fn the_fetch_ignores_an_ssh_command_the_checkout_holds() {
     use std::os::unix::fs::PermissionsExt;
 
     let fixture = fixture();
-    let head = skilled::git::head_state(&fixture.clone).expect("head state");
-    let upstream = skilled::git::upstream_of(&fixture.clone, &head)
+    let head = skilled::git::head_state((&fixture.clone).into()).expect("head state");
+    let upstream = skilled::git::upstream_of((&fixture.clone).into(), &head)
         .expect("read upstream")
         .expect("configured upstream");
     let marker = fixture._temporary.path().join("LATE_SSH_RAN");
@@ -3338,7 +3449,7 @@ fn the_fetch_ignores_an_ssh_command_the_checkout_holds() {
         ],
     );
 
-    let result = skilled::git::fetch_upstream(&fixture.clone, &upstream);
+    let result = skilled::git::fetch_upstream((&fixture.clone).into(), &upstream);
 
     assert!(result.is_err(), "the fetch reached the unreachable remote");
     assert!(!marker.exists(), "the checkout's ssh command ran");

@@ -58,6 +58,210 @@ const REPOSITORY_ROUTING_ENVIRONMENT: &[&str] = &[
     "GIT_CONFIG_COUNT",
 ];
 
+// `fchdir(2)` and the `open(2)` flags behind the pinned-checkout handle come
+// from `libc` rather than hand declarations: the call is POSIX everywhere,
+// but `O_DIRECTORY` and `O_NONBLOCK` are per-kernel, per-architecture ABI
+// values — Linux alone spells `O_DIRECTORY` two ways across architectures —
+// and a transcription error here silently passes some *other* flag to the
+// open that guards the trust boundary. The crate is already in every build's
+// dependency tree underneath the bundled SQLite.
+#[cfg(unix)]
+use libc::{O_DIRECTORY, O_NONBLOCK, fchdir};
+
+/// An open handle to the checkout an operation was validated against.
+///
+/// Spawning `git -C <path>` re-resolves the pathname at process creation, so
+/// a checkout renamed or replaced between a guard and the spawn would hand
+/// the child a repository the guard never saw. The handle closes that window
+/// at the syscall level: the directory is opened once, the open file
+/// description keeps naming that directory whatever happens to the pathname,
+/// and every bound child enters it with `fchdir(2)` before Git executes. A
+/// rename can change where the pathname leads, never which repository a bound
+/// process acts on.
+///
+/// Opening only pins a directory; it proves nothing about which repository
+/// was pinned. The identity checks that make it the *planned* checkout run
+/// through the handle afterwards, so every answer they give describes the
+/// pinned directory rather than the pathname's current occupant. Bound
+/// spawns also pin what discovery would otherwise re-decide inside the held
+/// directory: `GIT_DIR=.git` and `GIT_WORK_TREE=.`, resolved from the bound
+/// working directory, keep the repository and the worktree exactly there — a
+/// deleted `.git` refuses rather than walking up into a parent repository,
+/// and a `core.worktree` written into the configuration cannot move the
+/// merge's writes elsewhere.
+///
+/// The boundary that remains is the `.git` *object itself*. Git accepts a
+/// repository only by name — `GIT_DIR` takes a path, and the platforms here
+/// offer no directory-descriptor spelling a child could inherit — so a
+/// `.git` swapped in place between a guard and a spawn is followed, exactly
+/// as the pathname spawn always followed it. Reaching that swap requires
+/// write access inside the pinned checkout, and that capability already
+/// decides what the confirmed merge executes without any swap: hooks,
+/// filters, and configuration are read from `.git`'s contents at merge time,
+/// which is the disclosed, accepted nature of the one operation that runs
+/// repository code. The pin therefore claims the *outer* replacement window
+/// — the one `skilled-2k3.8.5.1` names — and no more.
+///
+/// On a platform without `fchdir` the handle degrades to the pathname it was
+/// opened from, spawned as `git -C <path>` as before; the syscall binding is
+/// documented for the Unix platforms Skilled supports rather than claimed
+/// universally.
+pub struct RepositoryHandle {
+    #[cfg(unix)]
+    directory: std::fs::File,
+    path: PathBuf,
+}
+
+impl RepositoryHandle {
+    /// Open `path` and prove the held object is the directory the pathname
+    /// named when it was read: not a symbolic link, a directory, and — on
+    /// Unix — the same filesystem object in the pre-open reading and in the
+    /// held description, so a swap between the two observations is a refusal
+    /// rather than a silent retarget.
+    ///
+    /// The open itself must not be a thing a swap can weaponise either: a
+    /// plain read-only `open(2)` of a FIFO substituted between the reading
+    /// and the open would block until a writer appeared, hanging the check
+    /// inside the very window this handle defends. The descriptor is
+    /// therefore acquired with `O_DIRECTORY`, which refuses a non-directory
+    /// during lookup, and `O_NONBLOCK`, which POSIX defines to make even a
+    /// FIFO open return at once — belt and braces, since the identity
+    /// comparison after the open rejects anything that is not the observed
+    /// directory anyway.
+    pub fn open(path: &Path) -> Result<Self> {
+        let observed = std::fs::symlink_metadata(path)?;
+        if observed.file_type().is_symlink() || !observed.is_dir() {
+            return Err(Error::SourcePathNotDirectory(path.to_path_buf()));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+            let directory = std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(O_DIRECTORY | O_NONBLOCK)
+                .open(path)?;
+            let held = directory.metadata()?;
+            if !held.is_dir() || held.dev() != observed.dev() || held.ino() != observed.ino() {
+                return Err(Error::SourceChangedAfterPreview);
+            }
+            Ok(Self {
+                directory,
+                path: path.to_path_buf(),
+            })
+        }
+        #[cfg(not(unix))]
+        {
+            Ok(Self {
+                path: path.to_path_buf(),
+            })
+        }
+    }
+
+    /// The pathname this handle was opened from. Error reports and probe
+    /// records name it even when the process itself was bound by descriptor.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Refuse to continue when the pathname no longer leads to the held
+    /// directory.
+    ///
+    /// The bound processes cannot be redirected either way; this check is for
+    /// the statement the user confirmed, which named a path. A checkout
+    /// renamed after validation would still be the proven repository, but it
+    /// would no longer be the path on the screen, so the write is refused
+    /// rather than performed somewhere true-but-unstated. On a platform
+    /// without the descriptor this is the pathname re-reading it always was.
+    pub fn still_names_its_path(&self) -> Result<()> {
+        let current =
+            std::fs::symlink_metadata(&self.path).map_err(|_| Error::SourceChangedAfterPreview)?;
+        if current.file_type().is_symlink() || !current.is_dir() {
+            return Err(Error::SourceChangedAfterPreview);
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let held = self.directory.metadata()?;
+            if held.dev() != current.dev() || held.ino() != current.ino() {
+                return Err(Error::SourceChangedAfterPreview);
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Where a Git child is pointed: a pathname resolved at spawn time, or an
+/// open [`RepositoryHandle`] entered by descriptor before Git executes.
+///
+/// Every function in this module takes this type rather than a path, and the
+/// conversion is written at each call site on purpose: which spawns are
+/// pathname-resolved and which are handle-bound is the property the update
+/// pipelines are built around, and an explicit `.into()` per call keeps that
+/// choice readable — and greppable — where it is made, instead of dissolving
+/// it into a generic parameter.
+#[derive(Clone, Copy)]
+pub enum GitTarget<'a> {
+    Path(&'a Path),
+    Handle(&'a RepositoryHandle),
+}
+
+impl GitTarget<'_> {
+    /// The pathname this target answers for, whichever way it spawns.
+    pub fn path(&self) -> &Path {
+        match self {
+            Self::Path(path) => path,
+            Self::Handle(handle) => handle.path(),
+        }
+    }
+}
+
+impl<'a> From<&'a Path> for GitTarget<'a> {
+    fn from(path: &'a Path) -> Self {
+        Self::Path(path)
+    }
+}
+
+impl<'a> From<&'a PathBuf> for GitTarget<'a> {
+    fn from(path: &'a PathBuf) -> Self {
+        Self::Path(path)
+    }
+}
+
+impl<'a> From<&'a RepositoryHandle> for GitTarget<'a> {
+    fn from(handle: &'a RepositoryHandle) -> Self {
+        Self::Handle(handle)
+    }
+}
+
+/// Enter the held directory in the child, between `fork` and `exec`.
+#[cfg(unix)]
+fn bind_to_handle(command: &mut Command, handle: &RepositoryHandle) {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::process::CommandExt;
+    let descriptor = handle.directory.as_raw_fd();
+    // SAFETY: `fchdir` is async-signal-safe, so it may run between `fork` and
+    // `exec`. The raw descriptor is read while the borrowed handle is alive —
+    // every command in this module is spawned within the call that built it —
+    // and it is still open when the closure runs, because close-on-exec
+    // applies at `exec`, after `pre_exec` closures have finished.
+    unsafe {
+        command.pre_exec(move || {
+            if fchdir(descriptor) == 0 {
+                Ok(())
+            } else {
+                Err(io::Error::last_os_error())
+            }
+        });
+    }
+}
+
+/// Without `fchdir` the handle spawns by its pathname, exactly as a
+/// [`GitTarget::Path`] does.
+#[cfg(not(unix))]
+fn bind_to_handle(command: &mut Command, handle: &RepositoryHandle) {
+    command.arg("-C").arg(handle.path());
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum HeadState {
     Branch { reference: String, revision: String },
@@ -621,7 +825,7 @@ fn force_ssh_batch_mode(command: &str) -> Result<String> {
     ))
 }
 
-fn command(repository: &Path, op: &UpdateOp) -> Command {
+fn command(repository: GitTarget<'_>, op: &UpdateOp) -> Command {
     debug_assert!(UPDATE_SUBCOMMANDS.contains(&op.subcommand()));
     let mut command = Command::new("git");
     for key in REPOSITORY_ROUTING_ENVIRONMENT {
@@ -635,21 +839,45 @@ fn command(repository: &Path, op: &UpdateOp) -> Command {
             "core.untrackedCache=false",
         ]);
     }
-    command.arg("-C").arg(repository).args(op.arguments());
+    match repository {
+        GitTarget::Path(path) => {
+            command.arg("-C").arg(path);
+        }
+        GitTarget::Handle(handle) => {
+            bind_to_handle(&mut command, handle);
+            // Resolved from the bound working directory, these two pin what a
+            // pathname spawn leaves to rediscovery. `GIT_DIR=.git` names the
+            // repository inside the held directory and nowhere else: a `.git`
+            // deleted after the pin becomes a refusal instead of an upward
+            // walk into whatever parent repository the pathname sits under.
+            // `GIT_WORK_TREE=.` makes the held directory the worktree
+            // outright, overriding a `core.worktree` that arrived in the
+            // configuration afterwards — the one lever that could otherwise
+            // send the confirmed merge's writes outside the pinned checkout.
+            // Every checkout Skilled registers is a worktree top level, where
+            // both spellings are exactly what discovery would have concluded.
+            // What stays with Git is the `.git` *contents*: an object swapped
+            // in place still decides hooks and configuration, because Git
+            // accepts no descriptor-pinned repository — see the type's
+            // documentation for why that boundary is accepted.
+            command.env("GIT_DIR", ".git").env("GIT_WORK_TREE", ".");
+        }
+    }
+    command.args(op.arguments());
     for (key, value) in op.environment() {
         command.env(key, value);
     }
     command
 }
 
-fn run(repository: &Path, op: UpdateOp) -> Result<Output> {
+fn run(repository: GitTarget<'_>, op: UpdateOp) -> Result<Output> {
     command(repository, &op)
         .output()
         .map_err(Error::GitUnavailable)
 }
 
 fn run_cancellable(
-    repository: &Path,
+    repository: GitTarget<'_>,
     op: &UpdateOp,
     cancelled: &AtomicBool,
     child_slot: &Mutex<Option<Child>>,
@@ -746,7 +974,7 @@ fn collect_cancellable_child(
 }
 
 fn required_cancellable(
-    repository: &Path,
+    repository: GitTarget<'_>,
     op: UpdateOp,
     cancelled: &AtomicBool,
     child_slot: &Mutex<Option<Child>>,
@@ -763,7 +991,7 @@ fn required_cancellable(
 }
 
 fn optional_cancellable(
-    repository: &Path,
+    repository: GitTarget<'_>,
     op: UpdateOp,
     cancelled: &AtomicBool,
     child_slot: &Mutex<Option<Child>>,
@@ -772,7 +1000,7 @@ fn optional_cancellable(
         .map(|output| output.status.success().then_some(output.stdout)))
 }
 
-fn required(repository: &Path, op: UpdateOp) -> Result<Vec<u8>> {
+fn required(repository: GitTarget<'_>, op: UpdateOp) -> Result<Vec<u8>> {
     let arguments = op.arguments();
     let output = run(repository, op)?;
     if output.status.success() {
@@ -781,12 +1009,12 @@ fn required(repository: &Path, op: UpdateOp) -> Result<Vec<u8>> {
     Err(git_error(repository, &arguments, &output))
 }
 
-fn optional(repository: &Path, op: UpdateOp) -> Result<Option<Vec<u8>>> {
+fn optional(repository: GitTarget<'_>, op: UpdateOp) -> Result<Option<Vec<u8>>> {
     let output = run(repository, op)?;
     Ok(output.status.success().then_some(output.stdout))
 }
 
-pub fn head_state(repository: &Path) -> Result<HeadState> {
+pub fn head_state(repository: GitTarget<'_>) -> Result<HeadState> {
     let revision = text(required(repository, UpdateOp::RevParse("HEAD".into()))?);
     let reference = optional(repository, UpdateOp::SymbolicHead)?
         .map(text)
@@ -801,7 +1029,7 @@ pub fn head_state(repository: &Path) -> Result<HeadState> {
 }
 
 pub(crate) fn head_state_cancellable(
-    repository: &Path,
+    repository: GitTarget<'_>,
     cancelled: &AtomicBool,
     child_slot: &Mutex<Option<Child>>,
 ) -> Result<Option<HeadState>> {
@@ -830,8 +1058,16 @@ pub(crate) fn head_state_cancellable(
     }))
 }
 
+pub(crate) fn repository_git_dir(repository: GitTarget<'_>) -> Result<PathBuf> {
+    let value = text(required(repository, UpdateOp::AbsoluteGitDir)?);
+    if value.is_empty() {
+        return Err(Error::InvalidGitOutput);
+    }
+    Ok(PathBuf::from(value))
+}
+
 pub(crate) fn repository_git_dir_cancellable(
-    repository: &Path,
+    repository: GitTarget<'_>,
     cancelled: &AtomicBool,
     child_slot: &Mutex<Option<Child>>,
 ) -> Result<Option<PathBuf>> {
@@ -849,7 +1085,7 @@ pub(crate) fn repository_git_dir_cancellable(
 
 /// Resolve the configured upstream before a fetch. Returning `None` performs no
 /// network operation and lets the classifier retain `source.no_upstream`.
-pub fn upstream_of(repository: &Path, head: &HeadState) -> Result<Option<Upstream>> {
+pub fn upstream_of(repository: GitTarget<'_>, head: &HeadState) -> Result<Option<Upstream>> {
     let Some(reference) = head.reference() else {
         return Ok(None);
     };
@@ -891,7 +1127,7 @@ pub fn upstream_of(repository: &Path, head: &HeadState) -> Result<Option<Upstrea
 }
 
 pub(crate) fn upstream_of_cancellable(
-    repository: &Path,
+    repository: GitTarget<'_>,
     head: &HeadState,
     cancelled: &AtomicBool,
     child_slot: &Mutex<Option<Child>>,
@@ -977,7 +1213,7 @@ pub(crate) fn upstream_of_cancellable(
     })))
 }
 
-pub fn config_get(repository: &Path, key: &str) -> Result<Option<String>> {
+pub fn config_get(repository: GitTarget<'_>, key: &str) -> Result<Option<String>> {
     Ok(optional(repository, UpdateOp::ConfigGet(key.into()))?
         .map(text)
         .filter(|s| !s.is_empty()))
@@ -992,7 +1228,7 @@ pub fn config_get(repository: &Path, key: &str) -> Result<Option<String>> {
 /// read reach the network, which is exactly the access an explicit check
 /// exists to bound, so all of them refuse the update rather than only the
 /// extension key.
-pub(crate) fn repository_is_partial_clone(repository: &Path) -> Result<bool> {
+pub(crate) fn repository_is_partial_clone(repository: GitTarget<'_>) -> Result<bool> {
     let op = UpdateOp::PromisorSettings;
     let arguments = op.arguments();
     let output = run(repository, op)?;
@@ -1067,7 +1303,7 @@ const SSH_COMMAND_PATTERN: &str = r"^core\.sshcommand$";
 /// key inside the checkout blocks the check. `--show-scope` is what separates
 /// them, and it reports a value pulled in by an `include.path` from the local
 /// file as `local`, so a setting cannot be hidden behind an include.
-pub(crate) fn repository_transport_code(repository: &Path) -> Result<Option<String>> {
+pub(crate) fn repository_transport_code(repository: GitTarget<'_>) -> Result<Option<String>> {
     let op = UpdateOp::TransportSettings;
     let arguments = op.arguments();
     let output = run(repository, op)?;
@@ -1083,7 +1319,7 @@ pub(crate) fn repository_transport_code(repository: &Path) -> Result<Option<Stri
 }
 
 pub(crate) fn repository_transport_code_cancellable(
-    repository: &Path,
+    repository: GitTarget<'_>,
     cancelled: &AtomicBool,
     child_slot: &Mutex<Option<Child>>,
 ) -> Result<Option<Option<String>>> {
@@ -1110,7 +1346,7 @@ pub(crate) fn repository_transport_code_cancellable(
 /// `protocol.*` policy is theirs the same way `merge.verifySignatures` is. The
 /// checkout's scopes are read out of that last one, so a repository can neither
 /// grant itself a transport nor deny the user one.
-fn permitted_transports(repository: &Path) -> Result<String> {
+fn permitted_transports(repository: GitTarget<'_>) -> Result<String> {
     Ok(narrowed_transports(
         &transport_policy(repository)?,
         &inherited_transport_boundary(),
@@ -1118,7 +1354,7 @@ fn permitted_transports(repository: &Path) -> Result<String> {
 }
 
 fn permitted_transports_cancellable(
-    repository: &Path,
+    repository: GitTarget<'_>,
     cancelled: &AtomicBool,
     child_slot: &Mutex<Option<Child>>,
 ) -> Result<Option<String>> {
@@ -1131,7 +1367,7 @@ fn permitted_transports_cancellable(
     )))
 }
 
-fn transport_policy(repository: &Path) -> Result<TransportPolicy> {
+fn transport_policy(repository: GitTarget<'_>) -> Result<TransportPolicy> {
     let op = UpdateOp::TransportPolicy;
     let arguments = op.arguments();
     let output = run(repository, op)?;
@@ -1147,7 +1383,7 @@ fn transport_policy(repository: &Path) -> Result<TransportPolicy> {
 }
 
 fn transport_policy_cancellable(
-    repository: &Path,
+    repository: GitTarget<'_>,
     cancelled: &AtomicBool,
     child_slot: &Mutex<Option<Child>>,
 ) -> Result<Option<TransportPolicy>> {
@@ -1328,7 +1564,7 @@ fn narrowed_transports(policy: &TransportPolicy, boundary: &TransportBoundary) -
 /// meanwhile. The check still refuses a repository-scoped value, because a
 /// checkout that names a program is a thing to report and not merely to
 /// disregard.
-fn user_ssh_command(repository: &Path) -> Result<Option<String>> {
+fn user_ssh_command(repository: GitTarget<'_>) -> Result<Option<String>> {
     let op = UpdateOp::UserSshCommand;
     let arguments = op.arguments();
     let output = run(repository, op)?;
@@ -1343,7 +1579,7 @@ fn user_ssh_command(repository: &Path) -> Result<Option<String>> {
 }
 
 fn user_ssh_command_cancellable(
-    repository: &Path,
+    repository: GitTarget<'_>,
     cancelled: &AtomicBool,
     child_slot: &Mutex<Option<Child>>,
 ) -> Result<Option<Option<String>>> {
@@ -1484,7 +1720,10 @@ fn transport_setting_is_disabled(name: &str, value: &str) -> bool {
 /// ordinary HTTPS address to a naive read and still be fetched as `ext::`.
 /// `ls-remote --get-url` applies the rewrites and reports what Git would use,
 /// and it is documented to exit without contacting the remote.
-pub(crate) fn effective_remote_url(repository: &Path, remote: &str) -> Result<Option<String>> {
+pub(crate) fn effective_remote_url(
+    repository: GitTarget<'_>,
+    remote: &str,
+) -> Result<Option<String>> {
     let op = UpdateOp::RemoteUrl(remote.to_owned());
     let arguments = op.arguments();
     let output = run(repository, op)?;
@@ -1496,7 +1735,7 @@ pub(crate) fn effective_remote_url(repository: &Path, remote: &str) -> Result<Op
 }
 
 pub(crate) fn effective_remote_url_cancellable(
-    repository: &Path,
+    repository: GitTarget<'_>,
     remote: &str,
     cancelled: &AtomicBool,
     child_slot: &Mutex<Option<Child>>,
@@ -1552,7 +1791,7 @@ pub(crate) fn remote_url_runs_a_helper(url: &str) -> bool {
 }
 
 pub(crate) fn repository_is_partial_clone_cancellable(
-    repository: &Path,
+    repository: GitTarget<'_>,
     cancelled: &AtomicBool,
     child_slot: &Mutex<Option<Child>>,
 ) -> Result<Option<bool>> {
@@ -1601,7 +1840,7 @@ fn parse_promisor_settings(bytes: Vec<u8>) -> Result<bool> {
 }
 
 pub(crate) fn config_get_cancellable(
-    repository: &Path,
+    repository: GitTarget<'_>,
     key: &str,
     cancelled: &AtomicBool,
     child_slot: &Mutex<Option<Child>>,
@@ -1623,7 +1862,7 @@ pub(crate) fn config_get_cancellable(
 /// which a forced refspec would then rewrite during a check the user was told
 /// only reads. The name is checked here, immediately before the fetch that
 /// would use it, and the refusal happens before any network access.
-fn reject_symbolic_tracking_ref(repository: &Path, upstream: &Upstream) -> Result<()> {
+fn reject_symbolic_tracking_ref(repository: GitTarget<'_>, upstream: &Upstream) -> Result<()> {
     let op = UpdateOp::SymbolicRef(upstream.tracking_ref.clone());
     let arguments = op.arguments();
     let output = run(repository, op)?;
@@ -1631,7 +1870,7 @@ fn reject_symbolic_tracking_ref(repository: &Path, upstream: &Upstream) -> Resul
 }
 
 fn reject_symbolic_tracking_ref_cancellable(
-    repository: &Path,
+    repository: GitTarget<'_>,
     upstream: &Upstream,
     cancelled: &AtomicBool,
     child_slot: &Mutex<Option<Child>>,
@@ -1648,7 +1887,7 @@ fn reject_symbolic_tracking_ref_cancellable(
 /// for a direct ref and for one that does not exist yet; neither of those can
 /// send the update anywhere but the named destination.
 fn symbolic_tracking_ref_verdict(
-    repository: &Path,
+    repository: GitTarget<'_>,
     upstream: &Upstream,
     arguments: &[OsString],
     output: &Output,
@@ -1762,13 +2001,13 @@ fn full_object_name(revision: &str) -> bool {
 /// be direct for the first answer and symbolic for the second, and a value
 /// read through a substituted symbolic ref is the referent's — exactly the
 /// state the publication is refusing.
-fn direct_ref_object(repository: &Path, reference: &str) -> Result<Option<String>> {
+fn direct_ref_object(repository: GitTarget<'_>, reference: &str) -> Result<Option<String>> {
     let output = run(repository, UpdateOp::RefState(reference.to_owned()))?;
     Ok(parse_direct_ref_object(&output))
 }
 
 fn direct_ref_object_cancellable(
-    repository: &Path,
+    repository: GitTarget<'_>,
     reference: &str,
     cancelled: &AtomicBool,
     child_slot: &Mutex<Option<Child>>,
@@ -1808,7 +2047,7 @@ fn parse_direct_ref_object(output: &Output) -> Option<String> {
 /// for a symbolic ref, so a ref substituted for one whose referent happens to
 /// hold `revision` is not mistaken for a ref that holds it.
 fn publish_or_accept_identical(
-    repository: &Path,
+    repository: GitTarget<'_>,
     upstream: &Upstream,
     revision: &str,
     expected: Option<&str>,
@@ -1835,7 +2074,7 @@ fn publish_ref_op(reference: &str, revision: &str, expected: Option<&str>) -> Up
 }
 
 fn publish_ref(
-    repository: &Path,
+    repository: GitTarget<'_>,
     reference: &str,
     revision: &str,
     expected: Option<&str>,
@@ -1851,7 +2090,7 @@ fn publish_ref(
 }
 
 fn publish_ref_cancellable(
-    repository: &Path,
+    repository: GitTarget<'_>,
     reference: &str,
     revision: &str,
     expected: Option<&str>,
@@ -1914,7 +2153,7 @@ fn fetch_op(upstream: &Upstream, transport: FetchTransport, destination: &str) -
 /// check start refuses the whole check, the ref lost that way existed only
 /// for the seconds this check was running. That residual, and the argument
 /// for accepting it, is the `skilled-q59` closeout record.
-pub fn fetch_upstream(repository: &Path, upstream: &Upstream) -> Result<String> {
+pub fn fetch_upstream(repository: GitTarget<'_>, upstream: &Upstream) -> Result<String> {
     reject_symbolic_tracking_ref(repository, upstream)?;
     let transport = FetchTransport {
         ssh_command: force_ssh_batch_mode(
@@ -1941,7 +2180,7 @@ pub fn fetch_upstream(repository: &Path, upstream: &Upstream) -> Result<String> 
 /// Fetch the upstream branch's objects and return the commit the transport
 /// reported, leaving every ref exactly as it was.
 fn fetch_reported_revision(
-    repository: &Path,
+    repository: GitTarget<'_>,
     upstream: &Upstream,
     transport: FetchTransport,
 ) -> Result<String> {
@@ -1978,7 +2217,7 @@ fn fetch_reported_revision(
 /// Fetch on a worker thread while publishing the child for main-thread
 /// cancellation. `None` is a clean cancellation, not a fetch failure.
 pub(crate) fn fetch_upstream_cancellable(
-    repository: &Path,
+    repository: GitTarget<'_>,
     upstream: &Upstream,
     cancelled: &AtomicBool,
     child_slot: &Mutex<Option<Child>>,
@@ -2055,7 +2294,7 @@ pub(crate) fn fetch_upstream_cancellable(
 }
 
 fn fetch_reported_revision_cancellable(
-    repository: &Path,
+    repository: GitTarget<'_>,
     upstream: &Upstream,
     transport: FetchTransport,
     cancelled: &AtomicBool,
@@ -2109,7 +2348,7 @@ fn fetch_reported_revision_cancellable(
     Ok(Some(revision))
 }
 
-fn run_bounded(repository: &Path, op: &UpdateOp, limit: usize) -> Result<Output> {
+fn run_bounded(repository: GitTarget<'_>, op: &UpdateOp, limit: usize) -> Result<Output> {
     let mut child = command(repository, op)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -2151,7 +2390,7 @@ fn upstream_refspec(upstream: &Upstream, destination: &str) -> String {
     format!("+{}:{}", upstream.merge_ref, destination)
 }
 
-pub fn merge_base(repository: &Path, left: &str, right: &str) -> Result<Option<String>> {
+pub fn merge_base(repository: GitTarget<'_>, left: &str, right: &str) -> Result<Option<String>> {
     let op = UpdateOp::MergeBase(left.into(), right.into());
     let arguments = op.arguments();
     let output = run(repository, op)?;
@@ -2165,7 +2404,7 @@ pub fn merge_base(repository: &Path, left: &str, right: &str) -> Result<Option<S
 }
 
 pub(crate) fn merge_base_cancellable(
-    repository: &Path,
+    repository: GitTarget<'_>,
     left: &str,
     right: &str,
     cancelled: &AtomicBool,
@@ -2185,7 +2424,7 @@ pub(crate) fn merge_base_cancellable(
     Err(git_error(repository, &arguments, &output))
 }
 
-pub fn ahead_behind(repository: &Path, left: &str, right: &str) -> Result<AheadBehind> {
+pub fn ahead_behind(repository: GitTarget<'_>, left: &str, right: &str) -> Result<AheadBehind> {
     let value = text(required(
         repository,
         UpdateOp::AheadBehind(left.into(), right.into()),
@@ -2206,7 +2445,7 @@ pub fn ahead_behind(repository: &Path, left: &str, right: &str) -> Result<AheadB
 }
 
 pub(crate) fn ahead_behind_cancellable(
-    repository: &Path,
+    repository: GitTarget<'_>,
     left: &str,
     right: &str,
     cancelled: &AtomicBool,
@@ -2240,7 +2479,11 @@ fn parse_ahead_behind(value: &str) -> Result<AheadBehind> {
     Ok(AheadBehind { ahead, behind })
 }
 
-pub fn changed_paths(repository: &Path, left: &str, right: &str) -> Result<Vec<ChangedPath>> {
+pub fn changed_paths(
+    repository: GitTarget<'_>,
+    left: &str,
+    right: &str,
+) -> Result<Vec<ChangedPath>> {
     let bytes = required(
         repository,
         UpdateOp::ChangedPaths(left.into(), right.into()),
@@ -2249,7 +2492,7 @@ pub fn changed_paths(repository: &Path, left: &str, right: &str) -> Result<Vec<C
 }
 
 pub(crate) fn changed_paths_cancellable(
-    repository: &Path,
+    repository: GitTarget<'_>,
     left: &str,
     right: &str,
     cancelled: &AtomicBool,
@@ -2314,7 +2557,7 @@ fn parse_changed_paths(bytes: Vec<u8>) -> Result<Vec<ChangedPath>> {
     Ok(paths)
 }
 
-pub fn commit_summaries(repository: &Path, left: &str, right: &str) -> Result<Vec<String>> {
+pub fn commit_summaries(repository: GitTarget<'_>, left: &str, right: &str) -> Result<Vec<String>> {
     let bytes = required(
         repository,
         UpdateOp::CommitSummaries(left.into(), right.into()),
@@ -2325,14 +2568,18 @@ pub fn commit_summaries(repository: &Path, left: &str, right: &str) -> Result<Ve
         .collect())
 }
 
-pub fn commit_exists(repository: &Path, revision: &str) -> Result<bool> {
+pub fn commit_exists(repository: GitTarget<'_>, revision: &str) -> Result<bool> {
     Ok(optional(repository, UpdateOp::CatFile(revision.into()))?.is_some())
 }
 
 /// The mode of the entry `path` names in the exact commit tree, if it names
 /// one. Literal pathspec handling keeps catalog names from becoming Git
 /// pattern syntax.
-fn tree_entry_mode(repository: &Path, revision: &str, path: &Path) -> Result<Option<Vec<u8>>> {
+fn tree_entry_mode(
+    repository: GitTarget<'_>,
+    revision: &str,
+    path: &Path,
+) -> Result<Option<Vec<u8>>> {
     let bytes = required(
         repository,
         UpdateOp::TreeEntryMode {
@@ -2369,7 +2616,11 @@ fn tree_entry_mode(repository: &Path, revision: &str, path: &Path) -> Result<Opt
 /// follows the write reports the installation as no longer loadable. The mode
 /// is what distinguishes them: `100644` and `100755` are regular files, and
 /// `120000` is a link.
-pub fn tree_regular_file_exists(repository: &Path, revision: &str, path: &Path) -> Result<bool> {
+pub fn tree_regular_file_exists(
+    repository: GitTarget<'_>,
+    revision: &str,
+    path: &Path,
+) -> Result<bool> {
     Ok(tree_entry_mode(repository, revision, path)?.is_some_and(|mode| mode.starts_with(b"100")))
 }
 
@@ -2378,7 +2629,7 @@ pub fn tree_regular_file_exists(repository: &Path, revision: &str, path: &Path) 
 /// A directory, a regular file, a symbolic link, or a submodule: what matters
 /// where a removal was disclosed is only whether an installed link would still
 /// have something to resolve to.
-pub fn tree_entry_exists(repository: &Path, revision: &str, path: &Path) -> Result<bool> {
+pub fn tree_entry_exists(repository: GitTarget<'_>, revision: &str, path: &Path) -> Result<bool> {
     Ok(tree_entry_mode(repository, revision, path)?.is_some())
 }
 
@@ -2390,7 +2641,7 @@ pub fn tree_entry_exists(repository: &Path, revision: &str, path: &Path) -> Resu
 /// every path under it, while an ancestor the update deletes outright leaves
 /// nothing to redirect.
 pub fn tree_directory_entry(
-    repository: &Path,
+    repository: GitTarget<'_>,
     revision: &str,
     path: &Path,
 ) -> Result<Option<bool>> {
@@ -2407,7 +2658,7 @@ pub fn tree_directory_entry(
     }))
 }
 
-pub fn worktree_state(repository: &Path) -> Result<WorktreeState> {
+pub fn worktree_state(repository: GitTarget<'_>) -> Result<WorktreeState> {
     let filter_settings = configured_filter_settings(repository)?;
     let configured_drivers = filter_settings
         .iter()
@@ -2433,7 +2684,7 @@ pub fn worktree_state(repository: &Path) -> Result<WorktreeState> {
 fn parse_worktree_status(
     bytes: Vec<u8>,
     configured_drivers: &HashSet<&str>,
-    filter_repository: Option<&Path>,
+    filter_repository: Option<GitTarget<'_>>,
 ) -> Result<WorktreeState> {
     let mut result = WorktreeState::default();
     let mut filter_ambiguous_paths = Vec::new();
@@ -2504,7 +2755,7 @@ fn parse_worktree_status(
 }
 
 pub(crate) fn worktree_state_cancellable(
-    repository: &Path,
+    repository: GitTarget<'_>,
     cancelled: &AtomicBool,
     child_slot: &Mutex<Option<Child>>,
 ) -> Result<Option<WorktreeState>> {
@@ -2549,7 +2800,7 @@ pub(crate) fn worktree_state_cancellable(
     parse_worktree_status(output.stdout, &configured_drivers, None).map(Some)
 }
 
-fn configured_filter_settings(repository: &Path) -> Result<Vec<(String, &'static str)>> {
+fn configured_filter_settings(repository: GitTarget<'_>) -> Result<Vec<(String, &'static str)>> {
     let op = UpdateOp::FilterSettings;
     let arguments = op.arguments();
     let output = run(repository, op)?;
@@ -2586,7 +2837,10 @@ fn configured_filter_driver(key: &str) -> Option<&str> {
     matches!(setting, "clean" | "process").then_some(driver)
 }
 
-fn filter_drivers_for_paths(repository: &Path, paths: &[Vec<u8>]) -> Result<Vec<Option<String>>> {
+fn filter_drivers_for_paths(
+    repository: GitTarget<'_>,
+    paths: &[Vec<u8>],
+) -> Result<Vec<Option<String>>> {
     let op = UpdateOp::CheckAttr;
     let arguments = op.arguments();
     let mut child = command(repository, &op)
@@ -2661,7 +2915,7 @@ fn filter_drivers_for_paths(repository: &Path, paths: &[Vec<u8>]) -> Result<Vec<
 
 /// Fast-forward to the exact object shown in the preview. Git's own hooks and
 /// checkout filters run; inspection-only configuration must not leak here.
-pub fn fast_forward(repository: &Path, revision: &str) -> Result<()> {
+pub fn fast_forward(repository: GitTarget<'_>, revision: &str) -> Result<()> {
     let op = UpdateOp::Merge(revision.into());
     let arguments = op.arguments();
     let output = run(repository, op)?;
@@ -2748,9 +3002,9 @@ fn text(bytes: Vec<u8>) -> String {
         .to_owned()
 }
 
-fn git_error(repository: &Path, arguments: &[OsString], output: &Output) -> Error {
+fn git_error(repository: GitTarget<'_>, arguments: &[OsString], output: &Output) -> Error {
     Error::GitCommand {
-        repository: repository.to_path_buf(),
+        repository: repository.path().to_path_buf(),
         arguments: arguments
             .iter()
             .map(|arg| arg.to_string_lossy().into_owned())
@@ -3149,7 +3403,7 @@ mod tests {
         // The ref now holds `second` while the check obtained `first` and
         // expected to be replacing nothing: publishing would roll it back.
         assert!(
-            publish_or_accept_identical(&repository, &upstream, &first, None).is_err(),
+            publish_or_accept_identical((&repository).into(), &upstream, &first, None).is_err(),
             "publication rolled a moved tracking ref back"
         );
         assert_eq!(
@@ -3160,7 +3414,7 @@ mod tests {
         // The ref already holds exactly what was reported, which is not the
         // rollback the compare-and-swap exists to stop.
         assert!(
-            publish_or_accept_identical(&repository, &upstream, &second, None).is_ok(),
+            publish_or_accept_identical((&repository).into(), &upstream, &second, None).is_ok(),
             "publication refused a ref already at the reported object"
         );
     }
@@ -3499,6 +3753,35 @@ mod tests {
         assert_ne!(fetch_destination(), fetch_destination());
     }
 
+    /// A read-only `open(2)` of a FIFO blocks until a writer appears, so a
+    /// FIFO substituted for the checkout between the pre-open reading and the
+    /// open could hang the pin inside the very window it defends. The flags
+    /// the pin opens with must make that open return at once instead — and,
+    /// on the platforms that define them, refuse the non-directory outright.
+    #[cfg(any(target_os = "macos", target_os = "ios", target_os = "linux"))]
+    #[test]
+    fn acquiring_a_fifo_with_the_pin_flags_returns_without_blocking() {
+        use std::os::unix::fs::OpenOptionsExt;
+        let Ok(temporary) = tempfile::tempdir() else {
+            return;
+        };
+        let fifo = temporary.path().join("substituted");
+        let made = Command::new("mkfifo")
+            .arg(&fifo)
+            .output()
+            .is_ok_and(|output| output.status.success());
+        if !made {
+            return;
+        }
+        // Returning at all is the property under test; with `O_DIRECTORY`
+        // defined, the return is a refusal.
+        let opened = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(O_DIRECTORY | O_NONBLOCK)
+            .open(&fifo);
+        assert!(opened.is_err(), "a FIFO was accepted as a directory");
+    }
+
     /// The report is read from the end of each line because the flag column
     /// may itself be a space, and only an exact, single, fully-spelled object
     /// for the exact destination is believed.
@@ -3690,7 +3973,8 @@ mod tests {
             stderr: b"fatal: https://user:secret@example.test/repository?token=pat".to_vec(),
         };
 
-        let error = git_error(Path::new("/repository"), &["fetch".into()], &output).to_string();
+        let error =
+            git_error(Path::new("/repository").into(), &["fetch".into()], &output).to_string();
 
         assert!(error.contains("status 1"), "{error}");
         assert!(error.contains("diagnostic was omitted"), "{error}");
@@ -3708,7 +3992,8 @@ mod tests {
             stderr: b"fatal: could not resolve host: secret.example.test".to_vec(),
         };
 
-        let error = git_error(Path::new("/repository"), &["fetch".into()], &output).to_string();
+        let error =
+            git_error(Path::new("/repository").into(), &["fetch".into()], &output).to_string();
 
         assert!(
             error.contains("remote host could not be resolved"),
@@ -3719,7 +4004,10 @@ mod tests {
 
     #[test]
     fn git_commands_remove_inherited_repository_routing() {
-        let command = command(Path::new("/registered"), &UpdateOp::Merge("abc".into()));
+        let command = command(
+            Path::new("/registered").into(),
+            &UpdateOp::Merge("abc".into()),
+        );
         let removed = command
             .get_envs()
             .filter(|(_, value)| value.is_none())

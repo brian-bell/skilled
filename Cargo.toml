@@ -15,6 +15,13 @@ serde = { version = "1.0", features = ["derive"] }
 serde_yaml_ng = "0.10.0"
 thiserror = "2.0.19"
 
+# Already in every build's dependency tree (rusqlite's bundled SQLite sits on
+# it); promoted to a direct dependency for `fchdir(2)` and the `open(2)` flag
+# constants behind `git::RepositoryHandle`, whose values are per-kernel and
+# per-architecture ABI facts that must not be transcribed by hand.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 insta = "1.48.0"
 tempfile = "3.27.0"

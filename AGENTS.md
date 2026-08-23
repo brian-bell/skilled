@@ -162,12 +162,25 @@ signal needs both, because colour alone is not an acceptable cue.
 - Repository updates write through Git only inside the canonical checkout the
   user registered. They begin only after an explicit check, fast-forward to the
   exact previewed object, and never reset, rebase, stash, commit, or push. The
-  checkout's filesystem identity is re-read as the last guard before the write
-  and again during verification, so a checkout replaced under the pathname is
-  identified rather than silently written to and reported as a pass. Binding
-  the Git process itself to the proven checkout is `skilled-2k3.8.5.1`; until
-  it lands, the gap between that final guard and `merge` remains open, the
-  update counterpart of `skilled-cb2`.
+  check and the apply each pin the checkout first — the directory is opened
+  once, its identity is proven through that handle, and every Git process they
+  run enters the held directory with `fchdir(2)` before executing — so a
+  checkout renamed or replaced under the pathname between any guard and any
+  spawn changes what the pathname names, never what the processes read or
+  write. The pathname is still re-read immediately before `merge`: a proven
+  repository that is no longer at the path the user confirmed is refused
+  rather than written wherever it went, and a rename inside that last gap
+  loses only the refusal — the write lands in the proven repository, not an
+  impostor's. Bound spawns also pin what discovery would re-decide inside the
+  held directory (`GIT_DIR=.git`, `GIT_WORK_TREE=.`): a deleted `.git`
+  refuses rather than walking up into a parent repository, and a
+  `core.worktree` written afterwards cannot move the merge's writes. The
+  `.git` object itself stays name-resolved — Git accepts no
+  descriptor-pinned repository — and the argument for that boundary lives on
+  `git::RepositoryHandle`. Verification re-reads identity by pathname
+  afterwards, as the observation it always was. On platforms without
+  `fchdir` the handle spawns by pathname as before, and the guard-order
+  narrowing is what remains.
 - An explicit check runs no repository code. Hooks are pointed at the null
   device, `core.fsmonitor` is turned off on every inspection — it is an
   executable Git runs for `status` and `fetch` alike, and `core.hooksPath` does

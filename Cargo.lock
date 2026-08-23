@@ -1410,6 +1410,7 @@ dependencies = [
  "crossterm",
  "directories",
  "insta",
+ "libc",
  "ratatui",
  "rusqlite",
  "serde",
