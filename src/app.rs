@@ -595,6 +595,7 @@ struct MetadataStartup {
     agent_selections: Option<[bool; 3]>,
     sources: Vec<RegisteredSource>,
     update_checks: Vec<CachedUpdateCheck>,
+    receipts: Option<Vec<Receipt>>,
     registry_availability: RegistryAvailability,
 }
 
@@ -608,6 +609,7 @@ fn open_metadata(data_dir: &Path) -> MetadataStartup {
             let agent_selections = store.agent_selections();
             let sources = store.load_registered_sources(false);
             let update_checks = store.update_checks();
+            let receipts = store.receipts();
             let inconsistent_setup =
                 matches!((&setup_complete, &agent_selections), (Ok(true), Ok(None))).then(|| {
                     Error::InvalidSetupMetadata(
@@ -622,6 +624,12 @@ fn open_metadata(data_dir: &Path) -> MetadataStartup {
                 .or_else(|| inconsistent_setup.as_ref().map(ToString::to_string))
                 .or_else(|| sources.as_ref().err().map(ToString::to_string))
                 .or_else(|| update_checks.as_ref().err().map(ToString::to_string))
+                .or_else(|| {
+                    receipts
+                        .as_ref()
+                        .err()
+                        .map(|error| format!("ownership receipts could not be read: {error}"))
+                })
                 // Last, so a value that is actually invalid leads: a store
                 // that opened read-only is a reason this session cannot
                 // write, not a reason to distrust anything it just read.
@@ -645,6 +653,7 @@ fn open_metadata(data_dir: &Path) -> MetadataStartup {
                 agent_selections: agent_selections.ok().flatten(),
                 sources: sources.unwrap_or_default(),
                 update_checks: update_checks.unwrap_or_default(),
+                receipts: receipts.ok(),
                 registry_availability,
             }
         }
@@ -654,6 +663,7 @@ fn open_metadata(data_dir: &Path) -> MetadataStartup {
             agent_selections: None,
             sources: Vec::new(),
             update_checks: Vec::new(),
+            receipts: None,
             registry_availability: RegistryAvailability::Unavailable,
         },
     }
@@ -763,9 +773,12 @@ impl SkilledApp {
             InventorySnapshot::not_scanned(&agents, registry_availability)
         };
         let mut cached_receipts: Option<Vec<Receipt>> = None;
-        let startup_receipts = match &startup.metadata {
-            Metadata::Ready(store) => store.receipts(),
-            Metadata::Unavailable(failure) => Err(Error::MetadataUnavailable(failure.clone())),
+        let startup_receipts = match startup.receipts {
+            Some(receipts) => Ok(receipts),
+            None => match &startup.metadata {
+                Metadata::Unavailable(failure) => Err(Error::MetadataUnavailable(failure.clone())),
+                Metadata::Ready(_) => unreachable!("ready metadata has readable receipts"),
+            },
         };
         let repair_overlay = match startup_receipts {
             Ok(receipts) => {
@@ -1099,7 +1112,7 @@ impl SkilledApp {
 
     /// Whether the selected inventory row contains a link Skilled may own.
     pub fn can_uninstall_selection(&self) -> bool {
-        if self.view != View::Inventory {
+        if self.metadata_failure().is_some() || self.view != View::Inventory {
             return false;
         }
         let Some(row) = self.selected_installation() else {
@@ -1123,7 +1136,8 @@ impl SkilledApp {
     }
 
     pub fn can_forget_source(&self) -> bool {
-        self.view == View::Sources
+        self.metadata_failure().is_none()
+            && self.view == View::Sources
             && self.sources_pane == SourcesPane::Repositories
             && self.selected_source().is_some()
     }
@@ -1149,7 +1163,8 @@ impl SkilledApp {
     /// A repository finding has no observed installation behind it, so it
     /// offers nothing here: repair replaces one link Skilled is proven to own.
     pub fn can_repair_finding(&self, entry: &DoctorItem<'_>) -> bool {
-        self.view == View::Doctor
+        self.metadata_failure().is_none()
+            && self.view == View::Doctor
             && entry
                 .observation()
                 .is_some_and(|observation| self.repair_overlay.is_offered(observation.path()))

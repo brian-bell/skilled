@@ -88,6 +88,33 @@ fn degraded_navigation_remains_available_while_mutation_keys_are_refused() {
     assert!(!data.join("skilled.sqlite3").exists());
 }
 
+#[cfg(unix)]
+#[test]
+fn degraded_inventory_withholds_uninstall_for_an_observed_link() {
+    use std::os::unix::fs::symlink;
+
+    let temporary = tempfile::tempdir().expect("temporary application directory");
+    let home = temporary.path().join("home");
+    let data = temporary.path().join("data");
+    let target = temporary.path().join("portable");
+    fs::create_dir_all(&target).expect("create link target");
+    fs::write(
+        target.join("SKILL.md"),
+        "---\nname: portable\ndescription: portable fixture\n---\n",
+    )
+    .expect("write link target");
+    let root = home.join(".claude/skills");
+    fs::create_dir_all(&root).expect("create agent root");
+    symlink(&target, root.join("portable")).expect("create observed link");
+    fs::create_dir_all(&data).expect("create established data directory");
+    let app =
+        SkilledApp::open(AppEnvironment::new(&home, &data, "")).expect("open degraded application");
+
+    let uninstall = KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE);
+    assert!(!app.can_uninstall_selection());
+    assert_eq!(action_for_app_key(&app, uninstall), None);
+}
+
 #[test]
 fn corrupt_metadata_is_unchanged_and_installed_content_has_unverified_provenance() {
     let temporary = tempfile::tempdir().expect("temporary application directory");
@@ -233,6 +260,32 @@ fn malformed_setup_completion_forces_degraded_mode() {
 }
 
 #[test]
+fn degraded_sources_withhold_forget_for_a_recovered_registration() {
+    let temporary = tempfile::tempdir().expect("temporary application directory");
+    let home = temporary.path().join("home");
+    let data = temporary.path().join("data");
+    complete_setup(&home, &data);
+    let database = data.join("skilled.sqlite3");
+    let connection = rusqlite::Connection::open(&database).expect("open metadata database");
+    connection
+        .execute_batch(
+            "INSERT INTO source_repositories
+                (id, label, canonical_path, head_revision, dirty, last_scan_at, dirty_known)
+             VALUES (1, 'library', '/fixture/library', 'abcdef0', 0, 0, 1);
+             UPDATE settings SET value = 'sometimes' WHERE key = 'setup_complete';",
+        )
+        .expect("create a readable source beside malformed setup metadata");
+    drop(connection);
+    let mut app =
+        SkilledApp::open(AppEnvironment::new(&home, &data, "")).expect("open degraded application");
+    app.update(Action::OpenSources);
+
+    let forget = KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE);
+    assert!(!app.can_forget_source());
+    assert_eq!(action_for_app_key(&app, forget), None);
+}
+
+#[test]
 fn invalid_integer_agent_selection_forces_degraded_mode() {
     let temporary = tempfile::tempdir().expect("temporary application directory");
     let home = temporary.path().join("home");
@@ -259,6 +312,41 @@ fn invalid_integer_agent_selection_forces_degraded_mode() {
             .cause()
             .contains("configured_agents.selected")
     );
+}
+
+#[test]
+fn an_undecodable_receipt_forces_degraded_mode_without_discarding_other_metadata() {
+    let temporary = tempfile::tempdir().expect("temporary application directory");
+    let home = temporary.path().join("home");
+    let data = temporary.path().join("data");
+    complete_setup(&home, &data);
+    let database = data.join("skilled.sqlite3");
+    let connection = rusqlite::Connection::open(&database).expect("open metadata database");
+    connection
+        .execute(
+            "INSERT INTO operation_receipts
+                (created_at, operation, agent, skill_name, link_path, link_target)
+             VALUES (1, 'install', 'future-agent', 'portable', '/link', '/target')",
+            [],
+        )
+        .expect("insert receipt from an unknown agent");
+    drop(connection);
+
+    let app =
+        SkilledApp::open(AppEnvironment::new(&home, &data, "")).expect("open degraded application");
+
+    assert_eq!(app.view(), View::Inventory);
+    assert!(!app.can_add_source());
+    assert!(!app.can_rerun_setup());
+    assert!(app.agent(AgentKind::ClaudeCode).selected());
+    assert_eq!(app.registry_availability(), RegistryAvailability::Readable);
+    assert!(
+        app.metadata_failure()
+            .expect("metadata failure")
+            .cause()
+            .contains("future-agent")
+    );
+    assert!(app.cached_receipts().is_none());
 }
 
 #[test]
