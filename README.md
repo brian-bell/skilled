@@ -8,7 +8,8 @@ The project is early in version-one development. The current build establishes
 the setup, terminal, source-registration, and read-only inspection foundation,
 installs and safely uninstalls registered skills across the agents that can use
 them, repairs the incorrect and dangling links it owns, and can forget inactive
-source metadata. It does not yet update or fetch anything over the network.
+source metadata. It also fast-forwards a registered repository after an
+explicit update check.
 
 ## Design references
 
@@ -155,12 +156,53 @@ source metadata. It does not yet update or fetch anything over the network.
   columns or more, plus a recoverable notice for smaller terminals.
 - Terminal restoration on normal exit, startup failure, panic unwinding, and
   the Ctrl-C key path used in raw mode.
+- Receipt-backed repair of one incorrect or dangling link Skilled owns. A link
+  is replaced only when its recorded target is byte-identical to a Skilled
+  ownership receipt for that path and the live registry supplies a safe
+  replacement. Repair never recreates an absent link or root, and never adopts
+  a link it cannot prove it wrote.
+- An explicit update check for a registered repository, and a fast-forward of
+  the exact revision it previewed. The check is the only network operation
+  Skilled itself starts, and it fetches the configured upstream with the
+  repository's own hooks and `core.fsmonitor` suppressed. A check runs no
+  program the checkout chose: one that configures a transport command —
+  `core.sshCommand`, `core.askPass`, `core.gitProxy`,
+  `core.alternateRefsCommand`, a credential helper,
+  `remote.<name>.uploadpack`, `remote.<name>.vcs`, `protocol.<scheme>.command`,
+  or a URL naming a transport helper such as `ext::` — is refused rather than
+  checked, so checking a repository you did not author cannot run what that
+  repository configured.
+  The same settings in your own global or system Git configuration are yours,
+  and keep working. The fast-forward is handed the repository's configuration on
+  purpose, and the plan discloses it: the hooks and checkout filters it may run
+  are the repository's own programs, and a filter such as Git LFS fetches over
+  the network itself. Opening Updates reads cached results only.
+- An update preview that states the checkout, the branch, the current and
+  target revisions, every incoming commit summary, and which installed skills
+  the update adds, updates, removes, renames, or restores, followed by the
+  untruncated changed-file listing as evidence. Skilled fast-forwards only:
+  it never resets, rebases, stashes, commits, or pushes, and a dirty,
+  diverged, detached, partial-clone, submodule-changing, or upstream-less
+  checkout blocks the update instead of being worked around. So does an
+  update that would take a skill away while leaving its directory standing:
+  the installed link would resolve to something that is not a skill rather
+  than losing its target, which is not a removal the preview can state.
+- A rescan and postcondition check after every fast-forward, with the same
+  three answers installation verification gives: verified, not verified, or
+  verified as far as the roots Skilled could read allow.
+- `skilled install`, `skilled repair`, and `skilled update` as non-interactive
+  commands over the same planners, guards, rescans, and verification the
+  screens run, with distinguishable exit statuses — `skilled update` keeps a
+  verification it could not complete apart from a plain success. `--yes`
+  removes the confirmation and nothing else.
 
-Update and remote fetching are still future work. Registration and inventory
-remain read-only, and Doctor writes nothing of its own. Install creates only a
-link and, when allowed, its documented root; uninstall removes only verified
-managed links; repair replaces only one proven link; Forget Source removes only
-private metadata.
+Adoption of unproven links and network operations beyond the explicit update
+check are still future work. Registration and inventory remain read-only, and
+Doctor writes nothing of its own. Install creates only a link and, when allowed,
+its documented root; uninstall removes only verified managed links; repair
+replaces only one proven link; Forget Source removes only private metadata; and
+an update writes through Git only inside the canonical checkout the user
+registered.
 
 ## Requirements
 

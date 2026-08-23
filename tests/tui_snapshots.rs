@@ -1183,14 +1183,14 @@ mod installed {
         let mut app = doctor_app(&temporary);
         while app
             .selected_finding()
-            .is_some_and(|entry| entry.agent() != AgentKind::OpenCode)
+            .is_some_and(|entry| entry.agent() != Some(AgentKind::OpenCode))
         {
             app.update(Action::MoveDoctorSelection(1));
         }
         let entry = app.selected_finding().expect("the OpenCode conflict");
         assert_eq!(
             (entry.finding().code(), entry.agent()),
-            ("variant.duplicate_for_agent", AgentKind::OpenCode)
+            ("variant.duplicate_for_agent", Some(AgentKind::OpenCode))
         );
         app.update(Action::AdvanceDoctorPane);
 

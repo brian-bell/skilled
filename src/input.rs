@@ -1,6 +1,8 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
-use crate::{Action, AgentKind, DoctorPane, InventoryPane, SetupStep, SkilledApp, View};
+use crate::{
+    Action, AgentKind, DoctorPane, InventoryPane, SetupStep, SkilledApp, UpdatesPane, View,
+};
 
 pub fn action_for_app_key(app: &SkilledApp, key: KeyEvent) -> Option<Action> {
     if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
@@ -78,6 +80,20 @@ pub fn action_for_app_key(app: &SkilledApp, key: KeyEvent) -> Option<Action> {
             _ => action,
         };
     }
+    if app.pending_update().is_some() {
+        let action = match key.code {
+            KeyCode::Enter => Some(Action::ConfirmRepositoryUpdate),
+            KeyCode::Esc => Some(Action::DismissRepositoryUpdate),
+            KeyCode::Up | KeyCode::Char('k') => Some(Action::ScrollDetail(-1)),
+            KeyCode::Down | KeyCode::Char('j') => Some(Action::ScrollDetail(1)),
+            _ => None,
+        };
+        return match (key.kind, action) {
+            (KeyEventKind::Repeat, Some(Action::ScrollDetail(_))) => action,
+            (KeyEventKind::Repeat, _) => None,
+            _ => action,
+        };
+    }
     if app.pending_source().is_some() {
         let action = match key.code {
             KeyCode::Enter => Some(Action::ConfirmPendingSource),
@@ -96,6 +112,9 @@ pub fn action_for_app_key(app: &SkilledApp, key: KeyEvent) -> Option<Action> {
             (KeyEventKind::Repeat, _) => None,
             _ => action,
         };
+    }
+    if app.view() == View::Updates && app.update_check_in_flight() && key.code == KeyCode::Esc {
+        return (key.kind == KeyEventKind::Press).then_some(Action::CancelUpdateCheck);
     }
     // `i` belongs to the region the user is standing in rather than to the
     // view, and only this side can see which region that is. A held key is not
@@ -140,6 +159,11 @@ pub fn action_for_app_key(app: &SkilledApp, key: KeyEvent) -> Option<Action> {
         {
             Some(Action::ScrollDetail(delta))
         }
+        Some(Action::MoveUpdatesSelection(delta))
+            if app.view() == View::Updates && app.updates_pane() == UpdatesPane::Details =>
+        {
+            Some(Action::ScrollDetail(delta))
+        }
         action => action,
     }
 }
@@ -161,6 +185,7 @@ pub fn action_for_key(view: View, key: KeyEvent) -> Option<Action> {
             View::Inventory => match key.code {
                 KeyCode::Char('s') => Some(Action::OpenSettings),
                 KeyCode::Char('2') => Some(Action::OpenSources),
+                KeyCode::Char('3') => Some(Action::OpenUpdates),
                 KeyCode::Char('4') => Some(Action::OpenDoctor),
                 KeyCode::Tab => Some(Action::MoveInventoryPane(1)),
                 KeyCode::BackTab => Some(Action::MoveInventoryPane(-1)),
@@ -173,6 +198,7 @@ pub fn action_for_key(view: View, key: KeyEvent) -> Option<Action> {
             },
             View::Sources => match key.code {
                 KeyCode::Char('1') => Some(Action::OpenInventory),
+                KeyCode::Char('3') => Some(Action::OpenUpdates),
                 KeyCode::Char('4') => Some(Action::OpenDoctor),
                 KeyCode::Char('a') => Some(Action::BeginAddSource),
                 KeyCode::Tab => Some(Action::MoveSourcesPane(1)),
@@ -183,9 +209,23 @@ pub fn action_for_key(view: View, key: KeyEvent) -> Option<Action> {
                 KeyCode::Esc => Some(Action::Back),
                 _ => None,
             },
+            View::Updates => match key.code {
+                KeyCode::Char('1') => Some(Action::OpenInventory),
+                KeyCode::Char('2') => Some(Action::OpenSources),
+                KeyCode::Char('4') => Some(Action::OpenDoctor),
+                KeyCode::Char('u') => Some(Action::BeginUpdateCheck),
+                KeyCode::Tab => Some(Action::MoveUpdatesPane(1)),
+                KeyCode::BackTab => Some(Action::MoveUpdatesPane(-1)),
+                KeyCode::Enter => Some(Action::AdvanceUpdatesPane),
+                KeyCode::Up | KeyCode::Char('k') => Some(Action::MoveUpdatesSelection(-1)),
+                KeyCode::Down | KeyCode::Char('j') => Some(Action::MoveUpdatesSelection(1)),
+                KeyCode::Esc => Some(Action::Back),
+                _ => None,
+            },
             View::Doctor => match key.code {
                 KeyCode::Char('1') => Some(Action::OpenInventory),
                 KeyCode::Char('2') => Some(Action::OpenSources),
+                KeyCode::Char('3') => Some(Action::OpenUpdates),
                 KeyCode::Tab => Some(Action::MoveDoctorPane(1)),
                 KeyCode::BackTab => Some(Action::MoveDoctorPane(-1)),
                 KeyCode::Enter => Some(Action::AdvanceDoctorPane),
@@ -206,6 +246,7 @@ pub fn action_for_key(view: View, key: KeyEvent) -> Option<Action> {
         (KeyEventKind::Repeat, Some(Action::MoveSelection(_))) => action,
         (KeyEventKind::Repeat, Some(Action::MoveInventorySelection(_))) => action,
         (KeyEventKind::Repeat, Some(Action::MoveDoctorSelection(_))) => action,
+        (KeyEventKind::Repeat, Some(Action::MoveUpdatesSelection(_))) => action,
         (KeyEventKind::Repeat, _) => None,
         _ => action,
     }

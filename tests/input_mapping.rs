@@ -125,11 +125,12 @@ fn doctor_navigates_its_findings_regions_and_routes() {
         );
     }
 
-    // Doctor is already on screen, and Updates has no implementation, so
-    // neither digit is bound here.
-    for code in [KeyCode::Char('3'), KeyCode::Char('4')] {
-        assert_eq!(action_for_key(View::Doctor, key(code)), None, "{code:?}");
-    }
+    assert_eq!(
+        action_for_key(View::Doctor, key(KeyCode::Char('3'))),
+        Some(Action::OpenUpdates)
+    );
+    // Doctor is already on screen, so its own route digit is inert.
+    assert_eq!(action_for_key(View::Doctor, key(KeyCode::Char('4'))), None);
 
     // The route the other two workspaces offer into Doctor.
     for view in [View::Inventory, View::Sources] {

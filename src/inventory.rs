@@ -700,7 +700,23 @@ pub(crate) fn doctor_order(code: &str) -> u8 {
         code if code.starts_with("skill.") => 2,
         // 4. Wrong, foreign, or explicitly incompatible agent variant.
         "variant.foreign_opencode_exposure" | "variant.incompatible_for_opencode" => 3,
-        // 5 and 6 — disabled skills, blocked updates — have no codes yet.
+        // 5. Disabled skills has no code yet.
+        // 6. Blocked repository updates, recorded only after an explicit check.
+        "source.dirty"
+        | "source.diverged"
+        | "source.missing"
+        | "source.detached_head"
+        | "source.no_upstream"
+        | "source.upstream_unfetched"
+        | "source.fetch_failed"
+        | "source.partial_clone_unsupported"
+        | "source.repository_transport_unsupported"
+        | "source.submodule_update_unsupported"
+        | "source.removal_leaves_content"
+        | "source.revival_name_mismatch"
+        | "update.apply_failed"
+        | "update.verification_failed"
+        | "update.verification_incomplete" => 5,
         // 7. Missing or ambiguous provenance.
         "install.provenance_unverified" => 6,
         // 8. Unmanaged installations and informational benign aliases. Stray

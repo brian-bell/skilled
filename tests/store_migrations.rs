@@ -18,7 +18,7 @@ fn a_database_from_a_newer_skilled_version_is_rejected_before_use() {
 
     let result = SkilledApp::open(AppEnvironment::new(
         temporary.path().join("home"),
-        data_dir,
+        &data_dir,
         "",
     ));
 
@@ -26,9 +26,19 @@ fn a_database_from_a_newer_skilled_version_is_rejected_before_use() {
         result,
         Err(Error::UnsupportedSchema {
             found: 99,
-            supported: 6
+            supported: 10
         })
     ));
+    let connection = rusqlite::Connection::open(data_dir.join("skilled.sqlite3"))
+        .expect("reopen future database");
+    assert_eq!(
+        connection
+            .query_row("PRAGMA journal_mode", [], |row| row.get::<_, String>(0))
+            .expect("journal mode"),
+        "delete"
+    );
+    assert!(!data_dir.join("skilled.sqlite3-wal").exists());
+    assert!(!data_dir.join("skilled.sqlite3-shm").exists());
 }
 
 /// The next schema after the one this build writes is still refused, so a
@@ -41,7 +51,7 @@ fn the_schema_one_past_this_build_is_refused_rather_than_written_through() {
     let connection =
         rusqlite::Connection::open(data_dir.join("skilled.sqlite3")).expect("create database");
     connection
-        .execute_batch("PRAGMA user_version = 7;")
+        .execute_batch("PRAGMA user_version = 11;")
         .expect("set the next schema version");
     drop(connection);
 
@@ -54,10 +64,51 @@ fn the_schema_one_past_this_build_is_refused_rather_than_written_through() {
     assert!(matches!(
         result,
         Err(Error::UnsupportedSchema {
-            found: 7,
-            supported: 6
+            found: 11,
+            supported: 10
         })
     ));
+}
+
+/// The update branch reached schema nine before main introduced the monotonic
+/// source-ID sequence in its own schema six. The join migration must repair a
+/// database from that branch instead of assuming every version-nine database
+/// passed through main's version six.
+#[test]
+fn version_nine_update_metadata_gains_the_source_id_sequence() {
+    let temporary = tempfile::tempdir().expect("temporary application directory");
+    let data_dir = temporary.path().join("data");
+    let environment = AppEnvironment::new(temporary.path().join("home"), &data_dir, "");
+    drop(SkilledApp::open(environment.clone()).expect("create current database"));
+    let database = data_dir.join("skilled.sqlite3");
+    let connection = rusqlite::Connection::open(&database).expect("open current database");
+    connection
+        .execute_batch(
+            "DROP TABLE source_id_sequence;
+             PRAGMA user_version = 9;",
+        )
+        .expect("stage update-branch schema nine");
+    drop(connection);
+
+    drop(SkilledApp::open(environment).expect("migrate update-branch database"));
+
+    let connection = rusqlite::Connection::open(database).expect("inspect migrated database");
+    assert_eq!(
+        connection
+            .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+            .expect("schema version"),
+        10
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT next_id FROM source_id_sequence WHERE singleton = 1",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("source ID sequence"),
+        1
+    );
 }
 
 /// Version six adds repair receipts without changing the chronological contract
@@ -156,7 +207,7 @@ fn version_five_receipts_gain_operations_and_keep_their_id_order() {
         connection
             .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
             .unwrap(),
-        6
+        10
     );
     assert_eq!(
         connection
@@ -186,6 +237,82 @@ fn version_five_receipts_gain_operations_and_keep_their_id_order() {
         [ReceiptOperation::Install, ReceiptOperation::Repair],
         "same-second install and repair receipts read back in id order"
     );
+}
+
+#[test]
+fn concurrent_openers_serialize_schema_discovery_and_migration() {
+    use std::sync::{Arc, Barrier};
+
+    let temporary = tempfile::tempdir().expect("temporary application directory");
+    let data_dir = temporary.path().join("data");
+    fs::create_dir_all(&data_dir).expect("create data directory");
+    let database = data_dir.join("skilled.sqlite3");
+    let connection = rusqlite::Connection::open(&database).expect("create database");
+    connection
+        .execute_batch(
+            "CREATE TABLE settings (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL);
+             CREATE TABLE configured_agents (
+                agent TEXT PRIMARY KEY NOT NULL,
+                selected INTEGER NOT NULL CHECK (selected IN (0, 1))
+             );
+             CREATE TABLE source_repositories (
+                id INTEGER PRIMARY KEY,
+                label TEXT NOT NULL,
+                canonical_path TEXT NOT NULL UNIQUE,
+                remote_url TEXT,
+                branch TEXT,
+                head_revision TEXT NOT NULL,
+                dirty INTEGER NOT NULL CHECK (dirty IN (0, 1)),
+                last_scan_at INTEGER NOT NULL,
+                dirty_known INTEGER NOT NULL DEFAULT 1 CHECK (dirty_known IN (0, 1))
+             );
+             CREATE TABLE catalog_roots (
+                id INTEGER PRIMARY KEY,
+                source_id INTEGER NOT NULL REFERENCES source_repositories(id) ON DELETE CASCADE,
+                relative_path TEXT NOT NULL,
+                classification TEXT NOT NULL CHECK (classification IN ('common', 'agent-specific')),
+                claude_code INTEGER NOT NULL CHECK (claude_code IN (0, 1)),
+                codex INTEGER NOT NULL CHECK (codex IN (0, 1)),
+                opencode INTEGER NOT NULL CHECK (opencode IN (0, 1)),
+                UNIQUE(source_id, relative_path)
+             );
+             CREATE TABLE operation_receipts (
+                id INTEGER PRIMARY KEY,
+                created_at INTEGER NOT NULL,
+                operation TEXT NOT NULL CHECK (operation IN ('install')),
+                agent TEXT NOT NULL,
+                skill_name TEXT NOT NULL,
+                link_path TEXT NOT NULL,
+                link_target TEXT NOT NULL,
+                source_id INTEGER,
+                catalog_relative_path TEXT,
+                variant_relative_path TEXT,
+                UNIQUE (agent, link_path, link_target, created_at)
+             );
+             PRAGMA user_version = 5;",
+        )
+        .expect("create version five schema");
+    drop(connection);
+    let barrier = Arc::new(Barrier::new(2));
+    let opens = (0..2)
+        .map(|_| {
+            let barrier = Arc::clone(&barrier);
+            let data_dir = data_dir.clone();
+            let home = temporary.path().join("home");
+            std::thread::spawn(move || {
+                barrier.wait();
+                SkilledApp::open(AppEnvironment::new(home, data_dir, ""))
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
+            })
+        })
+        .collect::<Vec<_>>();
+
+    for open in opens {
+        open.join()
+            .expect("opener thread")
+            .expect("migrate database");
+    }
 }
 
 /// Spec 7: an ownership receipt is evidence that Skilled created a particular
@@ -260,7 +387,7 @@ fn version_four_metadata_gains_receipt_storage_that_outlives_its_source() {
         connection
             .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
             .unwrap(),
-        6
+        10
     );
     connection
         .execute_batch(
@@ -378,7 +505,7 @@ fn version_two_metadata_migrates_to_constrained_source_catalog_storage() {
         connection
             .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
             .unwrap(),
-        6
+        10
     );
     assert_eq!(
         connection
