@@ -41,8 +41,9 @@ changing before overriding a bound, style, or phrase it documents.
 ## Build and Test
 
 Requires stable Rust 1.97 or newer.
-Repository updates require Git 2.33 or newer and, for SSH remotes, OpenSSH 8.4
-or newer.
+Repository updates require Git 2.41 or newer — the explicit check reads its
+fetch result from `git fetch --porcelain`, which 2.41 introduced — and, for
+SSH remotes, OpenSSH 8.4 or newer.
 
 ```bash
 cargo run
@@ -222,19 +223,24 @@ signal needs both, because colour alone is not an acceptable cue.
   would overrule it wherever the user set it — fast-forwarding to an unsigned
   tip Git had been told to refuse. Re-reading the object the preview named
   settles which object is merged, not who vouches for it.
-- The fetch never names a user-controllable ref as its destination. Git
-  dereferences a symbolic ref when it updates one, so a tracking ref
-  substituted after the preflight refusal would send a forced refspec into
-  whatever it points at, a local branch included. The fetch lands in a
-  per-invocation `refs/skilled/fetch/` name instead, deleted immediately before
-  and after; the tracking ref is published from it with `update-ref --no-deref`
-  and an expected old value, so a ref another fetch advanced meanwhile is
-  refused rather than rolled back — unless it already holds the very object
-  that was staged, which is nothing to refuse. The staging name is derived
-  rather than unguessable, so the substitution race is narrowed and reported
-  rather than closed; `skilled-q59` tracks a fetch that writes no
-  dereferenceable ref at all. A check may not report success over a staging
-  ref it failed to remove.
+- The fetch writes no ref at all. Git dereferences a symbolic ref when it
+  updates one, so any ref the fetch wrote — the tracking ref or a staging
+  name — could be substituted between a check and Git's own transaction and
+  send a forced refspec into whatever it points at, a local branch included.
+  The fetch therefore runs with `--dry-run`, which stores the objects and
+  skips every ref update, and the fetched object comes back through
+  `--porcelain`'s report under a per-invocation `refs/skilled/fetch/` name
+  that is only ever a name. The tracking ref is then published from the
+  reported object with `update-ref --no-deref` and an expected old value, so
+  a ref another fetch advanced meanwhile is refused rather than rolled
+  back — unless it already holds the very object that was reported, which is
+  nothing to refuse. `--no-deref` confines that one write to the named ref;
+  what it cannot do is refuse a ref made symbolic inside the final
+  check-to-write gap, because Git offers no single operation that asserts a
+  ref's kind and value together — such a ref is replaced in place, its
+  referent untouched, and a ref that was symbolic any earlier refuses the
+  check twice over. The argument for that residual is recorded on
+  `git::fetch_upstream` and in the `skilled-q59` closeout.
 - Cached update findings exist only after an explicit check. A changed `HEAD`
   or changed known dirtiness supersedes the cached verdict; opening Updates is
   therefore a metadata-only operation and never performs network access. A

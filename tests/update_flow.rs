@@ -2680,10 +2680,11 @@ fn a_verification_finding_outlives_the_source_failure_it_reports() {
     );
 }
 
-/// The staging destination is Skilled's own bookkeeping, not state the user's
-/// repository should be left holding.
+/// The fetch destination is a name in a refspec and a report, never a ref the
+/// user's repository is left holding: the tracking ref is the check's only
+/// ref write.
 #[test]
-fn an_update_check_leaves_no_staging_ref_behind() {
+fn an_update_check_writes_only_the_tracking_ref() {
     let fixture = fixture();
     let target = push_update(&fixture, "skills/demo/new.txt");
 
@@ -2987,15 +2988,17 @@ fn a_restoration_redirected_to_another_skill_is_not_verified() {
     );
 }
 
-/// `refs/skilled` is an ordinary name a user may already hold, and Git cannot
-/// have a ref and a directory of refs at once. Skilled's own choice of staging
-/// name must not turn that into a repository it can never check again.
+/// `refs/skilled` is an ordinary name a user may already hold, and a written
+/// destination could conflict with it: Git cannot have a ref and a directory
+/// of refs at once. The fetch writes no destination, so the occupied name
+/// must neither break the check nor be touched by it.
 #[test]
 fn a_ref_occupying_the_staging_namespace_does_not_break_the_check() {
     let fixture = fixture();
     let target = push_update(&fixture, "skills/demo/new.txt");
     let head = git(&fixture.clone, &["rev-parse", "HEAD"]);
-    // The conflicting ref, at the exact name a staging ref would nest under.
+    // The conflicting ref, at the exact name a fetch destination would nest
+    // under.
     git(
         &fixture.clone,
         &["update-ref", "--no-deref", "refs/skilled", &head],
@@ -3009,7 +3012,7 @@ fn a_ref_occupying_the_staging_namespace_does_not_break_the_check() {
         git(&fixture.clone, &["rev-parse", "refs/remotes/origin/main"]),
         target
     );
-    // The user's ref is untouched, and no staging ref was left behind.
+    // The user's ref is untouched, and no destination ref was left behind.
     assert_eq!(git(&fixture.clone, &["rev-parse", "refs/skilled"]), head);
     assert_eq!(
         git(
@@ -3021,6 +3024,39 @@ fn a_ref_occupying_the_staging_namespace_does_not_break_the_check() {
             ]
         ),
         ""
+    );
+}
+
+/// The substitution attempt `skilled-q59` closes out: a symbolic ref planted
+/// where the fetch destination would live must redirect nothing, because the
+/// fetch never writes its destination at all. The plant here covers the whole
+/// destination namespace — every per-invocation name nests under it — so if
+/// any ref write reached the namespace, this ref or its referent would show
+/// it. The check still completes, the local branch the symbolic ref points at
+/// is not moved, and the plant itself survives untouched.
+#[test]
+fn a_symbolic_ref_across_the_fetch_namespace_redirects_nothing() {
+    let fixture = fixture();
+    let target = push_update(&fixture, "skills/demo/new.txt");
+    let head = git(&fixture.clone, &["rev-parse", "refs/heads/main"]);
+    git(
+        &fixture.clone,
+        &["symbolic-ref", "refs/skilled/fetch", "refs/heads/main"],
+    );
+
+    let probe = probe_repository_update(&fixture.app.sources()[0], true);
+    let (verdict, findings) = classify_repository_update(&probe);
+
+    assert_eq!(verdict, RepositoryUpdateVerdict::Available, "{findings:?}");
+    assert_eq!(
+        git(&fixture.clone, &["rev-parse", "refs/remotes/origin/main"]),
+        target
+    );
+    // The forced refspec moved neither the referent branch nor the plant.
+    assert_eq!(git(&fixture.clone, &["rev-parse", "refs/heads/main"]), head);
+    assert_eq!(
+        git(&fixture.clone, &["symbolic-ref", "refs/skilled/fetch"]),
+        "refs/heads/main"
     );
 }
 
