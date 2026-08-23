@@ -50,10 +50,10 @@ pub fn action_for_app_key(app: &SkilledApp, key: KeyEvent) -> Option<Action> {
     // The install dialog is answered before anything else can be reached: a
     // preview is a question about writes that have not happened, and a report
     // is the only account of writes that have.
-    if app.pending_install().is_some() {
+    if app.pending_operation().is_some() {
         let action = match key.code {
-            KeyCode::Enter => Some(Action::ConfirmInstall),
-            KeyCode::Esc => Some(Action::DismissInstall),
+            KeyCode::Enter => Some(Action::ConfirmOperation),
+            KeyCode::Esc => Some(Action::DismissOperation),
             KeyCode::Up | KeyCode::Char('k') => Some(Action::ScrollDetail(-1)),
             KeyCode::Down | KeyCode::Char('j') => Some(Action::ScrollDetail(1)),
             _ => None,
@@ -124,6 +124,16 @@ pub fn action_for_app_key(app: &SkilledApp, key: KeyEvent) -> Option<Action> {
         && key.code == KeyCode::Char('i')
     {
         return Some(Action::BeginInstall);
+    }
+    if app.can_uninstall_selection()
+        && key.kind == KeyEventKind::Press
+        && key.code == KeyCode::Char('x')
+    {
+        return Some(Action::BeginUninstall);
+    }
+    if app.can_forget_source() && key.kind == KeyEventKind::Press && key.code == KeyCode::Char('x')
+    {
+        return Some(Action::BeginForgetSource);
     }
     if key.kind == KeyEventKind::Press
         && key.code == KeyCode::Char('r')

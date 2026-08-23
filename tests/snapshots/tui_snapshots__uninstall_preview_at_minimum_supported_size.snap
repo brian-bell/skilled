@@ -1,0 +1,28 @@
+---
+source: tests/tui_snapshots.rs
+expression: "normalize_install_screen(&temporary, render(&app, 80, 24))"
+---
+ ◆ skilled  global                                ● ready · 1 source registered
+ 1┌ Uninstall skill ───────────────────────────────────── managed links only ┐
+  │                                                                          │
+▌ │  Skill: portable                                                         │
+▁▁│                                                                          │▁▁
+  │  Targets                                                                 │
+▌ │  ! Claude Code · remove the managed link                                 │
+  │    [TEMP]                      /home/.claude/skills/portable             │
+  │    receipt target: [CANONICAL]                 /src/skills/portable      │
+  │    receipt source 1 · catalog skills · variant skills/portable           │
+  │  ! Codex · remove the managed link                                       │
+  │    [TEMP]                      /home/.agents/skills/portable             │
+  │    receipt target: [CANONICAL]                 /src/skills/portable      │
+  │    receipt source 1 · catalog skills · variant skills/portable           │
+  │  ! OpenCode · remove the managed link                                    │
+  │    [TEMP]                      /home/.config/opencode/skills/portable    │
+  │    receipt target: [CANONICAL]                 /src/skills/portable      │
+  │    receipt source 1 · catalog skills · variant skills/portable           │
+  │                                                                          │
+  │  ──────────────────────────────────────────────────────────────────────  │
+  │  3 managed links to remove · more below                       Esc Close  │
+  │                                                                          │
+  └──────────────────────────────────────────────────────────────────────────┘
+ j/k Scroll   Esc Close   Ctrl-C Quit

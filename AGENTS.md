@@ -10,18 +10,23 @@ Skilled is an early Rust 2024 / Ratatui terminal application for inspecting
 and managing global coding-agent skills. First-run setup, local Git source
 registration, Sources browsing, a read-only installation inventory, OpenCode
 effective resolution across its documented roots, a read-only Doctor findings
-view, installation, receipt-backed repair of incorrect or dangling links, and
-explicit repository update checks with guarded fast-forwards — each previewed,
-confirmed, rescanned, and verified — are implemented.
+view, installation, receipt-backed repair of incorrect or dangling links,
+guarded uninstall, metadata-only Forget Source, and explicit repository update
+checks with guarded fast-forwards — each previewed, confirmed, rescanned, and
+verified — are implemented.
 
 Filesystem mutation stays narrow. Installation creates one directory symbolic
 link per agent and may create the documented skill root when its own parent
 already exists; every occupied install path is a refusal. Repair replaces one
 observed symbolic link only when its raw target is byte-identical to the newest
-matching ownership receipt and the live registry supplies a safe replacement.
-It never recreates an absent link or root. Updates perform network access only
-after an explicit check and write only through the guarded repository
-fast-forward. Uninstall and adoption of unproven links remain unimplemented: do
+matching ownership receipt and the live registry supplies a safe replacement;
+it never recreates an absent link or root. Uninstall removes only an exact
+receipted link after rechecking its type, target, root, and ownership. Forget
+Source deletes private registration/catalog/receipt metadata only after proving
+every described link inactive; it never deletes a checkout or skill content.
+Updates perform network access only after an explicit check and write only
+through the guarded repository fast-forward. Adoption of unproven links and
+network operations beyond that explicit update check remain unimplemented: do
 not turn their placeholders into behavior unless the active Beads issue places
 that work in scope, and do not display a count, finding, status, or key hint the
 code cannot currently produce.
@@ -42,6 +47,8 @@ or newer.
 ```bash
 cargo run
 cargo run -- install --source <id-or-path> --skill <name> --agents claude-code
+cargo run -- uninstall --skill <name> --agent claude-code
+cargo run -- repair --skill <name> --agent claude-code
 cargo build --release
 cargo test --all-targets
 cargo fmt --check
@@ -68,13 +75,17 @@ signal needs both, because colour alone is not an acceptable cue.
   guarded apply, and three-answer verification.
 - `src/inventory.rs`: read-only scan of the native agent skill roots; owns the
   finding codes, the state vocabulary, and the count-or-phrase verdict.
-- `src/operations.rs`: sibling install and repair pipelines. Their probes are
-  the only machine reads before planning, their pure planners decide over those
-  observations, their guarded executors re-read immediately before writing,
-  and their verifiers check a fresh scan against the confirmed plan. The module
-  reuses `inventory::Finding` for the spec 18.2 collision codes.
-- `src/cli.rs`: the hand-parsed `skilled install`, `skilled repair`, and
-  `skilled update` surfaces over the same planners, guards, rescans, and
+- `src/operations.rs`: sibling install, repair, uninstall, and Forget Source
+  pipelines. Their probes are the only machine reads before planning, their pure
+  planners decide over those observations, their guarded executors re-read
+  immediately before writing, and their verifiers check a fresh scan against the
+  confirmed plan. Uninstall verifies the link gone and content survived before
+  deleting its receipt, and forget rechecks the entire receipt set and link
+  liveness before its transaction. The module reuses `inventory::Finding` for
+  the spec 18.2 collision codes.
+- `src/cli.rs`: the hand-parsed `skilled install`, `skilled uninstall`,
+  `skilled repair`, and `skilled update` surfaces over the same planners,
+  guards, rescans, and
   verification the TUI runs, with distinguishable exit statuses.
 - `src/resolution.rs`: pure per-agent variant selection and OpenCode effective
   resolution; decides which registered variant an agent resolves a name to and
@@ -142,7 +153,8 @@ signal needs both, because colour alone is not an acceptable cue.
   directory between it and the home directory, that is a symbolic link is
   refused rather than followed: the path the preview stated has to be the path
   the write lands on. Install retains a fail-if-exists pathname window between
-  its check and `symlink`, tracked as `skilled-cb2`. Repair has a more severe
+  its check and `symlink`, recorded on `apply_install` and `apply_uninstall` and
+  tracked as `skilled-cb2`. Repair has a more severe
   window between its final guard and `rename`: another object arriving there
   could be replaced. That data-loss risk is documented on `apply_repair` and
   tracked separately.
@@ -285,8 +297,8 @@ signal needs both, because colour alone is not an acceptable cue.
   and leaving the repository unable to update until the user fetched by hand.
 - Text from the filesystem — names, paths, link targets, operating-system error
   messages — is escaped through `components::terminal_safe` before it reaches a
-  terminal, on every surface. The screens and `skilled install` write to the
-  same terminal by different routes and both go through it.
+  terminal, on every surface. The screens and CLI commands write to the same
+  terminal by different routes and both go through it.
 - Verification has three answers, not two. `VerifyReport::is_verified` means
   nothing disagreed with the plan; `is_complete` means every postcondition was
   also checked. A root the scan could not read leaves its check withheld, which
@@ -296,15 +308,23 @@ signal needs both, because colour alone is not an acceptable cue.
   success, because a script reads only that. Install and repair still exit `0`
   there; `skilled-exm` has it.
 - `--yes` removes the confirmation and nothing else. Install requires
-  `--source`, `--skill`, and `--agents` explicitly; repair requires `--skill`
-  and `--agent`. Every ownership, collision, path, apply, rescan, and
-  verification gate still runs, and a named agent the plan cannot act on is a
-  blocked request rather than a silent skip.
+  `--source`, `--skill`, and `--agents` explicitly; uninstall and repair each
+  require `--skill` and `--agent`. Every ownership, collision, path, apply,
+  rescan, and verification gate still runs, and a named agent the plan cannot
+  act on is a blocked request rather than a silent skip.
 - Ownership receipts are evidence, never instructions. The scanner does not
   consult them and they outlive their source. Repair replaces a link only when
   the link's raw target is byte-identical to a receipt for that path; it never
   recreates a link from a receipt alone, and an unproven link is never adopted
-  by writing one.
+  by writing one. A receipt is removed only after uninstall positively verifies
+  its link gone, or Forget Source has just established the described link
+  inactive.
+- Uninstall never removes an agent root or follows the link it removes. Object
+  type, exact receipt, recorded target, and documented-root containment are
+  rechecked immediately before unlinking; one failed target stops the run.
+- Forget Source removes private metadata only. Any active or unreadable
+  receipted link, or any receipt-set change between preview and confirmation,
+  blocks the transaction; checkout and skill directories are never deleted.
 - Production dependencies require explicit review.
 
 ## Non-Interactive Shell Commands

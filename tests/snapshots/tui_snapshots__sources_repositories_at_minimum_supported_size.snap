@@ -1,5 +1,6 @@
 ---
 source: tests/tui_snapshots.rs
+assertion_line: 397
 expression: "normalize_sources_screen(&app, &temporary, render(&app, 80, 24))"
 ---
  ◆ skilled  global                                ● ready · 1 source registered
@@ -25,4 +26,4 @@ expression: "normalize_sources_screen(&app, &temporary, render(&app, 80, 24))"
 
 
 
- Tab/Shift-Tab Region   Enter Open   a Add source   1 Inventory   Esc Back …
+ Tab/Shift-Tab Region   x Forget   Enter Open   a Add source   Esc Back …

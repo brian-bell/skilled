@@ -6,9 +6,10 @@ Rust with Ratatui and Crossterm.
 
 The project is early in version-one development. The current build establishes
 the setup, terminal, source-registration, and read-only inspection foundation,
-installs a registered skill across the agents that can use it, repairs a link
-it owns, and fast-forwards a registered repository after an explicit check. It
-does not yet uninstall.
+installs and safely uninstalls registered skills across the agents that can use
+them, repairs the incorrect and dangling links it owns, and can forget inactive
+source metadata. It also fast-forwards a registered repository after an
+explicit update check.
 
 ## Design references
 
@@ -74,10 +75,16 @@ does not yet uninstall.
   it, is reported as exposure rather than claimed as usable. A root Skilled was
   asked to leave alone, or could not read, leaves the answer unstated instead of
   guessed at.
-- A read-only Doctor view listing every finding the scan holds, ordered by the
-  documented issue groups and then by severity. Each finding states what was
-  observed, what it costs, the paths involved, and that no repair exists in this
-  release — Skilled offers no key that would perform one.
+- A Doctor view listing every finding the scan holds, ordered by the documented
+  issue groups and then by severity. Each finding states what was observed, what
+  it costs, and the paths involved. The findings this release can act on offer
+  `r`; the rest name no key, because Skilled has none to offer them yet.
+- Receipt-backed repair of an incorrect or dangling link Skilled owns, from
+  Doctor (`r`) or `skilled repair`. The link's raw target must still be
+  byte-identical to the newest matching ownership receipt and the live registry
+  must supply a safe replacement, or the repair is refused. Skilled replaces
+  that one link and nothing else: it never recreates an absent link, never
+  creates a skill root, and never adopts a link it cannot prove is its own.
 - Installation of a registered skill variant as one individual directory
   symbolic link per agent, at that agent's own documented global root. Press `i`
   on a variant in Sources to see exactly what would happen: the source it comes
@@ -95,9 +102,19 @@ does not yet uninstall.
   that another root already answers for is a postcondition Skilled can see
   failing, and it stops before writing rather than writing and reporting it.
 - An ownership receipt for every link Skilled creates, recorded the moment the
-  link exists and outliving the source it came from. A link Skilled did not
-  create is never claimed: an identical one already in place is left alone and
-  unowned.
+  link exists. A link Skilled did not create is never claimed: an identical one
+  already in place is left alone and unowned. Receipts are deleted only after a
+  guarded removal is positively verified or a source forget has established
+  the described link inactive.
+- Guarded uninstall from Inventory (`x`) or `skilled uninstall`: Skilled removes
+  only a symlink whose path, object type, recorded target, documented root, and
+  ownership receipt still match the preview. It never removes the agent root or
+  follows the link into canonical content, then rescans and verifies both that
+  the link is gone and that resolving content survived.
+- Metadata-only Forget Source from the Sources Repositories pane (`x`). Active
+  or unreadable receipted links block the operation; otherwise one transaction
+  removes the source registration, catalogs, cached scan state, and inactive
+  receipts while leaving the checkout and every skill directory untouched.
 - A rescan and a postcondition check after every install. Each link written is
   observed again and compared with the plan — the object, the variant it
   resolves to, its validation, its health, and for OpenCode the name it
@@ -179,13 +196,13 @@ does not yet uninstall.
   verification it could not complete apart from a plain success. `--yes`
   removes the confirmation and nothing else.
 
-Uninstall, adoption of unproven links, and network operations beyond the
-explicit update check are still future work. Registration, inventory, and
-Doctor remain read-only: they catalog local checkouts and observe agent roots
-without changing anything in them. Installing creates a link, and the
-documented skill root above it when that root's own parent already exists;
-repair replaces one proven link; and an update writes through Git only inside
-the canonical checkout the user registered.
+Adoption of unproven links and network operations beyond the explicit update
+check are still future work. Registration and inventory remain read-only, and
+Doctor writes nothing of its own. Install creates only a link and, when allowed,
+its documented root; uninstall removes only verified managed links; repair
+replaces only one proven link; Forget Source removes only private metadata; and
+an update writes through Git only inside the canonical checkout the user
+registered.
 
 ## Requirements
 
@@ -232,12 +249,17 @@ returns. `j` / `k` or arrow keys move the selection in the table, and scroll the
 details region once it has focus — a region with more to show than fits says so
 at the foot of its window and names the keys that reach the rest. `/` filters by
 name, source, or health — Enter applies the query and Esc clears it.
+Press `x` on a managed skill to preview removing its receipted links. The dialog
+states every absolute path and offers confirmation only after the complete plan
+has been visible.
 
 From Inventory, press `2` to open Sources. In Sources, Tab and Shift-Tab move
 forward and backward through Repositories, Variants, and Details; Enter advances
 toward Details; and Esc returns through the region hierarchy before leaving the
 screen. In a selectable list, `j` / `k` or arrow keys move the selection. Press
 `a` to add another source or `1` to return to Inventory.
+In the Repositories pane, press `x` to preview forgetting the selected source's
+private metadata. Active or unreadable managed links block confirmation.
 
 In Sources, press `i` on a skill variant to preview installing it. The dialog
 names every agent, what would happen to it, and the exact absolute path
@@ -252,18 +274,22 @@ severity, stable code, skill, and agent, and its regions behave as the
 Inventory's do: Tab and Shift-Tab move between the list and the details, Enter
 opens the details of the selected finding on a compact terminal, `j` / `k` move
 the selection and scroll the details once they have focus, and Esc leaves the
-detail region and then the screen. Press `1` or `2` to return to Inventory or
-Sources.
+detail region and then the screen. On a finding this release can act on, `r`
+previews the one link Skilled would replace — the same preview, confirmation,
+rescan, and verification the install dialog uses. Press `1` or `2` to return to
+Inventory or Sources.
 
 Private metadata is stored in the platform application-data directory. On
 macOS, the database is normally
 `~/Library/Application Support/skilled/skilled.sqlite3`.
 
-## Install from the command line
+## Install, repair, and uninstall from the command line
 
 ```bash
 skilled install --source <id-or-path> --skill <name> \
                 --agents claude-code,codex,opencode [--yes]
+skilled repair --skill <name> --agent <agent> [--yes]
+skilled uninstall --skill <name> --agent <agent> [--yes]
 ```
 
 `--source` takes the identifier Skilled gave a registered source or the path its
@@ -275,6 +301,20 @@ cancels and writes nothing.
 `--skill`, and `--agents` to be given explicitly — a target set Skilled chose is
 not one anybody agreed to — and every collision check, apply guard, rescan, and
 verification still runs.
+
+Repair's `--agent` is singular for the same reason: it replaces exactly one
+link. The plan is refused unless an ownership receipt proves the link is
+Skilled's own, its raw target still matches that receipt byte for byte, and the
+current registry offers a replacement variant that agent can use. Skilled takes
+the same metadata guard the interactive path takes, rechecks the registration
+and the destination under it, then rescans and verifies the replacement.
+
+Uninstall's `--agent` is deliberately singular. It removes only that agent's
+still-matching managed link; an absent receipt, changed target, changed object
+type, or redirected root blocks the request.
+
+For both, `--yes` skips only the prompt, and still requires `--skill` and
+`--agent` to be given explicitly.
 
 Exit statuses: `0` success, `1` internal error, `2` invalid request, `3` blocked
 plan, `4` the apply did not complete as planned, `5` verification failed.
@@ -313,10 +353,11 @@ under `tests/snapshots/` and cell-level style assertions in
   skill roots and owns the finding codes it reports.
 - `src/resolution.rs` decides, purely, which registered variant an agent
   resolves a name to and what OpenCode would load across the roots it reads.
-- `src/operations.rs` plans installations and executes them under guard: one
-  read of the machine, one pure decision over it, one re-read immediately before
-  each write, and one check of a fresh scan against the plan.
-- `src/cli.rs` implements `skilled install` over that same path.
+- `src/operations.rs` plans install, repair, uninstall, and source-forget
+  operations; each executor rechecks the facts that authorize its narrowly
+  scoped mutation and verifies the result.
+- `src/cli.rs` implements `skilled install`, `skilled repair`, and
+  `skilled uninstall` over those same planner/apply paths.
 - `src/validation.rs` validates the portable `SKILL.md` subset used during
   source browsing.
 - `src/terminal.rs` guards raw mode and alternate-screen restoration.

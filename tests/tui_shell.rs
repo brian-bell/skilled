@@ -5016,7 +5016,7 @@ fn the_install_preview_carries_each_verdict_in_words_and_in_tone() {
 fn the_install_report_states_each_step_and_the_verification_behind_it() {
     let harness = Harness::new();
     let mut app = harness.installable_source();
-    for action in [Action::BeginInstall, Action::ConfirmInstall] {
+    for action in [Action::BeginInstall, Action::ConfirmOperation] {
         // The runner draws before every key; a confirmation waits on what the
         // frame measured.
         if app.pending_install().is_some() {
@@ -5067,7 +5067,7 @@ fn the_install_report_carries_a_residual_root_in_words_and_in_tone() {
         // Nothing here can be asserted over a link that was written after all.
         return;
     }
-    for action in [Action::BeginInstall, Action::ConfirmInstall] {
+    for action in [Action::BeginInstall, Action::ConfirmOperation] {
         // The runner draws before every key; a confirmation waits on what the
         // frame measured.
         if app.pending_install().is_some() {
@@ -5147,7 +5147,7 @@ fn the_install_report_escapes_filesystem_text_in_a_failed_step() {
     // The runner draws before every key, and a confirmation waits on what the
     // frame measured.
     app.note_detail_max_scroll(feedback(&app, 100, 30).detail_max_scroll());
-    let update = app.update(Action::ConfirmInstall);
+    let update = app.update(Action::ConfirmOperation);
     app.perform_effects(update.effects())
         .expect("apply install");
 
@@ -5170,7 +5170,7 @@ fn a_withheld_postcondition_is_stated_rather_than_reported_as_verified() {
     harness.deselect_codex(&mut app);
     app.update(Action::OpenSources);
     app.update(Action::AdvanceSourcesPane);
-    for action in [Action::BeginInstall, Action::ConfirmInstall] {
+    for action in [Action::BeginInstall, Action::ConfirmOperation] {
         // The runner draws before every key; a confirmation waits on what the
         // frame measured.
         if app.pending_install().is_some() {
@@ -5261,8 +5261,8 @@ fn a_preview_taller_than_its_dialog_says_so_and_can_be_scrolled_to_its_end() {
     // The runner notes what the frame measured before reading the next key, so
     // by the time Enter could arrive the reducer refuses it too.
     app.note_detail_max_scroll(Some(measured_extent(&app, 80, 24)));
-    assert!(!app.install_preview_fully_seen());
-    assert!(app.update(Action::ConfirmInstall).effects().is_empty());
+    assert!(!app.operation_preview_fully_seen());
+    assert!(app.update(Action::ConfirmOperation).effects().is_empty());
 
     // The window moves the way it does everywhere else: the frame measures the
     // extent, the runner notes it, and the next keystroke is clamped to it.
@@ -5292,11 +5292,11 @@ fn a_preview_taller_than_its_dialog_says_so_and_can_be_scrolled_to_its_end() {
         "{rendered}"
     );
     // And a confirmation is accepted only now.
-    let update = app.update(Action::ConfirmInstall);
+    let update = app.update(Action::ConfirmOperation);
     assert!(!update.effects().is_empty(), "{rendered}");
     // Once the end has been on screen, the key the reducer would accept is the
     // key the footer offers.
-    assert!(app.install_preview_fully_seen());
+    assert!(app.operation_preview_fully_seen());
     let footer = row_text(&screen, screen.area.height - 1);
     assert!(footer.contains("Enter Install"), "{footer}");
     assert!(footer.contains("Esc Cancel"), "{footer}");

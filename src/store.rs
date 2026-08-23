@@ -4,11 +4,12 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 
 use crate::{
     AgentKind, Error, Result,
     operations::{Receipt, ReceiptOperation},
+    resolution::VariantRef,
     source::{
         CatalogClassification, CatalogProposal, Compatibility, InspectedSource, RegisteredSource,
         SourcePreview, contains_revision, inspect_local_source,
@@ -17,7 +18,7 @@ use crate::{
     validation::InspectionBudget,
 };
 
-const SCHEMA_VERSION: i64 = 9;
+const SCHEMA_VERSION: i64 = 10;
 const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 const UPDATE_CHECK_UPSERT: &str = "INSERT INTO source_update_checks
         (source_id, checked_at, local_revision, local_reference, upstream_ref,
@@ -48,6 +49,17 @@ pub(crate) struct Store {
     connection: Connection,
 }
 
+/// One cross-process metadata mutation guard.
+///
+/// `BEGIN IMMEDIATE` reserves SQLite's single-writer slot before the caller
+/// touches the filesystem. Every install target, uninstall finalization, and
+/// Forget Source apply uses this guard, so a process cannot make a link active
+/// while another process is deciding whether its ownership metadata is safe to
+/// delete. Dropping the guard rolls the transaction back.
+pub(crate) struct Mutation<'store> {
+    transaction: Transaction<'store>,
+}
+
 impl Store {
     pub(crate) fn open(data_dir: &Path) -> Result<Self> {
         fs::create_dir_all(data_dir)?;
@@ -57,6 +69,14 @@ impl Store {
         let _: String = connection.query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))?;
         connection.execute_batch("PRAGMA foreign_keys = ON;")?;
         Ok(Self { connection })
+    }
+
+    pub(crate) fn begin_mutation(&mut self) -> Result<Mutation<'_>> {
+        Ok(Mutation {
+            transaction: self
+                .connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)?,
+        })
     }
 
     pub(crate) fn setup_complete(&self) -> Result<bool> {
@@ -121,61 +141,11 @@ impl Store {
 
     /// Check every path against the representation the receipt table stores.
     ///
-    /// The install guard calls this before creating anything, then
-    /// [`Self::record_receipt`] repeats it so no caller can bypass the table's
-    /// contract and turn a path conversion into a post-write surprise.
+    /// The install guard calls this before acquiring its mutation transaction,
+    /// then [`Mutation::record_receipt`] repeats it so no caller can bypass the
+    /// table's contract and turn a path conversion into a post-write surprise.
     pub(crate) fn ensure_receipt_recordable(&self, receipt: &Receipt) -> Result<()> {
-        stored_path(receipt.link_path())?;
-        stored_path(receipt.link_target())?;
-        receipt
-            .catalog_relative_path()
-            .map(stored_path)
-            .transpose()?;
-        receipt
-            .variant_relative_path()
-            .map(stored_path)
-            .transpose()?;
-        Ok(())
-    }
-
-    /// Record that Skilled created one particular link.
-    ///
-    /// One statement, and therefore its own transaction: the receipt is written
-    /// the moment the link exists, so a crash between two targets still leaves
-    /// the store describing exactly what is on disk.
-    ///
-    /// A receipt identical to one already recorded is left alone rather than
-    /// refused. Timestamps are whole seconds, so a link removed and put back
-    /// inside one second would otherwise fail its insert and leave Skilled
-    /// reporting that it does not own something it just created — when the
-    /// receipt it needs is already there.
-    pub(crate) fn record_receipt(&self, receipt: &Receipt) -> Result<()> {
-        self.ensure_receipt_recordable(receipt)?;
-        self.connection.execute(
-            "INSERT INTO operation_receipts
-                (created_at, operation, agent, skill_name, link_path, link_target,
-                 source_id, catalog_relative_path, variant_relative_path)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
-             ON CONFLICT DO NOTHING",
-            params![
-                current_timestamp(),
-                receipt.operation().identifier(),
-                agent_identifier(receipt.agent()),
-                receipt.skill_name(),
-                stored_path(receipt.link_path())?,
-                stored_path(receipt.link_target())?,
-                receipt.source_id(),
-                receipt
-                    .catalog_relative_path()
-                    .map(stored_path)
-                    .transpose()?,
-                receipt
-                    .variant_relative_path()
-                    .map(stored_path)
-                    .transpose()?,
-            ],
-        )?;
-        Ok(())
+        ensure_receipt_recordable(receipt)
     }
 
     /// Every ownership receipt, oldest first.
@@ -188,49 +158,27 @@ impl Store {
     /// deny, and denying it would let the next plan treat its own link as a
     /// stranger's.
     pub(crate) fn receipts(&self) -> Result<Vec<Receipt>> {
-        let mut statement = self.connection.prepare(
-            "SELECT operation, agent, skill_name, link_path, link_target, source_id,
-                    catalog_relative_path, variant_relative_path
-             FROM operation_receipts ORDER BY created_at, id",
+        receipts_on(&self.connection)
+    }
+
+    /// Required postconditions for forgetting: source, catalogs, and receipts absent.
+    pub(crate) fn verify_source_forgotten(&self, source_id: i64) -> Result<[bool; 3]> {
+        let source: i64 = self.connection.query_row(
+            "SELECT COUNT(*) FROM source_repositories WHERE id = ?1",
+            params![source_id],
+            |row| row.get(0),
         )?;
-        let rows = statement.query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, String>(4)?,
-                row.get::<_, Option<i64>>(5)?,
-                row.get::<_, Option<String>>(6)?,
-                row.get::<_, Option<String>>(7)?,
-            ))
-        })?;
-        rows.collect::<std::result::Result<Vec<_>, _>>()?
-            .into_iter()
-            .map(
-                |(
-                    operation,
-                    agent,
-                    skill_name,
-                    link_path,
-                    link_target,
-                    source_id,
-                    catalog_relative_path,
-                    variant_relative_path,
-                )| {
-                    Ok(Receipt::new(
-                        ReceiptOperation::from_identifier(&operation)?,
-                        agent_kind(&agent)?,
-                        skill_name,
-                        PathBuf::from(link_path),
-                        PathBuf::from(link_target),
-                        source_id,
-                        catalog_relative_path.map(PathBuf::from),
-                        variant_relative_path.map(PathBuf::from),
-                    ))
-                },
-            )
-            .collect()
+        let catalogs: i64 = self.connection.query_row(
+            "SELECT COUNT(*) FROM catalog_roots WHERE source_id = ?1",
+            params![source_id],
+            |row| row.get(0),
+        )?;
+        let receipts: i64 = self.connection.query_row(
+            "SELECT COUNT(*) FROM operation_receipts WHERE source_id = ?1",
+            params![source_id],
+            |row| row.get(0),
+        )?;
+        Ok([source == 0, catalogs == 0, receipts == 0])
     }
 
     pub(crate) fn register_source(&mut self, preview: &SourcePreview) -> Result<()> {
@@ -249,11 +197,34 @@ impl Store {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let existing_id = transaction
+            .query_row(
+                "SELECT id FROM source_repositories WHERE canonical_path = ?1",
+                params![canonical_path],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?;
+        let source_id = match existing_id {
+            Some(id) => id,
+            None => {
+                let id = transaction.query_row(
+                    "SELECT next_id FROM source_id_sequence WHERE singleton = 1",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )?;
+                transaction.execute(
+                    "UPDATE source_id_sequence SET next_id = next_id + 1
+                     WHERE singleton = 1",
+                    [],
+                )?;
+                id
+            }
+        };
         transaction.execute(
             "INSERT INTO source_repositories
-                (label, canonical_path, remote_url, branch, head_revision, dirty, dirty_known,
+                (id, label, canonical_path, remote_url, branch, head_revision, dirty, dirty_known,
                  last_scan_at, repository_identity)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
              ON CONFLICT(canonical_path) DO UPDATE SET
                 label = excluded.label,
                 remote_url = excluded.remote_url,
@@ -264,6 +235,7 @@ impl Store {
                 last_scan_at = excluded.last_scan_at,
                 repository_identity = excluded.repository_identity",
             params![
+                source_id,
                 label,
                 canonical_path,
                 source.remote_url(),
@@ -274,11 +246,6 @@ impl Store {
                 scanned_at,
                 repository_identity,
             ],
-        )?;
-        let source_id: i64 = transaction.query_row(
-            "SELECT id FROM source_repositories WHERE canonical_path = ?1",
-            params![canonical_path],
-            |row| row.get(0),
         )?;
         transaction.execute(
             "DELETE FROM catalog_roots WHERE source_id = ?1",
@@ -295,10 +262,7 @@ impl Store {
                 params![
                     source_id,
                     path_text(catalog.relative_path())?,
-                    match catalog.classification() {
-                        CatalogClassification::Common => "common",
-                        CatalogClassification::AgentSpecific => "agent-specific",
-                    },
+                    classification_text(catalog.classification()),
                     catalog.compatibility().claude_code(),
                     catalog.compatibility().codex(),
                     catalog.compatibility().opencode(),
@@ -615,10 +579,314 @@ impl Store {
     }
 }
 
+impl Mutation<'_> {
+    /// Record ownership in the transaction that already covers link creation.
+    ///
+    /// A receipt identical to one already recorded is left alone rather than
+    /// refused. Timestamps are whole seconds, so a link removed and put back
+    /// inside one second would otherwise fail its insert and leave Skilled
+    /// reporting that it does not own something it just created — when the
+    /// receipt it needs is already there.
+    pub(crate) fn record_receipt(&self, receipt: &Receipt) -> Result<()> {
+        record_receipt_on(&self.transaction, receipt)
+    }
+
+    pub(crate) fn receipts(&self) -> Result<Vec<Receipt>> {
+        receipts_on(&self.transaction)
+    }
+
+    /// Recheck that a stale install plan still names registered metadata while
+    /// holding the same guard that will cover its link and receipt writes.
+    pub(crate) fn source_is_registered(&self, source_id: i64) -> Result<bool> {
+        self.transaction
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM source_repositories WHERE id = ?1
+                 )",
+                params![source_id],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
+    }
+
+    /// Recheck the exact registration a confirmed install or repair plan named.
+    ///
+    /// [`Self::source_is_registered`] answers only that the identifier survived,
+    /// and identifiers survive a re-registration of the same checkout: between
+    /// the preview and this guard, a catalog can be excluded, reclassified, or
+    /// have an agent removed from its compatibility declaration while the source
+    /// row keeps its id. The transaction cannot invalidate a change committed
+    /// before it began, so the plan is compared with what is registered now.
+    ///
+    /// Every field the ownership receipt is about to record is compared: the
+    /// source it names, the checkout that source stands at, and the catalog root
+    /// beneath it with the classification and compatibility the plan selected
+    /// under. The variant directory itself is not registration — candidates are
+    /// scan results rather than metadata — and the caller revalidates it against
+    /// the filesystem immediately before this.
+    ///
+    /// This compares the inputs the plan chose from, not the choice. A source
+    /// another process registers after the preview can offer a competing
+    /// variant of the same name, which these queries cannot see; closing that
+    /// needs a registry generation the guard can compare, tracked as
+    /// `skilled-g64`.
+    pub(crate) fn variant_registration_matches(
+        &self,
+        variant: &VariantRef,
+        checkout: &Path,
+    ) -> Result<bool> {
+        let source = self
+            .transaction
+            .query_row(
+                "SELECT label, canonical_path FROM source_repositories WHERE id = ?1",
+                params![variant.source_id()],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?;
+        if source != Some((variant.source_label().to_owned(), path_text(checkout)?)) {
+            return Ok(false);
+        }
+        let catalog = self
+            .transaction
+            .query_row(
+                "SELECT classification, claude_code, codex, opencode
+                 FROM catalog_roots WHERE source_id = ?1 AND relative_path = ?2",
+                params![
+                    variant.source_id(),
+                    path_text(variant.catalog_relative_path())?
+                ],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, bool>(1)?,
+                        row.get::<_, bool>(2)?,
+                        row.get::<_, bool>(3)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let compatibility = variant.compatibility();
+        Ok(catalog
+            == Some((
+                classification_text(variant.classification()).to_owned(),
+                compatibility.claude_code(),
+                compatibility.codex(),
+                compatibility.opencode(),
+            )))
+    }
+
+    /// Recheck the complete stored registration represented by a Forget plan.
+    /// Candidate scans are not metadata and are intentionally excluded; every
+    /// source-row and catalog-root field the store persists is compared while
+    /// the mutation guard prevents a concurrent registration update.
+    pub(crate) fn source_matches(&self, expected: &RegisteredSource) -> Result<bool> {
+        let current = self
+            .transaction
+            .query_row(
+                "SELECT label, canonical_path, remote_url, branch, head_revision,
+                        dirty, dirty_known, last_scan_at
+                 FROM source_repositories WHERE id = ?1",
+                params![expected.id()],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, bool>(5)?,
+                        row.get::<_, bool>(6)?,
+                        row.get::<_, i64>(7)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let expected_dirty = expected.dirty();
+        let expected_source = (
+            expected.label().to_owned(),
+            path_text(expected.git_top_level())?,
+            expected.remote_url().map(str::to_owned),
+            expected.branch().map(str::to_owned),
+            expected.head().to_owned(),
+            expected_dirty.unwrap_or(false),
+            expected_dirty.is_some(),
+            expected.last_scan_at(),
+        );
+        if current.as_ref() != Some(&expected_source) {
+            return Ok(false);
+        }
+
+        let mut statement = self.transaction.prepare(
+            "SELECT relative_path, classification, claude_code, codex, opencode
+             FROM catalog_roots WHERE source_id = ?1 ORDER BY relative_path",
+        )?;
+        let rows = statement.query_map(params![expected.id()], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, bool>(2)?,
+                row.get::<_, bool>(3)?,
+                row.get::<_, bool>(4)?,
+            ))
+        })?;
+        let current_catalogs = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+        let mut expected_catalogs = expected
+            .catalogs()
+            .iter()
+            .map(|catalog| {
+                Ok((
+                    path_text(catalog.relative_path())?,
+                    classification_text(catalog.classification()).to_owned(),
+                    catalog.compatibility().claude_code(),
+                    catalog.compatibility().codex(),
+                    catalog.compatibility().opencode(),
+                ))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        expected_catalogs.sort_by(|left, right| left.0.cmp(&right.0));
+        Ok(current_catalogs == expected_catalogs)
+    }
+
+    /// Delete exactly the ownership facts whose link was positively verified
+    /// gone while this guard prevents a concurrent receipt writer from
+    /// committing a replacement fact before the deletion.
+    pub(crate) fn delete_receipts_for_link(
+        &self,
+        agent: AgentKind,
+        link_path: &Path,
+        link_target: &Path,
+    ) -> Result<usize> {
+        Ok(self.transaction.execute(
+            "DELETE FROM operation_receipts
+             WHERE agent = ?1 AND link_path = ?2 AND link_target = ?3",
+            params![
+                agent_identifier(agent),
+                stored_path(link_path)?,
+                stored_path(link_target)?,
+            ],
+        )?)
+    }
+
+    /// Remove one source's private metadata inside the guard that already
+    /// covered the caller's exact receipt-set check and filesystem reprobe.
+    pub(crate) fn forget_source(&self, source_id: i64) -> Result<usize> {
+        self.transaction.execute(
+            "DELETE FROM operation_receipts WHERE source_id = ?1",
+            params![source_id],
+        )?;
+        Ok(self.transaction.execute(
+            "DELETE FROM source_repositories WHERE id = ?1",
+            params![source_id],
+        )?)
+    }
+
+    pub(crate) fn commit(self) -> Result<()> {
+        self.transaction.commit().map_err(Into::into)
+    }
+}
+
+fn ensure_receipt_recordable(receipt: &Receipt) -> Result<()> {
+    stored_path(receipt.link_path())?;
+    stored_path(receipt.link_target())?;
+    receipt
+        .catalog_relative_path()
+        .map(stored_path)
+        .transpose()?;
+    receipt
+        .variant_relative_path()
+        .map(stored_path)
+        .transpose()?;
+    Ok(())
+}
+
+fn record_receipt_on(connection: &Connection, receipt: &Receipt) -> Result<()> {
+    ensure_receipt_recordable(receipt)?;
+    connection.execute(
+        "INSERT INTO operation_receipts
+            (created_at, operation, agent, skill_name, link_path, link_target,
+             source_id, catalog_relative_path, variant_relative_path)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+         ON CONFLICT DO NOTHING",
+        params![
+            current_timestamp(),
+            receipt.operation().identifier(),
+            agent_identifier(receipt.agent()),
+            receipt.skill_name(),
+            stored_path(receipt.link_path())?,
+            stored_path(receipt.link_target())?,
+            receipt.source_id(),
+            receipt
+                .catalog_relative_path()
+                .map(stored_path)
+                .transpose()?,
+            receipt
+                .variant_relative_path()
+                .map(stored_path)
+                .transpose()?,
+        ],
+    )?;
+    Ok(())
+}
+
+fn receipts_on(connection: &Connection) -> Result<Vec<Receipt>> {
+    let mut statement = connection.prepare(
+        "SELECT operation, agent, skill_name, link_path, link_target, source_id,
+                catalog_relative_path, variant_relative_path
+         FROM operation_receipts ORDER BY created_at, id",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, String>(4)?,
+            row.get::<_, Option<i64>>(5)?,
+            row.get::<_, Option<String>>(6)?,
+            row.get::<_, Option<String>>(7)?,
+        ))
+    })?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()?
+        .into_iter()
+        .map(
+            |(
+                operation,
+                agent,
+                skill_name,
+                link_path,
+                link_target,
+                source_id,
+                catalog_relative_path,
+                variant_relative_path,
+            )| {
+                Ok(Receipt::new(
+                    ReceiptOperation::from_identifier(&operation)?,
+                    agent_kind(&agent)?,
+                    skill_name,
+                    PathBuf::from(link_path),
+                    PathBuf::from(link_target),
+                    source_id,
+                    catalog_relative_path.map(PathBuf::from),
+                    variant_relative_path.map(PathBuf::from),
+                ))
+            },
+        )
+        .collect()
+}
+
 fn path_text(path: &Path) -> Result<String> {
     path.to_str()
         .map(str::to_owned)
         .ok_or_else(|| Error::InvalidSourcePath(path.to_path_buf()))
+}
+
+/// The one spelling of a classification the `catalog_roots` CHECK constraint
+/// accepts, shared by everything that writes or compares that column.
+fn classification_text(classification: CatalogClassification) -> &'static str {
+    match classification {
+        CatalogClassification::Common => "common",
+        CatalogClassification::AgentSpecific => "agent-specific",
+    }
 }
 
 /// A path stored outside the source tables, where "not a portable catalog path"
@@ -791,6 +1059,25 @@ mod tests {
             "newer"
         );
     }
+
+    #[test]
+    fn mutation_guards_serialize_independent_store_connections() {
+        let temporary = tempfile::tempdir().expect("temporary data directory");
+        let mut first = Store::open(temporary.path()).expect("first store");
+        let mut second = Store::open(temporary.path()).expect("second store");
+
+        let guard = first.begin_mutation().expect("first mutation guard");
+        assert!(
+            second.begin_mutation().is_err(),
+            "a second writer must not enter while the first can touch the filesystem"
+        );
+
+        drop(guard);
+        let guard = second
+            .begin_mutation()
+            .expect("guard becomes available after rollback");
+        guard.commit().expect("commit empty guard");
+    }
 }
 
 fn migrate(connection: &mut Connection) -> Result<()> {
@@ -891,6 +1178,11 @@ fn migrate(connection: &mut Connection) -> Result<()> {
         // Rebuilding inside this transaction preserves every existing receipt,
         // including its id: ordering by `(created_at, id)` is the public
         // oldest-to-newest contract used by ownership matching.
+        //
+        // The same version introduces the source-ID sequence: source IDs are
+        // durable identities carried by previews and receipts, and SQLite may
+        // reuse a deleted INTEGER PRIMARY KEY, so allocate them from a
+        // monotonic sequence that Forget Source never rewinds.
         transaction.execute_batch(
             "CREATE TABLE operation_receipts_v6 (
                 id INTEGER PRIMARY KEY,
@@ -913,6 +1205,12 @@ fn migrate(connection: &mut Connection) -> Result<()> {
              FROM operation_receipts;
              DROP TABLE operation_receipts;
              ALTER TABLE operation_receipts_v6 RENAME TO operation_receipts;
+             CREATE TABLE source_id_sequence (
+                singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                next_id INTEGER NOT NULL CHECK (next_id > 0)
+             );
+             INSERT INTO source_id_sequence (singleton, next_id)
+             SELECT 1, COALESCE(MAX(id), 0) + 1 FROM source_repositories;
              PRAGMA user_version = 6;",
         )?;
     }
@@ -945,6 +1243,21 @@ fn migrate(connection: &mut Connection) -> Result<()> {
         transaction.execute_batch(
             "ALTER TABLE source_repositories ADD COLUMN repository_identity TEXT;
              PRAGMA user_version = 9;",
+        )?;
+    }
+    if current_version < 10 {
+        // Main introduced the monotonic source-ID sequence as schema 6 while
+        // the update branch already used schemas 7 through 9. Existing
+        // databases from either line therefore need this idempotent join
+        // migration, while a fresh database already has the table from v6.
+        transaction.execute_batch(
+            "CREATE TABLE IF NOT EXISTS source_id_sequence (
+                singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                next_id INTEGER NOT NULL CHECK (next_id > 0)
+             );
+             INSERT OR IGNORE INTO source_id_sequence (singleton, next_id)
+             SELECT 1, COALESCE(MAX(id), 0) + 1 FROM source_repositories;
+             PRAGMA user_version = 10;",
         )?;
     }
     transaction.commit()?;

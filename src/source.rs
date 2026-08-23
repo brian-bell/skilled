@@ -469,11 +469,64 @@ pub fn inspect_local_source(path: &Path) -> Result<InspectedSource> {
     })
 }
 
-pub(crate) fn contains_revision(repository: &Path, revision: &str) -> Result<bool> {
+/// What one revision lookup settled, keeping "not there" apart from "Git would
+/// not say".
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum RevisionLookup {
+    Present,
+    Absent,
+    /// Git ran and refused to answer: not a repository, ownership declined,
+    /// objects unreadable. The message is carried so a caller can state it.
+    Undetermined(String),
+}
+
+/// Ask whether a repository holds one revision, separating "it is not there"
+/// from "Git could not look".
+///
+/// A failed lookup alone cannot tell those apart: Git answers a missing object
+/// and a directory that is no longer a repository with the same kind of
+/// nonzero exit, and a declined ownership check or an unreadable object store
+/// joins them. So a failure is followed by one question with a known answer —
+/// resolve this repository's own `HEAD` — and only a repository that can still
+/// answer that is one whose "no" is evidence. A caller deciding whether to
+/// write may treat every failure as a refusal, but a caller *reporting* what it
+/// found may not: "this is not the checkout" and "nothing could be established"
+/// are different answers, and only one of them is a finding.
+///
+/// One case this does not separate, stated rather than hidden: an object store
+/// that can still produce `HEAD` while the older object the caller asked about
+/// is unreadable rather than absent reads as [`RevisionLookup::Absent`].
+/// Telling those apart means matching Git's own English error text, which is a
+/// worse dependency than the residual, and it is tracked as `skilled-syn`.
+pub(crate) fn look_up_revision(repository: &Path, revision: &str) -> Result<RevisionLookup> {
     let commit = format!("{revision}^{{commit}}");
-    Ok(run_git(repository, &["cat-file", "-e", &commit])?
-        .status
-        .success())
+    let output = run_git(repository, &["cat-file", "-e", &commit])?;
+    if output.status.success() {
+        return Ok(RevisionLookup::Present);
+    }
+    let readable = run_git(
+        repository,
+        &["rev-parse", "--verify", "--quiet", "HEAD^{commit}"],
+    )?;
+    if readable.status.success() {
+        return Ok(RevisionLookup::Absent);
+    }
+    let message = String::from_utf8_lossy(&output.stderr);
+    let message = strip_record_terminator(message.trim_end()).trim();
+    Ok(RevisionLookup::Undetermined(if message.is_empty() {
+        "Git could not read this repository".to_owned()
+    } else {
+        message.to_owned()
+    }))
+}
+
+/// The fail-closed reading of [`look_up_revision`], for the guards that write.
+///
+/// A lookup Git would not answer is not a revision Skilled may act on, so it
+/// counts as absent here. Nothing reporting a verdict to the reader may use
+/// this.
+pub(crate) fn contains_revision(repository: &Path, revision: &str) -> Result<bool> {
+    Ok(look_up_revision(repository, revision)? == RevisionLookup::Present)
 }
 
 pub fn preview_local_source(path: &Path) -> Result<SourcePreview> {
