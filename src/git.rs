@@ -58,6 +58,210 @@ const REPOSITORY_ROUTING_ENVIRONMENT: &[&str] = &[
     "GIT_CONFIG_COUNT",
 ];
 
+// `fchdir(2)` and the `open(2)` flags behind the pinned-checkout handle come
+// from `libc` rather than hand declarations: the call is POSIX everywhere,
+// but `O_DIRECTORY` and `O_NONBLOCK` are per-kernel, per-architecture ABI
+// values — Linux alone spells `O_DIRECTORY` two ways across architectures —
+// and a transcription error here silently passes some *other* flag to the
+// open that guards the trust boundary. The crate is already in every build's
+// dependency tree underneath the bundled SQLite.
+#[cfg(unix)]
+use libc::{O_DIRECTORY, O_NONBLOCK, fchdir};
+
+/// An open handle to the checkout an operation was validated against.
+///
+/// Spawning `git -C <path>` re-resolves the pathname at process creation, so
+/// a checkout renamed or replaced between a guard and the spawn would hand
+/// the child a repository the guard never saw. The handle closes that window
+/// at the syscall level: the directory is opened once, the open file
+/// description keeps naming that directory whatever happens to the pathname,
+/// and every bound child enters it with `fchdir(2)` before Git executes. A
+/// rename can change where the pathname leads, never which repository a bound
+/// process acts on.
+///
+/// Opening only pins a directory; it proves nothing about which repository
+/// was pinned. The identity checks that make it the *planned* checkout run
+/// through the handle afterwards, so every answer they give describes the
+/// pinned directory rather than the pathname's current occupant. Bound
+/// spawns also pin what discovery would otherwise re-decide inside the held
+/// directory: `GIT_DIR=.git` and `GIT_WORK_TREE=.`, resolved from the bound
+/// working directory, keep the repository and the worktree exactly there — a
+/// deleted `.git` refuses rather than walking up into a parent repository,
+/// and a `core.worktree` written into the configuration cannot move the
+/// merge's writes elsewhere.
+///
+/// The boundary that remains is the `.git` *object itself*. Git accepts a
+/// repository only by name — `GIT_DIR` takes a path, and the platforms here
+/// offer no directory-descriptor spelling a child could inherit — so a
+/// `.git` swapped in place between a guard and a spawn is followed, exactly
+/// as the pathname spawn always followed it. Reaching that swap requires
+/// write access inside the pinned checkout, and that capability already
+/// decides what the confirmed merge executes without any swap: hooks,
+/// filters, and configuration are read from `.git`'s contents at merge time,
+/// which is the disclosed, accepted nature of the one operation that runs
+/// repository code. The pin therefore claims the *outer* replacement window
+/// — the one `skilled-2k3.8.5.1` names — and no more.
+///
+/// On a platform without `fchdir` the handle degrades to the pathname it was
+/// opened from, spawned as `git -C <path>` as before; the syscall binding is
+/// documented for the Unix platforms Skilled supports rather than claimed
+/// universally.
+pub struct RepositoryHandle {
+    #[cfg(unix)]
+    directory: std::fs::File,
+    path: PathBuf,
+}
+
+impl RepositoryHandle {
+    /// Open `path` and prove the held object is the directory the pathname
+    /// named when it was read: not a symbolic link, a directory, and — on
+    /// Unix — the same filesystem object in the pre-open reading and in the
+    /// held description, so a swap between the two observations is a refusal
+    /// rather than a silent retarget.
+    ///
+    /// The open itself must not be a thing a swap can weaponise either: a
+    /// plain read-only `open(2)` of a FIFO substituted between the reading
+    /// and the open would block until a writer appeared, hanging the check
+    /// inside the very window this handle defends. The descriptor is
+    /// therefore acquired with `O_DIRECTORY`, which refuses a non-directory
+    /// during lookup, and `O_NONBLOCK`, which POSIX defines to make even a
+    /// FIFO open return at once — belt and braces, since the identity
+    /// comparison after the open rejects anything that is not the observed
+    /// directory anyway.
+    pub fn open(path: &Path) -> Result<Self> {
+        let observed = std::fs::symlink_metadata(path)?;
+        if observed.file_type().is_symlink() || !observed.is_dir() {
+            return Err(Error::SourcePathNotDirectory(path.to_path_buf()));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+            let directory = std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(O_DIRECTORY | O_NONBLOCK)
+                .open(path)?;
+            let held = directory.metadata()?;
+            if !held.is_dir() || held.dev() != observed.dev() || held.ino() != observed.ino() {
+                return Err(Error::SourceChangedAfterPreview);
+            }
+            Ok(Self {
+                directory,
+                path: path.to_path_buf(),
+            })
+        }
+        #[cfg(not(unix))]
+        {
+            Ok(Self {
+                path: path.to_path_buf(),
+            })
+        }
+    }
+
+    /// The pathname this handle was opened from. Error reports and probe
+    /// records name it even when the process itself was bound by descriptor.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Refuse to continue when the pathname no longer leads to the held
+    /// directory.
+    ///
+    /// The bound processes cannot be redirected either way; this check is for
+    /// the statement the user confirmed, which named a path. A checkout
+    /// renamed after validation would still be the proven repository, but it
+    /// would no longer be the path on the screen, so the write is refused
+    /// rather than performed somewhere true-but-unstated. On a platform
+    /// without the descriptor this is the pathname re-reading it always was.
+    pub fn still_names_its_path(&self) -> Result<()> {
+        let current =
+            std::fs::symlink_metadata(&self.path).map_err(|_| Error::SourceChangedAfterPreview)?;
+        if current.file_type().is_symlink() || !current.is_dir() {
+            return Err(Error::SourceChangedAfterPreview);
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let held = self.directory.metadata()?;
+            if held.dev() != current.dev() || held.ino() != current.ino() {
+                return Err(Error::SourceChangedAfterPreview);
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Where a Git child is pointed: a pathname resolved at spawn time, or an
+/// open [`RepositoryHandle`] entered by descriptor before Git executes.
+///
+/// Every function in this module takes this type rather than a path, and the
+/// conversion is written at each call site on purpose: which spawns are
+/// pathname-resolved and which are handle-bound is the property the update
+/// pipelines are built around, and an explicit `.into()` per call keeps that
+/// choice readable — and greppable — where it is made, instead of dissolving
+/// it into a generic parameter.
+#[derive(Clone, Copy)]
+pub enum GitTarget<'a> {
+    Path(&'a Path),
+    Handle(&'a RepositoryHandle),
+}
+
+impl GitTarget<'_> {
+    /// The pathname this target answers for, whichever way it spawns.
+    pub fn path(&self) -> &Path {
+        match self {
+            Self::Path(path) => path,
+            Self::Handle(handle) => handle.path(),
+        }
+    }
+}
+
+impl<'a> From<&'a Path> for GitTarget<'a> {
+    fn from(path: &'a Path) -> Self {
+        Self::Path(path)
+    }
+}
+
+impl<'a> From<&'a PathBuf> for GitTarget<'a> {
+    fn from(path: &'a PathBuf) -> Self {
+        Self::Path(path)
+    }
+}
+
+impl<'a> From<&'a RepositoryHandle> for GitTarget<'a> {
+    fn from(handle: &'a RepositoryHandle) -> Self {
+        Self::Handle(handle)
+    }
+}
+
+/// Enter the held directory in the child, between `fork` and `exec`.
+#[cfg(unix)]
+fn bind_to_handle(command: &mut Command, handle: &RepositoryHandle) {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::process::CommandExt;
+    let descriptor = handle.directory.as_raw_fd();
+    // SAFETY: `fchdir` is async-signal-safe, so it may run between `fork` and
+    // `exec`. The raw descriptor is read while the borrowed handle is alive —
+    // every command in this module is spawned within the call that built it —
+    // and it is still open when the closure runs, because close-on-exec
+    // applies at `exec`, after `pre_exec` closures have finished.
+    unsafe {
+        command.pre_exec(move || {
+            if fchdir(descriptor) == 0 {
+                Ok(())
+            } else {
+                Err(io::Error::last_os_error())
+            }
+        });
+    }
+}
+
+/// Without `fchdir` the handle spawns by its pathname, exactly as a
+/// [`GitTarget::Path`] does.
+#[cfg(not(unix))]
+fn bind_to_handle(command: &mut Command, handle: &RepositoryHandle) {
+    command.arg("-C").arg(handle.path());
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum HeadState {
     Branch { reference: String, revision: String },
@@ -209,7 +413,6 @@ enum UpdateOp {
     TransportSettings,
     TransportPolicy,
     UserSshCommand,
-    RefsPresent(Vec<String>),
     RemoteUrl(String),
     FilterSettings,
     PromisorSettings,
@@ -237,10 +440,6 @@ enum UpdateOp {
         expected: String,
         hooks_path: PathBuf,
     },
-    DeleteRef {
-        reference: String,
-        hooks_path: PathBuf,
-    },
     Merge(String),
 }
 
@@ -249,7 +448,7 @@ impl UpdateOp {
         match self {
             Self::RevParse(_) | Self::AbsoluteGitDir => "rev-parse",
             Self::SymbolicHead | Self::SymbolicRef(_) => "symbolic-ref",
-            Self::UpstreamRef(_) | Self::RefState(_) | Self::RefsPresent(_) => "for-each-ref",
+            Self::UpstreamRef(_) | Self::RefState(_) => "for-each-ref",
             Self::ConfigGet(_)
             | Self::FilterSettings
             | Self::PromisorSettings
@@ -265,7 +464,7 @@ impl UpdateOp {
             Self::Status => "status",
             Self::Fetch { .. } => "fetch",
             Self::RemoteUrl(_) => "ls-remote",
-            Self::PublishRef { .. } | Self::DeleteRef { .. } => "update-ref",
+            Self::PublishRef { .. } => "update-ref",
             Self::Merge(_) => "merge",
         }
     }
@@ -298,12 +497,16 @@ impl UpdateOp {
     }
 
     fn operation_arguments(&self) -> Vec<OsString> {
-        // A fetch updates the remote-tracking ref, and Git runs the
-        // repository's `reference-transaction` hook for that update. A check
-        // the user was told only reads must not run repository code, so the
-        // hook search is pointed at a path inside the Git directory that
-        // Skilled never creates; anything able to plant a hook there could
-        // plant one in `hooks` itself.
+        // `--dry-run` is what makes the fetch a read: Git transfers and
+        // stores the objects and then skips every ref update, so no ref
+        // transaction ever starts and a symbolic ref substituted for the
+        // destination has nothing to redirect. `--porcelain` is how the
+        // result comes back without a ref to read it from — one
+        // machine-readable line per refspec naming the object the transport
+        // reported (requires Git 2.41). No transaction also means no
+        // `reference-transaction` hook, but the hook search is still pointed
+        // at a path that holds none, so the claim does not rest on a flag's
+        // behaviour staying put across Git versions.
         if let Self::Fetch {
             remote,
             refspec,
@@ -319,10 +522,12 @@ impl UpdateOp {
                 "-c".into(),
                 hooks_setting,
                 "fetch".into(),
+                "--porcelain".into(),
+                "--dry-run".into(),
                 "--no-auto-maintenance".into(),
-                // The tracking ref is the whole destination: rewriting
-                // FETCH_HEAD would discard state the user's own fetch left
-                // there, which a check is not entitled to touch.
+                // Even a dry run appends to FETCH_HEAD without this flag, and
+                // rewriting FETCH_HEAD would discard state the user's own
+                // fetch left there, which a check is not entitled to touch.
                 "--no-write-fetch-head".into(),
                 "--no-tags".into(),
                 "--no-prune".into(),
@@ -342,7 +547,7 @@ impl UpdateOp {
         // value is the other half: the tracking ref is the user's, and an
         // ordinary `git fetch` or another Skilled process may have advanced it
         // while this one was fetching. Naming what was there makes Git refuse
-        // rather than roll their newer value back to this staged one.
+        // rather than roll their newer value back to this reported one.
         if let Self::PublishRef {
             reference,
             revision,
@@ -360,22 +565,6 @@ impl UpdateOp {
                 reference.into(),
                 revision.into(),
                 expected.into(),
-            ];
-        }
-        if let Self::DeleteRef {
-            reference,
-            hooks_path,
-        } = self
-        {
-            let mut hooks_setting = OsString::from("core.hooksPath=");
-            hooks_setting.push(hooks_path);
-            return vec![
-                "-c".into(),
-                hooks_setting,
-                "update-ref".into(),
-                "--no-deref".into(),
-                "-d".into(),
-                reference.into(),
             ];
         }
         // The default listing keeps the entry's mode, which is the whole point
@@ -412,11 +601,6 @@ impl UpdateOp {
                 "--format=%(objectname)%09%(symref)".into(),
                 reference.clone(),
             ],
-            Self::RefsPresent(names) => {
-                let mut arguments = vec!["for-each-ref".into(), "--format=%(refname)".into()];
-                arguments.extend(names.iter().cloned());
-                arguments
-            }
             Self::RemoteUrl(remote) => {
                 vec!["ls-remote".into(), "--get-url".into(), remote.clone()]
             }
@@ -513,7 +697,7 @@ impl UpdateOp {
                     format!("{revision}^{{commit}}"),
                 ]
             }
-            Self::TreeEntryMode { .. } | Self::PublishRef { .. } | Self::DeleteRef { .. } => {
+            Self::TreeEntryMode { .. } | Self::PublishRef { .. } => {
                 unreachable!("tree and ref operations return above")
             }
             Self::Status => vec![
@@ -548,6 +732,16 @@ impl UpdateOp {
         strings.into_iter().map(OsString::from).collect()
     }
 
+    // `GIT_NO_LAZY_FETCH` backstops the partial-clone refusals on every
+    // process but the merge: an inspection that touches an object a promisor
+    // remote could supply must fail rather than fetch it, because that fetch
+    // would run the checkout's own transport configuration outside the one
+    // process hardened for the network. Git honours the variable from 2.45;
+    // on the 2.41–2.44 floor the re-asked `repository_is_partial_clone`
+    // guards are the only cover, which is why they are re-asked rather than
+    // remembered. The merge is exempt for the same reason it keeps the
+    // repository's configuration: partial clones are refused long before a
+    // plan exists, and the plan disclosed what the merge may run.
     fn environment(&self) -> Vec<(OsString, OsString)> {
         match self {
             Self::Merge(_) => Vec::new(),
@@ -579,12 +773,17 @@ impl UpdateOp {
                 ("GIT_SSH_COMMAND".into(), ssh_command.into()),
                 ("GIT_ALLOW_PROTOCOL".into(), allowed_protocols.into()),
                 ("GIT_OPTIONAL_LOCKS".into(), "0".into()),
+                ("GIT_NO_LAZY_FETCH".into(), "1".into()),
             ],
             Self::TreeEntryMode { .. } => vec![
                 ("GIT_OPTIONAL_LOCKS".into(), "0".into()),
                 ("GIT_LITERAL_PATHSPECS".into(), "1".into()),
+                ("GIT_NO_LAZY_FETCH".into(), "1".into()),
             ],
-            _ => vec![("GIT_OPTIONAL_LOCKS".into(), "0".into())],
+            _ => vec![
+                ("GIT_OPTIONAL_LOCKS".into(), "0".into()),
+                ("GIT_NO_LAZY_FETCH".into(), "1".into()),
+            ],
         }
     }
 }
@@ -626,7 +825,7 @@ fn force_ssh_batch_mode(command: &str) -> Result<String> {
     ))
 }
 
-fn command(repository: &Path, op: &UpdateOp) -> Command {
+fn command(repository: GitTarget<'_>, op: &UpdateOp) -> Command {
     debug_assert!(UPDATE_SUBCOMMANDS.contains(&op.subcommand()));
     let mut command = Command::new("git");
     for key in REPOSITORY_ROUTING_ENVIRONMENT {
@@ -640,21 +839,45 @@ fn command(repository: &Path, op: &UpdateOp) -> Command {
             "core.untrackedCache=false",
         ]);
     }
-    command.arg("-C").arg(repository).args(op.arguments());
+    match repository {
+        GitTarget::Path(path) => {
+            command.arg("-C").arg(path);
+        }
+        GitTarget::Handle(handle) => {
+            bind_to_handle(&mut command, handle);
+            // Resolved from the bound working directory, these two pin what a
+            // pathname spawn leaves to rediscovery. `GIT_DIR=.git` names the
+            // repository inside the held directory and nowhere else: a `.git`
+            // deleted after the pin becomes a refusal instead of an upward
+            // walk into whatever parent repository the pathname sits under.
+            // `GIT_WORK_TREE=.` makes the held directory the worktree
+            // outright, overriding a `core.worktree` that arrived in the
+            // configuration afterwards — the one lever that could otherwise
+            // send the confirmed merge's writes outside the pinned checkout.
+            // Every checkout Skilled registers is a worktree top level, where
+            // both spellings are exactly what discovery would have concluded.
+            // What stays with Git is the `.git` *contents*: an object swapped
+            // in place still decides hooks and configuration, because Git
+            // accepts no descriptor-pinned repository — see the type's
+            // documentation for why that boundary is accepted.
+            command.env("GIT_DIR", ".git").env("GIT_WORK_TREE", ".");
+        }
+    }
+    command.args(op.arguments());
     for (key, value) in op.environment() {
         command.env(key, value);
     }
     command
 }
 
-fn run(repository: &Path, op: UpdateOp) -> Result<Output> {
+fn run(repository: GitTarget<'_>, op: UpdateOp) -> Result<Output> {
     command(repository, &op)
         .output()
         .map_err(Error::GitUnavailable)
 }
 
 fn run_cancellable(
-    repository: &Path,
+    repository: GitTarget<'_>,
     op: &UpdateOp,
     cancelled: &AtomicBool,
     child_slot: &Mutex<Option<Child>>,
@@ -751,7 +974,7 @@ fn collect_cancellable_child(
 }
 
 fn required_cancellable(
-    repository: &Path,
+    repository: GitTarget<'_>,
     op: UpdateOp,
     cancelled: &AtomicBool,
     child_slot: &Mutex<Option<Child>>,
@@ -768,7 +991,7 @@ fn required_cancellable(
 }
 
 fn optional_cancellable(
-    repository: &Path,
+    repository: GitTarget<'_>,
     op: UpdateOp,
     cancelled: &AtomicBool,
     child_slot: &Mutex<Option<Child>>,
@@ -777,7 +1000,7 @@ fn optional_cancellable(
         .map(|output| output.status.success().then_some(output.stdout)))
 }
 
-fn required(repository: &Path, op: UpdateOp) -> Result<Vec<u8>> {
+fn required(repository: GitTarget<'_>, op: UpdateOp) -> Result<Vec<u8>> {
     let arguments = op.arguments();
     let output = run(repository, op)?;
     if output.status.success() {
@@ -786,12 +1009,12 @@ fn required(repository: &Path, op: UpdateOp) -> Result<Vec<u8>> {
     Err(git_error(repository, &arguments, &output))
 }
 
-fn optional(repository: &Path, op: UpdateOp) -> Result<Option<Vec<u8>>> {
+fn optional(repository: GitTarget<'_>, op: UpdateOp) -> Result<Option<Vec<u8>>> {
     let output = run(repository, op)?;
     Ok(output.status.success().then_some(output.stdout))
 }
 
-pub fn head_state(repository: &Path) -> Result<HeadState> {
+pub fn head_state(repository: GitTarget<'_>) -> Result<HeadState> {
     let revision = text(required(repository, UpdateOp::RevParse("HEAD".into()))?);
     let reference = optional(repository, UpdateOp::SymbolicHead)?
         .map(text)
@@ -806,7 +1029,7 @@ pub fn head_state(repository: &Path) -> Result<HeadState> {
 }
 
 pub(crate) fn head_state_cancellable(
-    repository: &Path,
+    repository: GitTarget<'_>,
     cancelled: &AtomicBool,
     child_slot: &Mutex<Option<Child>>,
 ) -> Result<Option<HeadState>> {
@@ -835,8 +1058,16 @@ pub(crate) fn head_state_cancellable(
     }))
 }
 
+pub(crate) fn repository_git_dir(repository: GitTarget<'_>) -> Result<PathBuf> {
+    let value = text(required(repository, UpdateOp::AbsoluteGitDir)?);
+    if value.is_empty() {
+        return Err(Error::InvalidGitOutput);
+    }
+    Ok(PathBuf::from(value))
+}
+
 pub(crate) fn repository_git_dir_cancellable(
-    repository: &Path,
+    repository: GitTarget<'_>,
     cancelled: &AtomicBool,
     child_slot: &Mutex<Option<Child>>,
 ) -> Result<Option<PathBuf>> {
@@ -854,7 +1085,7 @@ pub(crate) fn repository_git_dir_cancellable(
 
 /// Resolve the configured upstream before a fetch. Returning `None` performs no
 /// network operation and lets the classifier retain `source.no_upstream`.
-pub fn upstream_of(repository: &Path, head: &HeadState) -> Result<Option<Upstream>> {
+pub fn upstream_of(repository: GitTarget<'_>, head: &HeadState) -> Result<Option<Upstream>> {
     let Some(reference) = head.reference() else {
         return Ok(None);
     };
@@ -896,7 +1127,7 @@ pub fn upstream_of(repository: &Path, head: &HeadState) -> Result<Option<Upstrea
 }
 
 pub(crate) fn upstream_of_cancellable(
-    repository: &Path,
+    repository: GitTarget<'_>,
     head: &HeadState,
     cancelled: &AtomicBool,
     child_slot: &Mutex<Option<Child>>,
@@ -982,7 +1213,7 @@ pub(crate) fn upstream_of_cancellable(
     })))
 }
 
-pub fn config_get(repository: &Path, key: &str) -> Result<Option<String>> {
+pub fn config_get(repository: GitTarget<'_>, key: &str) -> Result<Option<String>> {
     Ok(optional(repository, UpdateOp::ConfigGet(key.into()))?
         .map(text)
         .filter(|s| !s.is_empty()))
@@ -997,7 +1228,7 @@ pub fn config_get(repository: &Path, key: &str) -> Result<Option<String>> {
 /// read reach the network, which is exactly the access an explicit check
 /// exists to bound, so all of them refuse the update rather than only the
 /// extension key.
-pub(crate) fn repository_is_partial_clone(repository: &Path) -> Result<bool> {
+pub(crate) fn repository_is_partial_clone(repository: GitTarget<'_>) -> Result<bool> {
     let op = UpdateOp::PromisorSettings;
     let arguments = op.arguments();
     let output = run(repository, op)?;
@@ -1072,7 +1303,7 @@ const SSH_COMMAND_PATTERN: &str = r"^core\.sshcommand$";
 /// key inside the checkout blocks the check. `--show-scope` is what separates
 /// them, and it reports a value pulled in by an `include.path` from the local
 /// file as `local`, so a setting cannot be hidden behind an include.
-pub(crate) fn repository_transport_code(repository: &Path) -> Result<Option<String>> {
+pub(crate) fn repository_transport_code(repository: GitTarget<'_>) -> Result<Option<String>> {
     let op = UpdateOp::TransportSettings;
     let arguments = op.arguments();
     let output = run(repository, op)?;
@@ -1088,7 +1319,7 @@ pub(crate) fn repository_transport_code(repository: &Path) -> Result<Option<Stri
 }
 
 pub(crate) fn repository_transport_code_cancellable(
-    repository: &Path,
+    repository: GitTarget<'_>,
     cancelled: &AtomicBool,
     child_slot: &Mutex<Option<Child>>,
 ) -> Result<Option<Option<String>>> {
@@ -1115,7 +1346,7 @@ pub(crate) fn repository_transport_code_cancellable(
 /// `protocol.*` policy is theirs the same way `merge.verifySignatures` is. The
 /// checkout's scopes are read out of that last one, so a repository can neither
 /// grant itself a transport nor deny the user one.
-fn permitted_transports(repository: &Path) -> Result<String> {
+fn permitted_transports(repository: GitTarget<'_>) -> Result<String> {
     Ok(narrowed_transports(
         &transport_policy(repository)?,
         &inherited_transport_boundary(),
@@ -1123,7 +1354,7 @@ fn permitted_transports(repository: &Path) -> Result<String> {
 }
 
 fn permitted_transports_cancellable(
-    repository: &Path,
+    repository: GitTarget<'_>,
     cancelled: &AtomicBool,
     child_slot: &Mutex<Option<Child>>,
 ) -> Result<Option<String>> {
@@ -1136,7 +1367,7 @@ fn permitted_transports_cancellable(
     )))
 }
 
-fn transport_policy(repository: &Path) -> Result<TransportPolicy> {
+fn transport_policy(repository: GitTarget<'_>) -> Result<TransportPolicy> {
     let op = UpdateOp::TransportPolicy;
     let arguments = op.arguments();
     let output = run(repository, op)?;
@@ -1152,7 +1383,7 @@ fn transport_policy(repository: &Path) -> Result<TransportPolicy> {
 }
 
 fn transport_policy_cancellable(
-    repository: &Path,
+    repository: GitTarget<'_>,
     cancelled: &AtomicBool,
     child_slot: &Mutex<Option<Child>>,
 ) -> Result<Option<TransportPolicy>> {
@@ -1333,7 +1564,7 @@ fn narrowed_transports(policy: &TransportPolicy, boundary: &TransportBoundary) -
 /// meanwhile. The check still refuses a repository-scoped value, because a
 /// checkout that names a program is a thing to report and not merely to
 /// disregard.
-fn user_ssh_command(repository: &Path) -> Result<Option<String>> {
+fn user_ssh_command(repository: GitTarget<'_>) -> Result<Option<String>> {
     let op = UpdateOp::UserSshCommand;
     let arguments = op.arguments();
     let output = run(repository, op)?;
@@ -1348,7 +1579,7 @@ fn user_ssh_command(repository: &Path) -> Result<Option<String>> {
 }
 
 fn user_ssh_command_cancellable(
-    repository: &Path,
+    repository: GitTarget<'_>,
     cancelled: &AtomicBool,
     child_slot: &Mutex<Option<Child>>,
 ) -> Result<Option<Option<String>>> {
@@ -1489,7 +1720,10 @@ fn transport_setting_is_disabled(name: &str, value: &str) -> bool {
 /// ordinary HTTPS address to a naive read and still be fetched as `ext::`.
 /// `ls-remote --get-url` applies the rewrites and reports what Git would use,
 /// and it is documented to exit without contacting the remote.
-pub(crate) fn effective_remote_url(repository: &Path, remote: &str) -> Result<Option<String>> {
+pub(crate) fn effective_remote_url(
+    repository: GitTarget<'_>,
+    remote: &str,
+) -> Result<Option<String>> {
     let op = UpdateOp::RemoteUrl(remote.to_owned());
     let arguments = op.arguments();
     let output = run(repository, op)?;
@@ -1501,7 +1735,7 @@ pub(crate) fn effective_remote_url(repository: &Path, remote: &str) -> Result<Op
 }
 
 pub(crate) fn effective_remote_url_cancellable(
-    repository: &Path,
+    repository: GitTarget<'_>,
     remote: &str,
     cancelled: &AtomicBool,
     child_slot: &Mutex<Option<Child>>,
@@ -1557,7 +1791,7 @@ pub(crate) fn remote_url_runs_a_helper(url: &str) -> bool {
 }
 
 pub(crate) fn repository_is_partial_clone_cancellable(
-    repository: &Path,
+    repository: GitTarget<'_>,
     cancelled: &AtomicBool,
     child_slot: &Mutex<Option<Child>>,
 ) -> Result<Option<bool>> {
@@ -1606,7 +1840,7 @@ fn parse_promisor_settings(bytes: Vec<u8>) -> Result<bool> {
 }
 
 pub(crate) fn config_get_cancellable(
-    repository: &Path,
+    repository: GitTarget<'_>,
     key: &str,
     cancelled: &AtomicBool,
     child_slot: &Mutex<Option<Child>>,
@@ -1628,7 +1862,7 @@ pub(crate) fn config_get_cancellable(
 /// which a forced refspec would then rewrite during a check the user was told
 /// only reads. The name is checked here, immediately before the fetch that
 /// would use it, and the refusal happens before any network access.
-fn reject_symbolic_tracking_ref(repository: &Path, upstream: &Upstream) -> Result<()> {
+fn reject_symbolic_tracking_ref(repository: GitTarget<'_>, upstream: &Upstream) -> Result<()> {
     let op = UpdateOp::SymbolicRef(upstream.tracking_ref.clone());
     let arguments = op.arguments();
     let output = run(repository, op)?;
@@ -1636,7 +1870,7 @@ fn reject_symbolic_tracking_ref(repository: &Path, upstream: &Upstream) -> Resul
 }
 
 fn reject_symbolic_tracking_ref_cancellable(
-    repository: &Path,
+    repository: GitTarget<'_>,
     upstream: &Upstream,
     cancelled: &AtomicBool,
     child_slot: &Mutex<Option<Child>>,
@@ -1653,7 +1887,7 @@ fn reject_symbolic_tracking_ref_cancellable(
 /// for a direct ref and for one that does not exist yet; neither of those can
 /// send the update anywhere but the named destination.
 fn symbolic_tracking_ref_verdict(
-    repository: &Path,
+    repository: GitTarget<'_>,
     upstream: &Upstream,
     arguments: &[OsString],
     output: &Output,
@@ -1682,119 +1916,80 @@ const SUPPRESSED_HOOKS_PATH: &str = "/dev/null";
 #[cfg(windows)]
 const SUPPRESSED_HOOKS_PATH: &str = "NUL";
 
-/// The two names a staging ref under `refs/skilled/fetch/` needs to be
-/// directories rather than refs.
-const STAGING_NAMESPACE_ROOT: &str = "refs/skilled";
-const STAGING_NAMESPACE: &str = "refs/skilled/fetch";
+/// Where a fetch destination name nests. The name exists in the refspec and
+/// in the porcelain report, and nowhere else.
+const FETCH_DESTINATION_NAMESPACE: &str = "refs/skilled/fetch";
 
-/// A fetch destination no other party can have prepared.
+/// A fetch destination that is only ever a name.
 ///
 /// Git dereferences a symbolic ref when a transaction updates it, so a fetch
-/// that names `refs/remotes/<remote>/<branch>` as its destination writes
-/// wherever that name points — a local branch included, if one is substituted
-/// after [`reject_symbolic_tracking_ref`] returns. Checking the name and using
-/// it are two processes and cannot be made one, so the destination is moved
-/// out of the attacker's reach instead: a name under `refs/skilled/fetch/`
-/// that this invocation alone chose, deleted immediately before the fetch so
-/// nothing can be standing at it, and deleted again afterwards. The
-/// remote-tracking ref is then written from the fetched object with
-/// `update-ref --no-deref`, which writes the named ref itself.
+/// that writes any ref writes wherever that ref's name points — a local
+/// branch included, if a symbolic ref is substituted for the destination
+/// between any check and Git's own transaction. An earlier revision of this
+/// check narrowed that race by fetching into a per-invocation staging ref,
+/// deleted before and after and re-checked in between; `skilled-q59` records
+/// why a name that is checked and then written stays reachable. The
+/// destination is now never written at all: the fetch runs with `--dry-run`,
+/// which stores the objects and then skips every ref update, and the object
+/// it obtained comes back through `--porcelain`'s report instead of a ref.
+/// A name no process writes cannot be redirected, whatever is standing at
+/// it — a direct ref, a symbolic ref, or a ref occupying the namespace
+/// itself, each observed inert under a dry run on Git 2.50. That last case is
+/// also why the namespace needs no occupancy probe or fallback spelling: a
+/// directory/file conflict only exists for a write.
 ///
-/// This narrows the race rather than closing it. The name is derived, not
-/// drawn from a cryptographic source, and it appears in the fetch process's
-/// own arguments, so a party that can both observe those and write refs could
-/// still plant a symbolic ref between the deletion and Git's ref transaction.
-/// [`reject_symbolic_staging_ref`] then reports it, after the fact. Closing it
-/// needs a fetch that writes no dereferenceable ref at all, which changes what
-/// the check hands the preview; that is `skilled-q59`.
-///
-/// `refs/skilled` and `refs/skilled/fetch` are ordinary ref names a user may
-/// already hold. Git cannot have a ref and a directory of refs at the same
-/// name, so either of them existing would make every staging ref under it
-/// impossible to create and every check on that repository fail — a permanent
-/// refusal caused by Skilled's own choice of name. When that is the case the
-/// destination becomes a flat `refs/skilled-fetch-<generated>` instead, which
-/// needs no reserved parent directory.
-fn staging_ref(repository: &Path) -> Result<String> {
-    let unique = staging_ref_unique();
-    Ok(if staging_namespace_is_occupied(repository)? {
-        format!("refs/skilled-fetch-{unique}")
-    } else {
-        format!("{STAGING_NAMESPACE}/{unique}")
-    })
-}
-
-/// The part of a staging name that makes it this invocation's alone.
-fn staging_ref_unique() -> String {
+/// The name is still unique per invocation, for the report rather than for
+/// safety: the porcelain line is matched by destination, and a destination no
+/// other party prepared cannot already hold the incoming object — which is
+/// the one documented way a refspec earns no report line, and so a state
+/// [`reported_revision`]'s caller may treat as tampering rather than routine.
+fn fetch_destination() -> String {
     static SEQUENCE: AtomicU64 = AtomicU64::new(0);
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
     format!(
-        "{:x}-{nanos:x}-{:x}",
+        "{FETCH_DESTINATION_NAMESPACE}/{:x}-{nanos:x}-{:x}",
         std::process::id(),
         SEQUENCE.fetch_add(1, Ordering::Relaxed)
     )
 }
 
-/// The name a staging ref takes when the namespace is free, for fixtures and
-/// for the tests that assert on its shape.
-fn staging_ref_name() -> String {
-    format!("{STAGING_NAMESPACE}/{}", staging_ref_unique())
-}
-
-/// Whether either ancestor of the usual staging name is itself a ref.
+/// The object the porcelain report names for `destination`, if exactly one
+/// plausible line does.
 ///
-/// One process asks about both: `for-each-ref` takes exact names as patterns,
-/// and any output at all means the namespace cannot hold children.
-fn staging_namespace_is_occupied(repository: &Path) -> Result<bool> {
-    let op = UpdateOp::RefsPresent(vec![
-        STAGING_NAMESPACE_ROOT.to_owned(),
-        STAGING_NAMESPACE.to_owned(),
-    ]);
-    let arguments = op.arguments();
-    let output = run(repository, op)?;
-    if !output.status.success() {
-        return Err(git_error(repository, &arguments, &output));
+/// `--porcelain` prints one `<flag> <old-oid> <new-oid> <local-reference>`
+/// line per refspec. The flag is a single character that may itself be a
+/// space, so the line is read from its end rather than its start: the last
+/// field is the destination and the field before it the incoming object. The
+/// old object is ignored — when something is standing at the destination the
+/// dry run reads it, possibly through a substituted symbolic ref, and evidence
+/// obtained that way must not shape the result. The incoming object must
+/// spell a full object name that is not the all-zero absent marker, because
+/// the caller is about to publish it to the user's remote-tracking ref.
+fn reported_revision(stdout: &[u8], destination: &str) -> Option<String> {
+    let report = String::from_utf8_lossy(stdout);
+    let mut revisions = report.lines().filter_map(|line| {
+        let mut fields = line.split_whitespace().rev();
+        (fields.next() == Some(destination))
+            .then(|| fields.next())
+            .flatten()
+    });
+    let revision = revisions.next()?;
+    if revisions.next().is_some() || !full_object_name(revision) {
+        return None;
     }
-    Ok(!output.stdout.is_empty())
+    Some(revision.to_owned())
 }
 
-fn delete_ref_op(reference: &str) -> UpdateOp {
-    UpdateOp::DeleteRef {
-        reference: reference.to_owned(),
-        hooks_path: SUPPRESSED_HOOKS_PATH.into(),
-    }
-}
-
-fn delete_ref(repository: &Path, reference: &str) -> Result<()> {
-    let op = delete_ref_op(reference);
-    let arguments = op.arguments();
-    let output = run(repository, op)?;
-    if output.status.success() {
-        Ok(())
-    } else {
-        Err(git_error(repository, &arguments, &output))
-    }
-}
-
-fn delete_ref_cancellable(
-    repository: &Path,
-    reference: &str,
-    cancelled: &AtomicBool,
-    child_slot: &Mutex<Option<Child>>,
-) -> Result<Option<()>> {
-    let op = delete_ref_op(reference);
-    let arguments = op.arguments();
-    let Some(output) = run_cancellable(repository, &op, cancelled, child_slot)? else {
-        return Ok(None);
-    };
-    if output.status.success() {
-        Ok(Some(()))
-    } else {
-        Err(git_error(repository, &arguments, &output))
-    }
+/// Whether `revision` spells out an entire object name: every byte hex, at a
+/// documented object-name length, and not the all-zero marker Git uses for a
+/// ref that is absent.
+fn full_object_name(revision: &str) -> bool {
+    matches!(revision.len(), 40 | 64)
+        && revision.bytes().all(|byte| byte.is_ascii_hexdigit())
+        && revision.bytes().any(|byte| byte != b'0')
 }
 
 /// The object a *direct* ref names: `None` when the ref does not exist, and
@@ -1806,13 +2001,13 @@ fn delete_ref_cancellable(
 /// be direct for the first answer and symbolic for the second, and a value
 /// read through a substituted symbolic ref is the referent's — exactly the
 /// state the publication is refusing.
-fn direct_ref_object(repository: &Path, reference: &str) -> Result<Option<String>> {
+fn direct_ref_object(repository: GitTarget<'_>, reference: &str) -> Result<Option<String>> {
     let output = run(repository, UpdateOp::RefState(reference.to_owned()))?;
     Ok(parse_direct_ref_object(&output))
 }
 
 fn direct_ref_object_cancellable(
-    repository: &Path,
+    repository: GitTarget<'_>,
     reference: &str,
     cancelled: &AtomicBool,
     child_slot: &Mutex<Option<Child>>,
@@ -1842,7 +2037,7 @@ fn parse_direct_ref_object(output: &Output) -> Option<String> {
 /// first with the very same object.
 ///
 /// The compare-and-swap exists to stop this fetch rolling a newer value back,
-/// and a ref already holding exactly what was staged is not that: another
+/// and a ref already holding exactly what the fetch reported is not that: another
 /// `git fetch` or another Skilled process reached the same upstream commit and
 /// wrote it. Reporting a fetch failure there would cache a blocker describing
 /// nothing that is wrong, and — because the later run holds the later
@@ -1852,7 +2047,7 @@ fn parse_direct_ref_object(output: &Output) -> Option<String> {
 /// for a symbolic ref, so a ref substituted for one whose referent happens to
 /// hold `revision` is not mistaken for a ref that holds it.
 fn publish_or_accept_identical(
-    repository: &Path,
+    repository: GitTarget<'_>,
     upstream: &Upstream,
     revision: &str,
     expected: Option<&str>,
@@ -1879,7 +2074,7 @@ fn publish_ref_op(reference: &str, revision: &str, expected: Option<&str>) -> Up
 }
 
 fn publish_ref(
-    repository: &Path,
+    repository: GitTarget<'_>,
     reference: &str,
     revision: &str,
     expected: Option<&str>,
@@ -1895,7 +2090,7 @@ fn publish_ref(
 }
 
 fn publish_ref_cancellable(
-    repository: &Path,
+    repository: GitTarget<'_>,
     reference: &str,
     revision: &str,
     expected: Option<&str>,
@@ -1938,7 +2133,27 @@ fn fetch_op(upstream: &Upstream, transport: FetchTransport, destination: &str) -
     }
 }
 
-pub fn fetch_upstream(repository: &Path, upstream: &Upstream) -> Result<String> {
+/// Check the configured upstream and publish what it holds, without the fetch
+/// writing any ref of its own.
+///
+/// The publication that follows the fetch is the one ref write the check
+/// performs, and it is confined by construction: `update-ref --no-deref`
+/// writes the named remote-tracking ref itself, never a referent, so no
+/// substitution can send the write outside that name. What `--no-deref`
+/// cannot do — observed across `update`, guarded delete, and must-not-exist
+/// creation alike on Git 2.50 — is refuse a symbolic ref: every form resolves
+/// the ref's referent to answer the old-value check and then replaces the
+/// symbolic ref in place with a direct one. Git offers no single operation
+/// that asserts a ref's kind and its value together, so the kind check is a
+/// separate process immediately before the write, twice over: a tracking ref
+/// that is symbolic when the check starts, or when the publication is
+/// reached, is refused untouched. What remains is a ref made symbolic inside
+/// the final check-to-write gap. Such a ref is replaced rather than refused —
+/// its referent still never written — and since a symbolic ref standing at
+/// check start refuses the whole check, the ref lost that way existed only
+/// for the seconds this check was running. That residual, and the argument
+/// for accepting it, is the `skilled-q59` closeout record.
+pub fn fetch_upstream(repository: GitTarget<'_>, upstream: &Upstream) -> Result<String> {
     reject_symbolic_tracking_ref(repository, upstream)?;
     let transport = FetchTransport {
         ssh_command: force_ssh_batch_mode(
@@ -1952,95 +2167,57 @@ pub fn fetch_upstream(repository: &Path, upstream: &Upstream) -> Result<String> 
     // Read before the fetch, so the publication below can say what it expected
     // to be replacing rather than overwriting whatever arrived meanwhile.
     let before = direct_ref_object(repository, &upstream.tracking_ref)?;
-    let staging = staging_ref(repository)?;
-    let fetched = fetch_into_staging(repository, upstream, transport, &staging);
-    let published = fetched.and_then(|revision| {
-        // Refused rather than clobbered: a tracking ref the user made symbolic
-        // is theirs, and `--no-deref` would overwrite it in place. The check
-        // is for that case; the flag is what makes losing the race harmless.
-        reject_symbolic_tracking_ref(repository, upstream)?;
-        publish_or_accept_identical(repository, upstream, &revision, before.as_deref())?;
-        Ok(revision)
-    });
-    // A staging ref left behind is a write into the user's repository that
-    // outlives the operation that made it, so a check may not report success
-    // over one. An already-failing result keeps its own error, which says more
-    // about what went wrong than the cleanup does.
-    let removed = delete_ref(repository, &staging);
-    published.and_then(|revision| removed.map(|()| revision))
+    let revision = fetch_reported_revision(repository, upstream, transport)?;
+    // Refused rather than clobbered: a tracking ref the user made symbolic
+    // is theirs, and `--no-deref` would overwrite it in place. The check
+    // is for that case; the flag is what makes losing the race harmless to
+    // everything but the substituted ref itself.
+    reject_symbolic_tracking_ref(repository, upstream)?;
+    publish_or_accept_identical(repository, upstream, &revision, before.as_deref())?;
+    Ok(revision)
 }
 
-/// Fetch the upstream branch into `staging` and return the object it holds.
-fn fetch_into_staging(
-    repository: &Path,
+/// Fetch the upstream branch's objects and return the commit the transport
+/// reported, leaving every ref exactly as it was.
+fn fetch_reported_revision(
+    repository: GitTarget<'_>,
     upstream: &Upstream,
     transport: FetchTransport,
-    staging: &str,
 ) -> Result<String> {
-    delete_ref(repository, staging)?;
-    let op = fetch_op(upstream, transport, staging);
+    let destination = fetch_destination();
+    let op = fetch_op(upstream, transport, &destination);
     let arguments = op.arguments();
     let output = run_bounded(repository, &op, MAX_FETCH_OUTPUT_BYTES)?;
     if !output.status.success() {
         return Err(git_error(repository, &arguments, &output));
     }
-    reject_symbolic_staging_ref(repository, staging)?;
-    Ok(text(required(
-        repository,
-        UpdateOp::RevParse(staging.to_owned()),
-    )?))
-}
-
-/// Refuse a staging ref that came back symbolic.
-///
-/// Nothing should be able to reach a name only this invocation chose, and the
-/// deletion immediately before the fetch means nothing was standing there. If
-/// one is symbolic anyway, the fetch wrote through it rather than to it, so
-/// the refusal reports a destination that was substituted rather than treating
-/// whatever it points at as the fetched upstream.
-fn reject_symbolic_staging_ref(repository: &Path, staging: &str) -> Result<()> {
-    let op = UpdateOp::SymbolicRef(staging.to_owned());
-    let arguments = op.arguments();
-    let output = run(repository, op)?;
-    staging_ref_verdict(repository, staging, &arguments, &output)
-}
-
-fn reject_symbolic_staging_ref_cancellable(
-    repository: &Path,
-    staging: &str,
-    cancelled: &AtomicBool,
-    child_slot: &Mutex<Option<Child>>,
-) -> Result<Option<()>> {
-    let op = UpdateOp::SymbolicRef(staging.to_owned());
-    let arguments = op.arguments();
-    let Some(output) = run_cancellable(repository, &op, cancelled, child_slot)? else {
-        return Ok(None);
+    let Some(revision) = reported_revision(&output.stdout, &destination) else {
+        return Err(Error::FetchUnreported);
     };
-    staging_ref_verdict(repository, staging, &arguments, &output).map(Some)
-}
-
-fn staging_ref_verdict(
-    repository: &Path,
-    staging: &str,
-    arguments: &[OsString],
-    output: &Output,
-) -> Result<()> {
-    if output.status.success() {
-        return Err(Error::SymbolicTrackingRef {
-            reference: staging.to_owned(),
-            target: text(output.stdout.clone()),
-        });
+    // Re-asked after the fetch, not remembered from the preflight: the read
+    // below touches an object, and a promisor remote configured while the
+    // fetch was running would let it fetch the object lazily — network access
+    // through the checkout's own transport configuration, outside the one
+    // process that was hardened for it. The gap between this answer and the
+    // read is the same two-process window every configuration guard has;
+    // `GIT_NO_LAZY_FETCH` on the read is what closes it where Git honours
+    // that variable.
+    if repository_is_partial_clone(repository)? {
+        return Err(Error::PartialCloneDuringCheck);
     }
-    if output.status.code() == Some(1) {
-        return Ok(());
+    // The report is the transport's word; the object store is the evidence. A
+    // dry run stores what it fetched, so a reported commit that cannot be
+    // read back was never actually obtained.
+    if !commit_exists(repository, &revision)? {
+        return Err(Error::FetchedCommitMissing { revision });
     }
-    Err(git_error(repository, arguments, output))
+    Ok(revision)
 }
 
 /// Fetch on a worker thread while publishing the child for main-thread
 /// cancellation. `None` is a clean cancellation, not a fetch failure.
 pub(crate) fn fetch_upstream_cancellable(
-    repository: &Path,
+    repository: GitTarget<'_>,
     upstream: &Upstream,
     cancelled: &AtomicBool,
     child_slot: &Mutex<Option<Child>>,
@@ -2072,76 +2249,59 @@ pub(crate) fn fetch_upstream_cancellable(
     else {
         return Ok(None);
     };
-    let staging = staging_ref(repository)?;
-    let fetched = fetch_into_staging_cancellable(
-        repository, upstream, transport, &staging, cancelled, child_slot,
-    );
-    let published = fetched.and_then(|revision| {
-        let Some(revision) = revision else {
-            return Ok(None);
-        };
-        if reject_symbolic_tracking_ref_cancellable(repository, upstream, cancelled, child_slot)?
-            .is_none()
-        {
-            return Ok(None);
-        }
-        let Some(attempt) = publish_ref_cancellable(
+    let Some(revision) = fetch_reported_revision_cancellable(
+        repository, upstream, transport, cancelled, child_slot,
+    )?
+    else {
+        return Ok(None);
+    };
+    if reject_symbolic_tracking_ref_cancellable(repository, upstream, cancelled, child_slot)?
+        .is_none()
+    {
+        return Ok(None);
+    }
+    let Some(attempt) = publish_ref_cancellable(
+        repository,
+        &upstream.tracking_ref,
+        &revision,
+        before.as_deref(),
+        cancelled,
+        child_slot,
+    )?
+    else {
+        return Ok(None);
+    };
+    if let Err(error) = attempt {
+        // The same tolerance the blocking path has, over the same
+        // single-process read: a ref already holding exactly what this
+        // fetch obtained was published by somebody who got there first, and
+        // is not the rollback the guard exists to stop. A symbolic ref
+        // reports no object of its own and so is never accepted here.
+        let Some(current) = direct_ref_object_cancellable(
             repository,
             &upstream.tracking_ref,
-            &revision,
-            before.as_deref(),
             cancelled,
             child_slot,
         )?
         else {
             return Ok(None);
         };
-        if let Err(error) = attempt {
-            // The same tolerance the blocking path has, over the same
-            // single-process read: a ref already holding exactly what this
-            // fetch staged was published by somebody who got there first, and
-            // is not the rollback the guard exists to stop. A symbolic ref
-            // reports no object of its own and so is never accepted here.
-            let Some(current) = direct_ref_object_cancellable(
-                repository,
-                &upstream.tracking_ref,
-                cancelled,
-                child_slot,
-            )?
-            else {
-                return Ok(None);
-            };
-            if current.as_deref() != Some(revision.as_str()) {
-                return Err(error);
-            }
+        if current.as_deref() != Some(revision.as_str()) {
+            return Err(error);
         }
-        Ok(Some(revision))
-    });
-    // Local, immediate, and worth doing even on the cancelled path: the
-    // staging ref is Skilled's own leftover, and a cancellation is not a
-    // reason to leave one behind. A cleanup that fails takes a successful
-    // fetch with it for the same reason it does in the blocking path — a
-    // check may not report success over a write it left in the repository —
-    // while a cancellation stays a cancellation.
-    let removed = delete_ref(repository, &staging);
-    published.and_then(|revision| match revision {
-        Some(revision) => removed.map(|()| Some(revision)),
-        None => Ok(None),
-    })
+    }
+    Ok(Some(revision))
 }
 
-fn fetch_into_staging_cancellable(
-    repository: &Path,
+fn fetch_reported_revision_cancellable(
+    repository: GitTarget<'_>,
     upstream: &Upstream,
     transport: FetchTransport,
-    staging: &str,
     cancelled: &AtomicBool,
     child_slot: &Mutex<Option<Child>>,
 ) -> Result<Option<String>> {
-    if delete_ref_cancellable(repository, staging, cancelled, child_slot)?.is_none() {
-        return Ok(None);
-    }
-    let op = fetch_op(upstream, transport, staging);
+    let destination = fetch_destination();
+    let op = fetch_op(upstream, transport, &destination);
     let arguments = op.arguments();
     let child = command(repository, &op)
         .stdin(Stdio::null())
@@ -2157,21 +2317,38 @@ fn fetch_into_staging_cancellable(
     if !output.status.success() {
         return Err(git_error(repository, &arguments, &output));
     }
-    if reject_symbolic_staging_ref_cancellable(repository, staging, cancelled, child_slot)?
-        .is_none()
-    {
+    let Some(revision) = reported_revision(&output.stdout, &destination) else {
+        return Err(Error::FetchUnreported);
+    };
+    // Re-asked after the fetch, for the reason given on the blocking path: a
+    // promisor remote configured while the fetch ran must not let the object
+    // read below reach the network.
+    let Some(partial_clone) =
+        repository_is_partial_clone_cancellable(repository, cancelled, child_slot)?
+    else {
         return Ok(None);
+    };
+    if partial_clone {
+        return Err(Error::PartialCloneDuringCheck);
     }
-    Ok(required_cancellable(
+    // The same evidence check as the blocking path: the report is the
+    // transport's word, and the object store is what the user can be shown.
+    let Some(present) = optional_cancellable(
         repository,
-        UpdateOp::RevParse(staging.to_owned()),
+        UpdateOp::CatFile(revision.clone()),
         cancelled,
         child_slot,
     )?
-    .map(text))
+    else {
+        return Ok(None);
+    };
+    if present.is_none() {
+        return Err(Error::FetchedCommitMissing { revision });
+    }
+    Ok(Some(revision))
 }
 
-fn run_bounded(repository: &Path, op: &UpdateOp, limit: usize) -> Result<Output> {
+fn run_bounded(repository: GitTarget<'_>, op: &UpdateOp, limit: usize) -> Result<Output> {
     let mut child = command(repository, op)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -2213,7 +2390,7 @@ fn upstream_refspec(upstream: &Upstream, destination: &str) -> String {
     format!("+{}:{}", upstream.merge_ref, destination)
 }
 
-pub fn merge_base(repository: &Path, left: &str, right: &str) -> Result<Option<String>> {
+pub fn merge_base(repository: GitTarget<'_>, left: &str, right: &str) -> Result<Option<String>> {
     let op = UpdateOp::MergeBase(left.into(), right.into());
     let arguments = op.arguments();
     let output = run(repository, op)?;
@@ -2227,7 +2404,7 @@ pub fn merge_base(repository: &Path, left: &str, right: &str) -> Result<Option<S
 }
 
 pub(crate) fn merge_base_cancellable(
-    repository: &Path,
+    repository: GitTarget<'_>,
     left: &str,
     right: &str,
     cancelled: &AtomicBool,
@@ -2247,7 +2424,7 @@ pub(crate) fn merge_base_cancellable(
     Err(git_error(repository, &arguments, &output))
 }
 
-pub fn ahead_behind(repository: &Path, left: &str, right: &str) -> Result<AheadBehind> {
+pub fn ahead_behind(repository: GitTarget<'_>, left: &str, right: &str) -> Result<AheadBehind> {
     let value = text(required(
         repository,
         UpdateOp::AheadBehind(left.into(), right.into()),
@@ -2268,7 +2445,7 @@ pub fn ahead_behind(repository: &Path, left: &str, right: &str) -> Result<AheadB
 }
 
 pub(crate) fn ahead_behind_cancellable(
-    repository: &Path,
+    repository: GitTarget<'_>,
     left: &str,
     right: &str,
     cancelled: &AtomicBool,
@@ -2302,7 +2479,11 @@ fn parse_ahead_behind(value: &str) -> Result<AheadBehind> {
     Ok(AheadBehind { ahead, behind })
 }
 
-pub fn changed_paths(repository: &Path, left: &str, right: &str) -> Result<Vec<ChangedPath>> {
+pub fn changed_paths(
+    repository: GitTarget<'_>,
+    left: &str,
+    right: &str,
+) -> Result<Vec<ChangedPath>> {
     let bytes = required(
         repository,
         UpdateOp::ChangedPaths(left.into(), right.into()),
@@ -2311,7 +2492,7 @@ pub fn changed_paths(repository: &Path, left: &str, right: &str) -> Result<Vec<C
 }
 
 pub(crate) fn changed_paths_cancellable(
-    repository: &Path,
+    repository: GitTarget<'_>,
     left: &str,
     right: &str,
     cancelled: &AtomicBool,
@@ -2376,7 +2557,7 @@ fn parse_changed_paths(bytes: Vec<u8>) -> Result<Vec<ChangedPath>> {
     Ok(paths)
 }
 
-pub fn commit_summaries(repository: &Path, left: &str, right: &str) -> Result<Vec<String>> {
+pub fn commit_summaries(repository: GitTarget<'_>, left: &str, right: &str) -> Result<Vec<String>> {
     let bytes = required(
         repository,
         UpdateOp::CommitSummaries(left.into(), right.into()),
@@ -2387,14 +2568,18 @@ pub fn commit_summaries(repository: &Path, left: &str, right: &str) -> Result<Ve
         .collect())
 }
 
-pub fn commit_exists(repository: &Path, revision: &str) -> Result<bool> {
+pub fn commit_exists(repository: GitTarget<'_>, revision: &str) -> Result<bool> {
     Ok(optional(repository, UpdateOp::CatFile(revision.into()))?.is_some())
 }
 
 /// The mode of the entry `path` names in the exact commit tree, if it names
 /// one. Literal pathspec handling keeps catalog names from becoming Git
 /// pattern syntax.
-fn tree_entry_mode(repository: &Path, revision: &str, path: &Path) -> Result<Option<Vec<u8>>> {
+fn tree_entry_mode(
+    repository: GitTarget<'_>,
+    revision: &str,
+    path: &Path,
+) -> Result<Option<Vec<u8>>> {
     let bytes = required(
         repository,
         UpdateOp::TreeEntryMode {
@@ -2431,7 +2616,11 @@ fn tree_entry_mode(repository: &Path, revision: &str, path: &Path) -> Result<Opt
 /// follows the write reports the installation as no longer loadable. The mode
 /// is what distinguishes them: `100644` and `100755` are regular files, and
 /// `120000` is a link.
-pub fn tree_regular_file_exists(repository: &Path, revision: &str, path: &Path) -> Result<bool> {
+pub fn tree_regular_file_exists(
+    repository: GitTarget<'_>,
+    revision: &str,
+    path: &Path,
+) -> Result<bool> {
     Ok(tree_entry_mode(repository, revision, path)?.is_some_and(|mode| mode.starts_with(b"100")))
 }
 
@@ -2440,7 +2629,7 @@ pub fn tree_regular_file_exists(repository: &Path, revision: &str, path: &Path) 
 /// A directory, a regular file, a symbolic link, or a submodule: what matters
 /// where a removal was disclosed is only whether an installed link would still
 /// have something to resolve to.
-pub fn tree_entry_exists(repository: &Path, revision: &str, path: &Path) -> Result<bool> {
+pub fn tree_entry_exists(repository: GitTarget<'_>, revision: &str, path: &Path) -> Result<bool> {
     Ok(tree_entry_mode(repository, revision, path)?.is_some())
 }
 
@@ -2452,7 +2641,7 @@ pub fn tree_entry_exists(repository: &Path, revision: &str, path: &Path) -> Resu
 /// every path under it, while an ancestor the update deletes outright leaves
 /// nothing to redirect.
 pub fn tree_directory_entry(
-    repository: &Path,
+    repository: GitTarget<'_>,
     revision: &str,
     path: &Path,
 ) -> Result<Option<bool>> {
@@ -2469,7 +2658,7 @@ pub fn tree_directory_entry(
     }))
 }
 
-pub fn worktree_state(repository: &Path) -> Result<WorktreeState> {
+pub fn worktree_state(repository: GitTarget<'_>) -> Result<WorktreeState> {
     let filter_settings = configured_filter_settings(repository)?;
     let configured_drivers = filter_settings
         .iter()
@@ -2495,7 +2684,7 @@ pub fn worktree_state(repository: &Path) -> Result<WorktreeState> {
 fn parse_worktree_status(
     bytes: Vec<u8>,
     configured_drivers: &HashSet<&str>,
-    filter_repository: Option<&Path>,
+    filter_repository: Option<GitTarget<'_>>,
 ) -> Result<WorktreeState> {
     let mut result = WorktreeState::default();
     let mut filter_ambiguous_paths = Vec::new();
@@ -2566,7 +2755,7 @@ fn parse_worktree_status(
 }
 
 pub(crate) fn worktree_state_cancellable(
-    repository: &Path,
+    repository: GitTarget<'_>,
     cancelled: &AtomicBool,
     child_slot: &Mutex<Option<Child>>,
 ) -> Result<Option<WorktreeState>> {
@@ -2611,7 +2800,7 @@ pub(crate) fn worktree_state_cancellable(
     parse_worktree_status(output.stdout, &configured_drivers, None).map(Some)
 }
 
-fn configured_filter_settings(repository: &Path) -> Result<Vec<(String, &'static str)>> {
+fn configured_filter_settings(repository: GitTarget<'_>) -> Result<Vec<(String, &'static str)>> {
     let op = UpdateOp::FilterSettings;
     let arguments = op.arguments();
     let output = run(repository, op)?;
@@ -2648,7 +2837,10 @@ fn configured_filter_driver(key: &str) -> Option<&str> {
     matches!(setting, "clean" | "process").then_some(driver)
 }
 
-fn filter_drivers_for_paths(repository: &Path, paths: &[Vec<u8>]) -> Result<Vec<Option<String>>> {
+fn filter_drivers_for_paths(
+    repository: GitTarget<'_>,
+    paths: &[Vec<u8>],
+) -> Result<Vec<Option<String>>> {
     let op = UpdateOp::CheckAttr;
     let arguments = op.arguments();
     let mut child = command(repository, &op)
@@ -2723,7 +2915,7 @@ fn filter_drivers_for_paths(repository: &Path, paths: &[Vec<u8>]) -> Result<Vec<
 
 /// Fast-forward to the exact object shown in the preview. Git's own hooks and
 /// checkout filters run; inspection-only configuration must not leak here.
-pub fn fast_forward(repository: &Path, revision: &str) -> Result<()> {
+pub fn fast_forward(repository: GitTarget<'_>, revision: &str) -> Result<()> {
     let op = UpdateOp::Merge(revision.into());
     let arguments = op.arguments();
     let output = run(repository, op)?;
@@ -2768,7 +2960,7 @@ pub fn update_operation_fixtures() -> Vec<OperationFixture> {
                     tracking_ref: "refs/remotes/origin/main".into(),
                     revision: None,
                 },
-                &staging_ref_name(),
+                &fetch_destination(),
             ),
             ssh_command: "ssh -o BatchMode=yes".into(),
             // What an unrestricted environment and an unset policy narrow to,
@@ -2786,10 +2978,6 @@ pub fn update_operation_fixtures() -> Vec<OperationFixture> {
             reference: "refs/remotes/origin/main".into(),
             revision: "abc".into(),
             expected: ABSENT_REF.into(),
-            hooks_path: SUPPRESSED_HOOKS_PATH.into(),
-        },
-        UpdateOp::DeleteRef {
-            reference: staging_ref_name(),
             hooks_path: SUPPRESSED_HOOKS_PATH.into(),
         },
         UpdateOp::Merge("abc".into()),
@@ -2814,9 +3002,9 @@ fn text(bytes: Vec<u8>) -> String {
         .to_owned()
 }
 
-fn git_error(repository: &Path, arguments: &[OsString], output: &Output) -> Error {
+fn git_error(repository: GitTarget<'_>, arguments: &[OsString], output: &Output) -> Error {
     Error::GitCommand {
-        repository: repository.to_path_buf(),
+        repository: repository.path().to_path_buf(),
         arguments: arguments
             .iter()
             .map(|arg| arg.to_string_lossy().into_owned())
@@ -3130,7 +3318,7 @@ mod tests {
     /// The publication is a compare-and-swap, and these are the two answers
     /// that are not a plain success: the ref moved to something else, which
     /// must fail rather than roll the user's newer value back, and the ref
-    /// already holds exactly what was staged, which is nothing to refuse.
+    /// already holds exactly what was reported, which is nothing to refuse.
     #[cfg(unix)]
     #[test]
     fn publication_refuses_a_moved_tracking_ref_but_accepts_an_identical_one() {
@@ -3212,10 +3400,10 @@ mod tests {
             ABSENT_REF,
         ]);
 
-        // The ref now holds `second` while the check staged `first` and
+        // The ref now holds `second` while the check obtained `first` and
         // expected to be replacing nothing: publishing would roll it back.
         assert!(
-            publish_or_accept_identical(&repository, &upstream, &first, None).is_err(),
+            publish_or_accept_identical((&repository).into(), &upstream, &first, None).is_err(),
             "publication rolled a moved tracking ref back"
         );
         assert_eq!(
@@ -3223,11 +3411,11 @@ mod tests {
             Some(second.as_str())
         );
 
-        // The ref already holds exactly what was staged, which is not the
+        // The ref already holds exactly what was reported, which is not the
         // rollback the compare-and-swap exists to stop.
         assert!(
-            publish_or_accept_identical(&repository, &upstream, &second, None).is_ok(),
-            "publication refused a ref already at the staged object"
+            publish_or_accept_identical((&repository).into(), &upstream, &second, None).is_ok(),
+            "publication refused a ref already at the reported object"
         );
     }
 
@@ -3559,16 +3747,80 @@ mod tests {
     }
 
     /// Two invocations must not be able to collide on a destination, or one
-    /// could observe the other's fetched object as its own.
+    /// could read the other's report line as its own.
     #[test]
-    fn every_staging_ref_is_its_own() {
-        assert_ne!(staging_ref_name(), staging_ref_name());
+    fn every_fetch_destination_is_its_own() {
+        assert_ne!(fetch_destination(), fetch_destination());
+    }
+
+    /// A read-only `open(2)` of a FIFO blocks until a writer appears, so a
+    /// FIFO substituted for the checkout between the pre-open reading and the
+    /// open could hang the pin inside the very window it defends. The flags
+    /// the pin opens with must make that open return at once instead — and,
+    /// on the platforms that define them, refuse the non-directory outright.
+    #[cfg(any(target_os = "macos", target_os = "ios", target_os = "linux"))]
+    #[test]
+    fn acquiring_a_fifo_with_the_pin_flags_returns_without_blocking() {
+        use std::os::unix::fs::OpenOptionsExt;
+        let Ok(temporary) = tempfile::tempdir() else {
+            return;
+        };
+        let fifo = temporary.path().join("substituted");
+        let made = Command::new("mkfifo")
+            .arg(&fifo)
+            .output()
+            .is_ok_and(|output| output.status.success());
+        if !made {
+            return;
+        }
+        // Returning at all is the property under test; with `O_DIRECTORY`
+        // defined, the return is a refusal.
+        let opened = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(O_DIRECTORY | O_NONBLOCK)
+            .open(&fifo);
+        assert!(opened.is_err(), "a FIFO was accepted as a directory");
+    }
+
+    /// The report is read from the end of each line because the flag column
+    /// may itself be a space, and only an exact, single, fully-spelled object
+    /// for the exact destination is believed.
+    #[test]
+    fn only_an_unambiguous_report_line_yields_a_revision() {
+        let destination = "refs/skilled/fetch/a-b-c";
+        let object = "6e0ab0cb6e0a6ab7410a1564cbdb4a6b27d45cbd";
+        let zeros = "0000000000000000000000000000000000000000";
+        let creation = format!("* {zeros} {object} {destination}\n");
+        assert_eq!(
+            reported_revision(creation.as_bytes(), destination),
+            Some(object.to_owned())
+        );
+        // A space flag: the line a forced update would print.
+        let forced = format!("  {object} {object} {destination}\n");
+        assert_eq!(
+            reported_revision(forced.as_bytes(), destination),
+            Some(object.to_owned())
+        );
+        // Another refspec's line is not this destination's report.
+        let other = format!("* {zeros} {object} refs/skilled/fetch/other\n");
+        assert_eq!(reported_revision(other.as_bytes(), destination), None);
+        // No line at all: a destination this invocation alone chose cannot be
+        // up to date, so silence is refused rather than defaulted.
+        assert_eq!(reported_revision(b"", destination), None);
+        // Two lines for one destination cannot both be the report.
+        let doubled = format!("{creation}{creation}");
+        assert_eq!(reported_revision(doubled.as_bytes(), destination), None);
+        // An all-zero or truncated object is not a fetched revision.
+        let absent = format!("- {object} {zeros} {destination}\n");
+        assert_eq!(reported_revision(absent.as_bytes(), destination), None);
+        let truncated = format!("* {zeros} {} {destination}\n", &object[..12]);
+        assert_eq!(reported_revision(truncated.as_bytes(), destination), None);
     }
 
     /// A symbolic ref holds no object of its own, and the object its referent
     /// holds is not evidence about it. Reporting that object would let a ref
     /// substituted for a symbolic one whose referent happens to hold the
-    /// staged revision be accepted as a ref that already holds it.
+    /// reported revision be accepted as a ref that already holds it.
     // `Output` needs an `ExitStatus`, which only the platform extension traits
     // construct; the parser under test is platform-neutral either way.
     #[cfg(unix)]
@@ -3595,16 +3847,16 @@ mod tests {
         }
     }
 
-    /// The tracking ref is written from the staged object rather than fetched
-    /// into, and `--no-deref` is what makes losing the substitution race
-    /// harmless: the named ref itself is written, never its referent.
+    /// The tracking ref is written from the reported object rather than
+    /// fetched into, and `--no-deref` is what confines losing the substitution
+    /// race: the named ref itself is written, never its referent.
     #[test]
     fn ref_updates_never_dereference_and_run_no_repository_hook() {
         let updates = update_operation_fixtures()
             .into_iter()
             .filter(|fixture| fixture.subcommand == "update-ref")
             .collect::<Vec<_>>();
-        assert_eq!(updates.len(), 2);
+        assert_eq!(updates.len(), 1);
         for update in updates {
             assert!(
                 update
@@ -3621,6 +3873,27 @@ mod tests {
                     .any(|argument| argument.to_string_lossy().starts_with("core.hooksPath=")),
                 "{:?}",
                 update.arguments
+            );
+        }
+    }
+
+    /// A lazily fetched object is network access through the checkout's own
+    /// transport configuration, outside the one process hardened for it.
+    /// Every process but the disclosed merge forbids it outright where Git
+    /// honours the variable; the re-asked partial-clone guards cover the
+    /// rest.
+    #[test]
+    fn every_process_but_the_merge_forbids_lazy_object_fetches() {
+        for fixture in update_operation_fixtures() {
+            let forbidden = fixture.environment.iter().any(|(key, value)| {
+                key == OsStr::new("GIT_NO_LAZY_FETCH") && value == OsStr::new("1")
+            });
+            assert_eq!(
+                forbidden,
+                fixture.subcommand != "merge",
+                "{}: {:?}",
+                fixture.subcommand,
+                fixture.environment
             );
         }
     }
@@ -3653,6 +3926,9 @@ mod tests {
             .expect("fetch fixture");
 
         for expected in [
+            "--porcelain",
+            "--dry-run",
+            "--no-write-fetch-head",
             "--no-tags",
             "--no-prune",
             "--no-prune-tags",
@@ -3697,7 +3973,8 @@ mod tests {
             stderr: b"fatal: https://user:secret@example.test/repository?token=pat".to_vec(),
         };
 
-        let error = git_error(Path::new("/repository"), &["fetch".into()], &output).to_string();
+        let error =
+            git_error(Path::new("/repository").into(), &["fetch".into()], &output).to_string();
 
         assert!(error.contains("status 1"), "{error}");
         assert!(error.contains("diagnostic was omitted"), "{error}");
@@ -3715,7 +3992,8 @@ mod tests {
             stderr: b"fatal: could not resolve host: secret.example.test".to_vec(),
         };
 
-        let error = git_error(Path::new("/repository"), &["fetch".into()], &output).to_string();
+        let error =
+            git_error(Path::new("/repository").into(), &["fetch".into()], &output).to_string();
 
         assert!(
             error.contains("remote host could not be resolved"),
@@ -3726,7 +4004,10 @@ mod tests {
 
     #[test]
     fn git_commands_remove_inherited_repository_routing() {
-        let command = command(Path::new("/registered"), &UpdateOp::Merge("abc".into()));
+        let command = command(
+            Path::new("/registered").into(),
+            &UpdateOp::Merge("abc".into()),
+        );
         let removed = command
             .get_envs()
             .filter(|(_, value)| value.is_none())

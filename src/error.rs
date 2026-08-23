@@ -92,6 +92,32 @@ pub enum Error {
         "remote-tracking ref {reference} is a symbolic ref to {target}; fetching it would move that ref instead"
     )]
     SymbolicTrackingRef { reference: String, target: String },
+    /// The fetch exited successfully but its report named no object for the
+    /// destination the refspec asked about.
+    ///
+    /// A destination this invocation alone chose cannot already be up to
+    /// date, so a silent report means a ref was standing at that name holding
+    /// the incoming object — something only a party guessing the name could
+    /// have arranged. Refusing is the safe reading either way: without a
+    /// reported object there is nothing to publish.
+    #[error("the fetch reported no object for its destination")]
+    FetchUnreported,
+    /// The fetch reported an object that is not a commit present locally.
+    ///
+    /// The report is the transport's claim and the object store is the ground
+    /// truth; publishing a revision the repository cannot show the user would
+    /// let the claim outrank the evidence.
+    #[error("the fetch reported {revision}, which is not a commit present in the repository")]
+    FetchedCommitMissing { revision: String },
+    /// The repository became a partial clone while the check was running.
+    ///
+    /// The check refused a partial clone before doing anything else, so this
+    /// says the promisor configuration appeared mid-check — and the reads
+    /// that follow the fetch touch objects, which a promisor remote would
+    /// let Git fetch lazily through the checkout's own transport
+    /// configuration.
+    #[error("the repository became a partial clone while the check was running")]
+    PartialCloneDuringCheck,
     #[error("git command failed in {repository:?}: git {arguments:?}: {stderr}")]
     GitCommand {
         repository: PathBuf,
