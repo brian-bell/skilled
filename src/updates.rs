@@ -1831,6 +1831,11 @@ fn surviving_removal(
             return Ok(Some(ancestor.to_path_buf()));
         }
     }
+    // The one read in this function that the caller's pin does not cover: the
+    // tree queries above are descriptor-bound Git children, while this walk
+    // re-resolves the pathname. Harmless at preview time, which promises
+    // nothing; under `validate_repository_update` it leaves the window
+    // `skilled-lr8` records.
     let mut budget = OCCUPANT_BUDGET;
     surviving_worktree_entry(
         &repository.path().join(candidate),
@@ -2142,17 +2147,30 @@ pub(crate) fn apply_repository_update_attempt(plan: &RepositoryUpdatePlan) -> (R
 /// Prove the checkout is the one the plan was confirmed against, and return
 /// the handle the merge must run through.
 ///
-/// Every guard here, and the fast-forward after it, is a Git process spawned
-/// through the returned [`git::RepositoryHandle`], so all of them act on the
-/// one directory that was pinned and identity-checked at the top — a checkout
+/// Every Git process here, and the fast-forward after it, is spawned through
+/// the returned [`git::RepositoryHandle`], so all of them act on the one
+/// directory that was pinned and identity-checked at the top — a checkout
 /// moved aside and replaced between any two of these steps changes what the
-/// pathname names, not what the processes read or write. What remains
-/// pathname-bound is the closing [`git::RepositoryHandle::still_names_its_path`]
-/// re-reading: the plan the user confirmed stated a path, so a proven
-/// repository that is no longer at that path is refused rather than written
-/// wherever it went. A rename inside the gap after that re-reading loses only
-/// the refusal — the write still lands in the proven repository, which is the
-/// inversion `skilled-2k3.8.5.1` asked for.
+/// pathname names, not what those processes read or write.
+///
+/// Two reads are not bound that way, and both are deliberate. The closing
+/// [`git::RepositoryHandle::still_names_its_path`] re-reading is pathname-bound
+/// by design: the plan the user confirmed stated a path, so a proven repository
+/// that is no longer at that path is refused rather than written wherever it
+/// went. A rename inside the gap after that re-reading loses only the refusal —
+/// the write still lands in the proven repository, which is the inversion
+/// `skilled-2k3.8.5.1` asked for.
+///
+/// The other is not a Git process at all: [`surviving_removal`]'s worktree
+/// occupant walk re-resolves the pathname, so the vacating-candidate loop below
+/// is one pathname-bound read inside an otherwise pinned sequence. A checkout
+/// renamed aside and restored around that loop can clear the guard with a
+/// readable, vacant decoy while the merge still fast-forwards the proven
+/// checkout. The write stays correct — right repository, planned revision — but
+/// the removal it discloses does not: the link the preview promised would dangle
+/// resolves instead to a directory that is no longer a skill. That is a false
+/// disclosure rather than a misdirected write, it needs write access to the
+/// checkout's parent, and it predates the pin. It is tracked as `skilled-lr8`.
 fn validate_repository_update(plan: &RepositoryUpdatePlan) -> Result<git::RepositoryHandle> {
     if plan.is_blocked() {
         return Err(crate::Error::SourceChangedAfterPreview);
