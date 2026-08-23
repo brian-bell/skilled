@@ -80,11 +80,25 @@ unsafe extern "C" {
 /// Opening only pins a directory; it proves nothing about which repository
 /// was pinned. The identity checks that make it the *planned* checkout run
 /// through the handle afterwards, so every answer they give describes the
-/// pinned directory rather than the pathname's current occupant. What the
-/// pin cannot vouch for is indirection kept *inside* the pinned directory —
-/// a `.git` that is itself a symbolic link or gitfile is followed by Git
-/// exactly as it always was, which is the same reading the pathname spawn
-/// gave it.
+/// pinned directory rather than the pathname's current occupant. Bound
+/// spawns also pin what discovery would otherwise re-decide inside the held
+/// directory: `GIT_DIR=.git` and `GIT_WORK_TREE=.`, resolved from the bound
+/// working directory, keep the repository and the worktree exactly there — a
+/// deleted `.git` refuses rather than walking up into a parent repository,
+/// and a `core.worktree` written into the configuration cannot move the
+/// merge's writes elsewhere.
+///
+/// The boundary that remains is the `.git` *object itself*. Git accepts a
+/// repository only by name — `GIT_DIR` takes a path, and the platforms here
+/// offer no directory-descriptor spelling a child could inherit — so a
+/// `.git` swapped in place between a guard and a spawn is followed, exactly
+/// as the pathname spawn always followed it. Reaching that swap requires
+/// write access inside the pinned checkout, and that capability already
+/// decides what the confirmed merge executes without any swap: hooks,
+/// filters, and configuration are read from `.git`'s contents at merge time,
+/// which is the disclosed, accepted nature of the one operation that runs
+/// repository code. The pin therefore claims the *outer* replacement window
+/// — the one `skilled-2k3.8.5.1` names — and no more.
 ///
 /// On a platform without `fchdir` the handle degrades to the pathname it was
 /// opened from, spawned as `git -C <path>` as before; the syscall binding is
@@ -807,7 +821,25 @@ fn command(repository: GitTarget<'_>, op: &UpdateOp) -> Command {
         GitTarget::Path(path) => {
             command.arg("-C").arg(path);
         }
-        GitTarget::Handle(handle) => bind_to_handle(&mut command, handle),
+        GitTarget::Handle(handle) => {
+            bind_to_handle(&mut command, handle);
+            // Resolved from the bound working directory, these two pin what a
+            // pathname spawn leaves to rediscovery. `GIT_DIR=.git` names the
+            // repository inside the held directory and nowhere else: a `.git`
+            // deleted after the pin becomes a refusal instead of an upward
+            // walk into whatever parent repository the pathname sits under.
+            // `GIT_WORK_TREE=.` makes the held directory the worktree
+            // outright, overriding a `core.worktree` that arrived in the
+            // configuration afterwards — the one lever that could otherwise
+            // send the confirmed merge's writes outside the pinned checkout.
+            // Every checkout Skilled registers is a worktree top level, where
+            // both spellings are exactly what discovery would have concluded.
+            // What stays with Git is the `.git` *contents*: an object swapped
+            // in place still decides hooks and configuration, because Git
+            // accepts no descriptor-pinned repository — see the type's
+            // documentation for why that boundary is accepted.
+            command.env("GIT_DIR", ".git").env("GIT_WORK_TREE", ".");
+        }
     }
     command.args(op.arguments());
     for (key, value) in op.environment() {

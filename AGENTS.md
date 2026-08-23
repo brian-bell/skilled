@@ -171,10 +171,16 @@ signal needs both, because colour alone is not an acceptable cue.
   repository that is no longer at the path the user confirmed is refused
   rather than written wherever it went, and a rename inside that last gap
   loses only the refusal — the write lands in the proven repository, not an
-  impostor's. Verification re-reads identity by pathname afterwards, as the
-  observation it always was. On platforms without `fchdir` the handle spawns
-  by pathname as before, and the guard-order narrowing is what remains
-  (documented on `git::RepositoryHandle`).
+  impostor's. Bound spawns also pin what discovery would re-decide inside the
+  held directory (`GIT_DIR=.git`, `GIT_WORK_TREE=.`): a deleted `.git`
+  refuses rather than walking up into a parent repository, and a
+  `core.worktree` written afterwards cannot move the merge's writes. The
+  `.git` object itself stays name-resolved — Git accepts no
+  descriptor-pinned repository — and the argument for that boundary lives on
+  `git::RepositoryHandle`. Verification re-reads identity by pathname
+  afterwards, as the observation it always was. On platforms without
+  `fchdir` the handle spawns by pathname as before, and the guard-order
+  narrowing is what remains.
 - An explicit check runs no repository code. Hooks are pointed at the null
   device, `core.fsmonitor` is turned off on every inspection — it is an
   executable Git runs for `status` and `fetch` alike, and `core.hooksPath` does
