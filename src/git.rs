@@ -209,7 +209,6 @@ enum UpdateOp {
     TransportSettings,
     TransportPolicy,
     UserSshCommand,
-    RefsPresent(Vec<String>),
     RemoteUrl(String),
     FilterSettings,
     PromisorSettings,
@@ -237,10 +236,6 @@ enum UpdateOp {
         expected: String,
         hooks_path: PathBuf,
     },
-    DeleteRef {
-        reference: String,
-        hooks_path: PathBuf,
-    },
     Merge(String),
 }
 
@@ -249,7 +244,7 @@ impl UpdateOp {
         match self {
             Self::RevParse(_) | Self::AbsoluteGitDir => "rev-parse",
             Self::SymbolicHead | Self::SymbolicRef(_) => "symbolic-ref",
-            Self::UpstreamRef(_) | Self::RefState(_) | Self::RefsPresent(_) => "for-each-ref",
+            Self::UpstreamRef(_) | Self::RefState(_) => "for-each-ref",
             Self::ConfigGet(_)
             | Self::FilterSettings
             | Self::PromisorSettings
@@ -265,7 +260,7 @@ impl UpdateOp {
             Self::Status => "status",
             Self::Fetch { .. } => "fetch",
             Self::RemoteUrl(_) => "ls-remote",
-            Self::PublishRef { .. } | Self::DeleteRef { .. } => "update-ref",
+            Self::PublishRef { .. } => "update-ref",
             Self::Merge(_) => "merge",
         }
     }
@@ -298,12 +293,16 @@ impl UpdateOp {
     }
 
     fn operation_arguments(&self) -> Vec<OsString> {
-        // A fetch updates the remote-tracking ref, and Git runs the
-        // repository's `reference-transaction` hook for that update. A check
-        // the user was told only reads must not run repository code, so the
-        // hook search is pointed at a path inside the Git directory that
-        // Skilled never creates; anything able to plant a hook there could
-        // plant one in `hooks` itself.
+        // `--dry-run` is what makes the fetch a read: Git transfers and
+        // stores the objects and then skips every ref update, so no ref
+        // transaction ever starts and a symbolic ref substituted for the
+        // destination has nothing to redirect. `--porcelain` is how the
+        // result comes back without a ref to read it from — one
+        // machine-readable line per refspec naming the object the transport
+        // reported (requires Git 2.41). No transaction also means no
+        // `reference-transaction` hook, but the hook search is still pointed
+        // at a path that holds none, so the claim does not rest on a flag's
+        // behaviour staying put across Git versions.
         if let Self::Fetch {
             remote,
             refspec,
@@ -319,10 +318,12 @@ impl UpdateOp {
                 "-c".into(),
                 hooks_setting,
                 "fetch".into(),
+                "--porcelain".into(),
+                "--dry-run".into(),
                 "--no-auto-maintenance".into(),
-                // The tracking ref is the whole destination: rewriting
-                // FETCH_HEAD would discard state the user's own fetch left
-                // there, which a check is not entitled to touch.
+                // Even a dry run appends to FETCH_HEAD without this flag, and
+                // rewriting FETCH_HEAD would discard state the user's own
+                // fetch left there, which a check is not entitled to touch.
                 "--no-write-fetch-head".into(),
                 "--no-tags".into(),
                 "--no-prune".into(),
@@ -342,7 +343,7 @@ impl UpdateOp {
         // value is the other half: the tracking ref is the user's, and an
         // ordinary `git fetch` or another Skilled process may have advanced it
         // while this one was fetching. Naming what was there makes Git refuse
-        // rather than roll their newer value back to this staged one.
+        // rather than roll their newer value back to this reported one.
         if let Self::PublishRef {
             reference,
             revision,
@@ -360,22 +361,6 @@ impl UpdateOp {
                 reference.into(),
                 revision.into(),
                 expected.into(),
-            ];
-        }
-        if let Self::DeleteRef {
-            reference,
-            hooks_path,
-        } = self
-        {
-            let mut hooks_setting = OsString::from("core.hooksPath=");
-            hooks_setting.push(hooks_path);
-            return vec![
-                "-c".into(),
-                hooks_setting,
-                "update-ref".into(),
-                "--no-deref".into(),
-                "-d".into(),
-                reference.into(),
             ];
         }
         // The default listing keeps the entry's mode, which is the whole point
@@ -412,11 +397,6 @@ impl UpdateOp {
                 "--format=%(objectname)%09%(symref)".into(),
                 reference.clone(),
             ],
-            Self::RefsPresent(names) => {
-                let mut arguments = vec!["for-each-ref".into(), "--format=%(refname)".into()];
-                arguments.extend(names.iter().cloned());
-                arguments
-            }
             Self::RemoteUrl(remote) => {
                 vec!["ls-remote".into(), "--get-url".into(), remote.clone()]
             }
@@ -513,7 +493,7 @@ impl UpdateOp {
                     format!("{revision}^{{commit}}"),
                 ]
             }
-            Self::TreeEntryMode { .. } | Self::PublishRef { .. } | Self::DeleteRef { .. } => {
+            Self::TreeEntryMode { .. } | Self::PublishRef { .. } => {
                 unreachable!("tree and ref operations return above")
             }
             Self::Status => vec![
@@ -548,6 +528,16 @@ impl UpdateOp {
         strings.into_iter().map(OsString::from).collect()
     }
 
+    // `GIT_NO_LAZY_FETCH` backstops the partial-clone refusals on every
+    // process but the merge: an inspection that touches an object a promisor
+    // remote could supply must fail rather than fetch it, because that fetch
+    // would run the checkout's own transport configuration outside the one
+    // process hardened for the network. Git honours the variable from 2.45;
+    // on the 2.41–2.44 floor the re-asked `repository_is_partial_clone`
+    // guards are the only cover, which is why they are re-asked rather than
+    // remembered. The merge is exempt for the same reason it keeps the
+    // repository's configuration: partial clones are refused long before a
+    // plan exists, and the plan disclosed what the merge may run.
     fn environment(&self) -> Vec<(OsString, OsString)> {
         match self {
             Self::Merge(_) => Vec::new(),
@@ -579,12 +569,17 @@ impl UpdateOp {
                 ("GIT_SSH_COMMAND".into(), ssh_command.into()),
                 ("GIT_ALLOW_PROTOCOL".into(), allowed_protocols.into()),
                 ("GIT_OPTIONAL_LOCKS".into(), "0".into()),
+                ("GIT_NO_LAZY_FETCH".into(), "1".into()),
             ],
             Self::TreeEntryMode { .. } => vec![
                 ("GIT_OPTIONAL_LOCKS".into(), "0".into()),
                 ("GIT_LITERAL_PATHSPECS".into(), "1".into()),
+                ("GIT_NO_LAZY_FETCH".into(), "1".into()),
             ],
-            _ => vec![("GIT_OPTIONAL_LOCKS".into(), "0".into())],
+            _ => vec![
+                ("GIT_OPTIONAL_LOCKS".into(), "0".into()),
+                ("GIT_NO_LAZY_FETCH".into(), "1".into()),
+            ],
         }
     }
 }
@@ -1682,119 +1677,80 @@ const SUPPRESSED_HOOKS_PATH: &str = "/dev/null";
 #[cfg(windows)]
 const SUPPRESSED_HOOKS_PATH: &str = "NUL";
 
-/// The two names a staging ref under `refs/skilled/fetch/` needs to be
-/// directories rather than refs.
-const STAGING_NAMESPACE_ROOT: &str = "refs/skilled";
-const STAGING_NAMESPACE: &str = "refs/skilled/fetch";
+/// Where a fetch destination name nests. The name exists in the refspec and
+/// in the porcelain report, and nowhere else.
+const FETCH_DESTINATION_NAMESPACE: &str = "refs/skilled/fetch";
 
-/// A fetch destination no other party can have prepared.
+/// A fetch destination that is only ever a name.
 ///
 /// Git dereferences a symbolic ref when a transaction updates it, so a fetch
-/// that names `refs/remotes/<remote>/<branch>` as its destination writes
-/// wherever that name points — a local branch included, if one is substituted
-/// after [`reject_symbolic_tracking_ref`] returns. Checking the name and using
-/// it are two processes and cannot be made one, so the destination is moved
-/// out of the attacker's reach instead: a name under `refs/skilled/fetch/`
-/// that this invocation alone chose, deleted immediately before the fetch so
-/// nothing can be standing at it, and deleted again afterwards. The
-/// remote-tracking ref is then written from the fetched object with
-/// `update-ref --no-deref`, which writes the named ref itself.
+/// that writes any ref writes wherever that ref's name points — a local
+/// branch included, if a symbolic ref is substituted for the destination
+/// between any check and Git's own transaction. An earlier revision of this
+/// check narrowed that race by fetching into a per-invocation staging ref,
+/// deleted before and after and re-checked in between; `skilled-q59` records
+/// why a name that is checked and then written stays reachable. The
+/// destination is now never written at all: the fetch runs with `--dry-run`,
+/// which stores the objects and then skips every ref update, and the object
+/// it obtained comes back through `--porcelain`'s report instead of a ref.
+/// A name no process writes cannot be redirected, whatever is standing at
+/// it — a direct ref, a symbolic ref, or a ref occupying the namespace
+/// itself, each observed inert under a dry run on Git 2.50. That last case is
+/// also why the namespace needs no occupancy probe or fallback spelling: a
+/// directory/file conflict only exists for a write.
 ///
-/// This narrows the race rather than closing it. The name is derived, not
-/// drawn from a cryptographic source, and it appears in the fetch process's
-/// own arguments, so a party that can both observe those and write refs could
-/// still plant a symbolic ref between the deletion and Git's ref transaction.
-/// [`reject_symbolic_staging_ref`] then reports it, after the fact. Closing it
-/// needs a fetch that writes no dereferenceable ref at all, which changes what
-/// the check hands the preview; that is `skilled-q59`.
-///
-/// `refs/skilled` and `refs/skilled/fetch` are ordinary ref names a user may
-/// already hold. Git cannot have a ref and a directory of refs at the same
-/// name, so either of them existing would make every staging ref under it
-/// impossible to create and every check on that repository fail — a permanent
-/// refusal caused by Skilled's own choice of name. When that is the case the
-/// destination becomes a flat `refs/skilled-fetch-<generated>` instead, which
-/// needs no reserved parent directory.
-fn staging_ref(repository: &Path) -> Result<String> {
-    let unique = staging_ref_unique();
-    Ok(if staging_namespace_is_occupied(repository)? {
-        format!("refs/skilled-fetch-{unique}")
-    } else {
-        format!("{STAGING_NAMESPACE}/{unique}")
-    })
-}
-
-/// The part of a staging name that makes it this invocation's alone.
-fn staging_ref_unique() -> String {
+/// The name is still unique per invocation, for the report rather than for
+/// safety: the porcelain line is matched by destination, and a destination no
+/// other party prepared cannot already hold the incoming object — which is
+/// the one documented way a refspec earns no report line, and so a state
+/// [`reported_revision`]'s caller may treat as tampering rather than routine.
+fn fetch_destination() -> String {
     static SEQUENCE: AtomicU64 = AtomicU64::new(0);
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
     format!(
-        "{:x}-{nanos:x}-{:x}",
+        "{FETCH_DESTINATION_NAMESPACE}/{:x}-{nanos:x}-{:x}",
         std::process::id(),
         SEQUENCE.fetch_add(1, Ordering::Relaxed)
     )
 }
 
-/// The name a staging ref takes when the namespace is free, for fixtures and
-/// for the tests that assert on its shape.
-fn staging_ref_name() -> String {
-    format!("{STAGING_NAMESPACE}/{}", staging_ref_unique())
-}
-
-/// Whether either ancestor of the usual staging name is itself a ref.
+/// The object the porcelain report names for `destination`, if exactly one
+/// plausible line does.
 ///
-/// One process asks about both: `for-each-ref` takes exact names as patterns,
-/// and any output at all means the namespace cannot hold children.
-fn staging_namespace_is_occupied(repository: &Path) -> Result<bool> {
-    let op = UpdateOp::RefsPresent(vec![
-        STAGING_NAMESPACE_ROOT.to_owned(),
-        STAGING_NAMESPACE.to_owned(),
-    ]);
-    let arguments = op.arguments();
-    let output = run(repository, op)?;
-    if !output.status.success() {
-        return Err(git_error(repository, &arguments, &output));
+/// `--porcelain` prints one `<flag> <old-oid> <new-oid> <local-reference>`
+/// line per refspec. The flag is a single character that may itself be a
+/// space, so the line is read from its end rather than its start: the last
+/// field is the destination and the field before it the incoming object. The
+/// old object is ignored — when something is standing at the destination the
+/// dry run reads it, possibly through a substituted symbolic ref, and evidence
+/// obtained that way must not shape the result. The incoming object must
+/// spell a full object name that is not the all-zero absent marker, because
+/// the caller is about to publish it to the user's remote-tracking ref.
+fn reported_revision(stdout: &[u8], destination: &str) -> Option<String> {
+    let report = String::from_utf8_lossy(stdout);
+    let mut revisions = report.lines().filter_map(|line| {
+        let mut fields = line.split_whitespace().rev();
+        (fields.next() == Some(destination))
+            .then(|| fields.next())
+            .flatten()
+    });
+    let revision = revisions.next()?;
+    if revisions.next().is_some() || !full_object_name(revision) {
+        return None;
     }
-    Ok(!output.stdout.is_empty())
+    Some(revision.to_owned())
 }
 
-fn delete_ref_op(reference: &str) -> UpdateOp {
-    UpdateOp::DeleteRef {
-        reference: reference.to_owned(),
-        hooks_path: SUPPRESSED_HOOKS_PATH.into(),
-    }
-}
-
-fn delete_ref(repository: &Path, reference: &str) -> Result<()> {
-    let op = delete_ref_op(reference);
-    let arguments = op.arguments();
-    let output = run(repository, op)?;
-    if output.status.success() {
-        Ok(())
-    } else {
-        Err(git_error(repository, &arguments, &output))
-    }
-}
-
-fn delete_ref_cancellable(
-    repository: &Path,
-    reference: &str,
-    cancelled: &AtomicBool,
-    child_slot: &Mutex<Option<Child>>,
-) -> Result<Option<()>> {
-    let op = delete_ref_op(reference);
-    let arguments = op.arguments();
-    let Some(output) = run_cancellable(repository, &op, cancelled, child_slot)? else {
-        return Ok(None);
-    };
-    if output.status.success() {
-        Ok(Some(()))
-    } else {
-        Err(git_error(repository, &arguments, &output))
-    }
+/// Whether `revision` spells out an entire object name: every byte hex, at a
+/// documented object-name length, and not the all-zero marker Git uses for a
+/// ref that is absent.
+fn full_object_name(revision: &str) -> bool {
+    matches!(revision.len(), 40 | 64)
+        && revision.bytes().all(|byte| byte.is_ascii_hexdigit())
+        && revision.bytes().any(|byte| byte != b'0')
 }
 
 /// The object a *direct* ref names: `None` when the ref does not exist, and
@@ -1842,7 +1798,7 @@ fn parse_direct_ref_object(output: &Output) -> Option<String> {
 /// first with the very same object.
 ///
 /// The compare-and-swap exists to stop this fetch rolling a newer value back,
-/// and a ref already holding exactly what was staged is not that: another
+/// and a ref already holding exactly what the fetch reported is not that: another
 /// `git fetch` or another Skilled process reached the same upstream commit and
 /// wrote it. Reporting a fetch failure there would cache a blocker describing
 /// nothing that is wrong, and — because the later run holds the later
@@ -1938,6 +1894,26 @@ fn fetch_op(upstream: &Upstream, transport: FetchTransport, destination: &str) -
     }
 }
 
+/// Check the configured upstream and publish what it holds, without the fetch
+/// writing any ref of its own.
+///
+/// The publication that follows the fetch is the one ref write the check
+/// performs, and it is confined by construction: `update-ref --no-deref`
+/// writes the named remote-tracking ref itself, never a referent, so no
+/// substitution can send the write outside that name. What `--no-deref`
+/// cannot do — observed across `update`, guarded delete, and must-not-exist
+/// creation alike on Git 2.50 — is refuse a symbolic ref: every form resolves
+/// the ref's referent to answer the old-value check and then replaces the
+/// symbolic ref in place with a direct one. Git offers no single operation
+/// that asserts a ref's kind and its value together, so the kind check is a
+/// separate process immediately before the write, twice over: a tracking ref
+/// that is symbolic when the check starts, or when the publication is
+/// reached, is refused untouched. What remains is a ref made symbolic inside
+/// the final check-to-write gap. Such a ref is replaced rather than refused —
+/// its referent still never written — and since a symbolic ref standing at
+/// check start refuses the whole check, the ref lost that way existed only
+/// for the seconds this check was running. That residual, and the argument
+/// for accepting it, is the `skilled-q59` closeout record.
 pub fn fetch_upstream(repository: &Path, upstream: &Upstream) -> Result<String> {
     reject_symbolic_tracking_ref(repository, upstream)?;
     let transport = FetchTransport {
@@ -1952,89 +1928,51 @@ pub fn fetch_upstream(repository: &Path, upstream: &Upstream) -> Result<String> 
     // Read before the fetch, so the publication below can say what it expected
     // to be replacing rather than overwriting whatever arrived meanwhile.
     let before = direct_ref_object(repository, &upstream.tracking_ref)?;
-    let staging = staging_ref(repository)?;
-    let fetched = fetch_into_staging(repository, upstream, transport, &staging);
-    let published = fetched.and_then(|revision| {
-        // Refused rather than clobbered: a tracking ref the user made symbolic
-        // is theirs, and `--no-deref` would overwrite it in place. The check
-        // is for that case; the flag is what makes losing the race harmless.
-        reject_symbolic_tracking_ref(repository, upstream)?;
-        publish_or_accept_identical(repository, upstream, &revision, before.as_deref())?;
-        Ok(revision)
-    });
-    // A staging ref left behind is a write into the user's repository that
-    // outlives the operation that made it, so a check may not report success
-    // over one. An already-failing result keeps its own error, which says more
-    // about what went wrong than the cleanup does.
-    let removed = delete_ref(repository, &staging);
-    published.and_then(|revision| removed.map(|()| revision))
+    let revision = fetch_reported_revision(repository, upstream, transport)?;
+    // Refused rather than clobbered: a tracking ref the user made symbolic
+    // is theirs, and `--no-deref` would overwrite it in place. The check
+    // is for that case; the flag is what makes losing the race harmless to
+    // everything but the substituted ref itself.
+    reject_symbolic_tracking_ref(repository, upstream)?;
+    publish_or_accept_identical(repository, upstream, &revision, before.as_deref())?;
+    Ok(revision)
 }
 
-/// Fetch the upstream branch into `staging` and return the object it holds.
-fn fetch_into_staging(
+/// Fetch the upstream branch's objects and return the commit the transport
+/// reported, leaving every ref exactly as it was.
+fn fetch_reported_revision(
     repository: &Path,
     upstream: &Upstream,
     transport: FetchTransport,
-    staging: &str,
 ) -> Result<String> {
-    delete_ref(repository, staging)?;
-    let op = fetch_op(upstream, transport, staging);
+    let destination = fetch_destination();
+    let op = fetch_op(upstream, transport, &destination);
     let arguments = op.arguments();
     let output = run_bounded(repository, &op, MAX_FETCH_OUTPUT_BYTES)?;
     if !output.status.success() {
         return Err(git_error(repository, &arguments, &output));
     }
-    reject_symbolic_staging_ref(repository, staging)?;
-    Ok(text(required(
-        repository,
-        UpdateOp::RevParse(staging.to_owned()),
-    )?))
-}
-
-/// Refuse a staging ref that came back symbolic.
-///
-/// Nothing should be able to reach a name only this invocation chose, and the
-/// deletion immediately before the fetch means nothing was standing there. If
-/// one is symbolic anyway, the fetch wrote through it rather than to it, so
-/// the refusal reports a destination that was substituted rather than treating
-/// whatever it points at as the fetched upstream.
-fn reject_symbolic_staging_ref(repository: &Path, staging: &str) -> Result<()> {
-    let op = UpdateOp::SymbolicRef(staging.to_owned());
-    let arguments = op.arguments();
-    let output = run(repository, op)?;
-    staging_ref_verdict(repository, staging, &arguments, &output)
-}
-
-fn reject_symbolic_staging_ref_cancellable(
-    repository: &Path,
-    staging: &str,
-    cancelled: &AtomicBool,
-    child_slot: &Mutex<Option<Child>>,
-) -> Result<Option<()>> {
-    let op = UpdateOp::SymbolicRef(staging.to_owned());
-    let arguments = op.arguments();
-    let Some(output) = run_cancellable(repository, &op, cancelled, child_slot)? else {
-        return Ok(None);
+    let Some(revision) = reported_revision(&output.stdout, &destination) else {
+        return Err(Error::FetchUnreported);
     };
-    staging_ref_verdict(repository, staging, &arguments, &output).map(Some)
-}
-
-fn staging_ref_verdict(
-    repository: &Path,
-    staging: &str,
-    arguments: &[OsString],
-    output: &Output,
-) -> Result<()> {
-    if output.status.success() {
-        return Err(Error::SymbolicTrackingRef {
-            reference: staging.to_owned(),
-            target: text(output.stdout.clone()),
-        });
+    // Re-asked after the fetch, not remembered from the preflight: the read
+    // below touches an object, and a promisor remote configured while the
+    // fetch was running would let it fetch the object lazily — network access
+    // through the checkout's own transport configuration, outside the one
+    // process that was hardened for it. The gap between this answer and the
+    // read is the same two-process window every configuration guard has;
+    // `GIT_NO_LAZY_FETCH` on the read is what closes it where Git honours
+    // that variable.
+    if repository_is_partial_clone(repository)? {
+        return Err(Error::PartialCloneDuringCheck);
     }
-    if output.status.code() == Some(1) {
-        return Ok(());
+    // The report is the transport's word; the object store is the evidence. A
+    // dry run stores what it fetched, so a reported commit that cannot be
+    // read back was never actually obtained.
+    if !commit_exists(repository, &revision)? {
+        return Err(Error::FetchedCommitMissing { revision });
     }
-    Err(git_error(repository, arguments, output))
+    Ok(revision)
 }
 
 /// Fetch on a worker thread while publishing the child for main-thread
@@ -2072,76 +2010,59 @@ pub(crate) fn fetch_upstream_cancellable(
     else {
         return Ok(None);
     };
-    let staging = staging_ref(repository)?;
-    let fetched = fetch_into_staging_cancellable(
-        repository, upstream, transport, &staging, cancelled, child_slot,
-    );
-    let published = fetched.and_then(|revision| {
-        let Some(revision) = revision else {
-            return Ok(None);
-        };
-        if reject_symbolic_tracking_ref_cancellable(repository, upstream, cancelled, child_slot)?
-            .is_none()
-        {
-            return Ok(None);
-        }
-        let Some(attempt) = publish_ref_cancellable(
+    let Some(revision) = fetch_reported_revision_cancellable(
+        repository, upstream, transport, cancelled, child_slot,
+    )?
+    else {
+        return Ok(None);
+    };
+    if reject_symbolic_tracking_ref_cancellable(repository, upstream, cancelled, child_slot)?
+        .is_none()
+    {
+        return Ok(None);
+    }
+    let Some(attempt) = publish_ref_cancellable(
+        repository,
+        &upstream.tracking_ref,
+        &revision,
+        before.as_deref(),
+        cancelled,
+        child_slot,
+    )?
+    else {
+        return Ok(None);
+    };
+    if let Err(error) = attempt {
+        // The same tolerance the blocking path has, over the same
+        // single-process read: a ref already holding exactly what this
+        // fetch obtained was published by somebody who got there first, and
+        // is not the rollback the guard exists to stop. A symbolic ref
+        // reports no object of its own and so is never accepted here.
+        let Some(current) = direct_ref_object_cancellable(
             repository,
             &upstream.tracking_ref,
-            &revision,
-            before.as_deref(),
             cancelled,
             child_slot,
         )?
         else {
             return Ok(None);
         };
-        if let Err(error) = attempt {
-            // The same tolerance the blocking path has, over the same
-            // single-process read: a ref already holding exactly what this
-            // fetch staged was published by somebody who got there first, and
-            // is not the rollback the guard exists to stop. A symbolic ref
-            // reports no object of its own and so is never accepted here.
-            let Some(current) = direct_ref_object_cancellable(
-                repository,
-                &upstream.tracking_ref,
-                cancelled,
-                child_slot,
-            )?
-            else {
-                return Ok(None);
-            };
-            if current.as_deref() != Some(revision.as_str()) {
-                return Err(error);
-            }
+        if current.as_deref() != Some(revision.as_str()) {
+            return Err(error);
         }
-        Ok(Some(revision))
-    });
-    // Local, immediate, and worth doing even on the cancelled path: the
-    // staging ref is Skilled's own leftover, and a cancellation is not a
-    // reason to leave one behind. A cleanup that fails takes a successful
-    // fetch with it for the same reason it does in the blocking path — a
-    // check may not report success over a write it left in the repository —
-    // while a cancellation stays a cancellation.
-    let removed = delete_ref(repository, &staging);
-    published.and_then(|revision| match revision {
-        Some(revision) => removed.map(|()| Some(revision)),
-        None => Ok(None),
-    })
+    }
+    Ok(Some(revision))
 }
 
-fn fetch_into_staging_cancellable(
+fn fetch_reported_revision_cancellable(
     repository: &Path,
     upstream: &Upstream,
     transport: FetchTransport,
-    staging: &str,
     cancelled: &AtomicBool,
     child_slot: &Mutex<Option<Child>>,
 ) -> Result<Option<String>> {
-    if delete_ref_cancellable(repository, staging, cancelled, child_slot)?.is_none() {
-        return Ok(None);
-    }
-    let op = fetch_op(upstream, transport, staging);
+    let destination = fetch_destination();
+    let op = fetch_op(upstream, transport, &destination);
     let arguments = op.arguments();
     let child = command(repository, &op)
         .stdin(Stdio::null())
@@ -2157,18 +2078,35 @@ fn fetch_into_staging_cancellable(
     if !output.status.success() {
         return Err(git_error(repository, &arguments, &output));
     }
-    if reject_symbolic_staging_ref_cancellable(repository, staging, cancelled, child_slot)?
-        .is_none()
-    {
+    let Some(revision) = reported_revision(&output.stdout, &destination) else {
+        return Err(Error::FetchUnreported);
+    };
+    // Re-asked after the fetch, for the reason given on the blocking path: a
+    // promisor remote configured while the fetch ran must not let the object
+    // read below reach the network.
+    let Some(partial_clone) =
+        repository_is_partial_clone_cancellable(repository, cancelled, child_slot)?
+    else {
         return Ok(None);
+    };
+    if partial_clone {
+        return Err(Error::PartialCloneDuringCheck);
     }
-    Ok(required_cancellable(
+    // The same evidence check as the blocking path: the report is the
+    // transport's word, and the object store is what the user can be shown.
+    let Some(present) = optional_cancellable(
         repository,
-        UpdateOp::RevParse(staging.to_owned()),
+        UpdateOp::CatFile(revision.clone()),
         cancelled,
         child_slot,
     )?
-    .map(text))
+    else {
+        return Ok(None);
+    };
+    if present.is_none() {
+        return Err(Error::FetchedCommitMissing { revision });
+    }
+    Ok(Some(revision))
 }
 
 fn run_bounded(repository: &Path, op: &UpdateOp, limit: usize) -> Result<Output> {
@@ -2768,7 +2706,7 @@ pub fn update_operation_fixtures() -> Vec<OperationFixture> {
                     tracking_ref: "refs/remotes/origin/main".into(),
                     revision: None,
                 },
-                &staging_ref_name(),
+                &fetch_destination(),
             ),
             ssh_command: "ssh -o BatchMode=yes".into(),
             // What an unrestricted environment and an unset policy narrow to,
@@ -2786,10 +2724,6 @@ pub fn update_operation_fixtures() -> Vec<OperationFixture> {
             reference: "refs/remotes/origin/main".into(),
             revision: "abc".into(),
             expected: ABSENT_REF.into(),
-            hooks_path: SUPPRESSED_HOOKS_PATH.into(),
-        },
-        UpdateOp::DeleteRef {
-            reference: staging_ref_name(),
             hooks_path: SUPPRESSED_HOOKS_PATH.into(),
         },
         UpdateOp::Merge("abc".into()),
@@ -3130,7 +3064,7 @@ mod tests {
     /// The publication is a compare-and-swap, and these are the two answers
     /// that are not a plain success: the ref moved to something else, which
     /// must fail rather than roll the user's newer value back, and the ref
-    /// already holds exactly what was staged, which is nothing to refuse.
+    /// already holds exactly what was reported, which is nothing to refuse.
     #[cfg(unix)]
     #[test]
     fn publication_refuses_a_moved_tracking_ref_but_accepts_an_identical_one() {
@@ -3212,7 +3146,7 @@ mod tests {
             ABSENT_REF,
         ]);
 
-        // The ref now holds `second` while the check staged `first` and
+        // The ref now holds `second` while the check obtained `first` and
         // expected to be replacing nothing: publishing would roll it back.
         assert!(
             publish_or_accept_identical(&repository, &upstream, &first, None).is_err(),
@@ -3223,11 +3157,11 @@ mod tests {
             Some(second.as_str())
         );
 
-        // The ref already holds exactly what was staged, which is not the
+        // The ref already holds exactly what was reported, which is not the
         // rollback the compare-and-swap exists to stop.
         assert!(
             publish_or_accept_identical(&repository, &upstream, &second, None).is_ok(),
-            "publication refused a ref already at the staged object"
+            "publication refused a ref already at the reported object"
         );
     }
 
@@ -3559,16 +3493,51 @@ mod tests {
     }
 
     /// Two invocations must not be able to collide on a destination, or one
-    /// could observe the other's fetched object as its own.
+    /// could read the other's report line as its own.
     #[test]
-    fn every_staging_ref_is_its_own() {
-        assert_ne!(staging_ref_name(), staging_ref_name());
+    fn every_fetch_destination_is_its_own() {
+        assert_ne!(fetch_destination(), fetch_destination());
+    }
+
+    /// The report is read from the end of each line because the flag column
+    /// may itself be a space, and only an exact, single, fully-spelled object
+    /// for the exact destination is believed.
+    #[test]
+    fn only_an_unambiguous_report_line_yields_a_revision() {
+        let destination = "refs/skilled/fetch/a-b-c";
+        let object = "6e0ab0cb6e0a6ab7410a1564cbdb4a6b27d45cbd";
+        let zeros = "0000000000000000000000000000000000000000";
+        let creation = format!("* {zeros} {object} {destination}\n");
+        assert_eq!(
+            reported_revision(creation.as_bytes(), destination),
+            Some(object.to_owned())
+        );
+        // A space flag: the line a forced update would print.
+        let forced = format!("  {object} {object} {destination}\n");
+        assert_eq!(
+            reported_revision(forced.as_bytes(), destination),
+            Some(object.to_owned())
+        );
+        // Another refspec's line is not this destination's report.
+        let other = format!("* {zeros} {object} refs/skilled/fetch/other\n");
+        assert_eq!(reported_revision(other.as_bytes(), destination), None);
+        // No line at all: a destination this invocation alone chose cannot be
+        // up to date, so silence is refused rather than defaulted.
+        assert_eq!(reported_revision(b"", destination), None);
+        // Two lines for one destination cannot both be the report.
+        let doubled = format!("{creation}{creation}");
+        assert_eq!(reported_revision(doubled.as_bytes(), destination), None);
+        // An all-zero or truncated object is not a fetched revision.
+        let absent = format!("- {object} {zeros} {destination}\n");
+        assert_eq!(reported_revision(absent.as_bytes(), destination), None);
+        let truncated = format!("* {zeros} {} {destination}\n", &object[..12]);
+        assert_eq!(reported_revision(truncated.as_bytes(), destination), None);
     }
 
     /// A symbolic ref holds no object of its own, and the object its referent
     /// holds is not evidence about it. Reporting that object would let a ref
     /// substituted for a symbolic one whose referent happens to hold the
-    /// staged revision be accepted as a ref that already holds it.
+    /// reported revision be accepted as a ref that already holds it.
     // `Output` needs an `ExitStatus`, which only the platform extension traits
     // construct; the parser under test is platform-neutral either way.
     #[cfg(unix)]
@@ -3595,16 +3564,16 @@ mod tests {
         }
     }
 
-    /// The tracking ref is written from the staged object rather than fetched
-    /// into, and `--no-deref` is what makes losing the substitution race
-    /// harmless: the named ref itself is written, never its referent.
+    /// The tracking ref is written from the reported object rather than
+    /// fetched into, and `--no-deref` is what confines losing the substitution
+    /// race: the named ref itself is written, never its referent.
     #[test]
     fn ref_updates_never_dereference_and_run_no_repository_hook() {
         let updates = update_operation_fixtures()
             .into_iter()
             .filter(|fixture| fixture.subcommand == "update-ref")
             .collect::<Vec<_>>();
-        assert_eq!(updates.len(), 2);
+        assert_eq!(updates.len(), 1);
         for update in updates {
             assert!(
                 update
@@ -3621,6 +3590,27 @@ mod tests {
                     .any(|argument| argument.to_string_lossy().starts_with("core.hooksPath=")),
                 "{:?}",
                 update.arguments
+            );
+        }
+    }
+
+    /// A lazily fetched object is network access through the checkout's own
+    /// transport configuration, outside the one process hardened for it.
+    /// Every process but the disclosed merge forbids it outright where Git
+    /// honours the variable; the re-asked partial-clone guards cover the
+    /// rest.
+    #[test]
+    fn every_process_but_the_merge_forbids_lazy_object_fetches() {
+        for fixture in update_operation_fixtures() {
+            let forbidden = fixture.environment.iter().any(|(key, value)| {
+                key == OsStr::new("GIT_NO_LAZY_FETCH") && value == OsStr::new("1")
+            });
+            assert_eq!(
+                forbidden,
+                fixture.subcommand != "merge",
+                "{}: {:?}",
+                fixture.subcommand,
+                fixture.environment
             );
         }
     }
@@ -3653,6 +3643,9 @@ mod tests {
             .expect("fetch fixture");
 
         for expected in [
+            "--porcelain",
+            "--dry-run",
+            "--no-write-fetch-head",
             "--no-tags",
             "--no-prune",
             "--no-prune-tags",
