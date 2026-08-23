@@ -528,6 +528,16 @@ impl UpdateOp {
         strings.into_iter().map(OsString::from).collect()
     }
 
+    // `GIT_NO_LAZY_FETCH` backstops the partial-clone refusals on every
+    // process but the merge: an inspection that touches an object a promisor
+    // remote could supply must fail rather than fetch it, because that fetch
+    // would run the checkout's own transport configuration outside the one
+    // process hardened for the network. Git honours the variable from 2.45;
+    // on the 2.41–2.44 floor the re-asked `repository_is_partial_clone`
+    // guards are the only cover, which is why they are re-asked rather than
+    // remembered. The merge is exempt for the same reason it keeps the
+    // repository's configuration: partial clones are refused long before a
+    // plan exists, and the plan disclosed what the merge may run.
     fn environment(&self) -> Vec<(OsString, OsString)> {
         match self {
             Self::Merge(_) => Vec::new(),
@@ -559,12 +569,17 @@ impl UpdateOp {
                 ("GIT_SSH_COMMAND".into(), ssh_command.into()),
                 ("GIT_ALLOW_PROTOCOL".into(), allowed_protocols.into()),
                 ("GIT_OPTIONAL_LOCKS".into(), "0".into()),
+                ("GIT_NO_LAZY_FETCH".into(), "1".into()),
             ],
             Self::TreeEntryMode { .. } => vec![
                 ("GIT_OPTIONAL_LOCKS".into(), "0".into()),
                 ("GIT_LITERAL_PATHSPECS".into(), "1".into()),
+                ("GIT_NO_LAZY_FETCH".into(), "1".into()),
             ],
-            _ => vec![("GIT_OPTIONAL_LOCKS".into(), "0".into())],
+            _ => vec![
+                ("GIT_OPTIONAL_LOCKS".into(), "0".into()),
+                ("GIT_NO_LAZY_FETCH".into(), "1".into()),
+            ],
         }
     }
 }
@@ -1940,6 +1955,17 @@ fn fetch_reported_revision(
     let Some(revision) = reported_revision(&output.stdout, &destination) else {
         return Err(Error::FetchUnreported);
     };
+    // Re-asked after the fetch, not remembered from the preflight: the read
+    // below touches an object, and a promisor remote configured while the
+    // fetch was running would let it fetch the object lazily — network access
+    // through the checkout's own transport configuration, outside the one
+    // process that was hardened for it. The gap between this answer and the
+    // read is the same two-process window every configuration guard has;
+    // `GIT_NO_LAZY_FETCH` on the read is what closes it where Git honours
+    // that variable.
+    if repository_is_partial_clone(repository)? {
+        return Err(Error::PartialCloneDuringCheck);
+    }
     // The report is the transport's word; the object store is the evidence. A
     // dry run stores what it fetched, so a reported commit that cannot be
     // read back was never actually obtained.
@@ -2055,6 +2081,17 @@ fn fetch_reported_revision_cancellable(
     let Some(revision) = reported_revision(&output.stdout, &destination) else {
         return Err(Error::FetchUnreported);
     };
+    // Re-asked after the fetch, for the reason given on the blocking path: a
+    // promisor remote configured while the fetch ran must not let the object
+    // read below reach the network.
+    let Some(partial_clone) =
+        repository_is_partial_clone_cancellable(repository, cancelled, child_slot)?
+    else {
+        return Ok(None);
+    };
+    if partial_clone {
+        return Err(Error::PartialCloneDuringCheck);
+    }
     // The same evidence check as the blocking path: the report is the
     // transport's word, and the object store is what the user can be shown.
     let Some(present) = optional_cancellable(
@@ -3553,6 +3590,27 @@ mod tests {
                     .any(|argument| argument.to_string_lossy().starts_with("core.hooksPath=")),
                 "{:?}",
                 update.arguments
+            );
+        }
+    }
+
+    /// A lazily fetched object is network access through the checkout's own
+    /// transport configuration, outside the one process hardened for it.
+    /// Every process but the disclosed merge forbids it outright where Git
+    /// honours the variable; the re-asked partial-clone guards cover the
+    /// rest.
+    #[test]
+    fn every_process_but_the_merge_forbids_lazy_object_fetches() {
+        for fixture in update_operation_fixtures() {
+            let forbidden = fixture.environment.iter().any(|(key, value)| {
+                key == OsStr::new("GIT_NO_LAZY_FETCH") && value == OsStr::new("1")
+            });
+            assert_eq!(
+                forbidden,
+                fixture.subcommand != "merge",
+                "{}: {:?}",
+                fixture.subcommand,
+                fixture.environment
             );
         }
     }

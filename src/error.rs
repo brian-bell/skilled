@@ -71,6 +71,15 @@ pub enum Error {
     /// let the claim outrank the evidence.
     #[error("the fetch reported {revision}, which is not a commit present in the repository")]
     FetchedCommitMissing { revision: String },
+    /// The repository became a partial clone while the check was running.
+    ///
+    /// The check refused a partial clone before doing anything else, so this
+    /// says the promisor configuration appeared mid-check — and the reads
+    /// that follow the fetch touch objects, which a promisor remote would
+    /// let Git fetch lazily through the checkout's own transport
+    /// configuration.
+    #[error("the repository became a partial clone while the check was running")]
+    PartialCloneDuringCheck,
     #[error("git command failed in {repository:?}: git {arguments:?}: {stderr}")]
     GitCommand {
         repository: PathBuf,
