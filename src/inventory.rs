@@ -713,6 +713,8 @@ pub(crate) fn doctor_order(code: &str) -> u8 {
         | "source.repository_transport_unsupported"
         | "source.submodule_update_unsupported"
         | "source.removal_leaves_content"
+        | "source.revival_name_mismatch"
+        | "update.apply_failed"
         | "update.verification_failed"
         | "update.verification_incomplete" => 5,
         // 7. Missing or ambiguous provenance.

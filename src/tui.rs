@@ -2130,9 +2130,17 @@ fn finding_consequence(entry: &DoctorItem<'_>) -> &'static str {
              installation would resolve to something that is not a skill rather than losing \
              its target."
         }
+        "source.revival_name_mismatch" => {
+            "The link uses a different installation name, so the updated skill would still \
+             fail validation there."
+        }
         "source.changed_after_preview" => {
             "The repository moved after its plan was previewed, so that plan was abandoned \
              without writing. Check again for the current state."
+        }
+        "update.apply_failed" => {
+            "Git failed after Skilled reached the fast-forward command, so the checkout was \
+             rescanned but the write is not reported as applied or verified."
         }
         "update.verification_failed" => {
             "A fast-forward was applied and the result disagreed with the plan, so what this \
@@ -3443,6 +3451,36 @@ fn update_prompt_lines(prompt: &RepositoryUpdatePrompt) -> Vec<Line<'static>> {
             Line::raw("Repository update could not be prepared"),
             Line::raw(terminal_safe(error)),
         ],
+        RepositoryUpdatePrompt::StateUnavailable {
+            apply_error,
+            write_attempted,
+            refresh_error,
+        } => {
+            let headline = if !write_attempted {
+                "Repository update was abandoned without writing"
+            } else if apply_error.is_some() {
+                "Fast-forward command failed; post-attempt state is unavailable"
+            } else {
+                "Fast-forward completed; post-attempt state is unavailable"
+            };
+            let mut lines = vec![Line::raw(headline)];
+            if let Some(error) = apply_error {
+                lines.push(Line::raw(format!(
+                    "{}: {}",
+                    if *write_attempted {
+                        "Command failure"
+                    } else {
+                        "Guard refusal"
+                    },
+                    terminal_safe(error)
+                )));
+            }
+            lines.push(Line::raw(format!(
+                "Post-attempt state unavailable: {}",
+                terminal_safe(refresh_error)
+            )));
+            lines
+        }
         RepositoryUpdatePrompt::Preview(plan) => {
             let mut lines = update_plan_statement_lines(prompt);
             for path in plan.changed_files() {
@@ -3465,10 +3503,13 @@ fn update_prompt_lines(prompt: &RepositoryUpdatePrompt) -> Vec<Line<'static>> {
         RepositoryUpdatePrompt::Report {
             verification,
             apply_error,
+            write_attempted,
             persistence_error,
             ..
         } => {
-            let headline = if apply_error.is_some() && verification.is_verified() {
+            let headline = if !write_attempted {
+                "Repository update was abandoned without writing"
+            } else if apply_error.is_some() && verification.is_verified() {
                 "Fast-forward command failed; the previewed target was nevertheless verified"
             } else if apply_error.is_some() {
                 "Fast-forward failed and the post-attempt state was not verified"
@@ -3482,7 +3523,12 @@ fn update_prompt_lines(prompt: &RepositoryUpdatePrompt) -> Vec<Line<'static>> {
             let mut lines = vec![Line::raw(headline)];
             if let Some(error) = apply_error {
                 lines.push(Line::raw(format!(
-                    "Command failure: {}",
+                    "{}: {}",
+                    if *write_attempted {
+                        "Command failure"
+                    } else {
+                        "Guard refusal"
+                    },
                     terminal_safe(error)
                 )));
             }
@@ -3553,7 +3599,7 @@ fn update_plan_statement_lines(prompt: &RepositoryUpdatePrompt) -> Vec<Line<'sta
     }
     for (installed, skill) in &plan.affected().restored {
         lines.push(Line::raw(format!(
-            "  dangling link gains its target · {} → {}",
+            "  installation starts loading · {} → {}",
             terminal_safe(installed),
             terminal_safe(skill)
         )));

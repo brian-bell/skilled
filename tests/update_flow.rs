@@ -9,7 +9,7 @@ use skilled::{
     updates::{
         RepositoryUpdatePrompt, RepositoryUpdateVerdict, apply_repository_update,
         classify_repository_update, plan_repository_update, probe_repository_update,
-        verify_repository_update,
+        probe_repository_update_against, verify_repository_update,
     },
 };
 
@@ -1569,6 +1569,127 @@ fn a_failed_apply_refreshes_and_reports_the_post_attempt_state() {
             .iter()
             .all(|finding| finding.code() != "update.verification_failed")
     );
+
+    let backend = TestBackend::new(100, 34);
+    let mut terminal = Terminal::new(backend).expect("terminal");
+    terminal
+        .draw(|frame| {
+            tui::render(frame, &fixture.app);
+        })
+        .expect("render guard-refusal report");
+    let buffer = terminal.backend().buffer();
+    let screen = (buffer.area.y..buffer.area.y + buffer.area.height)
+        .map(|y| {
+            (buffer.area.x..buffer.area.x + buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(screen.contains("abandoned without writing"), "{screen}");
+    assert!(!screen.contains("Fast-forward failed"), "{screen}");
+}
+
+#[test]
+fn a_failed_fast_forward_caches_the_apply_and_verification_failures() {
+    let mut fixture = fixture();
+    push_update(&fixture, "skills/demo/new.txt");
+    fixture
+        .app
+        .perform_effects(&[Effect::CheckUpdates])
+        .expect("start check");
+    finish_update_check(&mut fixture.app);
+    fixture
+        .app
+        .perform_effects(&[Effect::PlanRepositoryUpdate])
+        .expect("plan update");
+
+    // The final guard does not reject this policy change. Git itself reaches
+    // the merge, refuses the unsigned incoming tip, and leaves HEAD unmoved.
+    git(
+        &fixture.clone,
+        &["config", "merge.verifySignatures", "true"],
+    );
+    fixture
+        .app
+        .perform_effects(&[Effect::ApplyRepositoryUpdate])
+        .expect("observe failed fast-forward");
+
+    assert!(matches!(
+        fixture.app.pending_update(),
+        Some(RepositoryUpdatePrompt::Report {
+            apply_error: Some(_),
+            ..
+        })
+    ));
+    let findings = fixture.app.update_checks()[0].findings();
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.code() == "update.apply_failed"),
+        "{findings:?}"
+    );
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.code() == "update.verification_failed"),
+        "{findings:?}"
+    );
+}
+
+#[test]
+fn a_guard_refusal_stays_a_no_write_outcome_when_source_refresh_fails() {
+    let mut fixture = fixture();
+    push_update(&fixture, "skills/demo/new.txt");
+    fixture
+        .app
+        .perform_effects(&[Effect::CheckUpdates])
+        .expect("start check");
+    finish_update_check(&mut fixture.app);
+    fixture
+        .app
+        .perform_effects(&[Effect::PlanRepositoryUpdate])
+        .expect("plan update");
+    git(&fixture.clone, &["switch", "-c", "other"]);
+    let connection =
+        rusqlite::Connection::open(fixture._temporary.path().join("data/skilled.sqlite3"))
+            .expect("open metadata");
+    connection
+        .execute_batch("DROP TABLE source_repositories;")
+        .expect("make source refresh unavailable");
+    drop(connection);
+
+    fixture
+        .app
+        .perform_effects(&[Effect::ApplyRepositoryUpdate])
+        .expect("observe failed refresh");
+
+    assert!(matches!(
+        fixture.app.pending_update(),
+        Some(RepositoryUpdatePrompt::StateUnavailable {
+            apply_error: Some(_),
+            write_attempted: false,
+            ..
+        })
+    ));
+    let backend = TestBackend::new(100, 34);
+    let mut terminal = Terminal::new(backend).expect("terminal");
+    terminal
+        .draw(|frame| {
+            tui::render(frame, &fixture.app);
+        })
+        .expect("render unavailable-state report");
+    let buffer = terminal.backend().buffer();
+    let screen = (buffer.area.y..buffer.area.y + buffer.area.height)
+        .map(|y| {
+            (buffer.area.x..buffer.area.x + buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(screen.contains("abandoned without writing"), "{screen}");
+    assert!(!screen.contains("Fast-forward command failed"), "{screen}");
 }
 
 #[test]
@@ -2788,10 +2909,10 @@ fn a_restoration_redirected_to_another_skill_is_not_verified() {
     let alias = fixture._temporary.path().join("alias");
     std::os::unix::fs::symlink(fixture.clone.join("skills/added"), &alias)
         .expect("intermediate alias");
-    // Named for the skill the hook will redirect it to, so that resolving to
-    // that skill raises no finding of its own: the only thing left to notice
-    // the substitution is the identity the preview disclosed.
-    std::os::unix::fs::symlink(&alias, root.join("other")).expect("aliased dangling link");
+    // The installation name matches the skill the update will restore. A
+    // different name is blocked at preview because it would start loading a
+    // skill whose declared identity does not match the path an agent reads.
+    std::os::unix::fs::symlink(&alias, root.join("added")).expect("aliased dangling link");
 
     std::fs::create_dir_all(fixture.seed.join("skills/added")).expect("added skill directory");
     std::fs::write(
@@ -2838,7 +2959,7 @@ fn a_restoration_redirected_to_another_skill_is_not_verified() {
     };
     assert_eq!(
         plan.affected().restored,
-        vec![("other".to_owned(), "added".to_owned())]
+        vec![("added".to_owned(), "added".to_owned())]
     );
 
     fixture
@@ -3195,24 +3316,20 @@ fn the_fetch_ignores_an_ssh_command_the_checkout_holds() {
 // behaviour under the Rust 2024 contract for `set_var` and would leak the
 // configuration into every other test's Git invocations besides.
 
-/// A link may be installed under a name other than the directory it points at,
-/// and several links may point at one directory. The plan states the
-/// installation that starts loading, because that is what the user is
+/// Several agent roots may hold links to one directory. The plan states the
+/// installation that starts loading once, because that is what the user is
 /// confirming and what verification will check.
 #[test]
 fn a_restoration_names_the_installations_that_start_loading() {
     let mut fixture = fixture();
     let root = fixture._temporary.path().join("home/.claude/skills");
     std::fs::create_dir_all(&root).expect("agent root");
-    std::os::unix::fs::symlink(fixture.clone.join("skills/added"), root.join("legacy"))
-        .expect("aliased dangling link");
+    std::os::unix::fs::symlink(fixture.clone.join("skills/added"), root.join("added"))
+        .expect("dangling link");
     let codex_root = fixture._temporary.path().join("home/.agents/skills");
     std::fs::create_dir_all(&codex_root).expect("codex root");
-    std::os::unix::fs::symlink(
-        fixture.clone.join("skills/added"),
-        codex_root.join("another"),
-    )
-    .expect("second aliased dangling link");
+    std::os::unix::fs::symlink(fixture.clone.join("skills/added"), codex_root.join("added"))
+        .expect("second dangling link");
 
     std::fs::create_dir_all(fixture.seed.join("skills/added")).expect("added skill directory");
     std::fs::write(
@@ -3236,14 +3353,11 @@ fn a_restoration_names_the_installations_that_start_loading() {
     let Some(RepositoryUpdatePrompt::Preview(plan)) = fixture.app.pending_update().cloned() else {
         panic!("expected a preview: {:?}", fixture.app.pending_update());
     };
-    // Both installations are named, under the names their roots hold, beside
-    // the upstream skill each will load.
+    // The installation is named once beside the upstream skill it will load;
+    // its inventory row records both agent roots.
     assert_eq!(
         plan.affected().restored,
-        vec![
-            ("another".to_owned(), "added".to_owned()),
-            ("legacy".to_owned(), "added".to_owned()),
-        ]
+        vec![("added".to_owned(), "added".to_owned())]
     );
     assert!(plan.affected().added.is_empty(), "{:?}", plan.affected());
 
@@ -3256,22 +3370,17 @@ fn a_restoration_names_the_installations_that_start_loading() {
     else {
         panic!("expected a report: {:?}", fixture.app.pending_update());
     };
-    // A link that loads a skill declaring another name gains a mismatch
-    // finding by starting to resolve, and the plan disclosed the loading
-    // rather than the fault. Verification says so, under the names the roots
-    // hold — which is the point: the disclosure and the postcondition are
-    // about the same installations.
+    // OpenCode consults both compatibility roots, so restoring the same skill
+    // through each one creates a disclosed installation but also a benign
+    // alias finding that verification must not ignore.
     assert!(!verification.is_verified());
-    for name in ["legacy", "another"] {
-        assert!(
-            verification
-                .failures()
-                .iter()
-                .any(|failure| failure.contains(name) && failure.contains("skill.name_mismatch")),
-            "{name} missing from {:?}",
-            verification.failures()
-        );
-    }
+    assert!(
+        verification
+            .failures()
+            .iter()
+            .any(|failure| failure.contains("variant.benign_alias")),
+        "{verification:?}"
+    );
 }
 
 /// A disclosed removal names one link. `install.dangling_symlink` on the same
@@ -3445,6 +3554,34 @@ fn a_check_fetches_a_configured_upstream_whose_tracking_ref_was_deleted() {
         .app
         .perform_effects(&[Effect::ScanInstallations])
         .expect("scan after update");
+}
+
+#[test]
+fn a_preview_reports_a_moved_upstream_as_changed_not_unconfigured() {
+    let fixture = fixture();
+    let target = push_update(&fixture, "skills/demo/new.txt");
+    let source = fixture.app.sources()[0].clone();
+    let checked = probe_repository_update(&source, true);
+    let upstream = checked.upstream.as_ref().expect("configured upstream");
+    assert_eq!(upstream.revision(), Some(target.as_str()));
+
+    git(
+        &fixture.clone,
+        &["config", "branch.main.merge", "refs/heads/other"],
+    );
+    let preview = probe_repository_update_against(
+        &source,
+        upstream.tracking_ref(),
+        upstream.revision().expect("fetched upstream revision"),
+    );
+    let (_, findings) = classify_repository_update(&preview);
+    let codes = findings
+        .iter()
+        .map(skilled::inventory::Finding::code)
+        .collect::<Vec<_>>();
+
+    assert!(codes.contains(&"source.changed_after_preview"), "{codes:?}");
+    assert!(!codes.contains(&"source.no_upstream"), "{codes:?}");
 }
 
 /// A root entry need not be named after the skill it points at. Matching the
@@ -3777,6 +3914,157 @@ fn replacing_a_skill_document_with_a_symlink_is_not_an_update_in_place() {
         "{codes:?}"
     );
     assert!(plan.is_blocked());
+}
+
+#[test]
+fn replacing_a_symlinked_skill_document_with_a_regular_file_revives_its_link() {
+    let mut fixture = fixture();
+    std::fs::create_dir_all(fixture.seed.join("skills/other")).expect("second skill directory");
+    std::fs::write(
+        fixture.seed.join("skills/other/SKILL.md"),
+        "---\nname: other\ndescription: fixture\n---\n",
+    )
+    .expect("second skill");
+    std::fs::write(
+        fixture.seed.join("skills/elsewhere.md"),
+        "---\nname: demo\ndescription: linked fixture\n---\n",
+    )
+    .expect("link destination");
+    std::fs::remove_file(fixture.seed.join("skills/demo/SKILL.md"))
+        .expect("remove regular skill document");
+    std::os::unix::fs::symlink("../elsewhere.md", fixture.seed.join("skills/demo/SKILL.md"))
+        .expect("symlink skill document");
+    commit(&fixture.seed, "make the skill document a symlink");
+    git(&fixture.seed, &["push"]);
+    git(&fixture.clone, &["pull", "--ff-only"]);
+
+    let preview = fixture
+        .app
+        .preview_source(&fixture.clone)
+        .expect("preview symlinked source");
+    fixture
+        .app
+        .confirm_source(preview)
+        .expect("record symlinked source state");
+    let root = fixture._temporary.path().join("home/.claude/skills");
+    std::fs::create_dir_all(&root).expect("agent root");
+    std::os::unix::fs::symlink(fixture.clone.join("skills/demo"), root.join("demo"))
+        .expect("non-resolving skill link");
+
+    std::fs::remove_file(fixture.seed.join("skills/demo/SKILL.md"))
+        .expect("remove symlinked skill document");
+    std::fs::write(
+        fixture.seed.join("skills/demo/SKILL.md"),
+        "---\nname: demo\ndescription: restored fixture\n---\n",
+    )
+    .expect("regular skill document");
+    commit(&fixture.seed, "restore a regular skill document");
+    git(&fixture.seed, &["push"]);
+
+    fixture
+        .app
+        .perform_effects(&[Effect::CheckUpdates])
+        .expect("start check");
+    finish_update_check(&mut fixture.app);
+    fixture
+        .app
+        .perform_effects(&[Effect::PlanRepositoryUpdate])
+        .expect("plan update");
+
+    let Some(RepositoryUpdatePrompt::Preview(plan)) = fixture.app.pending_update().cloned() else {
+        panic!("expected a preview: {:?}", fixture.app.pending_update());
+    };
+    assert_eq!(
+        plan.affected().restored,
+        vec![("demo".to_owned(), "demo".to_owned())],
+        "{:?}",
+        fixture.app.inventory().rows()
+    );
+    let backend = TestBackend::new(100, 34);
+    let mut terminal = Terminal::new(backend).expect("terminal");
+    terminal
+        .draw(|frame| {
+            tui::render(frame, &fixture.app);
+        })
+        .expect("render type-change preview");
+    let buffer = terminal.backend().buffer();
+    let screen = (buffer.area.y..buffer.area.y + buffer.area.height)
+        .map(|y| {
+            (buffer.area.x..buffer.area.x + buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(screen.contains("installation starts loading"), "{screen}");
+    assert!(!screen.contains("dangling link gains"), "{screen}");
+
+    fixture
+        .app
+        .perform_effects(&[Effect::ApplyRepositoryUpdate])
+        .expect("apply update");
+    let Some(RepositoryUpdatePrompt::Report { verification, .. }) = fixture.app.pending_update()
+    else {
+        panic!("expected a report: {:?}", fixture.app.pending_update());
+    };
+    assert!(verification.is_verified(), "{:?}", verification.failures());
+    assert!(root.join("demo/SKILL.md").is_file());
+}
+
+#[test]
+fn a_mismatched_alias_cannot_be_promised_as_revived_by_a_regular_skill_document() {
+    let mut fixture = fixture();
+    std::fs::create_dir_all(fixture.seed.join("skills/other")).expect("second skill directory");
+    std::fs::write(
+        fixture.seed.join("skills/other/SKILL.md"),
+        "---\nname: other\ndescription: fixture\n---\n",
+    )
+    .expect("second skill");
+    std::fs::write(
+        fixture.seed.join("skills/elsewhere.md"),
+        "---\nname: demo\ndescription: linked fixture\n---\n",
+    )
+    .expect("link destination");
+    std::fs::remove_file(fixture.seed.join("skills/demo/SKILL.md"))
+        .expect("remove regular skill document");
+    std::os::unix::fs::symlink("../elsewhere.md", fixture.seed.join("skills/demo/SKILL.md"))
+        .expect("symlink skill document");
+    commit(&fixture.seed, "make the skill document a symlink");
+    git(&fixture.seed, &["push"]);
+    git(&fixture.clone, &["pull", "--ff-only"]);
+    let preview = fixture
+        .app
+        .preview_source(&fixture.clone)
+        .expect("preview symlinked source");
+    fixture
+        .app
+        .confirm_source(preview)
+        .expect("record symlinked source state");
+    let root = fixture._temporary.path().join("home/.claude/skills");
+    std::fs::create_dir_all(&root).expect("agent root");
+    std::os::unix::fs::symlink(fixture.clone.join("skills/demo"), root.join("alias"))
+        .expect("non-resolving alias link");
+
+    std::fs::remove_file(fixture.seed.join("skills/demo/SKILL.md"))
+        .expect("remove symlinked skill document");
+    std::fs::write(
+        fixture.seed.join("skills/demo/SKILL.md"),
+        "---\nname: demo\ndescription: restored fixture\n---\n",
+    )
+    .expect("regular skill document");
+    commit(&fixture.seed, "restore a regular skill document");
+    git(&fixture.seed, &["push"]);
+
+    fixture
+        .app
+        .perform_effects(&[Effect::CheckUpdates])
+        .expect("start check");
+    finish_update_check(&mut fixture.app);
+    let check = &fixture.app.update_checks()[0];
+    assert_eq!(check.verdict, RepositoryUpdateVerdict::Blocked);
+    assert!(check.findings().iter().any(|finding| {
+        finding.code() == "source.revival_name_mismatch" && finding.evidence().contains("alias")
+    }));
 }
 
 /// `ls-tree` does not walk through a symbolic link, so a candidate under one

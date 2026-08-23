@@ -11,8 +11,8 @@ use crate::{
     git::{self, ChangeKind, ChangedPath, HeadState, Upstream, WorktreeState},
     inventory::{Finding, FindingSeverity, InventorySnapshot},
     source::{
-        CatalogProposal, RegisteredSource, RepositoryIdentity, repository_identity,
-        repository_identity_from_git_dir,
+        CatalogProposal, RegisteredSource, RepositoryIdentity, SkillValidation,
+        repository_identity, repository_identity_from_git_dir,
     },
 };
 
@@ -106,7 +106,9 @@ impl CachedUpdateCheck {
         if findings.iter().any(|finding| {
             matches!(
                 finding.code(),
-                "update.verification_failed" | "update.verification_incomplete"
+                "update.apply_failed"
+                    | "update.verification_failed"
+                    | "update.verification_incomplete"
             )
         }) {
             return false;
@@ -162,10 +164,12 @@ impl CachedUpdateCheck {
                     | "source.partial_clone_unsupported"
                     | "source.repository_transport_unsupported"
                     | "source.submodule_update_unsupported"
+                    | "source.revival_name_mismatch"
                     | "source.changed_after_preview"
                     | "source.no_upstream"
                     | "source.missing"
                     | "source.detached_head"
+                    | "update.apply_failed"
                     | "update.verification_failed"
                     | "update.verification_incomplete"
             )
@@ -277,7 +281,7 @@ pub(crate) fn cached_update_check(
 
 const FINDINGS_DETAIL_PREFIX: &str = "findings-v1;";
 
-fn encode_findings(findings: &[Finding]) -> String {
+pub(crate) fn encode_findings(findings: &[Finding]) -> String {
     if findings.is_empty() {
         return String::new();
     }
@@ -335,7 +339,7 @@ fn decode_findings(detail: &str) -> Vec<Finding> {
 fn finding_from_parts(code: &str, evidence: &str) -> Finding {
     Finding::new(
         leak_code(code),
-        if code == "update.verification_failed" {
+        if matches!(code, "update.apply_failed" | "update.verification_failed") {
             FindingSeverity::Critical
         } else {
             FindingSeverity::Warning
@@ -357,7 +361,9 @@ fn leak_code(code: &str) -> &'static str {
         "source.repository_transport_unsupported" => "source.repository_transport_unsupported",
         "source.submodule_update_unsupported" => "source.submodule_update_unsupported",
         "source.removal_leaves_content" => "source.removal_leaves_content",
+        "source.revival_name_mismatch" => "source.revival_name_mismatch",
         "source.changed_after_preview" => "source.changed_after_preview",
+        "update.apply_failed" => "update.apply_failed",
         "update.verification_failed" => "update.verification_failed",
         "update.verification_incomplete" => "update.verification_incomplete",
         _ => "source.fetch_failed",
@@ -777,7 +783,7 @@ fn probe_existing_against(
         return Ok(no_upstream_probe(path, local, worktree));
     };
     if upstream.tracking_ref() != expected_upstream_ref {
-        return Ok(no_upstream_probe(path, local, worktree));
+        return Err(crate::Error::SourceChangedAfterPreview);
     }
     // An absent tracking ref reads the same way a moved one does: the object
     // the plan was previewed against is not what the ref names now.
@@ -1476,6 +1482,7 @@ fn affected_catalog_skills(
     let mut added_changes = Vec::new();
     let mut restored = Vec::new();
     let mut expected_revival = Vec::new();
+    let mut revival_name_mismatches = Vec::new();
     for ((catalog_path, name), change) in &changes {
         if is_cancelled(cancelled) {
             return Ok(None);
@@ -1509,14 +1516,20 @@ fn affected_catalog_skills(
         // at the directory being created. What decides a revival is the
         // directory appearing, not what some other agent's link happens to
         // answer to.
-        let revived = if change.added && target_keeps_skill && skill_is_new {
+        let (revived, mismatched) = if target_keeps_skill && skill_is_new {
             revived_by_added_skill(
                 inventory,
+                name,
                 &absolute_candidate_path(repository, &change.candidate_path),
             )
         } else {
-            Vec::new()
+            (Vec::new(), Vec::new())
         };
+        revival_name_mismatches.extend(
+            mismatched
+                .into_iter()
+                .map(|installed| (installed, name.clone())),
+        );
         if !revived.is_empty() {
             // The installation that starts loading is the one the root holds,
             // which need not be named after the directory it points at. Naming
@@ -1535,7 +1548,7 @@ fn affected_catalog_skills(
         }
         let installed_agents = installed.get(&(catalog_path.clone(), name.clone()));
         if installed_agents.is_none() {
-            if change.added && target_keeps_skill && skill_is_new && revived.is_empty() {
+            if target_keeps_skill && skill_is_new && revived.is_empty() {
                 added_changes.push((name.clone(), change.clone()));
             }
             continue;
@@ -1599,9 +1612,15 @@ fn affected_catalog_skills(
         // two are independent: the same update can leave the old skill's link
         // dangling and make another link at the new path start loading.
         if let Some(new_change) = changes.get(&(catalog_path.clone(), new.clone())) {
-            let revived = revived_by_added_skill(
+            let (revived, mismatched) = revived_by_added_skill(
                 inventory,
+                &new,
                 &absolute_candidate_path(repository, &new_change.candidate_path),
+            );
+            revival_name_mismatches.extend(
+                mismatched
+                    .into_iter()
+                    .map(|installed| (installed, new.clone())),
             );
             restored.extend(revived.iter().map(|(row, _)| (row.clone(), new.clone())));
             expected_revival.extend(
@@ -1673,6 +1692,16 @@ fn affected_catalog_skills(
                 ),
             )
         })
+        .chain(revival_name_mismatches.into_iter().map(|(installed, skill)| {
+            Finding::new(
+                "source.revival_name_mismatch",
+                FindingSeverity::Warning,
+                format!(
+                    "installation {installed} points at skill {skill}, but its different name \
+                     means the update would change its invalid state without making it load"
+                ),
+            )
+        }))
         .collect();
     Ok(Some((
         AffectedInstallations {
@@ -1861,30 +1890,58 @@ fn absolute_candidate_path(repository: &Path, candidate: &Path) -> PathBuf {
 /// compares one against a receipt. Nothing here consults a receipt or claims
 /// ownership: this is a statement about what an agent will load after the
 /// fast-forward, which the scan can see from the target alone.
-fn revived_by_added_skill(inventory: &InventorySnapshot, directory: &Path) -> Vec<(String, usize)> {
-    let Some(wanted) = absent_directory_key(None, directory) else {
-        return Vec::new();
-    };
+fn revived_by_added_skill(
+    inventory: &InventorySnapshot,
+    skill_name: &str,
+    directory: &Path,
+) -> (Vec<(String, usize)>, Vec<String>) {
     let mut revived = Vec::new();
+    let mut mismatched = Vec::new();
     for row in inventory.rows() {
         for observation in row.observations() {
             let crate::inventory::InstallationObject::Symlink { target } = observation.object()
             else {
                 continue;
             };
-            if absent_directory_key(observation.path().parent(), target).as_ref() == Some(&wanted)
-                && observation
-                    .findings()
-                    .iter()
-                    .any(|finding| finding.code() == "install.dangling_symlink")
+            if !matches!(
+                observation.validation(),
+                Some(SkillValidation::Valid { .. })
+            ) && link_target_names_directory(observation.path(), target, directory)
             {
-                revived.push((row.name().to_owned(), observation.agent().index()));
+                if row.name() == skill_name {
+                    revived.push((row.name().to_owned(), observation.agent().index()));
+                } else {
+                    mismatched.push(row.name().to_owned());
+                }
             }
         }
     }
     revived.sort();
     revived.dedup();
-    revived
+    mismatched.sort();
+    mismatched.dedup();
+    (revived, mismatched)
+}
+
+fn link_target_names_directory(link: &Path, target: &Path, directory: &Path) -> bool {
+    let resolved_target = if target.is_absolute() {
+        target.to_path_buf()
+    } else {
+        let Some(parent) = link.parent() else {
+            return false;
+        };
+        parent.join(target)
+    };
+    match (resolved_target.canonicalize(), directory.canonicalize()) {
+        (Ok(target), Ok(directory)) => target == directory,
+        _ => matches!(
+            (
+                absent_directory_key(link.parent(), target),
+                absent_directory_key(None, directory)
+            ),
+            (Some(target), Some(directory)) if target == directory
+        ),
+    }
 }
 
 /// A comparable identity for a directory that does not exist yet.
@@ -2004,7 +2061,13 @@ pub enum RepositoryUpdatePrompt {
         plan: RepositoryUpdatePlan,
         verification: RepositoryVerifyReport,
         apply_error: Option<String>,
+        write_attempted: bool,
         persistence_error: Option<String>,
+    },
+    StateUnavailable {
+        apply_error: Option<String>,
+        write_attempted: bool,
+        refresh_error: String,
     },
     Failed(String),
 }

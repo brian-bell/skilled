@@ -26,7 +26,7 @@ fn a_database_from_a_newer_skilled_version_is_rejected_before_use() {
         result,
         Err(Error::UnsupportedSchema {
             found: 99,
-            supported: 9
+            supported: 10
         })
     ));
     let connection = rusqlite::Connection::open(data_dir.join("skilled.sqlite3"))
@@ -51,7 +51,7 @@ fn the_schema_one_past_this_build_is_refused_rather_than_written_through() {
     let connection =
         rusqlite::Connection::open(data_dir.join("skilled.sqlite3")).expect("create database");
     connection
-        .execute_batch("PRAGMA user_version = 10;")
+        .execute_batch("PRAGMA user_version = 11;")
         .expect("set the next schema version");
     drop(connection);
 
@@ -64,10 +64,51 @@ fn the_schema_one_past_this_build_is_refused_rather_than_written_through() {
     assert!(matches!(
         result,
         Err(Error::UnsupportedSchema {
-            found: 10,
-            supported: 9
+            found: 11,
+            supported: 10
         })
     ));
+}
+
+/// The update branch reached schema nine before main introduced the monotonic
+/// source-ID sequence in its own schema six. The join migration must repair a
+/// database from that branch instead of assuming every version-nine database
+/// passed through main's version six.
+#[test]
+fn version_nine_update_metadata_gains_the_source_id_sequence() {
+    let temporary = tempfile::tempdir().expect("temporary application directory");
+    let data_dir = temporary.path().join("data");
+    let environment = AppEnvironment::new(temporary.path().join("home"), &data_dir, "");
+    drop(SkilledApp::open(environment.clone()).expect("create current database"));
+    let database = data_dir.join("skilled.sqlite3");
+    let connection = rusqlite::Connection::open(&database).expect("open current database");
+    connection
+        .execute_batch(
+            "DROP TABLE source_id_sequence;
+             PRAGMA user_version = 9;",
+        )
+        .expect("stage update-branch schema nine");
+    drop(connection);
+
+    drop(SkilledApp::open(environment).expect("migrate update-branch database"));
+
+    let connection = rusqlite::Connection::open(database).expect("inspect migrated database");
+    assert_eq!(
+        connection
+            .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+            .expect("schema version"),
+        10
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT next_id FROM source_id_sequence WHERE singleton = 1",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("source ID sequence"),
+        1
+    );
 }
 
 /// Version six adds repair receipts without changing the chronological contract
@@ -166,7 +207,7 @@ fn version_five_receipts_gain_operations_and_keep_their_id_order() {
         connection
             .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
             .unwrap(),
-        9
+        10
     );
     assert_eq!(
         connection
@@ -346,7 +387,7 @@ fn version_four_metadata_gains_receipt_storage_that_outlives_its_source() {
         connection
             .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
             .unwrap(),
-        9
+        10
     );
     connection
         .execute_batch(
@@ -464,7 +505,7 @@ fn version_two_metadata_migrates_to_constrained_source_catalog_storage() {
         connection
             .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
             .unwrap(),
-        9
+        10
     );
     assert_eq!(
         connection

@@ -1,6 +1,11 @@
 #![cfg(unix)]
 
-use std::{io::Cursor, os::unix::fs::PermissionsExt, path::Path, process::Command};
+use std::{
+    io::{BufRead, Cursor, Read},
+    os::unix::fs::PermissionsExt,
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 use skilled::{
     AppEnvironment, SkilledApp,
@@ -37,6 +42,60 @@ fn commit(repository: &Path, message: &str) {
             message,
         ],
     );
+}
+
+struct StaleConfirmation {
+    input: Cursor<Vec<u8>>,
+    checkout: PathBuf,
+    database_to_break: Option<PathBuf>,
+    cache_to_break: Option<PathBuf>,
+    changed: bool,
+}
+
+impl StaleConfirmation {
+    fn change_checkout(&mut self) {
+        if !self.changed {
+            std::fs::write(
+                self.checkout.join("skills/demo/SKILL.md"),
+                "changed after preview\n",
+            )
+            .expect("change checkout after preview");
+            if let Some(database) = &self.database_to_break {
+                let connection = rusqlite::Connection::open(database).expect("open metadata");
+                connection
+                    .execute_batch("DROP TABLE source_repositories;")
+                    .expect("make source refresh unavailable");
+            }
+            if let Some(database) = &self.cache_to_break {
+                let connection = rusqlite::Connection::open(database).expect("open metadata");
+                connection
+                    .execute_batch(
+                        "CREATE TRIGGER reject_update_check BEFORE UPDATE ON source_update_checks
+                         BEGIN SELECT RAISE(FAIL, 'fixture cache failure'); END;",
+                    )
+                    .expect("make update cache unavailable");
+            }
+            self.changed = true;
+        }
+    }
+}
+
+impl Read for StaleConfirmation {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        self.change_checkout();
+        self.input.read(buffer)
+    }
+}
+
+impl BufRead for StaleConfirmation {
+    fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
+        self.change_checkout();
+        self.input.fill_buf()
+    }
+
+    fn consume(&mut self, amount: usize) {
+        self.input.consume(amount);
+    }
 }
 
 fn fixture() -> (
@@ -177,6 +236,104 @@ fn tracked_worktree_changes_block_without_moving_head() {
     );
     assert_eq!(git(&clone, &["rev-parse", "HEAD"]), before);
     assert!(String::from_utf8_lossy(&output).contains("source.dirty"));
+}
+
+#[test]
+fn a_guard_refusal_after_confirmation_is_blocked_without_claiming_a_failed_write() {
+    let (_temporary, environment, seed, clone) = fixture();
+    std::fs::write(seed.join("upstream.txt"), "incoming\n").expect("incoming file");
+    commit(&seed, "upstream change");
+    git(&seed, &["push"]);
+    let before = git(&clone, &["rev-parse", "HEAD"]);
+    let mut input = StaleConfirmation {
+        input: Cursor::new(b"y\n".to_vec()),
+        checkout: clone.clone(),
+        database_to_break: None,
+        cache_to_break: None,
+        changed: false,
+    };
+    let mut output = Vec::new();
+
+    let code = cli::run(
+        &[
+            "update".into(),
+            "--source".into(),
+            clone.display().to_string(),
+        ],
+        environment,
+        &mut input,
+        &mut output,
+    );
+
+    let output = String::from_utf8(output).expect("utf-8 output");
+    assert_eq!(code, ExitCodeKind::Blocked, "{output}");
+    assert_eq!(git(&clone, &["rev-parse", "HEAD"]), before);
+    assert!(output.contains("Blocked: nothing was written."), "{output}");
+    assert!(output.contains("Guard refusal: source changed"), "{output}");
+    assert!(!output.contains("Fast-forward command failed"), "{output}");
+}
+
+#[test]
+fn a_guard_refusal_with_an_unavailable_refresh_is_not_reported_as_an_ordinary_block() {
+    let (temporary, environment, seed, clone) = fixture();
+    std::fs::write(seed.join("upstream.txt"), "incoming\n").expect("incoming file");
+    commit(&seed, "upstream change");
+    git(&seed, &["push"]);
+    let mut input = StaleConfirmation {
+        input: Cursor::new(b"y\n".to_vec()),
+        checkout: clone,
+        database_to_break: Some(temporary.path().join("data/skilled.sqlite3")),
+        cache_to_break: None,
+        changed: false,
+    };
+    let mut output = Vec::new();
+
+    let code = cli::run(
+        &["update".into(), "--source".into(), "1".into()],
+        environment,
+        &mut input,
+        &mut output,
+    );
+
+    let output = String::from_utf8(output).expect("utf-8 output");
+    assert_eq!(code, ExitCodeKind::PartialApply, "{output}");
+    assert!(output.contains("Guard refusal: source changed"), "{output}");
+    assert!(
+        output.contains("Post-attempt state unavailable"),
+        "{output}"
+    );
+    assert!(output.contains("nothing was written"), "{output}");
+}
+
+#[test]
+fn a_guard_refusal_with_a_cache_failure_keeps_the_refreshed_state_distinct() {
+    let (temporary, environment, seed, clone) = fixture();
+    std::fs::write(seed.join("upstream.txt"), "incoming\n").expect("incoming file");
+    commit(&seed, "upstream change");
+    git(&seed, &["push"]);
+    let mut input = StaleConfirmation {
+        input: Cursor::new(b"y\n".to_vec()),
+        checkout: clone,
+        database_to_break: None,
+        cache_to_break: Some(temporary.path().join("data/skilled.sqlite3")),
+        changed: false,
+    };
+    let mut output = Vec::new();
+
+    let code = cli::run(
+        &["update".into(), "--source".into(), "1".into()],
+        environment,
+        &mut input,
+        &mut output,
+    );
+
+    let output = String::from_utf8(output).expect("utf-8 output");
+    assert_eq!(code, ExitCodeKind::PartialApply, "{output}");
+    assert!(
+        output.contains("Post-attempt state was not cached"),
+        "{output}"
+    );
+    assert!(!output.contains("state unavailable"), "{output}");
 }
 
 /// Verification has three answers, and the exit status has to keep them apart.

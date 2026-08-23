@@ -3,7 +3,7 @@ use std::{
     process::Child,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, AtomicI64, Ordering},
+        atomic::{AtomicBool, AtomicI64, AtomicU8, Ordering},
         mpsc::{self, Receiver, TryRecvError},
     },
     thread::JoinHandle,
@@ -14,8 +14,8 @@ use crate::{
     AgentDetection, AgentKind, AppEnvironment, Result, SessionIdentity,
     agents::{detect_agents, detection_at},
     inventory::{
-        DoctorEntry, Finding, InstallationObject, InstalledSkillObservation, InventoryRow,
-        InventorySnapshot, doctor_order, scan_installations,
+        DoctorEntry, Finding, FindingSeverity, InstallationObject, InstalledSkillObservation,
+        InventoryRow, InventorySnapshot, doctor_order, scan_installations,
     },
     operations::{
         ForgetOutcome, ForgetPlan, ForgetPrompt, InstallOutcome, InstallPlan, InstallPrompt,
@@ -34,8 +34,8 @@ use crate::{
     store::Store,
     updates::{
         CachedUpdateCheck, RepositoryUpdatePlan, RepositoryUpdatePrompt, RepositoryUpdateVerdict,
-        apply_repository_update_attempt, cached_update_check, plan_repository_update,
-        probe_repository_update, probe_repository_update_against,
+        apply_repository_update_attempt, cached_update_check, encode_findings,
+        plan_repository_update, probe_repository_update, probe_repository_update_against,
         probe_repository_update_cancellable, verify_repository_update,
     },
     validation::valid_skill_name,
@@ -272,13 +272,19 @@ struct UpdateCheckRun {
     receiver: Receiver<UpdateCheckMessage>,
     handle: JoinHandle<()>,
     cancelled: Arc<AtomicBool>,
+    terminal_state: Arc<AtomicU8>,
     child: Arc<Mutex<Option<Child>>>,
 }
+
+const UPDATE_CHECK_RUNNING: u8 = 0;
+const UPDATE_CHECK_CANCELLED: u8 = 1;
+const UPDATE_CHECK_FINISHED: u8 = 2;
 
 pub(crate) struct RepositoryApplyOutcome {
     pub(crate) verification: Option<crate::updates::RepositoryVerifyReport>,
     pub(crate) apply_error: Option<String>,
     pub(crate) bookkeeping_error: Option<String>,
+    pub(crate) write_attempted: bool,
 }
 
 enum UpdateCheckMessage {
@@ -772,14 +778,10 @@ impl SkilledApp {
                     self.update_check_progress = Some((completed, total));
                 }
                 Ok(UpdateCheckMessage::Finished(checks)) => {
-                    if run.cancelled.load(Ordering::Acquire) {
-                        effects.push(Effect::FinishUpdateCheck);
-                    } else {
-                        effects.extend([
-                            Effect::RecordUpdateChecks(checks),
-                            Effect::FinishUpdateCheck,
-                        ]);
-                    }
+                    effects.extend([
+                        Effect::RecordUpdateChecks(checks),
+                        Effect::FinishUpdateCheck,
+                    ]);
                     break;
                 }
                 Ok(UpdateCheckMessage::Failed(error)) => {
@@ -1819,9 +1821,12 @@ impl SkilledApp {
             }
         };
         let cancelled = Arc::new(AtomicBool::new(false));
+        let terminal_state = Arc::new(AtomicU8::new(UPDATE_CHECK_RUNNING));
         let child = Arc::new(Mutex::new(None));
         let (sender, receiver) = mpsc::channel();
         let worker_cancelled = Arc::clone(&cancelled);
+        let worker_terminal_state = Arc::clone(&terminal_state);
+        let panic_terminal_state = Arc::clone(&terminal_state);
         let worker_child = Arc::clone(&child);
         let panic_sender = sender.clone();
         let handle = std::thread::spawn(move || {
@@ -1867,20 +1872,29 @@ impl SkilledApp {
                 }
                 if worker_cancelled.load(Ordering::Acquire) {
                     let _ = sender.send(UpdateCheckMessage::Cancelled);
-                } else {
+                } else if worker_terminal_state
+                    .compare_exchange(
+                        UPDATE_CHECK_RUNNING,
+                        UPDATE_CHECK_FINISHED,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    )
+                    .is_ok()
+                {
                     let _ = sender.send(UpdateCheckMessage::Finished(checks));
+                } else {
+                    let _ = sender.send(UpdateCheckMessage::Cancelled);
                 }
             });
             if result.is_err() {
-                let _ = panic_sender.send(UpdateCheckMessage::Failed(
-                    "update check worker panicked before completing".to_owned(),
-                ));
+                publish_update_worker_failure(&panic_terminal_state, &panic_sender);
             }
         });
         self.update_check_run = Some(UpdateCheckRun {
             receiver,
             handle,
             cancelled,
+            terminal_state,
             child,
         });
         self.update_check_progress = Some((0, self.sources.len()));
@@ -1936,14 +1950,25 @@ impl SkilledApp {
             return;
         }
         if let Some(run) = self.update_check_run.take() {
-            run.cancelled.store(true, Ordering::Release);
-            if let Some(mut child) = run
-                .child
-                .lock()
-                .unwrap_or_else(|poison| poison.into_inner())
-                .take()
+            if run
+                .terminal_state
+                .compare_exchange(
+                    UPDATE_CHECK_RUNNING,
+                    UPDATE_CHECK_CANCELLED,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_ok()
             {
-                crate::git::terminate_child(&mut child);
+                run.cancelled.store(true, Ordering::Release);
+                if let Some(mut child) = run
+                    .child
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner())
+                    .take()
+                {
+                    crate::git::terminate_child(&mut child);
+                }
             }
             // Non-fetch inspection children are not yet published through the
             // cancellable child slot. Keep ownership of the run until its
@@ -2048,12 +2073,11 @@ impl SkilledApp {
         self.sources = match self.store.registered_sources() {
             Ok(sources) => sources,
             Err(error) => {
-                let prefix = apply_error.as_deref().map_or_else(String::new, |apply| {
-                    format!("fast-forward command failed: {apply}; ")
+                self.pending_update = Some(RepositoryUpdatePrompt::StateUnavailable {
+                    apply_error,
+                    write_attempted,
+                    refresh_error: error.to_string(),
                 });
-                self.pending_update = Some(RepositoryUpdatePrompt::Failed(format!(
-                    "{prefix}post-attempt source state could not be refreshed: {error}"
-                )));
                 self.reset_detail_scroll();
                 return;
             }
@@ -2078,7 +2102,17 @@ impl SkilledApp {
             Err(error) => Some(error),
             Ok(checked_at) => {
                 let check = if write_attempted {
-                    self.repository_verification_check(&plan, &verification, checked_at)
+                    apply_error.as_deref().map_or_else(
+                        || self.repository_verification_check(&plan, &verification, checked_at),
+                        |error| {
+                            self.repository_apply_failure_check(
+                                &plan,
+                                error,
+                                &verification,
+                                checked_at,
+                            )
+                        },
+                    )
                 } else {
                     self.superseded_repository_check(plan.source_id(), checked_at)
                 };
@@ -2095,6 +2129,7 @@ impl SkilledApp {
             plan,
             verification,
             apply_error,
+            write_attempted,
             persistence_error,
         });
         self.reset_detail_scroll();
@@ -2177,6 +2212,7 @@ impl SkilledApp {
                     bookkeeping_error: Some(format!(
                         "post-attempt source state could not be refreshed: {error}"
                     )),
+                    write_attempted,
                 };
             }
         };
@@ -2188,7 +2224,17 @@ impl SkilledApp {
             Err(error) => Some(error),
             Ok(checked_at) => {
                 let check = if write_attempted {
-                    self.repository_verification_check(plan, &verification, checked_at)
+                    apply_error.as_deref().map_or_else(
+                        || self.repository_verification_check(plan, &verification, checked_at),
+                        |error| {
+                            self.repository_apply_failure_check(
+                                plan,
+                                error,
+                                &verification,
+                                checked_at,
+                            )
+                        },
+                    )
                 } else {
                     self.superseded_repository_check(plan.source_id(), checked_at)
                 };
@@ -2204,6 +2250,7 @@ impl SkilledApp {
             verification: Some(verification),
             apply_error,
             bookkeeping_error,
+            write_attempted,
         }
     }
 
@@ -2213,11 +2260,6 @@ impl SkilledApp {
         verification: &crate::updates::RepositoryVerifyReport,
         checked_at: i64,
     ) -> CachedUpdateCheck {
-        let source = self
-            .sources
-            .iter()
-            .find(|source| source.id() == plan.source_id());
-        let dirty = source.and_then(RegisteredSource::dirty);
         let (verdict, detail) = if !verification.is_verified() {
             (
                 RepositoryUpdateVerdict::Blocked,
@@ -2237,6 +2279,54 @@ impl SkilledApp {
         } else {
             (RepositoryUpdateVerdict::UpToDate, String::new())
         };
+        self.repository_result_check(plan, checked_at, verdict, detail)
+    }
+
+    fn repository_apply_failure_check(
+        &self,
+        plan: &RepositoryUpdatePlan,
+        error: &str,
+        verification: &crate::updates::RepositoryVerifyReport,
+        checked_at: i64,
+    ) -> CachedUpdateCheck {
+        let mut findings = vec![Finding::new(
+            "update.apply_failed",
+            FindingSeverity::Critical,
+            error.to_owned(),
+        )];
+        if !verification.is_verified() {
+            findings.push(Finding::new(
+                "update.verification_failed",
+                FindingSeverity::Critical,
+                verification.failures().join("; "),
+            ));
+        } else if !verification.is_complete() {
+            findings.push(Finding::new(
+                "update.verification_incomplete",
+                FindingSeverity::Warning,
+                verification.withheld().join("; "),
+            ));
+        }
+        self.repository_result_check(
+            plan,
+            checked_at,
+            RepositoryUpdateVerdict::Blocked,
+            encode_findings(&findings),
+        )
+    }
+
+    fn repository_result_check(
+        &self,
+        plan: &RepositoryUpdatePlan,
+        checked_at: i64,
+        verdict: RepositoryUpdateVerdict,
+        detail: String,
+    ) -> CachedUpdateCheck {
+        let source = self
+            .sources
+            .iter()
+            .find(|source| source.id() == plan.source_id());
+        let dirty = source.and_then(RegisteredSource::dirty);
         CachedUpdateCheck {
             source_id: plan.source_id(),
             checked_at,
@@ -2993,6 +3083,27 @@ impl SkilledApp {
     }
 }
 
+fn publish_update_worker_failure(
+    terminal_state: &AtomicU8,
+    sender: &mpsc::Sender<UpdateCheckMessage>,
+) {
+    if terminal_state
+        .compare_exchange(
+            UPDATE_CHECK_RUNNING,
+            UPDATE_CHECK_FINISHED,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        )
+        .is_ok()
+    {
+        let _ = sender.send(UpdateCheckMessage::Failed(
+            "update check worker panicked before completing".to_owned(),
+        ));
+    } else if terminal_state.load(Ordering::Acquire) == UPDATE_CHECK_CANCELLED {
+        let _ = sender.send(UpdateCheckMessage::Cancelled);
+    }
+}
+
 /// Letting go of the application ends the check it started.
 ///
 /// The worker owns nothing that would stop it: it ignores failed sends, so a
@@ -3006,7 +3117,18 @@ impl Drop for SkilledApp {
         let Some(run) = self.update_check_run.take() else {
             return;
         };
-        run.cancelled.store(true, Ordering::Release);
+        if run
+            .terminal_state
+            .compare_exchange(
+                UPDATE_CHECK_RUNNING,
+                UPDATE_CHECK_CANCELLED,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+        {
+            run.cancelled.store(true, Ordering::Release);
+        }
         if let Some(mut child) = run
             .child
             .lock()
@@ -3047,6 +3169,7 @@ mod tests {
             receiver,
             handle: std::thread::spawn(|| {}),
             cancelled,
+            terminal_state: Arc::new(AtomicU8::new(UPDATE_CHECK_FINISHED)),
             child: Arc::new(Mutex::new(None)),
         });
 
@@ -3055,6 +3178,73 @@ mod tests {
         assert!(!observed_cancelled.load(Ordering::Acquire));
         assert!(!app.update_check_in_flight());
         assert!(app.update_check_error().is_none());
+    }
+
+    #[test]
+    fn draining_honours_a_finished_message_that_won_the_cancellation_race() {
+        let (_temporary, mut app) = test_app();
+        let (sender, receiver) = mpsc::channel();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let terminal_state = Arc::new(AtomicU8::new(UPDATE_CHECK_RUNNING));
+        let worker_state = Arc::clone(&terminal_state);
+        let (claimed_sender, claimed_receiver) = mpsc::sync_channel(0);
+        let (release_sender, release_receiver) = mpsc::sync_channel(0);
+        let handle = std::thread::spawn(move || {
+            worker_state
+                .compare_exchange(
+                    UPDATE_CHECK_RUNNING,
+                    UPDATE_CHECK_FINISHED,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .expect("claim finished result");
+            claimed_sender.send(()).expect("publish completion claim");
+            release_receiver.recv().expect("release finished message");
+            sender
+                .send(UpdateCheckMessage::Finished(Vec::new()))
+                .expect("queue finished result");
+        });
+        app.update_check_run = Some(UpdateCheckRun {
+            receiver,
+            handle,
+            cancelled: Arc::clone(&cancelled),
+            terminal_state,
+            child: Arc::new(Mutex::new(None)),
+        });
+
+        claimed_receiver.recv().expect("worker claimed completion");
+        app.cancel_update_check();
+        assert!(!cancelled.load(Ordering::Acquire));
+        release_sender.send(()).expect("publish finished message");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        let effects = loop {
+            let effects = app.drain_update_check();
+            if !effects.is_empty() || std::time::Instant::now() >= deadline {
+                break effects;
+            }
+            std::thread::yield_now();
+        };
+
+        assert_eq!(
+            effects,
+            [
+                Effect::RecordUpdateChecks(Vec::new()),
+                Effect::FinishUpdateCheck
+            ]
+        );
+    }
+
+    #[test]
+    fn cancellation_suppresses_a_later_worker_panic_publication() {
+        let terminal_state = AtomicU8::new(UPDATE_CHECK_CANCELLED);
+        let (sender, receiver) = mpsc::channel();
+
+        publish_update_worker_failure(&terminal_state, &sender);
+
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(UpdateCheckMessage::Cancelled)
+        ));
     }
 
     #[test]
@@ -3073,6 +3263,7 @@ mod tests {
             receiver,
             handle,
             cancelled,
+            terminal_state: Arc::new(AtomicU8::new(UPDATE_CHECK_RUNNING)),
             child: Arc::new(Mutex::new(None)),
         });
 
@@ -3129,6 +3320,7 @@ mod tests {
             receiver,
             handle: std::thread::spawn(|| {}),
             cancelled: Arc::new(AtomicBool::new(false)),
+            terminal_state: Arc::new(AtomicU8::new(UPDATE_CHECK_RUNNING)),
             child: Arc::new(Mutex::new(None)),
         });
 
@@ -3169,6 +3361,7 @@ mod tests {
             receiver,
             handle,
             cancelled: Arc::clone(&cancelled),
+            terminal_state: Arc::new(AtomicU8::new(UPDATE_CHECK_RUNNING)),
             child: Arc::new(Mutex::new(None)),
         });
 

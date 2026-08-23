@@ -732,6 +732,22 @@ fn execute_update(
         return Ok(ExitCodeKind::Success);
     }
     let outcome = app.apply_repository_plan(&plan);
+    if let Some(guard_error) = outcome.apply_error.as_deref()
+        && !outcome.write_attempted
+    {
+        let _ = writeln!(output, "Blocked: nothing was written.");
+        let _ = writeln!(output, "Guard refusal: {}", safe(guard_error));
+        if let Some(error) = outcome.bookkeeping_error.as_deref() {
+            let label = if outcome.verification.is_none() {
+                "Post-attempt state unavailable"
+            } else {
+                "Post-attempt state was not cached"
+            };
+            let _ = writeln!(output, "{label}: {}", safe(error));
+            return Ok(ExitCodeKind::PartialApply);
+        }
+        return Ok(ExitCodeKind::Blocked);
+    }
     let apply_failed = outcome.apply_error.is_some();
     let bookkeeping_failed = outcome.bookkeeping_error.is_some();
     let verification = match outcome.verification {
@@ -824,7 +840,7 @@ fn write_repository_update_plan(
     for (installed, skill) in &plan.affected().restored {
         writeln!(
             output,
-            "    dangling link gains its target · {} -> {}",
+            "    installation starts loading · {} -> {}",
             safe(installed),
             safe(skill)
         )?;
