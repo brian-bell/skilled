@@ -217,7 +217,7 @@ pub(crate) fn cached_update_check(
         source,
         inventory,
         &changed_files,
-        &probe.path,
+        (&probe.path).into(),
         &local,
         &target,
         cancelled,
@@ -398,10 +398,18 @@ pub fn probe_repository_update(source: &RegisteredSource, fetch: bool) -> Reposi
             error: Some(format!("source.missing|{error}")),
         };
     }
-    if !registered_checkout_path_is_current(source) {
+    // Pinned before anything is proven: the identity check below and every
+    // Git process the probe runs go through this handle, so their answers
+    // describe one directory rather than whatever the pathname names at each
+    // spawn. `skilled-2k3.8.5.1` is the record of why the pathname was not
+    // enough.
+    let Ok(handle) = git::RepositoryHandle::open(&path) else {
+        return changed_checkout_probe(path);
+    };
+    if !registered_checkout_path_is_current(source, &handle) {
         return changed_checkout_probe(path);
     }
-    match probe_existing(&path, fetch) {
+    match probe_existing(&handle, fetch) {
         Ok(probe) => probe,
         Err(error) => failed_probe(path, error),
     }
@@ -426,12 +434,17 @@ pub(crate) fn probe_repository_update_cancellable(
             error: Some(format!("source.missing|{error}")),
         });
     }
+    // Pinned before anything is proven, for the reason given on the blocking
+    // path: every process this check runs answers for one directory.
+    let Ok(handle) = git::RepositoryHandle::open(&path) else {
+        return Some(changed_checkout_probe(path));
+    };
     let checkout_is_current =
-        registered_checkout_path_is_current_cancellable(source, cancelled, child_slot)?;
+        registered_checkout_path_is_current_cancellable(source, &handle, cancelled, child_slot)?;
     if !checkout_is_current {
         return Some(changed_checkout_probe(path));
     }
-    match probe_existing_cancellable(&path, cancelled, child_slot) {
+    match probe_existing_cancellable(&handle, cancelled, child_slot) {
         Ok(Some(probe)) => Some(probe),
         Ok(None) => None,
         Err(error) => Some(failed_probe_without_reinspection(path, error)),
@@ -439,12 +452,14 @@ pub(crate) fn probe_repository_update_cancellable(
 }
 
 fn probe_existing_cancellable(
-    path: &Path,
+    handle: &git::RepositoryHandle,
     cancelled: &AtomicBool,
     child_slot: &Mutex<Option<Child>>,
 ) -> std::result::Result<Option<RepositoryUpdateProbe>, ProbeFailure> {
+    let path = handle.path();
+    let target: git::GitTarget = handle.into();
     let Some(partial_clone) =
-        git::repository_is_partial_clone_cancellable(path, cancelled, child_slot)
+        git::repository_is_partial_clone_cancellable(target, cancelled, child_slot)
             .map_err(ProbeFailure::Inspect)?
     else {
         return Ok(None);
@@ -453,7 +468,7 @@ fn probe_existing_cancellable(
         return Ok(Some(partial_clone_probe(path)));
     }
     let Some(transport_code) =
-        git::repository_transport_code_cancellable(path, cancelled, child_slot)
+        git::repository_transport_code_cancellable(target, cancelled, child_slot)
             .map_err(ProbeFailure::Inspect)?
     else {
         return Ok(None);
@@ -461,17 +476,17 @@ fn probe_existing_cancellable(
     if let Some(setting) = transport_code {
         return Ok(Some(transport_code_probe(path, &setting)));
     }
-    let Some(local) =
-        git::head_state_cancellable(path, cancelled, child_slot).map_err(ProbeFailure::Inspect)?
-    else {
-        return Ok(None);
-    };
-    let Some(worktree) = git::worktree_state_cancellable(path, cancelled, child_slot)
+    let Some(local) = git::head_state_cancellable(target, cancelled, child_slot)
         .map_err(ProbeFailure::Inspect)?
     else {
         return Ok(None);
     };
-    let Some(upstream) = git::upstream_of_cancellable(path, &local, cancelled, child_slot)
+    let Some(worktree) = git::worktree_state_cancellable(target, cancelled, child_slot)
+        .map_err(ProbeFailure::Inspect)?
+    else {
+        return Ok(None);
+    };
+    let Some(upstream) = git::upstream_of_cancellable(target, &local, cancelled, child_slot)
         .map_err(ProbeFailure::Inspect)?
     else {
         return Ok(None);
@@ -493,7 +508,7 @@ fn probe_existing_cancellable(
         // over a remote that may list several.
         let key = format!("remote.{}.url", upstream.remote());
         let Some(url) =
-            git::effective_remote_url_cancellable(path, upstream.remote(), cancelled, child_slot)
+            git::effective_remote_url_cancellable(target, upstream.remote(), cancelled, child_slot)
                 .map_err(ProbeFailure::Inspect)?
         else {
             return Ok(None);
@@ -504,7 +519,7 @@ fn probe_existing_cancellable(
         // Re-asked immediately before the fetch, for the reason given on the
         // same guard in `probe_existing`.
         let Some(transport_code) =
-            git::repository_transport_code_cancellable(path, cancelled, child_slot)
+            git::repository_transport_code_cancellable(target, cancelled, child_slot)
                 .map_err(ProbeFailure::Inspect)?
         else {
             return Ok(None);
@@ -512,7 +527,7 @@ fn probe_existing_cancellable(
         if let Some(setting) = transport_code {
             return Ok(Some(transport_code_probe(path, &setting)));
         }
-        match git::fetch_upstream_cancellable(path, &upstream, cancelled, child_slot) {
+        match git::fetch_upstream_cancellable(target, &upstream, cancelled, child_slot) {
             Ok(Some(revision)) => revision,
             Ok(None) => return Ok(None),
             Err(error) => {
@@ -532,20 +547,20 @@ fn probe_existing_cancellable(
     };
     let upstream = upstream.with_revision(revision.clone());
     let Some(base) =
-        git::merge_base_cancellable(path, local.revision(), &revision, cancelled, child_slot)
+        git::merge_base_cancellable(target, local.revision(), &revision, cancelled, child_slot)
             .map_err(ProbeFailure::Inspect)?
     else {
         return Ok(None);
     };
     let Some(counts) =
-        git::ahead_behind_cancellable(path, local.revision(), &revision, cancelled, child_slot)
+        git::ahead_behind_cancellable(target, local.revision(), &revision, cancelled, child_slot)
             .map_err(ProbeFailure::Inspect)?
     else {
         return Ok(None);
     };
     let changed_files = if counts.behind > 0 {
         let Some(files) = git::changed_paths_cancellable(
-            path,
+            target,
             local.revision(),
             &revision,
             cancelled,
@@ -594,10 +609,15 @@ pub fn probe_repository_update_against(
             error: Some(format!("source.missing|{error}")),
         };
     }
-    if !registered_checkout_path_is_current(source) {
+    // Pinned before anything is proven, for the reason given on the explicit
+    // check: every process this re-probe runs answers for one directory.
+    let Ok(handle) = git::RepositoryHandle::open(&path) else {
+        return changed_checkout_probe(path);
+    };
+    if !registered_checkout_path_is_current(source, &handle) {
         return changed_checkout_probe(path);
     }
-    match probe_existing_against(&path, upstream_ref, upstream_revision) {
+    match probe_existing_against(&handle, upstream_ref, upstream_revision) {
         Ok(probe) => probe,
         Err(crate::Error::SourceChangedAfterPreview) => changed_after_preview_probe(path),
         Err(error) => failed_probe(path, ProbeFailure::Inspect(error)),
@@ -610,8 +630,8 @@ enum ProbeFailure {
 }
 
 fn failed_probe(path: PathBuf, error: ProbeFailure) -> RepositoryUpdateProbe {
-    let local = git::head_state(&path).ok();
-    let worktree = git::worktree_state(&path).ok();
+    let local = git::head_state((&path).into()).ok();
+    let worktree = git::worktree_state((&path).into()).ok();
     let (code, error) = match error {
         ProbeFailure::Fetch(error) => ("source.fetch_failed", error),
         ProbeFailure::Inspect(error) => ("source.missing", error),
@@ -720,7 +740,14 @@ fn transport_code_probe(path: &Path, setting: &str) -> RepositoryUpdateProbe {
     }
 }
 
-fn registered_checkout_path_is_current(source: &RegisteredSource) -> bool {
+/// Whether the registered pathname still names the registered repository —
+/// asked through `handle`, so the identity answered for is the pinned
+/// directory the rest of the probe will act on, not whatever the pathname
+/// resolves to at each later spawn.
+fn registered_checkout_path_is_current(
+    source: &RegisteredSource,
+    handle: &git::RepositoryHandle,
+) -> bool {
     let path = source.git_top_level();
     let Ok(metadata) = std::fs::symlink_metadata(path) else {
         return false;
@@ -731,13 +758,17 @@ fn registered_checkout_path_is_current(source: &RegisteredSource) -> bool {
     if path.canonicalize().ok().as_deref() != Some(path) {
         return false;
     }
-    source
-        .repository_identity()
-        .is_some_and(|expected| repository_identity(path).is_ok_and(|current| current == *expected))
+    let Ok(git_dir) = git::repository_git_dir(handle.into()) else {
+        return false;
+    };
+    source.repository_identity().is_some_and(|expected| {
+        repository_identity_from_git_dir(git_dir).is_ok_and(|current| current == *expected)
+    })
 }
 
 fn registered_checkout_path_is_current_cancellable(
     source: &RegisteredSource,
+    handle: &git::RepositoryHandle,
     cancelled: &AtomicBool,
     child_slot: &Mutex<Option<Child>>,
 ) -> Option<bool> {
@@ -754,7 +785,7 @@ fn registered_checkout_path_is_current_cancellable(
     {
         return Some(false);
     }
-    let git_dir = match git::repository_git_dir_cancellable(path, cancelled, child_slot) {
+    let git_dir = match git::repository_git_dir_cancellable(handle.into(), cancelled, child_slot) {
         Ok(Some(path)) => path,
         Ok(None) => return None,
         Err(_) => return Some(false),
@@ -765,21 +796,23 @@ fn registered_checkout_path_is_current_cancellable(
 }
 
 fn probe_existing_against(
-    path: &Path,
+    handle: &git::RepositoryHandle,
     expected_upstream_ref: &str,
     upstream_revision: &str,
 ) -> Result<RepositoryUpdateProbe> {
+    let path = handle.path();
+    let target: git::GitTarget = handle.into();
     // Re-asked, not remembered. The explicit check refused a partial clone
     // before reading any object, but a promisor remote configured since then
     // would let `merge-base`, `diff-tree`, and `rev-list` below fetch missing
     // objects lazily — network access while the user is merely opening a
     // preview, outside the one step that was agreed to reach the network.
-    if git::repository_is_partial_clone(path)? {
+    if git::repository_is_partial_clone(target)? {
         return Ok(partial_clone_probe(path));
     }
-    let local = git::head_state(path)?;
-    let worktree = git::worktree_state(path)?;
-    let Some(upstream) = git::upstream_of(path, &local)? else {
+    let local = git::head_state(target)?;
+    let worktree = git::worktree_state(target)?;
+    let Some(upstream) = git::upstream_of(target, &local)? else {
         return Ok(no_upstream_probe(path, local, worktree));
     };
     if upstream.tracking_ref() != expected_upstream_ref {
@@ -791,7 +824,7 @@ fn probe_existing_against(
         return Err(crate::Error::SourceChangedAfterPreview);
     }
     finish_probe(
-        path,
+        target,
         local,
         worktree,
         upstream.with_revision(upstream_revision.to_owned()),
@@ -799,21 +832,23 @@ fn probe_existing_against(
 }
 
 fn probe_existing(
-    path: &Path,
+    handle: &git::RepositoryHandle,
     fetch: bool,
 ) -> std::result::Result<RepositoryUpdateProbe, ProbeFailure> {
-    if git::repository_is_partial_clone(path).map_err(ProbeFailure::Inspect)? {
+    let path = handle.path();
+    let target: git::GitTarget = handle.into();
+    if git::repository_is_partial_clone(target).map_err(ProbeFailure::Inspect)? {
         return Ok(partial_clone_probe(path));
     }
     // Asked before anything else the check does, because the answer decides
     // whether the check may run at all rather than how one of its steps
     // behaves.
-    if let Some(setting) = git::repository_transport_code(path).map_err(ProbeFailure::Inspect)? {
+    if let Some(setting) = git::repository_transport_code(target).map_err(ProbeFailure::Inspect)? {
         return Ok(transport_code_probe(path, &setting));
     }
-    let local = git::head_state(path).map_err(ProbeFailure::Inspect)?;
-    let worktree = git::worktree_state(path).map_err(ProbeFailure::Inspect)?;
-    let mut upstream = git::upstream_of(path, &local).map_err(ProbeFailure::Inspect)?;
+    let local = git::head_state(target).map_err(ProbeFailure::Inspect)?;
+    let worktree = git::worktree_state(target).map_err(ProbeFailure::Inspect)?;
+    let mut upstream = git::upstream_of(target, &local).map_err(ProbeFailure::Inspect)?;
     if fetch
         && let Some(value) = &upstream
         && value.remote() != "."
@@ -824,7 +859,7 @@ fn probe_existing(
         // transport, and a remote with several URLs is fetched from the first
         // while `--get` answers with the last.
         if let Some(url) =
-            git::effective_remote_url(path, value.remote()).map_err(ProbeFailure::Inspect)?
+            git::effective_remote_url(target, value.remote()).map_err(ProbeFailure::Inspect)?
             && git::remote_url_runs_a_helper(&url)
         {
             return Ok(transport_code_probe(
@@ -841,17 +876,17 @@ fn probe_existing(
         // be inside the window this answer covers. What remains is the single
         // gap between this process and the fetch, tracked as `skilled-88j`.
         if let Some(setting) =
-            git::repository_transport_code(path).map_err(ProbeFailure::Inspect)?
+            git::repository_transport_code(target).map_err(ProbeFailure::Inspect)?
         {
             return Ok(transport_code_probe(path, &setting));
         }
-        let revision = git::fetch_upstream(path, value).map_err(ProbeFailure::Fetch)?;
+        let revision = git::fetch_upstream(target, value).map_err(ProbeFailure::Fetch)?;
         upstream = Some(value.with_revision(revision));
     }
     let Some(upstream_value) = upstream else {
         return Ok(no_upstream_probe(path, local, worktree));
     };
-    finish_probe(path, local, worktree, upstream_value).map_err(ProbeFailure::Inspect)
+    finish_probe(target, local, worktree, upstream_value).map_err(ProbeFailure::Inspect)
 }
 
 fn no_upstream_probe(
@@ -902,18 +937,19 @@ fn unfetched_upstream_probe(
 }
 
 fn finish_probe(
-    path: &Path,
+    target: git::GitTarget<'_>,
     local: HeadState,
     worktree: WorktreeState,
     upstream: Upstream,
 ) -> Result<RepositoryUpdateProbe> {
+    let path = target.path();
     let Some(revision) = upstream.revision().map(str::to_owned) else {
         return Ok(unfetched_upstream_probe(path, local, worktree, upstream));
     };
-    let base = git::merge_base(path, local.revision(), &revision)?;
-    let counts = git::ahead_behind(path, local.revision(), &revision)?;
+    let base = git::merge_base(target, local.revision(), &revision)?;
+    let counts = git::ahead_behind(target, local.revision(), &revision)?;
     let changed_files = if counts.behind > 0 {
-        git::changed_paths(path, local.revision(), &revision)?
+        git::changed_paths(target, local.revision(), &revision)?
     } else {
         Vec::new()
     };
@@ -1207,7 +1243,7 @@ pub fn plan_repository_update(
         .unwrap_or("")
         .to_owned();
     let commits = if verdict == RepositoryUpdateVerdict::Available {
-        git::commit_summaries(&probe.path, &local, &target)?
+        git::commit_summaries((&probe.path).into(), &local, &target)?
     } else {
         Vec::new()
     };
@@ -1223,7 +1259,7 @@ pub fn plan_repository_update(
         source,
         inventory,
         &changed_files,
-        &probe.path,
+        (&probe.path).into(),
         &local,
         &target,
         &AtomicBool::new(false),
@@ -1306,7 +1342,7 @@ fn affected_catalog_skills(
     source: &RegisteredSource,
     inventory: &InventorySnapshot,
     files: &[ChangedPath],
-    repository: &Path,
+    repository: git::GitTarget<'_>,
     current_revision: &str,
     target_revision: &str,
     cancelled: &AtomicBool,
@@ -1520,7 +1556,7 @@ fn affected_catalog_skills(
             revived_by_added_skill(
                 inventory,
                 name,
-                &absolute_candidate_path(repository, &change.candidate_path),
+                &absolute_candidate_path(repository.path(), &change.candidate_path),
             )
         } else {
             (Vec::new(), Vec::new())
@@ -1615,7 +1651,7 @@ fn affected_catalog_skills(
             let (revived, mismatched) = revived_by_added_skill(
                 inventory,
                 &new,
-                &absolute_candidate_path(repository, &new_change.candidate_path),
+                &absolute_candidate_path(repository.path(), &new_change.candidate_path),
             );
             revival_name_mismatches.extend(
                 mismatched
@@ -1765,13 +1801,13 @@ fn candidate_skill_document(candidate: &Path) -> PathBuf {
 /// treated as one. So is one too large to walk within [`OCCUPANT_BUDGET`]:
 /// understating what is standing there is the error that gets a write applied.
 fn surviving_removal(
-    repository: &Path,
+    repository: git::GitTarget<'_>,
     target_revision: &str,
     candidate: &Path,
     deleted: &std::collections::BTreeSet<PathBuf>,
 ) -> Result<Option<PathBuf>> {
     if candidate == Path::new(".") {
-        return Ok(Some(repository.to_path_buf()));
+        return Ok(Some(repository.path().to_path_buf()));
     }
     // Any entry, not only a directory: an update that replaces the skill
     // directory with a regular file or a symbolic link leaves the installed
@@ -1796,7 +1832,12 @@ fn surviving_removal(
         }
     }
     let mut budget = OCCUPANT_BUDGET;
-    surviving_worktree_entry(&repository.join(candidate), candidate, deleted, &mut budget)
+    surviving_worktree_entry(
+        &repository.path().join(candidate),
+        candidate,
+        deleted,
+        &mut budget,
+    )
 }
 
 /// How many worktree entries [`surviving_removal`] reads before giving up and
@@ -2073,8 +2114,8 @@ pub enum RepositoryUpdatePrompt {
 }
 
 pub fn apply_repository_update(plan: &RepositoryUpdatePlan) -> Result<()> {
-    validate_repository_update(plan)?;
-    git::fast_forward(&plan.path, &plan.target_revision)
+    let checkout = validate_repository_update(plan)?;
+    git::fast_forward((&checkout).into(), &plan.target_revision)
 }
 
 /// Apply while reporting whether Git's write operation was reached. Callers
@@ -2090,36 +2131,56 @@ pub fn apply_repository_update(plan: &RepositoryUpdatePlan) -> Result<()> {
 /// window and is tracked as `skilled-8tr`.
 pub(crate) fn apply_repository_update_attempt(plan: &RepositoryUpdatePlan) -> (Result<()>, bool) {
     match validate_repository_update(plan) {
-        Ok(()) => (git::fast_forward(&plan.path, &plan.target_revision), true),
+        Ok(checkout) => (
+            git::fast_forward((&checkout).into(), &plan.target_revision),
+            true,
+        ),
         Err(error) => (Err(error), false),
     }
 }
 
-fn validate_repository_update(plan: &RepositoryUpdatePlan) -> Result<()> {
+/// Prove the checkout is the one the plan was confirmed against, and return
+/// the handle the merge must run through.
+///
+/// Every guard here, and the fast-forward after it, is a Git process spawned
+/// through the returned [`git::RepositoryHandle`], so all of them act on the
+/// one directory that was pinned and identity-checked at the top — a checkout
+/// moved aside and replaced between any two of these steps changes what the
+/// pathname names, not what the processes read or write. What remains
+/// pathname-bound is the closing [`git::RepositoryHandle::still_names_its_path`]
+/// re-reading: the plan the user confirmed stated a path, so a proven
+/// repository that is no longer at that path is refused rather than written
+/// wherever it went. A rename inside the gap after that re-reading loses only
+/// the refusal — the write still lands in the proven repository, which is the
+/// inversion `skilled-2k3.8.5.1` asked for.
+fn validate_repository_update(plan: &RepositoryUpdatePlan) -> Result<git::RepositoryHandle> {
     if plan.is_blocked() {
         return Err(crate::Error::SourceChangedAfterPreview);
     }
-    checkout_is_the_planned_repository(plan)?;
+    let checkout = git::RepositoryHandle::open(&plan.path)
+        .map_err(|_| crate::Error::SourceChangedAfterPreview)?;
+    checkout_is_the_planned_repository(plan, &checkout)?;
+    let target: git::GitTarget = (&checkout).into();
     // The preview's refusal is not evidence about now. Every guard below reads
     // objects, and a promisor remote configured since the preview would let
     // them fetch lazily on the way into a write.
-    if git::repository_is_partial_clone(&plan.path)? {
+    if git::repository_is_partial_clone(target)? {
         return Err(crate::Error::SourceChangedAfterPreview);
     }
-    let head = git::head_state(&plan.path)?;
+    let head = git::head_state(target)?;
     if head.reference() != Some(plan.current_reference.as_str())
         || head.revision() != plan.current_revision
     {
         return Err(crate::Error::SourceChangedAfterPreview);
     }
-    let upstream = git::upstream_of(&plan.path, &head)?;
+    let upstream = git::upstream_of(target, &head)?;
     if upstream.as_ref().map(Upstream::tracking_ref) != Some(plan.upstream_ref.as_str())
         || upstream.as_ref().and_then(Upstream::revision) != Some(plan.target_revision.as_str())
-        || !git::commit_exists(&plan.path, &plan.target_revision)?
+        || !git::commit_exists(target, &plan.target_revision)?
     {
         return Err(crate::Error::SourceChangedAfterPreview);
     }
-    let state = git::worktree_state(&plan.path)?;
+    let state = git::worktree_state(target)?;
     if state.tracked_dirty() || !state.worktree_dirty_known {
         return Err(crate::Error::SourceChangedAfterPreview);
     }
@@ -2134,23 +2195,26 @@ fn validate_repository_update(plan: &RepositoryUpdatePlan) -> Result<()> {
     // against the worktree as it stands now.
     let deleted = deleted_paths(&plan.changed_files);
     for candidate in &plan.affected.vacating_candidates {
-        if surviving_removal(&plan.path, &plan.target_revision, candidate, &deleted)?.is_some() {
+        if surviving_removal(target, &plan.target_revision, candidate, &deleted)?.is_some() {
             return Err(crate::Error::SourceChangedAfterPreview);
         }
     }
-    // Read again, last. Every guard above is a Git process against a pathname,
-    // and each one is another moment in which the checkout could be moved aside
-    // and replaced. Re-reading the identity here does not close that window —
-    // `skilled-2k3.8.5.1` tracks binding the write itself to the proven
-    // checkout — but it shrinks the window to the single gap before `merge`
-    // rather than leaving the whole guard sequence inside it.
-    checkout_is_the_planned_repository(plan)
+    // Asked last, so the statement on the screen stays true up to the write:
+    // the guards above cannot be redirected, but the path the user agreed to
+    // must still lead to the directory they are all bound to.
+    checkout.still_names_its_path()?;
+    Ok(checkout)
 }
 
-/// Whether `plan.path` is still the exact directory the plan was made against:
-/// not a symbolic link, not reached through one, and the same repository by
-/// filesystem identity rather than by name.
-fn checkout_is_the_planned_repository(plan: &RepositoryUpdatePlan) -> Result<()> {
+/// Whether the pinned checkout is the exact repository the plan was made
+/// against: `plan.path` is not a symbolic link, not reached through one, and
+/// the identity read *through the handle* matches the planned one — so the
+/// answer describes the directory every later guard and the merge act on,
+/// rather than whatever the pathname resolves to at each spawn.
+fn checkout_is_the_planned_repository(
+    plan: &RepositoryUpdatePlan,
+    checkout: &git::RepositoryHandle,
+) -> Result<()> {
     let metadata = std::fs::symlink_metadata(&plan.path)
         .map_err(|_| crate::Error::SourceChangedAfterPreview)?;
     if metadata.file_type().is_symlink()
@@ -2159,7 +2223,11 @@ fn checkout_is_the_planned_repository(plan: &RepositoryUpdatePlan) -> Result<()>
     {
         return Err(crate::Error::SourceChangedAfterPreview);
     }
-    if repository_identity(&plan.path).ok().as_ref() != Some(&plan.repository_identity) {
+    checkout.still_names_its_path()?;
+    let identity = git::repository_git_dir(checkout.into())
+        .ok()
+        .and_then(|git_dir| repository_identity_from_git_dir(git_dir).ok());
+    if identity.as_ref() != Some(&plan.repository_identity) {
         return Err(crate::Error::SourceChangedAfterPreview);
     }
     Ok(())
@@ -2179,7 +2247,7 @@ pub fn verify_repository_update(
     // matches would then read as a pass for a write that landed elsewhere.
     match repository_identity(&plan.path) {
         Ok(identity) if identity == plan.repository_identity => {
-            match git::head_state(&plan.path) {
+            match git::head_state((&plan.path).into()) {
                 Ok(head)
                     if head.reference() == Some(plan.current_reference.as_str())
                         && head.revision() == plan.target_revision => {}
@@ -2192,7 +2260,7 @@ pub fn verify_repository_update(
                 )),
                 Err(error) => withheld.push(format!("HEAD could not be checked: {error}")),
             }
-            match git::worktree_state(&plan.path) {
+            match git::worktree_state((&plan.path).into()) {
                 Ok(state) if state.tracked_dirty() => failures.push(
                     "the repository has tracked changes after the fast-forward operation".into(),
                 ),
