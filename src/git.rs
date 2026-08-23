@@ -66,6 +66,37 @@ unsafe extern "C" {
     fn fchdir(fd: std::ffi::c_int) -> std::ffi::c_int;
 }
 
+// `open(2)` flags for acquiring the pinned directory, declared per supported
+// platform for the same no-new-dependency reason as `fchdir` above. The
+// values are the kernel ABI's: Darwin defines one set for every architecture;
+// Linux takes the asm-generic values except on x86, whose `O_DIRECTORY`
+// predates them. An unlisted Unix builds with both flags absent, falling back
+// to the plain open whose post-open identity comparison still rejects a
+// non-directory — it merely loses the guarantee of not blocking on one.
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+const O_DIRECTORY: i32 = 0x0010_0000;
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+const O_NONBLOCK: i32 = 0x0000_0004;
+#[cfg(all(target_os = "linux", any(target_arch = "x86_64", target_arch = "x86")))]
+const O_DIRECTORY: i32 = 0o200000;
+#[cfg(all(
+    target_os = "linux",
+    not(any(target_arch = "x86_64", target_arch = "x86"))
+))]
+const O_DIRECTORY: i32 = 0o40000;
+#[cfg(target_os = "linux")]
+const O_NONBLOCK: i32 = 0o4000;
+#[cfg(all(
+    unix,
+    not(any(target_os = "macos", target_os = "ios", target_os = "linux"))
+))]
+const O_DIRECTORY: i32 = 0;
+#[cfg(all(
+    unix,
+    not(any(target_os = "macos", target_os = "ios", target_os = "linux"))
+))]
+const O_NONBLOCK: i32 = 0;
+
 /// An open handle to the checkout an operation was validated against.
 ///
 /// Spawning `git -C <path>` re-resolves the pathname at process creation, so
@@ -116,6 +147,16 @@ impl RepositoryHandle {
     /// Unix — the same filesystem object in the pre-open reading and in the
     /// held description, so a swap between the two observations is a refusal
     /// rather than a silent retarget.
+    ///
+    /// The open itself must not be a thing a swap can weaponise either: a
+    /// plain read-only `open(2)` of a FIFO substituted between the reading
+    /// and the open would block until a writer appeared, hanging the check
+    /// inside the very window this handle defends. The descriptor is
+    /// therefore acquired with `O_DIRECTORY`, which refuses a non-directory
+    /// during lookup, and `O_NONBLOCK`, which POSIX defines to make even a
+    /// FIFO open return at once — belt and braces, since the identity
+    /// comparison after the open rejects anything that is not the observed
+    /// directory anyway.
     pub fn open(path: &Path) -> Result<Self> {
         let observed = std::fs::symlink_metadata(path)?;
         if observed.file_type().is_symlink() || !observed.is_dir() {
@@ -123,10 +164,13 @@ impl RepositoryHandle {
         }
         #[cfg(unix)]
         {
-            use std::os::unix::fs::MetadataExt;
-            let directory = std::fs::File::open(path)?;
+            use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+            let directory = std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(O_DIRECTORY | O_NONBLOCK)
+                .open(path)?;
             let held = directory.metadata()?;
-            if held.dev() != observed.dev() || held.ino() != observed.ino() {
+            if !held.is_dir() || held.dev() != observed.dev() || held.ino() != observed.ino() {
                 return Err(Error::SourceChangedAfterPreview);
             }
             Ok(Self {
@@ -177,6 +221,13 @@ impl RepositoryHandle {
 
 /// Where a Git child is pointed: a pathname resolved at spawn time, or an
 /// open [`RepositoryHandle`] entered by descriptor before Git executes.
+///
+/// Every function in this module takes this type rather than a path, and the
+/// conversion is written at each call site on purpose: which spawns are
+/// pathname-resolved and which are handle-bound is the property the update
+/// pipelines are built around, and an explicit `.into()` per call keeps that
+/// choice readable — and greppable — where it is made, instead of dissolving
+/// it into a generic parameter.
 #[derive(Clone, Copy)]
 pub enum GitTarget<'a> {
     Path(&'a Path),
@@ -3729,6 +3780,35 @@ mod tests {
     #[test]
     fn every_fetch_destination_is_its_own() {
         assert_ne!(fetch_destination(), fetch_destination());
+    }
+
+    /// A read-only `open(2)` of a FIFO blocks until a writer appears, so a
+    /// FIFO substituted for the checkout between the pre-open reading and the
+    /// open could hang the pin inside the very window it defends. The flags
+    /// the pin opens with must make that open return at once instead — and,
+    /// on the platforms that define them, refuse the non-directory outright.
+    #[cfg(any(target_os = "macos", target_os = "ios", target_os = "linux"))]
+    #[test]
+    fn acquiring_a_fifo_with_the_pin_flags_returns_without_blocking() {
+        use std::os::unix::fs::OpenOptionsExt;
+        let Ok(temporary) = tempfile::tempdir() else {
+            return;
+        };
+        let fifo = temporary.path().join("substituted");
+        let made = Command::new("mkfifo")
+            .arg(&fifo)
+            .output()
+            .is_ok_and(|output| output.status.success());
+        if !made {
+            return;
+        }
+        // Returning at all is the property under test; with `O_DIRECTORY`
+        // defined, the return is a refusal.
+        let opened = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(O_DIRECTORY | O_NONBLOCK)
+            .open(&fifo);
+        assert!(opened.is_err(), "a FIFO was accepted as a directory");
     }
 
     /// The report is read from the end of each line because the flag column
