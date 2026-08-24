@@ -2439,6 +2439,11 @@ pub struct VerifyWithheld {
     /// Whether this is a postcondition on a target Skilled wrote, as opposed
     /// to an ancillary OpenCode resolution affected through another root.
     required: bool,
+    /// Whether the user's own agent selection is all that kept this check from
+    /// running: every root involved went unread only because it was
+    /// deselected. False whenever anything else contributed — an unreadable
+    /// root, an entry that could not be followed, a scan that never ran.
+    precluded_by_selection: bool,
 }
 
 impl VerifyWithheld {
@@ -2452,6 +2457,12 @@ impl VerifyWithheld {
 
     pub fn required(&self) -> bool {
         self.required
+    }
+
+    /// Whether the user's own agent selection is the only thing that kept
+    /// this check from running.
+    pub fn precluded_by_selection(&self) -> bool {
+        self.precluded_by_selection
     }
 
     /// What stopped the check, in words.
@@ -2516,6 +2527,24 @@ impl VerifyReport {
     /// Whether every postcondition was both checked and held.
     pub fn is_complete(&self) -> bool {
         self.failures.is_empty() && self.withheld.is_empty()
+    }
+
+    /// Whether every postcondition the user's own agent selection lets Skilled
+    /// check was both checked and held.
+    ///
+    /// [`Self::is_complete`] is the stricter question. The two differ exactly
+    /// when the only unestablished checks are ones a deselected root
+    /// precludes — the ordinary state for anyone running fewer than three
+    /// agents, where the user asked Skilled to leave those roots alone. The
+    /// installation inventory draws the same line: a deselected root does not
+    /// make [`crate::InventorySnapshot::counts_are_complete`] false, while an
+    /// unreadable one does.
+    pub fn is_complete_for_selection(&self) -> bool {
+        self.failures.is_empty()
+            && self
+                .withheld
+                .iter()
+                .all(VerifyWithheld::precluded_by_selection)
     }
 
     pub fn failures(&self) -> &[VerifyFailure] {
@@ -4068,6 +4097,7 @@ pub fn verify_repair(
                         path.display()
                     ),
                     required: true,
+                    precluded_by_selection: false,
                 });
                 return VerifyReport {
                     held,
@@ -4085,6 +4115,7 @@ pub fn verify_repair(
                         path.display()
                     ),
                     required: true,
+                    precluded_by_selection: false,
                 });
                 return VerifyReport {
                     held,
@@ -4099,6 +4130,7 @@ pub fn verify_repair(
             postcondition: Postcondition::LinkAsPlanned,
             reason: reason.to_owned(),
             required: true,
+            precluded_by_selection: false,
         });
         return VerifyReport {
             held,
@@ -4112,6 +4144,7 @@ pub fn verify_repair(
             postcondition: Postcondition::LinkAsPlanned,
             reason,
             required: true,
+            precluded_by_selection: false,
         });
         return VerifyReport {
             held,
@@ -4191,6 +4224,7 @@ pub fn verify_repair(
             postcondition: Postcondition::LinkAsPlanned,
             reason,
             required: true,
+            precluded_by_selection: false,
         }),
     }
     if failures.is_empty() && !withheld.iter().any(VerifyWithheld::blocks_success) {
@@ -4203,6 +4237,7 @@ pub fn verify_repair(
                     unknown_roots(roots)
                 ),
                 required: false,
+                precluded_by_selection: unknown_only_by_selection(roots, snapshot),
             }),
             Some(resolution) => {
                 let actual = OpenCodeOutlook::of(resolution);
@@ -4228,6 +4263,13 @@ pub fn verify_repair(
                 reason: "the fresh scan produced no OpenCode resolution, so that ancillary postcondition was not checked"
                     .to_owned(),
                 required: false,
+                // The scan computes no resolution at all exactly when OpenCode
+                // itself was deselected; anything else leaves an Incomplete
+                // resolution rather than none. Deselection alone is not enough
+                // to call the gap the user's choice, though: a selected root
+                // the scan could not read would have kept this check from
+                // running just as surely, and must not hide behind it.
+                precluded_by_selection: scan_gaps_only_by_selection(row, snapshot),
             }),
             None => {}
         }
@@ -4480,6 +4522,7 @@ pub fn verify_uninstall(
                 postcondition: Postcondition::LinkGone,
                 reason,
                 required: true,
+                precluded_by_selection: false,
             });
         } else if row.and_then(|row| row.observation(step.agent)).is_none() {
             report.held.push(VerifyPass {
@@ -4516,12 +4559,14 @@ pub fn verify_uninstall(
                     postcondition: Postcondition::ContentSurvived,
                     reason: format!("the recorded target content could not be re-read: {reason}"),
                     required: false,
+                    precluded_by_selection: false,
                 }),
                 ContentSighting::NotApplicable => report.withheld.push(VerifyWithheld {
                     agent: step.agent,
                     postcondition: Postcondition::ContentSurvived,
                     reason: "the recorded target content was not re-read".to_owned(),
                     required: false,
+                    precluded_by_selection: false,
                 }),
             },
             UninstallDisposition::RemoveLink {
@@ -4534,6 +4579,7 @@ pub fn verify_uninstall(
                     "the recorded target content was unreadable before link removal: {reason}"
                 ),
                 required: false,
+                precluded_by_selection: false,
             }),
             _ => {}
         }
@@ -4550,6 +4596,7 @@ pub fn verify_uninstall(
                     "the plan could not establish what OpenCode would resolve after the uninstall"
                         .to_owned(),
                 required: false,
+                precluded_by_selection: false,
             });
         } else if let Some(observed) = observed {
             match UninstallOutlook::of(observed) {
@@ -4559,6 +4606,12 @@ pub fn verify_uninstall(
                     reason: "what OpenCode resolves the name to could not be established"
                         .to_owned(),
                     required: false,
+                    precluded_by_selection: match observed {
+                        OpenCodeResolution::Incomplete { roots } => {
+                            unknown_only_by_selection(roots, snapshot)
+                        }
+                        _ => false,
+                    },
                 }),
                 actual if &actual == expected => report.held.push(VerifyPass {
                     agent: AgentKind::OpenCode,
@@ -4601,6 +4654,7 @@ pub fn verify_uninstall(
                         gaps.join("; ")
                     ),
                     required: false,
+                    precluded_by_selection: scan_gaps_only_by_selection(row, snapshot),
                 });
             }
         } else {
@@ -4610,6 +4664,7 @@ pub fn verify_uninstall(
                 reason: "the post-uninstall inventory did not state OpenCode's resolution"
                     .to_owned(),
                 required: false,
+                precluded_by_selection: false,
             });
         }
     }
@@ -5307,6 +5362,7 @@ pub fn verify_install(
                 postcondition: Postcondition::LinkAsPlanned,
                 reason,
                 required: true,
+                precluded_by_selection: false,
             });
             continue;
         }
@@ -5337,6 +5393,7 @@ pub fn verify_install(
                     postcondition: Postcondition::LinkAsPlanned,
                     reason,
                     required: true,
+                    precluded_by_selection: false,
                 });
                 continue;
             }
@@ -5367,6 +5424,7 @@ pub fn verify_install(
                     unknown_roots(roots)
                 ),
                 required: false,
+                precluded_by_selection: unknown_only_by_selection(roots, snapshot),
             });
             continue;
         }
@@ -5409,6 +5467,7 @@ pub fn verify_install(
                         unknown_roots(roots)
                     ),
                     required: false,
+                    precluded_by_selection: unknown_only_by_selection(roots, snapshot),
                 });
             }
             (Some(expected), actual) if expected != &actual => failures.push(VerifyFailure {
@@ -5454,6 +5513,34 @@ fn unknown_roots(roots: &[UnknownRoot]) -> String {
         })
         .collect::<Vec<_>>()
         .join("; ")
+}
+
+/// Whether the user's own agent selection is the only reason these roots went
+/// unread: every one of them was skipped because it was deselected, and none
+/// was unreadable, unscanned for another reason, or read but unresolvable.
+fn unknown_only_by_selection(roots: &[UnknownRoot], snapshot: &InventorySnapshot) -> bool {
+    roots.iter().all(|root| {
+        root.cause() == UnknownCause::RootNotRead
+            && matches!(snapshot.root(root.root()).status(), RootStatus::NotSelected)
+    })
+}
+
+/// Whether every gap in what this scan established under one name traces only
+/// to the user's own agent selection. A deselected agent must not mask a
+/// *selected* root the scan could not read — nor a selected root it did read
+/// whose entry under the name could not be followed: the check that consults
+/// this was kept from running by both, and only deselection is the user's own
+/// choice.
+fn scan_gaps_only_by_selection(row: Option<&InventoryRow>, snapshot: &InventorySnapshot) -> bool {
+    AgentKind::ALL.into_iter().all(|agent| {
+        match snapshot.root(agent).status() {
+            RootStatus::NotSelected => return true,
+            status if unscanned(status).is_some() => return false,
+            _ => {}
+        }
+        row.and_then(|row| row.observation(agent))
+            .is_none_or(|observation| !matches!(observation.sighting(), RootSighting::Unknown))
+    })
 }
 
 /// Why a root contributed nothing to the scan, where that is not the scan

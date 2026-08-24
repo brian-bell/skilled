@@ -231,8 +231,10 @@ impl InstalledSkillObservation {
     /// The three cases the scan keeps apart survive the translation: content
     /// that resolves, content observed to resolve to nothing, and content whose
     /// resolution could not be established. The last is what stops an effective
-    /// resolution being stated over it.
-    fn sighting(&self) -> RootSighting {
+    /// resolution being stated over it — which is why verification asks this
+    /// too, when it decides whether a withheld check was precluded by anything
+    /// beyond the user's own selection.
+    pub(crate) fn sighting(&self) -> RootSighting {
         if !self.object.is_installation() {
             return RootSighting::NothingToLoad;
         }

@@ -24,7 +24,7 @@ use crate::{
         AppliedStep, ExcludedReason, InstallOutcome, InstallPlan, InstallStatus, InstallTarget,
         LocateFailure, RepairDisposition, RepairOutcome, RepairPlan, RepairStatus,
         RepairStepOutcome, StepOutcome, TargetDisposition, UninstallDisposition, UninstallOutcome,
-        UninstallPlan, UninstallStatus, locate_variant,
+        UninstallPlan, UninstallStatus, VerifyReport, locate_variant,
     },
     updates::RepositoryUpdatePlan,
 };
@@ -50,15 +50,18 @@ pub enum ExitCodeKind {
     /// Everything was written, and the scan afterwards did not bear it out.
     VerificationFailed,
     /// Everything was written, nothing disagreed with the plan, and at least
-    /// one postcondition could not be checked at all.
+    /// one postcondition the user's selection allowed could not be checked.
     ///
     /// Distinct from [`Self::VerificationFailed`], which is a disagreement, and
-    /// from [`Self::Success`], which would present an update whose core
-    /// postconditions were never established as an ordinary success. The three
-    /// answers `VerifyReport` keeps apart survive into the exit status, because
-    /// a script reads only this. Repository updates report it today; aligning
-    /// `install` and `repair`, which still exit `0` over a withheld check, is
-    /// `skilled-exm`.
+    /// from [`Self::Success`], which would present a run whose postconditions
+    /// were never established as an ordinary success. The three answers
+    /// `VerifyReport` keeps apart survive into the exit status, because a
+    /// script reads only this. `update`, `install`, and `repair` all report
+    /// it. A check the user's own agent selection precludes — the ancillary
+    /// OpenCode resolution over a root they deselected — does not raise it:
+    /// that is the ordinary state for anyone running fewer than three agents,
+    /// the same line `InventorySnapshot::counts_are_complete` draws when it
+    /// counts a deselected root as complete scope.
     VerificationIncomplete,
 }
 
@@ -147,17 +150,28 @@ pub fn run(
 /// Skilled could not record owning all mean that, and the printed report is
 /// what distinguishes them.
 ///
-/// An ancillary OpenCode postcondition Skilled could not establish is *not*
-/// one of them. Every link asked for was still observed; what is missing is an
-/// effective-resolution check over a root the user asked Skilled to leave
-/// alone, which is the ordinary configuration for anyone running fewer than
-/// three agents. Reporting that as non-zero would make the common path fail and
-/// teach a reader to ignore the status. It is said in words instead —
+/// An ancillary check the user's own agent selection precludes is *not*
+/// non-zero either. Every link asked for was still observed; what is missing
+/// is an effective-resolution check over a root the user asked Skilled to
+/// leave alone, which is the ordinary configuration for anyone running fewer
+/// than three agents. Reporting that as non-zero would make the common path
+/// fail and teach a reader to ignore the status. It is said in words instead —
 /// "Verified as far as it could be", then each unestablished check by name —
-/// where it can be read rather than only branched on. A written target that was
-/// not re-observed is different and exits as a verification failure.
-pub fn exit_code_for(status: InstallStatus) -> ExitCodeKind {
+/// where it can be read rather than only branched on.
+///
+/// A check the selection allowed that still could not run — a root that was
+/// unreadable, an entry that could not be followed — is different: the report
+/// is then vouching for less than the configuration asked it to, and a script
+/// reads only the exit status, so that is [`ExitCodeKind::VerificationIncomplete`]
+/// rather than success. The status word deliberately does not carry that
+/// answer (see [`InstallStatus::Installed`]), which is why this mapping takes
+/// the verification report beside it. A written target that was not
+/// re-observed at all exits as a verification failure.
+pub fn exit_code_for(status: InstallStatus, verification: &VerifyReport) -> ExitCodeKind {
     match status {
+        InstallStatus::Installed if !verification.is_complete_for_selection() => {
+            ExitCodeKind::VerificationIncomplete
+        }
         InstallStatus::Installed | InstallStatus::NothingToDo => ExitCodeKind::Success,
         InstallStatus::PartiallyApplied
         | InstallStatus::NotApplied
@@ -182,8 +196,13 @@ pub fn exit_code_for_uninstall(status: UninstallStatus) -> ExitCodeKind {
     }
 }
 
-pub fn exit_code_for_repair(status: RepairStatus) -> ExitCodeKind {
+/// The same three answers as install: a repaired link whose report withheld a
+/// check the selection allowed is its own status, not a plain success.
+pub fn exit_code_for_repair(status: RepairStatus, verification: &VerifyReport) -> ExitCodeKind {
     match status {
+        RepairStatus::Repaired if !verification.is_complete_for_selection() => {
+            ExitCodeKind::VerificationIncomplete
+        }
         RepairStatus::NothingToRepair | RepairStatus::Repaired => ExitCodeKind::Success,
         RepairStatus::NotApplied => ExitCodeKind::Blocked,
         RepairStatus::PartiallyApplied | RepairStatus::RepairedUnrecorded => {
@@ -502,7 +521,7 @@ fn execute_install(
 
     let outcome = app.apply_plan(&plan).map_err(|error| error.to_string())?;
     write_report(output, &outcome).map_err(|error| error.to_string())?;
-    Ok(exit_code_for(outcome.status()))
+    Ok(exit_code_for(outcome.status(), outcome.verification()))
 }
 
 fn execute_uninstall(
@@ -702,7 +721,10 @@ fn execute_repair(
         .apply_repair_plan(&plan)
         .map_err(|error| error.to_string())?;
     write_repair_report(output, &outcome).map_err(|error| error.to_string())?;
-    Ok(exit_code_for_repair(outcome.status()))
+    Ok(exit_code_for_repair(
+        outcome.status(),
+        outcome.verification(),
+    ))
 }
 
 fn execute_update(

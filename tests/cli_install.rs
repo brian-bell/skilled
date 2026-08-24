@@ -17,7 +17,7 @@ use std::{
 use skilled::{
     Action, AgentKind, AppEnvironment, SkilledApp,
     cli::{self, ExitCodeKind},
-    operations::{InstallStatus, UninstallStatus},
+    operations::{InstallStatus, UninstallStatus, VerifyReport},
 };
 
 const ROOTS: [(AgentKind, &str); 3] = [
@@ -525,6 +525,53 @@ fn a_withheld_postcondition_is_printed_rather_than_claimed_as_verified() {
     assert!(output.contains("did not read Codex"), "{output}");
 }
 
+/// A postcondition withheld because a root could not be read is not a plain
+/// success. The deselected case above stays exit zero — the user's own
+/// selection is what precluded that check — but an unreadable root is a
+/// machine in a state the report could not vouch for, and a script reads only
+/// the exit status (skilled-exm).
+#[test]
+fn an_unreadable_root_makes_a_verified_install_exit_as_incomplete() {
+    if running_as_root() {
+        // Permission bits decide nothing for the superuser, so the root this
+        // case needs to be unreadable would be read.
+        return;
+    }
+    let fixture = Fixture::new();
+    let repository = fixture.register("library", &["portable"]);
+    // Codex's root exists but cannot be read, so what OpenCode — which reads
+    // that root too — resolves the name to cannot be established.
+    let codex_root = fixture.home().join(".agents/skills");
+    fs::create_dir_all(&codex_root).expect("create Codex root");
+    fs::set_permissions(&codex_root, fs::Permissions::from_mode(0o000)).expect("seal Codex root");
+
+    let (code, output) = fixture.run(&[
+        "install",
+        "--yes",
+        "--source",
+        &repository.display().to_string(),
+        "--skill",
+        "portable",
+        "--agents",
+        "claude-code",
+    ]);
+    fs::set_permissions(&codex_root, fs::Permissions::from_mode(0o755)).expect("unseal Codex root");
+
+    assert_eq!(code, ExitCodeKind::VerificationIncomplete, "{output}");
+    // The link itself was written and observed: this is the third answer, not
+    // a failure.
+    assert!(
+        fixture.home().join(".claude/skills/portable").is_dir(),
+        "{output}"
+    );
+    assert!(
+        output.contains("Verified as far as it could be"),
+        "{output}"
+    );
+    assert!(output.contains("Not established: OpenCode"), "{output}");
+    assert!(!output.contains("Not verified"), "{output}");
+}
+
 /// An agent the request named but the plan cannot act on is a blocked request,
 /// not a silent skip: `--agents` is the target set the user agreed to, and
 /// installing to fewer of them while reporting success is the same gap `--yes`
@@ -629,7 +676,11 @@ fn every_outcome_has_its_own_exit_status() {
             5,
         ),
     ] {
-        assert_eq!(cli::exit_code_for(status), expected, "{status:?}");
+        assert_eq!(
+            cli::exit_code_for(status, &VerifyReport::default()),
+            expected,
+            "{status:?}"
+        );
         assert_eq!(expected.code(), code, "{status:?}");
     }
     for (status, expected, code) in [
@@ -888,15 +939,20 @@ fn filesystem_text_is_escaped_before_it_is_printed() {
 }
 
 /// Whether permission bits will be enforced against this process.
+/// Probed once and cached: tests in one binary run concurrently, and two
+/// probes sharing a process-id-derived path would race each other's create,
+/// chmod, and remove.
 fn running_as_root() -> bool {
-    let probe = std::env::temp_dir().join(format!("skilled-cli-probe-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&probe);
-    fs::create_dir(&probe).expect("create permission probe");
-    fs::set_permissions(&probe, fs::Permissions::from_mode(0o000)).expect("seal probe");
-    let readable = fs::read_dir(&probe).is_ok();
-    fs::set_permissions(&probe, fs::Permissions::from_mode(0o755)).expect("unseal probe");
-    fs::remove_dir_all(&probe).expect("remove probe");
-    readable
+    static ROOT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ROOT.get_or_init(|| {
+        let probe = tempfile::tempdir().expect("create permission probe");
+        let sealed = probe.path().join("sealed");
+        fs::create_dir(&sealed).expect("create sealed probe directory");
+        fs::set_permissions(&sealed, fs::Permissions::from_mode(0o000)).expect("seal probe");
+        let readable = fs::read_dir(&sealed).is_ok();
+        fs::set_permissions(&sealed, fs::Permissions::from_mode(0o755)).expect("unseal probe");
+        readable
+    })
 }
 
 struct Fixture {
