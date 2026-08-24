@@ -26,8 +26,128 @@ pub enum RepositoryUpdateVerdict {
 
 #[cfg(test)]
 mod tests {
-    use super::gitlink_intersects_catalog;
-    use std::path::Path;
+    use super::{gitlink_intersects_catalog, surviving_removal};
+    use crate::git;
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+
+    fn run_git(repository: &Path, arguments: &[&str]) -> String {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(repository)
+            .args(arguments)
+            .output()
+            .expect("run Git fixture command");
+        assert!(output.status.success(), "git {arguments:?}: {output:?}");
+        String::from_utf8(output.stdout)
+            .expect("UTF-8 Git output")
+            .trim()
+            .to_owned()
+    }
+
+    /// The skilled-lr8 window, staged deterministically: the checkout is
+    /// pinned, then renamed aside and a readable decoy left at its pathname
+    /// whose vacating candidate holds only paths the update deletes. The tree
+    /// queries are descriptor-bound Git children and answer for the proven
+    /// checkout either way; the worktree occupant walk must observe the same
+    /// directory, so the occupant standing in the proven checkout is reported
+    /// rather than the decoy's vacancy.
+    #[test]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn the_occupant_walk_observes_the_pinned_checkout_not_the_pathname() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let checkout = directory.path().join("checkout");
+        std::fs::create_dir_all(checkout.join("skills/demo")).expect("create candidate");
+        std::fs::write(
+            checkout.join("skills/demo/SKILL.md"),
+            "---\nname: demo\ndescription: fixture\n---\n# demo\n",
+        )
+        .expect("write skill document");
+        run_git(&checkout, &["init", "-b", "main"]);
+        run_git(&checkout, &["config", "user.name", "Skilled Test"]);
+        run_git(&checkout, &["config", "user.email", "skilled@example.test"]);
+        run_git(&checkout, &["add", "."]);
+        run_git(&checkout, &["commit", "-m", "fixture"]);
+        // The target revision no longer holds the candidate at all: an empty
+        // tree, made without touching the worktree.
+        let empty_tree = run_git(&checkout, &["mktree"]);
+        let target = run_git(&checkout, &["commit-tree", &empty_tree, "-m", "removal"]);
+        // A local occupant the update does not delete keeps the candidate
+        // standing in the real checkout.
+        std::fs::write(checkout.join("skills/demo/occupant.txt"), "kept\n")
+            .expect("write occupant");
+        let deleted = std::collections::BTreeSet::from([PathBuf::from("skills/demo/SKILL.md")]);
+
+        let handle = git::RepositoryHandle::open(&checkout).expect("pin the checkout");
+        let moved = directory.path().join("moved");
+        std::fs::rename(&checkout, &moved).expect("rename the checkout aside");
+        // The decoy's candidate holds only the path the update deletes, so a
+        // pathname-bound walk would report it vacant.
+        std::fs::create_dir_all(checkout.join("skills/demo")).expect("create decoy candidate");
+        std::fs::write(
+            checkout.join("skills/demo/SKILL.md"),
+            "---\nname: demo\ndescription: decoy\n---\n# demo\n",
+        )
+        .expect("write decoy skill document");
+
+        let occupant = surviving_removal(
+            (&handle).into(),
+            &target,
+            Path::new("skills/demo"),
+            &deleted,
+        )
+        .expect("walk the pinned checkout");
+
+        assert_eq!(occupant, Some(PathBuf::from("skills/demo/occupant.txt")));
+    }
+
+    /// The bound descent opens every component with `O_NOFOLLOW`, so a
+    /// worktree ancestor that is a symbolic link refuses rather than being
+    /// followed to wherever it points: a redirected candidate cannot prove
+    /// itself vacant.
+    #[test]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn a_symlinked_worktree_ancestor_is_an_occupant_not_a_road() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let checkout = directory.path().join("checkout");
+        std::fs::create_dir_all(checkout.join("skills/demo")).expect("create candidate");
+        std::fs::write(
+            checkout.join("skills/demo/SKILL.md"),
+            "---\nname: demo\ndescription: fixture\n---\n# demo\n",
+        )
+        .expect("write skill document");
+        run_git(&checkout, &["init", "-b", "main"]);
+        run_git(&checkout, &["config", "user.name", "Skilled Test"]);
+        run_git(&checkout, &["config", "user.email", "skilled@example.test"]);
+        run_git(&checkout, &["add", "."]);
+        run_git(&checkout, &["commit", "-m", "fixture"]);
+        let empty_tree = run_git(&checkout, &["mktree"]);
+        let target = run_git(&checkout, &["commit-tree", &empty_tree, "-m", "removal"]);
+        // The worktree's own `skills` becomes a link to a vacant directory
+        // elsewhere; the path still reads, but not inside the checkout.
+        let elsewhere = directory.path().join("elsewhere");
+        std::fs::create_dir_all(elsewhere.join("demo")).expect("create redirected candidate");
+        std::fs::write(
+            elsewhere.join("demo/SKILL.md"),
+            "---\nname: demo\ndescription: elsewhere\n---\n# demo\n",
+        )
+        .expect("write redirected skill document");
+        std::fs::remove_dir_all(checkout.join("skills")).expect("remove real ancestor");
+        std::os::unix::fs::symlink(&elsewhere, checkout.join("skills"))
+            .expect("redirect the ancestor");
+        let deleted = std::collections::BTreeSet::from([PathBuf::from("skills/demo/SKILL.md")]);
+        let handle = git::RepositoryHandle::open(&checkout).expect("pin the checkout");
+
+        let occupant = surviving_removal(
+            (&handle).into(),
+            &target,
+            Path::new("skills/demo"),
+            &deleted,
+        )
+        .expect("walk the pinned checkout");
+
+        assert_eq!(occupant, Some(PathBuf::from("skills/demo")));
+    }
 
     #[test]
     fn gitlinks_intersect_catalogs_above_at_and_below_the_catalog_root() {
@@ -1831,12 +1951,33 @@ fn surviving_removal(
             return Ok(Some(ancestor.to_path_buf()));
         }
     }
-    // The one read in this function that the caller's pin does not cover: the
-    // tree queries above are descriptor-bound Git children, while this walk
-    // re-resolves the pathname. Harmless at preview time, which promises
-    // nothing; under `validate_repository_update` it leaves the window
-    // `skilled-lr8` records.
+    // The worktree walk observes the same directory the tree queries above
+    // answered for. Handed the pinned handle, it descends with
+    // `openat(2)`-relative descriptors from the held directory — the
+    // skilled-lr8 window, where a checkout renamed aside and replaced around
+    // this walk could clear a vacating-candidate guard with a readable,
+    // vacant decoy, is closed on Linux and macOS — the Unix platforms
+    // Skilled supports — by never consulting the pathname; the listing
+    // leans on `d_type` and an errno accessor, so it is compiled for
+    // exactly the platforms whose C library layout it implements. Handed
+    // a pathname — every preview-time call, which promises nothing — or
+    // on any other platform, it re-resolves the pathname exactly as
+    // before.
     let mut budget = OCCUPANT_BUDGET;
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if let git::GitTarget::Handle(handle) = repository {
+        return match handle.open_worktree_directory(candidate) {
+            Ok(directory) => {
+                surviving_worktree_entry_bound(&directory, candidate, deleted, &mut budget)
+            }
+            // A candidate that cannot be opened from the held directory —
+            // absent, unreadable, or redirected through a symbolic link on
+            // the way — cannot rule an occupant out, so it is treated as one,
+            // the same answer the pathname walk gives an unreadable
+            // directory.
+            Err(_) => Ok(Some(candidate.to_path_buf())),
+        };
+    }
     surviving_worktree_entry(
         &repository.path().join(candidate),
         candidate,
@@ -1895,6 +2036,54 @@ fn surviving_worktree_entry(
         }
     }
     Ok(empty.then(|| relative.to_path_buf()))
+}
+
+/// [`surviving_worktree_entry`], bound to the pinned checkout: the same
+/// question, asked through descriptors instead of pathnames. The directory
+/// handed in was opened from the held checkout descriptor, recursion opens
+/// each subdirectory relative to its parent's descriptor, and the listing
+/// itself reads through the descriptor too, so no rename of the checkout can
+/// change which directory any level of the walk observes. The answers keep
+/// the pathname walk's shape exactly: an empty directory is an occupant, a
+/// listing or entry that cannot be established is an occupant, and a budget
+/// that runs out reports the directory rather than understating it.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn surviving_worktree_entry_bound(
+    directory: &std::fs::File,
+    relative: &Path,
+    deleted: &std::collections::BTreeSet<PathBuf>,
+    budget: &mut usize,
+) -> Result<Option<PathBuf>> {
+    let Ok(listed) = git::bound_directory_entries(directory, *budget) else {
+        return Ok(Some(relative.to_path_buf()));
+    };
+    // More entries than the remaining budget: reported as the budget running
+    // out, exactly where the pathname walk would have stopped reading.
+    let Some(entries) = listed else {
+        return Ok(Some(relative.to_path_buf()));
+    };
+    if entries.is_empty() {
+        return Ok(Some(relative.to_path_buf()));
+    }
+    for entry in entries {
+        if *budget == 0 {
+            return Ok(Some(relative.to_path_buf()));
+        }
+        *budget -= 1;
+        let path = relative.join(&entry.name);
+        if entry.is_directory {
+            let Ok(child) = git::open_directory_at(directory, &entry.name) else {
+                return Ok(Some(path));
+            };
+            if let Some(occupant) = surviving_worktree_entry_bound(&child, &path, deleted, budget)?
+            {
+                return Ok(Some(occupant));
+            }
+        } else if !deleted.contains(&path) {
+            return Ok(Some(path));
+        }
+    }
+    Ok(None)
 }
 
 /// The paths an update deletes from the worktree, rename sources included.
@@ -2161,16 +2350,15 @@ pub(crate) fn apply_repository_update_attempt(plan: &RepositoryUpdatePlan) -> (R
 /// the write still lands in the proven repository, which is the inversion
 /// `skilled-2k3.8.5.1` asked for.
 ///
-/// The other is not a Git process at all: [`surviving_removal`]'s worktree
-/// occupant walk re-resolves the pathname, so the vacating-candidate loop below
-/// is one pathname-bound read inside an otherwise pinned sequence. A checkout
-/// renamed aside and restored around that loop can clear the guard with a
-/// readable, vacant decoy while the merge still fast-forwards the proven
-/// checkout. The write stays correct — right repository, planned revision — but
-/// the removal it discloses does not: the link the preview promised would dangle
-/// resolves instead to a directory that is no longer a skill. That is a false
-/// disclosure rather than a misdirected write, it needs write access to the
-/// checkout's parent, and it predates the pin. It is tracked as `skilled-lr8`.
+/// The other read here is not a Git process at all: [`surviving_removal`]'s
+/// worktree occupant walk. Handed the pinned handle, it descends from the held
+/// directory descriptor with `openat(2)` and lists through descriptors too, so
+/// the vacating-candidate loop below observes the same checkout as the bound
+/// Git children — a checkout renamed aside and restored around the loop can no
+/// longer clear the guard with a readable, vacant decoy (the skilled-lr8
+/// window). On platforms other than Linux and macOS the walk re-resolves
+/// the pathname as before, and the guard-order narrowing is what remains
+/// there.
 fn validate_repository_update(plan: &RepositoryUpdatePlan) -> Result<git::RepositoryHandle> {
     if plan.is_blocked() {
         return Err(crate::Error::SourceChangedAfterPreview);

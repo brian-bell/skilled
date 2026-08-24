@@ -163,6 +163,37 @@ impl RepositoryHandle {
         &self.path
     }
 
+    /// Open a directory `relative` beneath the held checkout without ever
+    /// consulting the checkout's pathname: every component is opened with
+    /// `openat(2)` from the previous descriptor, starting at the held one, so
+    /// a checkout renamed or replaced under its pathname changes nothing
+    /// about what is opened. `O_NOFOLLOW` on each step makes a symbolic link
+    /// anywhere along the way a refusal rather than a redirection, and only
+    /// plain name components are accepted — `..` from a repository-relative
+    /// path would name something outside the checkout, which no caller here
+    /// means.
+    ///
+    /// This is the worktree counterpart of the bound spawns: reads that must
+    /// describe the pinned checkout, made through its descriptor. Compiled
+    /// for Linux and macOS — the Unix platforms Skilled supports — because
+    /// the listing beside it reads `d_type` and clears `errno` through
+    /// accessors whose names are per-C-library; elsewhere the caller keeps
+    /// its documented pathname fallback.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub(crate) fn open_worktree_directory(&self, relative: &Path) -> io::Result<std::fs::File> {
+        let mut current = self.directory.try_clone()?;
+        for component in relative.components() {
+            let std::path::Component::Normal(name) = component else {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "a worktree directory is opened by plain name components only",
+                ));
+            };
+            current = open_directory_at(&current, name)?;
+        }
+        Ok(current)
+    }
+
     /// Refuse to continue when the pathname no longer leads to the held
     /// directory.
     ///
@@ -260,6 +291,163 @@ fn bind_to_handle(command: &mut Command, handle: &RepositoryHandle) {
 #[cfg(not(unix))]
 fn bind_to_handle(command: &mut Command, handle: &RepositoryHandle) {
     command.arg("-C").arg(handle.path());
+}
+
+/// One entry a descriptor-bound directory listing reports: its name, and
+/// whether it is itself a directory. A symbolic link is never followed, so a
+/// link to a directory reads as not-a-directory, exactly as `lstat(2)` would
+/// say.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) struct BoundDirectoryEntry {
+    pub(crate) name: std::ffi::OsString,
+    pub(crate) is_directory: bool,
+}
+
+/// Open one directory entry relative to an already-open directory, touching
+/// no absolute pathname. `O_NOFOLLOW` refuses a symbolic link standing at the
+/// name, `O_DIRECTORY` refuses anything that is not a directory during the
+/// lookup itself, and `O_NONBLOCK` keeps a substituted FIFO from hanging the
+/// open — the same discipline [`RepositoryHandle::open`] applies to the
+/// checkout root.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) fn open_directory_at(
+    parent: &std::fs::File,
+    name: &std::ffi::OsStr,
+) -> io::Result<std::fs::File> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::ffi::OsStrExt;
+    let name = std::ffi::CString::new(name.as_bytes()).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "a directory name holds a NUL byte",
+        )
+    })?;
+    // SAFETY: `openat` allocates a fresh descriptor; on success it is owned
+    // by the returned `File` and nothing else.
+    let descriptor = unsafe {
+        libc::openat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_RDONLY | O_DIRECTORY | libc::O_NOFOLLOW | O_NONBLOCK | libc::O_CLOEXEC,
+        )
+    };
+    if descriptor < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(unsafe { std::fs::File::from_raw_fd(descriptor) })
+}
+
+/// List an already-open directory by its descriptor, reporting at most
+/// `limit` entries.
+///
+/// `Ok(None)` means the directory holds more than `limit` entries, which the
+/// caller treats exactly as its walk budget running out. Every other outcome
+/// keeps the conservative direction of the occupant walk: an entry whose
+/// kind cannot be established, or a listing that fails part way, is an error
+/// the caller reads as an occupant rather than as vacancy.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) fn bound_directory_entries(
+    directory: &std::fs::File,
+    limit: usize,
+) -> io::Result<Option<Vec<BoundDirectoryEntry>>> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::ffi::OsStrExt;
+    // `fdopendir` takes ownership of the descriptor it is handed and
+    // `closedir` closes it, so it is handed a duplicate rather than the
+    // caller's own.
+    let duplicated = unsafe { libc::fcntl(directory.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) };
+    if duplicated < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let stream = unsafe { libc::fdopendir(duplicated) };
+    if stream.is_null() {
+        let error = io::Error::last_os_error();
+        unsafe { libc::close(duplicated) };
+        return Err(error);
+    }
+    // The duplicate shares the original description's read offset; rewinding
+    // keeps a second listing of the same handle from starting where an
+    // earlier one stopped.
+    unsafe { libc::rewinddir(stream) };
+    let mut entries = Vec::new();
+    let result = loop {
+        // `readdir` reports an error and the end of the stream the same way,
+        // so `errno` is what tells them apart: cleared before the call, read
+        // after it.
+        unsafe { *errno_location() = 0 };
+        let entry = unsafe { libc::readdir(stream) };
+        if entry.is_null() {
+            let error = io::Error::last_os_error();
+            break match error.raw_os_error() {
+                Some(0) | None => Ok(Some(entries)),
+                _ => Err(error),
+            };
+        }
+        // The entry the returned pointer names is only valid until the next
+        // `readdir`, so the name is copied out immediately.
+        let name = unsafe { std::ffi::CStr::from_ptr((*entry).d_name.as_ptr()) };
+        let bytes = name.to_bytes();
+        if bytes == b"." || bytes == b".." {
+            continue;
+        }
+        if entries.len() == limit {
+            break Ok(None);
+        }
+        let name = std::ffi::OsStr::from_bytes(bytes).to_owned();
+        let kind = unsafe { (*entry).d_type };
+        // Not every filesystem reports a type in the directory entry itself;
+        // `DT_UNKNOWN` is answered with an `lstat` bound to the same
+        // descriptor.
+        let is_directory = if kind == libc::DT_UNKNOWN {
+            match lstat_is_directory_at(directory, &name) {
+                Ok(is_directory) => is_directory,
+                Err(error) => break Err(error),
+            }
+        } else {
+            kind == libc::DT_DIR
+        };
+        entries.push(BoundDirectoryEntry { name, is_directory });
+    };
+    unsafe { libc::closedir(stream) };
+    result
+}
+
+/// Whether the named entry is a directory, asked of the filesystem relative
+/// to the open parent and never following a symbolic link.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn lstat_is_directory_at(parent: &std::fs::File, name: &std::ffi::OsStr) -> io::Result<bool> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::ffi::OsStrExt;
+    let name = std::ffi::CString::new(name.as_bytes()).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "a directory name holds a NUL byte",
+        )
+    })?;
+    let mut status: libc::stat = unsafe { std::mem::zeroed() };
+    let result = unsafe {
+        libc::fstatat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            &mut status,
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    if result != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(status.st_mode & libc::S_IFMT == libc::S_IFDIR)
+}
+
+/// Where this platform's C library keeps `errno` for the calling thread.
+#[cfg(target_os = "macos")]
+fn errno_location() -> *mut libc::c_int {
+    unsafe { libc::__error() }
+}
+
+#[cfg(target_os = "linux")]
+fn errno_location() -> *mut libc::c_int {
+    unsafe { libc::__errno_location() }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

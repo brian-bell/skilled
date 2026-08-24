@@ -304,7 +304,12 @@ signal needs both, because colour alone is not an acceptable cue.
   rather than losing its target, so the preview cannot state what the write
   would do. The worktree half is a live read, so the apply guard asks it again
   over the worktree as it then stands: an occupant that arrived after the
-  preview refuses the write rather than being applied. `cached_update_check`
+  preview refuses the write rather than being applied. Under the apply guard
+  that walk is descriptor-bound on Linux and macOS — it descends from the pinned
+  checkout's held directory with `openat(2)` and never consults the pathname,
+  so a checkout renamed aside and restored around it cannot clear the guard
+  with a vacant decoy, and a worktree ancestor that is a symbolic link
+  refuses rather than being followed. `cached_update_check`
   decides it too, as it already does for the incoming-collision and submodule
   findings — the cached check is what Updates advertises and what Doctor reads,
   so a finding only the preview raises would leave the list offering an update
