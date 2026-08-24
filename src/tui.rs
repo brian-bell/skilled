@@ -6031,7 +6031,17 @@ fn repair_report_lines(outcome: &RepairOutcome) -> Vec<Line<'static>> {
                 terminal_safe(error)
             ),
             RepairStepOutcome::ResidualTemporary { path, error } => format!(
-                "temporary link left at {}: {}",
+                "an object was preserved at {}: {}",
+                terminal_safe(&path.display().to_string()),
+                terminal_safe(error)
+            ),
+            RepairStepOutcome::RepairedResidualTemporary { path, error } => format!(
+                "link replaced and receipt recorded, but an object was left at {}: {}",
+                terminal_safe(&path.display().to_string()),
+                terminal_safe(error)
+            ),
+            RepairStepOutcome::MovedRootUnreceipted { path, error } => format!(
+                "live replacement written without a receipt at {}: {}",
                 terminal_safe(&path.display().to_string()),
                 terminal_safe(error)
             ),

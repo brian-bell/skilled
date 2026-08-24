@@ -2935,10 +2935,27 @@ pub enum RepairStepOutcome {
     /// and creation then failed. Skilled did not install a replacement; the
     /// path may be absent or occupied by an object that raced with creation.
     RemovedUnreplaced(String),
-    /// Unix could not remove the sibling temporary link after its atomic rename
-    /// failed. The original installation remains, but this additional link is a
-    /// residual write that must be reported with its exact path.
+    /// A failed replacement attempt left an object preserved at a sibling
+    /// temporary path, which must be reported where it actually is. Only that
+    /// residual object is known to remain: the destination is unchanged on
+    /// most paths, but after a failed revert its state is unproven — it may
+    /// hold neither the original link nor the replacement.
     ResidualTemporary {
+        path: PathBuf,
+        error: String,
+    },
+    /// The replacement is live and its receipt recorded, but the exchange left
+    /// a displaced object at a sibling temporary path that could not be
+    /// removed or swapped back. The residual write must be reported with its
+    /// exact path.
+    RepairedResidualTemporary {
+        path: PathBuf,
+        error: String,
+    },
+    /// The replacement was written, but the skill root was renamed while the
+    /// repair ran: the live, unreceipted link is at `path` — a location the
+    /// plan never stated — and must never be presented as removable residue.
+    MovedRootUnreceipted {
         path: PathBuf,
         error: String,
     },
@@ -2947,7 +2964,10 @@ pub enum RepairStepOutcome {
 
 impl RepairStepOutcome {
     fn wrote_link(&self) -> bool {
-        matches!(self, Self::Repaired | Self::RepairedUnrecorded(_))
+        matches!(
+            self,
+            Self::Repaired | Self::RepairedUnrecorded(_) | Self::RepairedResidualTemporary { .. }
+        )
     }
 }
 
@@ -2985,19 +3005,21 @@ impl RepairApplyReport {
 
 /// Replace the one proven link after re-establishing every preview guard.
 ///
-/// Unix creates a sibling temporary link and renames it over the destination.
-/// `rename(2)` is atomic within one directory, so readers never observe the
-/// installation path absent. A pathname race remains after the last guard:
-/// unlike install's fail-if-exists race, rename can unlink a file or stranger's
-/// link that arrives in that window. Closing it requires handle-relative APIs
-/// the standard library does not expose; this data-loss window is tracked as a
-/// follow-up and is stated here rather than hidden.
+/// Unix creates a sibling temporary link and atomically exchanges it with the
+/// destination, so readers never observe the installation path absent. Unlike
+/// the rename this replaced, the exchange destroys nothing: the displaced
+/// object is verified byte-identical to the proven raw target before it is
+/// removed, anything else is swapped back intact and refused, and a
+/// filesystem that cannot exchange refuses the repair rather than falling
+/// back to a destructive rename. `replace_directory_symlink` carries the full
+/// syscall-level argument that closed the skilled-2k3.6.1 window.
 ///
 /// Windows cannot atomically rename over an existing directory symlink. Its
 /// fallback removes the directory link with `remove_dir` and creates the new
 /// one, and is therefore explicitly non-atomic. A creation failure after the
 /// removal is a partial apply and is reported as such rather than as an inert
-/// refusal.
+/// refusal, and the remove-and-create pathname window that remains there is
+/// tracked as `skilled-tdm`.
 ///
 /// The metadata mutation guard covers the replacement for the same reason it
 /// covers install's creation. A repair makes a link active and records a
@@ -3107,8 +3129,9 @@ fn apply_repair_target(plan: &RepairPlan, store: &mut Store, home: &Path) -> Rep
     // take time, and acquiring the guard above can wait behind another writer
     // for as long as that writer holds it. The guard freezes the metadata, not
     // the filesystem, so both sides of the write — where the link points and
-    // where it lands — are re-established here, leaving only the final syscall
-    // window tracked by skilled-2k3.6.1.
+    // where it lands — are re-established here. An object arriving at the
+    // destination after these rechecks is handled by the replacement itself,
+    // which proves what it displaced before destroying anything.
     if let Err(reason) = repair_source_unchanged(source_dir, source_checkout, source_revision) {
         return RepairStepOutcome::Failed(reason);
     }
@@ -3125,34 +3148,112 @@ fn apply_repair_target(plan: &RepairPlan, store: &mut Store, home: &Path) -> Rep
     if let Err(reason) = repair_destination_unchanged(plan, root, home) {
         return RepairStepOutcome::Failed(reason);
     }
-    if let Err(error) = replace_directory_symlink(source_dir, &plan.link_path) {
-        return match error {
-            ReplaceLinkError::Unchanged(error) => {
-                RepairStepOutcome::Failed(format!("the link could not be replaced: {error}"))
-            }
-            #[cfg(windows)]
-            ReplaceLinkError::RemovedOldLink(error) => {
-                RepairStepOutcome::RemovedUnreplaced(error.to_string())
-            }
-            #[cfg(unix)]
-            ReplaceLinkError::ResidualTemporary {
+    let replacement = match replace_directory_symlink(
+        source_dir,
+        &plan.link_path,
+        plan.recorded_target(),
+        home,
+    ) {
+        Ok(replacement) => replacement,
+        Err(ReplaceLinkError::Unchanged(error)) => {
+            return RepairStepOutcome::Failed(format!("the link could not be replaced: {error}"));
+        }
+        #[cfg(unix)]
+        Err(ReplaceLinkError::ExchangeUnsupported(error)) => {
+            return RepairStepOutcome::Failed(format!(
+                "the skill root's filesystem does not support atomic exchange, so a provable \
+                 replacement is impossible and nothing was written: {error}"
+            ));
+        }
+        #[cfg(unix)]
+        Err(ReplaceLinkError::ConcurrentlyReplaced { observed }) => {
+            return RepairStepOutcome::Failed(format!(
+                "the destination changed after the final recheck — {observed}; the arriving \
+                 object was left in place and nothing was written"
+            ));
+        }
+        #[cfg(windows)]
+        Err(ReplaceLinkError::RemovedOldLink(error)) => {
+            return RepairStepOutcome::RemovedUnreplaced(error.to_string());
+        }
+        #[cfg(unix)]
+        Err(ReplaceLinkError::ResidualTemporary { path, detail }) => {
+            return RepairStepOutcome::ResidualTemporary {
                 path,
-                rename_error,
-                cleanup_error,
-            } => RepairStepOutcome::ResidualTemporary {
-                path,
+                error: detail,
+            };
+        }
+    };
+    // A residual tail still replaced the link: the receipt describing the live
+    // replacement is recorded before the leftover is reported. Every reported
+    // path is resolved from the pin at the moment it is reported, so a root
+    // renamed at any point still has its entries named where they now are.
+    #[cfg(unix)]
+    let residual = |detail: &String| (replacement.pin.residual_path(), detail.clone());
+    #[cfg(not(unix))]
+    let residual = |detail: &String| (plan.link_path.clone(), detail.clone());
+    let describe = |error: &dyn std::fmt::Display| match &replacement.residue {
+        None => error.to_string(),
+        Some(detail) => {
+            let (path, detail) = residual(detail);
+            format!("{error}; additionally, {detail} at {}", path.display())
+        }
+    };
+    // A failed receipt write or commit must still classify a moved root:
+    // reporting `RepairedUnrecorded` alone would imply the replacement is at
+    // the planned path when it may be live in the renamed directory.
+    let unrecorded = |error: &dyn std::fmt::Display| {
+        #[cfg(unix)]
+        if !replacement.pin.still_at_planned_path() {
+            return RepairStepOutcome::MovedRootUnreceipted {
+                path: replacement.pin.written_path(),
                 error: format!(
-                    "the replacement rename failed ({rename_error}), then cleanup failed: {cleanup_error}"
+                    "the skill root was renamed while the repair ran, so the planned path no \
+                     longer names the directory the guards validated; additionally, the receipt \
+                     could not be recorded: {}",
+                    describe(error)
                 ),
-            },
+            };
+        }
+        RepairStepOutcome::RepairedUnrecorded(describe(error))
+    };
+    if let Err(error) = mutation.record_receipt(&receipt) {
+        return unrecorded(&error);
+    }
+    // The identity guard the replacement held has to still hold when the
+    // receipt becomes durable: a root renamed since would leave the receipt
+    // naming a path the live replacement no longer has. Dropping the mutation
+    // without committing rolls the staged receipt back. A rename after this
+    // recheck is indistinguishable from one moments after a completed repair —
+    // a receipt is historical evidence, revalidated against the live
+    // filesystem before any later action relies on it — which is the boundary
+    // of what any pre-commit check can promise.
+    #[cfg(unix)]
+    if !replacement.pin.still_at_planned_path() {
+        let residue = match &replacement.residue {
+            None => String::new(),
+            Some(detail) => {
+                let (path, detail) = residual(detail);
+                format!("; additionally, {detail} at {}", path.display())
+            }
+        };
+        return RepairStepOutcome::MovedRootUnreceipted {
+            path: replacement.pin.written_path(),
+            error: format!(
+                "the skill root was renamed while the repair ran, so the planned path no longer \
+                 names the directory the guards validated{residue}"
+            ),
         };
     }
-    if let Err(error) = mutation.record_receipt(&receipt) {
-        return RepairStepOutcome::RepairedUnrecorded(error.to_string());
-    }
     match mutation.commit() {
-        Ok(()) => RepairStepOutcome::Repaired,
-        Err(error) => RepairStepOutcome::RepairedUnrecorded(error.to_string()),
+        Ok(()) => match &replacement.residue {
+            None => RepairStepOutcome::Repaired,
+            Some(detail) => {
+                let (path, error) = residual(detail);
+                RepairStepOutcome::RepairedResidualTemporary { path, error }
+            }
+        },
+        Err(error) => unrecorded(&error),
     }
 }
 
@@ -3215,8 +3316,395 @@ fn repair_destination_unchanged(plan: &RepairPlan, root: &Path, home: &Path) -> 
     }
 }
 
+/// Atomically exchange two entries of the pinned directory, destroying
+/// neither.
+///
+/// This is the syscall-level guard skilled-2k3.6.1 asked for: unlike
+/// `rename(2)`, which unlinks whatever occupies its destination, an exchange
+/// only swaps two directory entries. macOS spells it `renameatx_np(2)` with
+/// `RENAME_SWAP`; Linux spells it `renameat2(2)` with `RENAME_EXCHANGE`. The
+/// flag constants come from `libc` for the reason `src/git.rs` records: they
+/// are per-kernel ABI values that must not be transcribed by hand. A Unix
+/// platform with neither call gets `ErrorKind::Unsupported`, which repair
+/// reports as a refusal rather than falling back to a destructive rename.
+#[cfg(target_os = "macos")]
+fn exchange_in(dir: &fs::File, a: &std::ffi::CStr, b: &std::ffi::CStr) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+    // SAFETY: the descriptor and both name pointers are live, and the flag is
+    // the documented RENAME_SWAP value for this platform.
+    let result = unsafe {
+        libc::renameatx_np(
+            dir.as_raw_fd(),
+            a.as_ptr(),
+            dir.as_raw_fd(),
+            b.as_ptr(),
+            libc::RENAME_SWAP,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn exchange_in(dir: &fs::File, a: &std::ffi::CStr, b: &std::ffi::CStr) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+    // SAFETY: the descriptor and both name pointers are live, and the flag is
+    // the documented RENAME_EXCHANGE value for this platform.
+    let result = unsafe {
+        libc::renameat2(
+            dir.as_raw_fd(),
+            a.as_ptr(),
+            dir.as_raw_fd(),
+            b.as_ptr(),
+            libc::RENAME_EXCHANGE,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+#[cfg(all(unix, not(any(target_os = "macos", target_os = "linux"))))]
+fn exchange_in(_dir: &fs::File, _a: &std::ffi::CStr, _b: &std::ffi::CStr) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "this platform offers no atomic path exchange",
+    ))
+}
+
+/// Open the trust anchor the pinned walk starts from.
+///
+/// The base — the validated home directory — is deliberately opened without
+/// `O_NOFOLLOW`: the existing path contract permits home itself to be
+/// reached through a link and refuses only redirected components below it,
+/// and this open follows that same rule. Every component beneath the base is
+/// then opened `O_NOFOLLOW` relative to the previous descriptor.
+///
+/// `git.rs` records the semantics the resulting handle provides: an open
+/// directory handle keeps naming the directory the guards validated,
+/// whatever happens to the pathname, so a skill root renamed mid-operation
+/// can neither redirect a write nor strand an entry at a path the report
+/// does not name. Every create, exchange, inspection, and unlink of the
+/// replacement runs relative to the walked descriptor.
 #[cfg(unix)]
-fn replace_directory_symlink(target: &Path, link_path: &Path) -> Result<(), ReplaceLinkError> {
+fn open_trusted_base(base: &Path) -> io::Result<fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY)
+        .open(base)
+}
+
+/// Open the next path component relative to an already-pinned directory,
+/// refusing a symbolic link at that component.
+#[cfg(unix)]
+fn open_dir_component(dir: &fs::File, name: &std::ffi::OsStr) -> io::Result<fs::File> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+    let name = entry_name_arg(name)?;
+    // SAFETY: the descriptor and name pointer are live; the returned fd is
+    // owned immediately by the File.
+    let fd = unsafe {
+        libc::openat(
+            dir.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(unsafe { fs::File::from_raw_fd(fd) })
+}
+
+/// Pin the skill root's parent by walking to it from the validated base one
+/// component at a time, each step descriptor-relative and `O_NOFOLLOW`.
+///
+/// A single `open` with `O_NOFOLLOW` guards only its final component, so an
+/// ancestor between the base and the root swapped for a symbolic link after
+/// the guards would silently redirect the pin. The walk closes that: every
+/// component is opened relative to the previous descriptor and refuses to be
+/// a link, which is the repository's root-is-not-a-link invariant enforced at
+/// the syscall level — and the `openat` discipline `skilled-cb2` asks for.
+#[cfg(unix)]
+fn open_pinned_parent_via(base: &Path, parent: &Path) -> io::Result<fs::File> {
+    let relative = parent.strip_prefix(base).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "the skill root does not lie under the validated base",
+        )
+    })?;
+    let mut dir = open_trusted_base(base)?;
+    for component in relative.components() {
+        let std::path::Component::Normal(name) = component else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "the path contains a non-plain component",
+            ));
+        };
+        dir = open_dir_component(&dir, name)?;
+    }
+    Ok(dir)
+}
+
+/// A single directory-entry name as a syscall argument.
+#[cfg(unix)]
+fn entry_name_arg(name: &std::ffi::OsStr) -> io::Result<std::ffi::CString> {
+    use std::os::unix::ffi::OsStrExt;
+    std::ffi::CString::new(name.as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "the name contains a NUL byte"))
+}
+
+/// Create a symbolic link to `target` named `name` in the pinned directory.
+#[cfg(unix)]
+fn symlink_in(dir: &fs::File, target: &Path, name: &std::ffi::CStr) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::ffi::OsStrExt;
+    let target = std::ffi::CString::new(target.as_os_str().as_bytes()).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "the target contains a NUL byte",
+        )
+    })?;
+    // SAFETY: the descriptor and both pointers are live.
+    if unsafe { libc::symlinkat(target.as_ptr(), dir.as_raw_fd(), name.as_ptr()) } == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+/// Read the raw target of the link named `name` in the pinned directory.
+#[cfg(unix)]
+fn read_link_in(dir: &fs::File, name: &std::ffi::CStr) -> io::Result<PathBuf> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::ffi::OsStringExt;
+    let mut capacity = 256usize;
+    loop {
+        let mut buffer = vec![0u8; capacity];
+        // SAFETY: the descriptor, the name, and the buffer with its exact
+        // length are all live.
+        let written = unsafe {
+            libc::readlinkat(
+                dir.as_raw_fd(),
+                name.as_ptr(),
+                buffer.as_mut_ptr().cast(),
+                buffer.len(),
+            )
+        };
+        let Ok(written) = usize::try_from(written) else {
+            return Err(io::Error::last_os_error());
+        };
+        if written < buffer.len() {
+            buffer.truncate(written);
+            return Ok(PathBuf::from(std::ffi::OsString::from_vec(buffer)));
+        }
+        // A result filling the buffer may be truncated; retry larger, bounded
+        // well past any target Skilled itself would write.
+        capacity *= 2;
+        if capacity > 1 << 16 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "the link target does not fit any supported path",
+            ));
+        }
+    }
+}
+
+/// Unlink the entry named `name` in the pinned directory.
+#[cfg(unix)]
+fn unlink_in(dir: &fs::File, name: &std::ffi::CStr) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+    // SAFETY: the descriptor and the name pointer are live.
+    if unsafe { libc::unlinkat(dir.as_raw_fd(), name.as_ptr(), 0) } == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+/// The pinned directory's current pathname, so a residue report can name
+/// where an object actually is even after the directory was renamed. `None`
+/// when the platform cannot answer; the caller then falls back to the
+/// pathname the plan stated.
+#[cfg(target_os = "macos")]
+fn pinned_directory_path(dir: &fs::File) -> Option<PathBuf> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::ffi::OsStringExt;
+    let mut buffer = vec![0u8; libc::PATH_MAX as usize];
+    // SAFETY: F_GETPATH requires a buffer of at least PATH_MAX bytes, which
+    // this is; the descriptor is live.
+    if unsafe { libc::fcntl(dir.as_raw_fd(), libc::F_GETPATH, buffer.as_mut_ptr()) } == -1 {
+        return None;
+    }
+    let length = buffer.iter().position(|byte| *byte == 0)?;
+    buffer.truncate(length);
+    Some(PathBuf::from(std::ffi::OsString::from_vec(buffer)))
+}
+
+#[cfg(target_os = "linux")]
+fn pinned_directory_path(dir: &fs::File) -> Option<PathBuf> {
+    use std::os::fd::AsRawFd;
+    fs::read_link(format!("/proc/self/fd/{}", dir.as_raw_fd())).ok()
+}
+
+#[cfg(all(unix, not(any(target_os = "macos", target_os = "linux"))))]
+fn pinned_directory_path(_dir: &fs::File) -> Option<PathBuf> {
+    None
+}
+
+/// Whether `path` still names the pinned directory itself, established by
+/// re-walking every component from the trust anchor with the same
+/// `O_NOFOLLOW` discipline the pin was acquired with, then comparing the
+/// resulting descriptor's device and inode against the pin. A final-component
+/// check alone would follow a symlink swapped in at any ancestor, so the
+/// whole chain is re-proven: nothing below the base may be a link, and the
+/// walk must land on the very directory the writes went through. Success,
+/// and the receipt it records against the planned pathname, may be claimed
+/// only while this holds.
+#[cfg(unix)]
+fn pinned_directory_still_via(dir: &fs::File, base: &Path, path: &Path) -> bool {
+    let Ok(reopened) = open_pinned_parent_via(base, path) else {
+        return false;
+    };
+    same_directory(dir, &reopened)
+}
+
+#[cfg(unix)]
+fn same_directory(a: &fs::File, b: &fs::File) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (a.metadata(), b.metadata()) {
+        (Ok(a), Ok(b)) => a.dev() == b.dev() && a.ino() == b.ino(),
+        _ => false,
+    }
+}
+
+/// Whether an exchange failure means the filesystem or kernel cannot exchange
+/// at all, as opposed to this particular attempt failing. `ENOTSUP` is the
+/// documented macOS answer for a volume without `VOL_CAP_INT_RENAME_SWAP`;
+/// Linux answers `EINVAL` from a filesystem without `RENAME_EXCHANGE` support
+/// and `ENOSYS` from a kernel predating `renameat2(2)`.
+#[cfg(unix)]
+fn exchange_unsupported(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::Unsupported
+        || matches!(
+            error.raw_os_error(),
+            Some(libc::ENOTSUP | libc::EINVAL | libc::ENOSYS)
+        )
+}
+
+/// A completed replacement, still pinned.
+#[derive(Debug)]
+struct LinkReplacement {
+    /// The pin the writes went through, kept so the caller can re-verify the
+    /// planned pathname immediately before the receipt becomes durable and
+    /// resolve every reported path from the descriptor at reporting time.
+    #[cfg(unix)]
+    pin: ReplacementPin,
+    /// What remains at the sibling temporary path, if anything; its current
+    /// path is resolved from the pin when it is reported.
+    residue: Option<String>,
+}
+
+/// The pinned directory a replacement was performed in, with the entry names
+/// it used.
+#[cfg(unix)]
+#[derive(Debug)]
+struct ReplacementPin {
+    dir: fs::File,
+    base: PathBuf,
+    planned_parent: PathBuf,
+    destination_file_name: std::ffi::OsString,
+    temporary_file_name: String,
+}
+
+#[cfg(unix)]
+impl ReplacementPin {
+    /// Whether the planned pathname still names the pinned directory itself,
+    /// re-walked component by component from the trust anchor.
+    fn still_at_planned_path(&self) -> bool {
+        pinned_directory_still_via(&self.dir, &self.base, &self.planned_parent)
+    }
+
+    /// The directory's current pathname. The planned pathname is used only
+    /// after re-verifying it still names the pinned directory; when neither
+    /// resolution works, `None` — a stale path must never pose as an object's
+    /// actual location.
+    fn current_directory(&self) -> Option<PathBuf> {
+        pinned_directory_path(&self.dir).or_else(|| {
+            self.still_at_planned_path()
+                .then(|| self.planned_parent.clone())
+        })
+    }
+
+    fn locate(&self, name: &std::ffi::OsStr) -> PathBuf {
+        match self.current_directory() {
+            Some(directory) => directory.join(name),
+            None => Path::new("<the moved directory could not be resolved>").join(name),
+        }
+    }
+
+    /// Where the written replacement lives right now.
+    fn written_path(&self) -> PathBuf {
+        self.locate(&self.destination_file_name)
+    }
+
+    /// Where the temporary entry lives right now.
+    fn residual_path(&self) -> PathBuf {
+        self.locate(std::ffi::OsStr::new(&self.temporary_file_name))
+    }
+}
+
+/// Replace the proven link with a freshly created one, destroying nothing
+/// unproven.
+///
+/// A plain `rename(2)` unlinks whatever occupies its destination, so an object
+/// arriving between the caller's last recheck and the syscall would be
+/// destroyed. The exchange closes that window: the temporary link is swapped
+/// with the destination atomically, the displaced object — moved intact to a
+/// sibling temporary path — is read back, and only a symbolic link whose raw
+/// target is byte-identical to `proven_target` is then removed. Anything else
+/// was a concurrent arrival: the exchange is reverted, preserving the object,
+/// and the attempt is refused. Readers never observe the destination absent
+/// on either path.
+///
+/// The exchange binds the destination — the one entry a concurrent actor
+/// legitimately touches — and a revert exchange touches it again, so what a
+/// revert displaces to the temporary path may be a later arrival rather than
+/// Skilled's own replacement. Every cleanup of the temporary path therefore
+/// goes through [`remove_proven_temporary`], which removes only a link
+/// re-proven byte-identical to the object that cleanup expects — the recorded
+/// old target, or Skilled's own replacement — and preserves anything else as
+/// reported residue. Every operation here — create, exchange, inspection,
+/// cleanup — runs relative to a parent directory pinned open first, so a
+/// skill root renamed mid-operation can neither redirect a write nor strand
+/// an entry unreported ([`open_pinned_parent`] records the semantics this
+/// borrows from `git.rs`), and success is claimed only while the planned
+/// pathname still names the pinned directory — a mid-operation rename becomes
+/// a partial stating where the replacement actually lives, recording no
+/// receipt against the stale path. The pinned directory proves itself before
+/// anything is created: the descriptor was opened from a pathname after the
+/// guards ran against that pathname, and the gap between the two closes by
+/// requiring the pinned directory's own destination entry to still hold a
+/// link byte-identical to the proven raw target. Linux and macOS offer no
+/// unlink bound to a verified inode (FreeBSD's `funlinkat(2)` has no
+/// equivalent here); the check-then-unlink remainder and the private-name
+/// argument that bounds it are documented on that helper. The residual tails
+/// — a displaced object that cannot be removed or swapped back — leave extra
+/// entries behind and still destroy nothing; their reported path is resolved
+/// from the pinned descriptor at reporting time, so it names the directory
+/// wherever it now lives.
+#[cfg(unix)]
+fn replace_directory_symlink(
+    target: &Path,
+    link_path: &Path,
+    proven_target: &Path,
+    base: &Path,
+) -> Result<LinkReplacement, ReplaceLinkError> {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     let parent = link_path.parent().ok_or_else(|| {
@@ -3225,33 +3713,302 @@ fn replace_directory_symlink(target: &Path, link_path: &Path) -> Result<(), Repl
             "target has no parent",
         ))
     })?;
+    let Some(destination_file_name) = link_path.file_name() else {
+        return Err(ReplaceLinkError::Unchanged(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "the destination has no file name",
+        )));
+    };
+    let destination_name =
+        entry_name_arg(destination_file_name).map_err(ReplaceLinkError::Unchanged)?;
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
-    let temporary = parent.join(format!(".skilled-repair-{}-{nonce}", std::process::id()));
-    create_directory_symlink(target, &temporary).map_err(ReplaceLinkError::Unchanged)?;
-    if let Err(error) = fs::rename(&temporary, link_path) {
-        return match fs::remove_file(&temporary) {
-            Ok(()) => Err(ReplaceLinkError::Unchanged(error)),
-            Err(cleanup_error) => Err(ReplaceLinkError::ResidualTemporary {
-                path: temporary,
-                rename_error: error,
-                cleanup_error,
-            }),
-        };
+    let temporary_file_name = format!(".skilled-repair-{}-{nonce}", std::process::id());
+    let temporary_name = entry_name_arg(std::ffi::OsStr::new(&temporary_file_name))
+        .map_err(ReplaceLinkError::Unchanged)?;
+    let dir = open_pinned_parent_via(base, parent).map_err(ReplaceLinkError::Unchanged)?;
+    // A residue report must name where the object actually is, which the
+    // starting pathname cannot promise once the directory is pinned: resolve
+    // the pinned directory's current path at reporting time instead.
+    let residual_path = || {
+        // The planned pathname is trusted only after re-verifying it still
+        // names the pinned directory; an unresolvable moved directory is
+        // stated as such rather than posed as a stale path.
+        let directory = pinned_directory_path(&dir).or_else(|| {
+            pinned_directory_still_via(&dir, base, parent).then(|| parent.to_path_buf())
+        });
+        match directory {
+            Some(directory) => directory.join(&temporary_file_name),
+            None => {
+                Path::new("<the moved directory could not be resolved>").join(&temporary_file_name)
+            }
+        }
+    };
+    // The guards ran against a pathname, and this descriptor was opened from
+    // that pathname afterwards; the gap between the two is closed by making
+    // the pinned directory prove itself. Only a directory whose entry still
+    // holds a link byte-identical to the proven raw target may be written —
+    // the same ownership standard every other repair decision applies.
+    match read_link_in(&dir, &destination_name) {
+        Ok(raw) if raw == proven_target => {}
+        Ok(raw) => {
+            return Err(ReplaceLinkError::ConcurrentlyReplaced {
+                observed: format!("a symbolic link to {} arrived there", raw.display()),
+            });
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Err(ReplaceLinkError::Unchanged(error));
+        }
+        Err(error) if error.raw_os_error() == Some(libc::EINVAL) => {
+            return Err(ReplaceLinkError::ConcurrentlyReplaced {
+                observed: "an object that is not a symbolic link arrived there".to_owned(),
+            });
+        }
+        Err(error) => return Err(ReplaceLinkError::Unchanged(error)),
     }
-    Ok(())
+    symlink_in(&dir, target, &temporary_name).map_err(ReplaceLinkError::Unchanged)?;
+    if let Err(error) = exchange_in(&dir, &temporary_name, &destination_name) {
+        // The destination is untouched; the only write so far is the
+        // temporary link, and even that is re-proven before removal.
+        return Err(
+            match remove_proven_temporary(&dir, &temporary_name, target) {
+                TemporaryCleanup::Removed if exchange_unsupported(&error) => {
+                    ReplaceLinkError::ExchangeUnsupported(error)
+                }
+                TemporaryCleanup::Removed => ReplaceLinkError::Unchanged(error),
+                TemporaryCleanup::NotProven { observed } => ReplaceLinkError::ResidualTemporary {
+                    path: residual_path(),
+                    detail: format!(
+                        "the atomic exchange failed ({error}), and by then {observed} the temporary \
+                     path, so it was preserved"
+                    ),
+                },
+                TemporaryCleanup::RemoveFailed(cleanup_error) => {
+                    ReplaceLinkError::ResidualTemporary {
+                        path: residual_path(),
+                        detail: format!(
+                            "the atomic exchange failed ({error}), then removing the temporary link \
+                     failed: {cleanup_error}"
+                        ),
+                    }
+                }
+            },
+        );
+    }
+    // The exchange moved whatever occupied the destination to the temporary
+    // path: this read describes exactly the object the replacement displaced.
+    let outcome = match read_link_in(&dir, &temporary_name) {
+        Ok(raw) if raw == proven_target => {
+            match remove_proven_temporary(&dir, &temporary_name, proven_target) {
+                TemporaryCleanup::Removed => Ok(None),
+                TemporaryCleanup::NotProven { observed } => Ok(Some(format!(
+                    "after the displaced proven link was verified, {observed} the temporary \
+                     path, so it was preserved"
+                ))),
+                TemporaryCleanup::RemoveFailed(cleanup_error) => {
+                    match exchange_in(&dir, &temporary_name, &destination_name) {
+                        // The revert touched the public destination again, so what
+                        // it displaced to the temporary path must be re-proven as
+                        // Skilled's own replacement before it may be removed.
+                        Ok(()) => match remove_proven_temporary(&dir, &temporary_name, target) {
+                            TemporaryCleanup::Removed => {
+                                Err(ReplaceLinkError::Unchanged(io::Error::new(
+                                    cleanup_error.kind(),
+                                    format!(
+                                        "the displaced link could not be removed ({cleanup_error}), \
+                                     so the exchange was reverted"
+                                    ),
+                                )))
+                            }
+                            TemporaryCleanup::NotProven { observed } => {
+                                Err(ReplaceLinkError::ResidualTemporary {
+                                    path: residual_path(),
+                                    detail: format!(
+                                        "the displaced proven link could not be removed \
+                                     ({cleanup_error}); the exchange was reverted, and it \
+                                     displaced an object that arrived at the destination \
+                                     meanwhile — {observed} the temporary path and was preserved"
+                                    ),
+                                })
+                            }
+                            TemporaryCleanup::RemoveFailed(second_error) => {
+                                Err(ReplaceLinkError::ResidualTemporary {
+                                    path: residual_path(),
+                                    detail: format!(
+                                        "the displaced proven link could not be removed \
+                                     ({cleanup_error}); the exchange was reverted, but the \
+                                     temporary replacement link could not be removed either: \
+                                     {second_error}"
+                                    ),
+                                })
+                            }
+                        },
+                        // A failed revert proves nothing about the
+                        // destination: success — and the receipt it records —
+                        // is claimed only after re-reading, through the pinned
+                        // descriptor, that the replacement is still there.
+                        Err(revert_error) => match read_link_in(&dir, &destination_name) {
+                            Ok(raw) if raw == target => Ok(Some(format!(
+                                "the displaced proven old link could not be removed \
+                                 ({cleanup_error}) and the exchange could not be reverted \
+                                 ({revert_error})"
+                            ))),
+                            _ => Err(ReplaceLinkError::ResidualTemporary {
+                                path: residual_path(),
+                                detail: format!(
+                                    "the displaced proven link could not be removed \
+                                     ({cleanup_error}), the exchange could not be reverted \
+                                     ({revert_error}), and the destination no longer holds the \
+                                     replacement; the displaced link was preserved at this path"
+                                ),
+                            }),
+                        },
+                    }
+                }
+            }
+        }
+        displaced => {
+            let observed = match displaced {
+                Ok(raw) => format!("a symbolic link to {} arrived there", raw.display()),
+                Err(_) => "an object that is not a symbolic link arrived there".to_owned(),
+            };
+            match exchange_in(&dir, &temporary_name, &destination_name) {
+                // As above: the revert exchanged with the public destination,
+                // so only Skilled's own replacement may be removed from the
+                // temporary path afterwards; anything else arrived at the
+                // destination during the attempt and is preserved.
+                Ok(()) => match remove_proven_temporary(&dir, &temporary_name, target) {
+                    TemporaryCleanup::Removed => {
+                        Err(ReplaceLinkError::ConcurrentlyReplaced { observed })
+                    }
+                    TemporaryCleanup::NotProven { observed: occupant } => {
+                        Err(ReplaceLinkError::ResidualTemporary {
+                            path: residual_path(),
+                            detail: format!(
+                                "{observed}; it was restored, and the revert displaced a further \
+                             arrival — {occupant} the temporary path and was preserved"
+                            ),
+                        })
+                    }
+                    TemporaryCleanup::RemoveFailed(cleanup_error) => {
+                        Err(ReplaceLinkError::ResidualTemporary {
+                            path: residual_path(),
+                            detail: format!(
+                                "{observed}; it was restored, but the temporary replacement link \
+                                 could not be removed: {cleanup_error}"
+                            ),
+                        })
+                    }
+                },
+                // As above: a failed revert proves nothing about the
+                // destination, so the receipt-recording success is claimed
+                // only after re-reading the replacement there.
+                Err(revert_error) => match read_link_in(&dir, &destination_name) {
+                    Ok(raw) if raw == target => Ok(Some(format!(
+                        "{observed} and could not be swapped back ({revert_error}); the \
+                         replacement link is live and the arriving object is preserved here"
+                    ))),
+                    _ => Err(ReplaceLinkError::ResidualTemporary {
+                        path: residual_path(),
+                        detail: format!(
+                            "{observed} and could not be swapped back ({revert_error}), and the \
+                             destination no longer holds the replacement; the arriving object is \
+                             preserved here"
+                        ),
+                    }),
+                },
+            }
+        }
+    };
+    // Descriptor-relative writes land in the pinned directory wherever it
+    // now lives, so success — and the receipt the caller records against the
+    // planned pathname — may be claimed only while that pathname still names
+    // the pinned directory. That classification belongs to the caller, at the
+    // last moment before the receipt becomes durable, so the pin itself is
+    // returned with the result.
+    let residue = outcome?;
+    Ok(LinkReplacement {
+        pin: ReplacementPin {
+            dir,
+            base: base.to_path_buf(),
+            planned_parent: parent.to_path_buf(),
+            destination_file_name: destination_file_name.to_os_string(),
+            temporary_file_name,
+        },
+        residue,
+    })
+}
+
+/// The outcome of removing a temporary entry that must still hold a proven
+/// object.
+#[cfg(unix)]
+enum TemporaryCleanup {
+    /// The entry held the proven link (or was already gone) and no longer
+    /// exists.
+    Removed,
+    /// The entry holds something other than the proven link; it was preserved
+    /// and `observed` states what occupies it.
+    NotProven { observed: String },
+    /// The entry held the proven link, but removing it failed.
+    RemoveFailed(io::Error),
+}
+
+/// Remove the entry named `name` in the pinned directory only when it is a
+/// symbolic link whose raw target is byte-identical to `proven`; preserve
+/// anything else.
+///
+/// The check and the unlink are still two syscalls — Linux and macOS offer no
+/// unlink bound to the verified inode — so this narrows rather than closes
+/// that window. What makes the remainder acceptable is the name it applies
+/// to: both run against the pinned parent descriptor, so no rename of the
+/// root can redirect them, and every caller passes a temporary name embedding
+/// this process's id and a nanosecond timestamp, which no accidental writer
+/// reaches. A process racing that private name deliberately holds the
+/// home-directory write access `apply_install` records as the boundary of
+/// what any pathname discipline can defend.
+#[cfg(unix)]
+fn remove_proven_temporary(
+    dir: &fs::File,
+    name: &std::ffi::CStr,
+    proven: &Path,
+) -> TemporaryCleanup {
+    match read_link_in(dir, name) {
+        Ok(raw) if raw == proven => match unlink_in(dir, name) {
+            Ok(()) => TemporaryCleanup::Removed,
+            Err(error) => TemporaryCleanup::RemoveFailed(error),
+        },
+        Ok(raw) => TemporaryCleanup::NotProven {
+            observed: format!("a symbolic link to {} occupies", raw.display()),
+        },
+        Err(error) if error.kind() == io::ErrorKind::NotFound => TemporaryCleanup::Removed,
+        Err(_) => TemporaryCleanup::NotProven {
+            observed: "an object that is not a symbolic link occupies".to_owned(),
+        },
+    }
 }
 
 #[cfg(windows)]
-fn replace_directory_symlink(target: &Path, link_path: &Path) -> Result<(), ReplaceLinkError> {
+fn replace_directory_symlink(
+    target: &Path,
+    link_path: &Path,
+    _proven_target: &Path,
+    _base: &Path,
+) -> Result<LinkReplacement, ReplaceLinkError> {
     fs::remove_dir(link_path).map_err(ReplaceLinkError::Unchanged)?;
-    create_directory_symlink(target, link_path).map_err(ReplaceLinkError::RemovedOldLink)
+    create_directory_symlink(target, link_path)
+        .map(|()| LinkReplacement { residue: None })
+        .map_err(ReplaceLinkError::RemovedOldLink)
 }
 
 #[cfg(not(any(unix, windows)))]
-fn replace_directory_symlink(_target: &Path, _link_path: &Path) -> Result<(), ReplaceLinkError> {
+fn replace_directory_symlink(
+    _target: &Path,
+    _link_path: &Path,
+    _proven_target: &Path,
+    _base: &Path,
+) -> Result<LinkReplacement, ReplaceLinkError> {
     Err(ReplaceLinkError::Unchanged(io::Error::new(
         io::ErrorKind::Unsupported,
         "this platform does not support Skilled's directory-link repair",
@@ -3262,17 +4019,23 @@ fn replace_directory_symlink(_target: &Path, _link_path: &Path) -> Result<(), Re
 enum ReplaceLinkError {
     /// The destination still names the same object it did before this attempt.
     Unchanged(io::Error),
+    /// The destination's filesystem or kernel cannot exchange paths
+    /// atomically, so a provable replacement is impossible; nothing was
+    /// written.
+    #[cfg(unix)]
+    ExchangeUnsupported(io::Error),
+    /// An object that is not the proven link arrived at the destination after
+    /// the final recheck. It was swapped back intact and nothing was written.
+    #[cfg(unix)]
+    ConcurrentlyReplaced { observed: String },
     /// The proven old link was removed before replacement creation failed.
     #[cfg(windows)]
     RemovedOldLink(io::Error),
-    /// The replacement rename failed and its sibling temporary link could not
-    /// be removed, leaving an additional filesystem entry behind.
+    /// No replacement is claimed at the destination — it is unchanged, or a
+    /// failed revert left its state unproven — and an entry remains at a
+    /// temporary path; `detail` states exactly what and where.
     #[cfg(unix)]
-    ResidualTemporary {
-        path: PathBuf,
-        rename_error: io::Error,
-        cleanup_error: io::Error,
-    },
+    ResidualTemporary { path: PathBuf, detail: String },
 }
 
 /// Check a repaired link and its OpenCode outlook against a fresh scan.
@@ -3301,7 +4064,24 @@ pub fn verify_repair(
                     agent: step.agent,
                     postcondition: Postcondition::LinkAsPlanned,
                     reason: format!(
-                        "the failed repair left a temporary link at {}",
+                        "the failed repair left an object preserved at {}",
+                        path.display()
+                    ),
+                    required: true,
+                });
+                return VerifyReport {
+                    held,
+                    failures,
+                    withheld,
+                };
+            }
+            RepairStepOutcome::MovedRootUnreceipted { path, .. } => {
+                withheld.push(VerifyWithheld {
+                    agent: step.agent,
+                    postcondition: Postcondition::LinkAsPlanned,
+                    reason: format!(
+                        "the skill root moved during the repair; the live replacement was written \
+                         at {} without a receipt",
                         path.display()
                     ),
                     required: true,
@@ -3508,6 +4288,10 @@ impl RepairOutcome {
             Some(RepairStepOutcome::Failed(_)) => RepairStatus::NotApplied,
             Some(RepairStepOutcome::RemovedUnreplaced(_)) => RepairStatus::PartiallyApplied,
             Some(RepairStepOutcome::ResidualTemporary { .. }) => RepairStatus::PartiallyApplied,
+            Some(RepairStepOutcome::RepairedResidualTemporary { .. }) => {
+                RepairStatus::PartiallyApplied
+            }
+            Some(RepairStepOutcome::MovedRootUnreceipted { .. }) => RepairStatus::PartiallyApplied,
             Some(RepairStepOutcome::RepairedUnrecorded(_)) => RepairStatus::RepairedUnrecorded,
             Some(RepairStepOutcome::Repaired) if !self.verification.is_verified() => {
                 RepairStatus::VerificationFailed
@@ -5196,5 +5980,379 @@ mod tests {
         let outcome = RepairOutcome::new(plan, applied, VerifyReport::default());
 
         assert_eq!(outcome.status(), RepairStatus::PartiallyApplied);
+    }
+
+    /// A replacement written into a root that moved during the repair is a
+    /// partial mutation of its own kind: the link is live but unreceipted at
+    /// a path the plan never stated, which must never render as disposable
+    /// temporary residue.
+    #[test]
+    fn a_replacement_in_a_moved_root_is_a_partial_repair() {
+        let mut plan = empty_repair_plan(
+            AgentKind::Codex,
+            "portable",
+            PathBuf::from("/home/example/.agents/skills/portable"),
+        );
+        plan.disposition = RepairDisposition::ReplaceLink { dangling: false };
+        let applied = RepairApplyReport {
+            step: Some(RepairAppliedStep {
+                agent: AgentKind::Codex,
+                link_path: plan.link_path.clone(),
+                outcome: RepairStepOutcome::MovedRootUnreceipted {
+                    path: PathBuf::from("/home/example/renamed-skills/portable"),
+                    error: "the skill root was renamed while the repair ran".to_owned(),
+                },
+            }),
+        };
+        let outcome = RepairOutcome::new(plan, applied, VerifyReport::default());
+
+        assert_eq!(outcome.status(), RepairStatus::PartiallyApplied);
+    }
+
+    /// A displaced object stranded beside a completed replacement is a
+    /// residual write outstanding, so the repair reports as partial even
+    /// though its link and receipt are complete.
+    #[test]
+    fn a_stranded_displaced_object_is_a_partial_repair() {
+        let mut plan = empty_repair_plan(
+            AgentKind::Codex,
+            "portable",
+            PathBuf::from("/home/example/.agents/skills/portable"),
+        );
+        plan.disposition = RepairDisposition::ReplaceLink { dangling: false };
+        let applied = RepairApplyReport {
+            step: Some(RepairAppliedStep {
+                agent: AgentKind::Codex,
+                link_path: plan.link_path.clone(),
+                outcome: RepairStepOutcome::RepairedResidualTemporary {
+                    path: PathBuf::from("/home/example/.agents/skills/.skilled-repair-123-456"),
+                    error: "permission denied".to_owned(),
+                },
+            }),
+        };
+        let outcome = RepairOutcome::new(plan, applied, VerifyReport::default());
+
+        assert_eq!(outcome.status(), RepairStatus::PartiallyApplied);
+    }
+
+    /// Cleaning up a temporary entry must re-prove what it removes, relative
+    /// to the pinned parent directory: a link whose raw target matches is
+    /// removed, anything else is preserved.
+    #[cfg(unix)]
+    #[test]
+    fn temporary_cleanup_removes_only_a_proven_link() {
+        let fixture = tempfile::tempdir().expect("temporary fixture");
+        let proven = fixture.path().join("proven-target");
+        let matching = fixture.path().join("matching");
+        std::os::unix::fs::symlink(&proven, &matching).expect("matching link");
+        let differing = fixture.path().join("differing");
+        std::os::unix::fs::symlink(fixture.path().join("elsewhere"), &differing)
+            .expect("differing link");
+        let occupied = fixture.path().join("occupied");
+        fs::write(&occupied, b"arrived data").expect("arrived file");
+        let dir = open_pinned_parent_via(fixture.path(), fixture.path())
+            .expect("pinned parent directory");
+        let name = |name: &str| entry_name_arg(std::ffi::OsStr::new(name)).expect("entry name");
+
+        assert!(matches!(
+            remove_proven_temporary(&dir, &name("matching"), &proven),
+            TemporaryCleanup::Removed
+        ));
+        assert!(fs::symlink_metadata(&matching).is_err());
+
+        assert!(matches!(
+            remove_proven_temporary(&dir, &name("differing"), &proven),
+            TemporaryCleanup::NotProven { .. }
+        ));
+        assert!(fs::symlink_metadata(&differing).is_ok());
+
+        assert!(matches!(
+            remove_proven_temporary(&dir, &name("occupied"), &proven),
+            TemporaryCleanup::NotProven { .. }
+        ));
+        assert_eq!(
+            fs::read(&occupied).expect("preserved file"),
+            b"arrived data"
+        );
+    }
+
+    /// A residual report must name where the residue actually is: the pinned
+    /// descriptor resolves its current pathname even after the directory was
+    /// renamed, so a report never points at a path the object no longer has.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn the_pinned_directory_reports_its_current_path_after_a_rename() {
+        let fixture = tempfile::tempdir().expect("temporary fixture");
+        let original = fixture.path().join("root-a");
+        fs::create_dir_all(&original).expect("original root");
+        let dir = open_pinned_parent_via(fixture.path(), &original).expect("pinned directory");
+        let renamed = fixture.path().join("root-b");
+        fs::rename(&original, &renamed).expect("root renamed");
+
+        let reported = pinned_directory_path(&dir).expect("current pathname");
+
+        assert_eq!(
+            reported,
+            fs::canonicalize(&renamed).expect("renamed root resolves")
+        );
+    }
+
+    /// Success may claim the planned pathname only while that pathname still
+    /// names the pinned directory; a rename must be detected so no receipt is
+    /// recorded against a path the replacement no longer has.
+    #[cfg(unix)]
+    #[test]
+    fn the_pinned_directory_knows_when_its_pathname_moved() {
+        let fixture = tempfile::tempdir().expect("temporary fixture");
+        let original = fixture.path().join("root-a");
+        fs::create_dir_all(&original).expect("original root");
+        let dir = open_pinned_parent_via(fixture.path(), &original).expect("pinned directory");
+
+        assert!(pinned_directory_still_via(&dir, fixture.path(), &original));
+
+        let renamed = fixture.path().join("root-b");
+        fs::rename(&original, &renamed).expect("root renamed");
+
+        assert!(!pinned_directory_still_via(&dir, fixture.path(), &original));
+
+        fs::create_dir_all(&original).expect("impostor at the original path");
+
+        assert!(!pinned_directory_still_via(&dir, fixture.path(), &original));
+
+        fs::remove_dir(&original).expect("impostor removed");
+        std::os::unix::fs::symlink(&renamed, &original).expect("alias at the original path");
+
+        assert!(
+            !pinned_directory_still_via(&dir, fixture.path(), &original),
+            "a symlink alias to the pinned directory must not pass as the root itself"
+        );
+    }
+
+    /// `O_NOFOLLOW` guards only the final component, so the walk from the
+    /// validated base must refuse a symbolic link at every step: an ancestor
+    /// swapped for a link after the guards must not redirect the pin, even
+    /// when the redirected tree holds a byte-identical proven link.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn replace_refuses_a_symlinked_ancestor_between_base_and_root() {
+        let fixture = tempfile::tempdir().expect("temporary fixture");
+        let real = fixture.path().join("real");
+        let root_in_real = real.join("skills");
+        fs::create_dir_all(&root_in_real).expect("redirected skill root");
+        let old_target = fixture.path().join("old-target");
+        let new_target = fixture.path().join("new-target");
+        fs::create_dir_all(&old_target).expect("old target directory");
+        fs::create_dir_all(&new_target).expect("new target directory");
+        std::os::unix::fs::symlink(&old_target, root_in_real.join("portable"))
+            .expect("byte-identical link in the redirected tree");
+        let alias = fixture.path().join("agent");
+        std::os::unix::fs::symlink(&real, &alias).expect("swapped ancestor");
+        let destination = alias.join("skills").join("portable");
+
+        let error =
+            replace_directory_symlink(&new_target, &destination, &old_target, fixture.path())
+                .expect_err("a symlinked ancestor refuses the replacement");
+
+        assert!(
+            matches!(error, ReplaceLinkError::Unchanged(_)),
+            "unexpected error: {error:?}"
+        );
+        assert_eq!(
+            fs::read_link(root_in_real.join("portable")).expect("untouched link"),
+            old_target
+        );
+        assert_eq!(
+            fs::read_dir(&root_in_real)
+                .expect("redirected root listing")
+                .count(),
+            1,
+            "the redirected tree must gain nothing"
+        );
+    }
+
+    /// The pinned parent refuses to open through a symbolic link, re-enforcing
+    /// the root-is-not-a-link invariant at the descriptor that every write
+    /// then goes through.
+    #[cfg(unix)]
+    #[test]
+    fn the_pinned_parent_refuses_a_symlinked_directory() {
+        let fixture = tempfile::tempdir().expect("temporary fixture");
+        let real = fixture.path().join("real-root");
+        fs::create_dir_all(&real).expect("real root");
+        let alias = fixture.path().join("alias-root");
+        std::os::unix::fs::symlink(&real, &alias).expect("root alias");
+
+        assert!(open_pinned_parent_via(fixture.path(), &alias).is_err());
+        assert!(open_pinned_parent_via(fixture.path(), &real).is_ok());
+        assert!(
+            open_pinned_parent_via(&alias, &alias).is_ok(),
+            "the trust anchor itself may be reached through a link"
+        );
+    }
+
+    /// The replacement must displace exactly the proven link: the exchange
+    /// swaps it out whole, the displaced link is verified against the recorded
+    /// raw target, and nothing else is left in the skill root afterwards.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn replace_exchanges_the_proven_link_for_the_replacement() {
+        let fixture = tempfile::tempdir().expect("temporary fixture");
+        let root = fixture.path().join("skills");
+        fs::create_dir_all(&root).expect("skill root");
+        let old_target = fixture.path().join("old-target");
+        let new_target = fixture.path().join("new-target");
+        fs::create_dir_all(&old_target).expect("old target directory");
+        fs::create_dir_all(&new_target).expect("new target directory");
+        let link = root.join("portable");
+        std::os::unix::fs::symlink(&old_target, &link).expect("proven link");
+
+        let replaced = replace_directory_symlink(&new_target, &link, &old_target, fixture.path())
+            .expect("replacing the proven link succeeds");
+
+        assert!(
+            replaced.residue.is_none(),
+            "a clean replacement leaves no residue"
+        );
+        assert_eq!(fs::read_link(&link).expect("replaced link"), new_target);
+        let entries: Vec<_> = fs::read_dir(&root)
+            .expect("skill root listing")
+            .map(|entry| entry.expect("entry").file_name())
+            .collect();
+        assert_eq!(entries, vec![std::ffi::OsString::from("portable")]);
+    }
+
+    /// A regular file that arrives at the destination after the final recheck
+    /// is exactly what `rename(2)` would have destroyed. The replacement must
+    /// refuse, and the file must survive at the destination with its content,
+    /// with no temporary residue beside it.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn replace_preserves_a_file_that_arrived_at_the_destination() {
+        let fixture = tempfile::tempdir().expect("temporary fixture");
+        let root = fixture.path().join("skills");
+        fs::create_dir_all(&root).expect("skill root");
+        let proven_target = fixture.path().join("old-target");
+        let new_target = fixture.path().join("new-target");
+        fs::create_dir_all(&new_target).expect("new target directory");
+        let destination = root.join("portable");
+        fs::write(&destination, b"a stranger's data").expect("arrived file");
+
+        let error =
+            replace_directory_symlink(&new_target, &destination, &proven_target, fixture.path())
+                .expect_err("an unproven occupant refuses the replacement");
+
+        assert!(
+            matches!(error, ReplaceLinkError::ConcurrentlyReplaced { .. }),
+            "unexpected error: {error:?}"
+        );
+        assert_eq!(
+            fs::read(&destination).expect("preserved file"),
+            b"a stranger's data"
+        );
+        let entries: Vec<_> = fs::read_dir(&root)
+            .expect("skill root listing")
+            .map(|entry| entry.expect("entry").file_name())
+            .collect();
+        assert_eq!(entries, vec![std::ffi::OsString::from("portable")]);
+    }
+
+    /// A symbolic link whose raw target is not byte-identical to the proven
+    /// one is a stranger's link, not the link repair proved. It must be
+    /// restored unread and unfollowed, with its raw target intact.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn replace_restores_a_stranger_link_with_its_raw_target_intact() {
+        let fixture = tempfile::tempdir().expect("temporary fixture");
+        let root = fixture.path().join("skills");
+        fs::create_dir_all(&root).expect("skill root");
+        let proven_target = fixture.path().join("old-target");
+        let new_target = fixture.path().join("new-target");
+        fs::create_dir_all(&new_target).expect("new target directory");
+        let destination = root.join("portable");
+        let stranger_target = PathBuf::from("../somewhere/else");
+        std::os::unix::fs::symlink(&stranger_target, &destination).expect("arrived link");
+
+        let error =
+            replace_directory_symlink(&new_target, &destination, &proven_target, fixture.path())
+                .expect_err("an unproven link refuses the replacement");
+
+        assert!(
+            matches!(error, ReplaceLinkError::ConcurrentlyReplaced { .. }),
+            "unexpected error: {error:?}"
+        );
+        assert_eq!(
+            fs::read_link(&destination).expect("preserved link"),
+            stranger_target
+        );
+        let entries: Vec<_> = fs::read_dir(&root)
+            .expect("skill root listing")
+            .map(|entry| entry.expect("entry").file_name())
+            .collect();
+        assert_eq!(entries, vec![std::ffi::OsString::from("portable")]);
+    }
+
+    /// Repair never recreates an absent link. A destination that vanished
+    /// after the final recheck refuses the replacement and stays absent — the
+    /// skill root gains nothing, not even transiently visible residue.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn replace_refuses_an_absent_destination_and_creates_nothing() {
+        let fixture = tempfile::tempdir().expect("temporary fixture");
+        let root = fixture.path().join("skills");
+        fs::create_dir_all(&root).expect("skill root");
+        let proven_target = fixture.path().join("old-target");
+        let new_target = fixture.path().join("new-target");
+        fs::create_dir_all(&new_target).expect("new target directory");
+        let destination = root.join("portable");
+
+        let error =
+            replace_directory_symlink(&new_target, &destination, &proven_target, fixture.path())
+                .expect_err("an absent destination refuses the replacement");
+
+        assert!(
+            matches!(error, ReplaceLinkError::Unchanged(_)),
+            "unexpected error: {error:?}"
+        );
+        assert!(fs::symlink_metadata(&destination).is_err());
+        assert_eq!(
+            fs::read_dir(&root).expect("skill root listing").count(),
+            0,
+            "the skill root must be left empty"
+        );
+    }
+
+    /// A Unix platform without an atomic exchange refuses the repair rather
+    /// than falling back to a destructive rename: the proven link survives
+    /// untouched and the skill root gains no residue.
+    #[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
+    #[test]
+    fn replace_refuses_where_no_atomic_exchange_exists() {
+        let fixture = tempfile::tempdir().expect("temporary fixture");
+        let root = fixture.path().join("skills");
+        fs::create_dir_all(&root).expect("skill root");
+        let old_target = fixture.path().join("old-target");
+        let new_target = fixture.path().join("new-target");
+        fs::create_dir_all(&old_target).expect("old target directory");
+        fs::create_dir_all(&new_target).expect("new target directory");
+        let destination = root.join("portable");
+        std::os::unix::fs::symlink(&old_target, &destination).expect("proven link");
+
+        let error =
+            replace_directory_symlink(&new_target, &destination, &old_target, fixture.path())
+                .expect_err("a platform without exchange refuses the replacement");
+
+        assert!(
+            matches!(error, ReplaceLinkError::ExchangeUnsupported(_)),
+            "unexpected error: {error:?}"
+        );
+        assert_eq!(
+            fs::read_link(&destination).expect("surviving link"),
+            old_target
+        );
+        let entries: Vec<_> = fs::read_dir(&root)
+            .expect("skill root listing")
+            .map(|entry| entry.expect("entry").file_name())
+            .collect();
+        assert_eq!(entries, vec![std::ffi::OsString::from("portable")]);
     }
 }

@@ -160,10 +160,14 @@ signal needs both, because colour alone is not an acceptable cue.
   refused rather than followed: the path the preview stated has to be the path
   the write lands on. Install retains a fail-if-exists pathname window between
   its check and `symlink`, recorded on `apply_install` and `apply_uninstall` and
-  tracked as `skilled-cb2`. Repair has a more severe
-  window between its final guard and `rename`: another object arriving there
-  could be replaced. That data-loss risk is documented on `apply_repair` and
-  tracked separately.
+  tracked as `skilled-cb2`. Repair replaces through an atomic exchange: the
+  displaced object must be byte-identical to the proven link before it is
+  removed, a stranger's object is swapped back intact and refused — or, if the
+  swap back itself fails, preserved at a reported temporary path while the
+  repair reports as partial — and a filesystem that cannot exchange refuses
+  the repair rather than falling back to a destructive rename. Windows keeps
+  its documented non-atomic remove-and-create fallback, tracked as
+  `skilled-tdm`.
 - Repository updates write through Git only inside the canonical checkout the
   user registered. They begin only after an explicit check, fast-forward to the
   exact previewed object, and never reset, rebase, stash, commit, or push. The

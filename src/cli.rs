@@ -1048,7 +1048,17 @@ fn write_repair_report(output: &mut dyn Write, outcome: &RepairOutcome) -> std::
                 )
             }
             RepairStepOutcome::ResidualTemporary { path, error } => format!(
-                "temporary link left at {} — {}",
+                "an object was preserved at {} — {}",
+                safe(&path.display()),
+                safe(error)
+            ),
+            RepairStepOutcome::RepairedResidualTemporary { path, error } => format!(
+                "link replaced and receipt recorded, but an object was left at {} — {}",
+                safe(&path.display()),
+                safe(error)
+            ),
+            RepairStepOutcome::MovedRootUnreceipted { path, error } => format!(
+                "live replacement written without a receipt at {} — {}",
                 safe(&path.display()),
                 safe(error)
             ),
