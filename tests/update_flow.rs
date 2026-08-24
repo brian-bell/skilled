@@ -2305,6 +2305,66 @@ fn a_repository_finding_states_its_consequence_in_doctor() {
     assert!(rendered.contains("changes of its own"), "{rendered}");
 }
 
+/// The identity-unproven refusal reaches Doctor with a stated consequence:
+/// updates stay disabled until the source is re-registered, and the detail
+/// pane says so rather than falling back to the no-account line.
+#[test]
+fn an_unproven_identity_finding_states_its_consequence_in_doctor() {
+    let fixture = fixture();
+    let data = fixture._temporary.path().join("data");
+    let connection =
+        rusqlite::Connection::open(data.join("skilled.sqlite3")).expect("open metadata");
+    connection
+        .execute(
+            "UPDATE source_repositories SET repository_identity = NULL",
+            [],
+        )
+        .expect("simulate a pre-schema-9 row");
+    drop(connection);
+    let environment = AppEnvironment::new(fixture._temporary.path().join("home"), data, "");
+    let mut app = SkilledApp::open(environment).expect("reopen app over the legacy row");
+    app.perform_effects(&[Effect::CheckUpdates])
+        .expect("start explicit check");
+    finish_update_check(&mut app);
+    for _ in 0..7 {
+        let update = app.update(Action::Continue);
+        app.perform_effects(update.effects())
+            .expect("complete setup");
+    }
+    app.update(Action::OpenDoctor);
+    let position = app
+        .doctor_findings()
+        .iter()
+        .position(|entry| entry.finding().code() == "source.identity_unproven")
+        .expect("a listed identity-unproven finding");
+    for _ in 0..position {
+        app.update(Action::MoveDoctorSelection(1));
+    }
+    app.update(Action::AdvanceDoctorPane);
+    let backend = TestBackend::new(100, 30);
+    let mut terminal = Terminal::new(backend).expect("terminal");
+    terminal
+        .draw(|frame| {
+            tui::render(frame, &app);
+        })
+        .expect("render doctor");
+    let buffer = terminal.backend().buffer();
+    let rendered = (buffer.area.y..buffer.area.y + buffer.area.height)
+        .map(|y| {
+            (buffer.area.x..buffer.area.x + buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(
+        !rendered.contains("has no account of what this costs"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("re-register"), "{rendered}");
+}
+
 #[test]
 fn a_failed_fetch_withholds_the_whole_registry_update_count() {
     let mut fixture = fixture();

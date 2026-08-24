@@ -113,6 +113,20 @@ impl CachedUpdateCheck {
         }) {
             return false;
         }
+        // An identity-unproven refusal records a fact about the registration,
+        // not about the checkout: the row proves no identity. No observation
+        // of the standing checkout — a moved HEAD, changed dirtiness — makes
+        // a fresh check answer differently, so none of them supersedes it.
+        // What does change the answer is the registration itself: an identity
+        // recorded by re-registration is the prescribed remedy taking effect,
+        // and a source that can no longer be read would make a fresh check
+        // report the missing checkout instead.
+        if findings
+            .iter()
+            .any(|finding| finding.code() == "source.identity_unproven")
+        {
+            return source.repository_identity().is_some() || source.source_error().is_some();
+        }
         let observed_missing = findings
             .iter()
             .any(|finding| finding.code() == "source.missing");
@@ -168,6 +182,7 @@ impl CachedUpdateCheck {
                     | "source.changed_after_preview"
                     | "source.no_upstream"
                     | "source.missing"
+                    | "source.identity_unproven"
                     | "source.detached_head"
                     | "update.apply_failed"
                     | "update.verification_failed"
@@ -353,6 +368,7 @@ fn leak_code(code: &str) -> &'static str {
         "source.dirty" => "source.dirty",
         "source.diverged" => "source.diverged",
         "source.missing" => "source.missing",
+        "source.identity_unproven" => "source.identity_unproven",
         "source.detached_head" => "source.detached_head",
         "source.no_upstream" => "source.no_upstream",
         "source.upstream_unfetched" => "source.upstream_unfetched",
@@ -398,6 +414,12 @@ pub fn probe_repository_update(source: &RegisteredSource, fetch: bool) -> Reposi
             error: Some(format!("source.missing|{error}")),
         };
     }
+    // A row that proves no identity is refused before the checkout is even
+    // opened: the guard below can only compare what was stored, and for these
+    // rows nothing was.
+    if source.repository_identity().is_none() {
+        return identity_unproven_probe(path);
+    }
     // Pinned before anything is proven: the identity check below and every
     // Git process the probe runs go through this handle, so their answers
     // describe one directory rather than whatever the pathname names at each
@@ -433,6 +455,12 @@ pub(crate) fn probe_repository_update_cancellable(
             changed_files: Vec::new(),
             error: Some(format!("source.missing|{error}")),
         });
+    }
+    // Refused before the checkout is opened, for the reason given on the
+    // blocking path: a row that proves no identity has nothing for the guard
+    // below to compare.
+    if source.repository_identity().is_none() {
+        return Some(identity_unproven_probe(path));
     }
     // Pinned before anything is proven, for the reason given on the blocking
     // path: every process this check runs answers for one directory.
@@ -609,6 +637,12 @@ pub fn probe_repository_update_against(
             error: Some(format!("source.missing|{error}")),
         };
     }
+    // Refused before the checkout is opened, for the reason given on the
+    // explicit check: a row that proves no identity has nothing for the
+    // guard below to compare.
+    if source.repository_identity().is_none() {
+        return identity_unproven_probe(path);
+    }
     // Pinned before anything is proven, for the reason given on the explicit
     // check: every process this re-probe runs answers for one directory.
     let Ok(handle) = git::RepositoryHandle::open(&path) else {
@@ -696,6 +730,32 @@ fn changed_checkout_probe(path: PathBuf) -> RepositoryUpdateProbe {
         changed_files: Vec::new(),
         error: Some(
             "source.missing|the registered checkout changed or was replaced since it was inspected"
+                .into(),
+        ),
+    }
+}
+
+/// A source registered before Skilled recorded repository identities carries
+/// none, and nothing standing at the path can prove it is the checkout that
+/// was registered — a different clone of the same repository contains the
+/// stored head just as the original would. Every other surface keeps working
+/// over such a row; an update is the one operation that writes into the
+/// checkout, so it is refused until the user re-registers the source and the
+/// registration records what it observed (skilled-t0f).
+fn identity_unproven_probe(path: PathBuf) -> RepositoryUpdateProbe {
+    RepositoryUpdateProbe {
+        path,
+        local: None,
+        upstream: None,
+        merge_base: None,
+        ahead: 0,
+        behind: 0,
+        worktree: None,
+        changed_files: Vec::new(),
+        error: Some(
+            "source.identity_unproven|this source was registered before Skilled recorded \
+             repository identities, so no update can prove the checkout is the one that was \
+             registered; re-register the source at the same path to record it and enable updates"
                 .into(),
         ),
     }
@@ -1138,7 +1198,12 @@ pub struct RepositoryUpdatePlan {
     source_id: i64,
     source_label: String,
     path: PathBuf,
-    repository_identity: RepositoryIdentity,
+    /// The registered identity the apply guard and verification hold the
+    /// checkout to. `None` for a source that proves none — a row from before
+    /// identities were recorded — whose plan exists only to state the finding
+    /// that blocks it: the guard refuses such a plan outright, and
+    /// verification cannot pass it.
+    repository_identity: Option<RepositoryIdentity>,
     current_reference: String,
     current_revision: String,
     target_revision: String,
@@ -1270,10 +1335,7 @@ pub fn plan_repository_update(
         source_id: source.id(),
         source_label: source.label().into(),
         path: probe.path.clone(),
-        repository_identity: source
-            .repository_identity()
-            .cloned()
-            .ok_or(crate::Error::SourceChangedAfterPreview)?,
+        repository_identity: source.repository_identity().cloned(),
         current_reference: probe
             .local
             .as_ref()
@@ -2242,10 +2304,16 @@ fn checkout_is_the_planned_repository(
         return Err(crate::Error::SourceChangedAfterPreview);
     }
     checkout.still_names_its_path()?;
+    // A plan that proves no identity is refused outright: it exists only to
+    // state the finding that blocks it, and `is_blocked` refused it above,
+    // but the guard does not lean on that ordering.
+    let Some(expected) = plan.repository_identity.as_ref() else {
+        return Err(crate::Error::SourceChangedAfterPreview);
+    };
     let identity = git::repository_git_dir(checkout.into())
         .ok()
         .and_then(|git_dir| repository_identity_from_git_dir(git_dir).ok());
-    if identity.as_ref() != Some(&plan.repository_identity) {
+    if identity.as_ref() != Some(expected) {
         return Err(crate::Error::SourceChangedAfterPreview);
     }
     Ok(())
@@ -2264,7 +2332,10 @@ pub fn verify_repository_update(
     // below on behalf of a repository the plan was never about — a HEAD that
     // matches would then read as a pass for a write that landed elsewhere.
     match repository_identity(&plan.path) {
-        Ok(identity) if identity == plan.repository_identity => {
+        // A plan without a proven identity can never have been applied — the
+        // guard refuses it — so nothing read at the path answers for it, and
+        // the arm below that says so is the one that fires.
+        Ok(identity) if Some(&identity) == plan.repository_identity.as_ref() => {
             match git::head_state((&plan.path).into()) {
                 Ok(head)
                     if head.reference() == Some(plan.current_reference.as_str())
