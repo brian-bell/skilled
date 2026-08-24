@@ -2,14 +2,52 @@ use std::{io, path::PathBuf};
 
 use thiserror::Error;
 
+/// The private metadata store could not be used for this session.
+///
+/// The path and operation cause remain separate until presentation so both can
+/// be escaped as terminal input independently.
+#[derive(Clone, Debug, Eq, Error, PartialEq)]
+#[error("application metadata unavailable at {}: {cause}", database_path.display())]
+pub struct MetadataFailure {
+    database_path: PathBuf,
+    cause: String,
+}
+
+impl MetadataFailure {
+    pub(crate) fn new(database_path: PathBuf, cause: impl Into<String>) -> Self {
+        Self {
+            database_path,
+            cause: cause.into(),
+        }
+    }
+
+    pub fn database_path(&self) -> &std::path::Path {
+        &self.database_path
+    }
+
+    pub fn cause(&self) -> &str {
+        &self.cause
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum Error {
+    #[error("{0}")]
+    MetadataUnavailable(MetadataFailure),
     #[error("filesystem operation failed: {0}")]
     Io(#[from] io::Error),
     #[error("application metadata operation failed: {0}")]
     Database(#[from] rusqlite::Error),
     #[error("application metadata schema {found} is newer than supported schema {supported}")]
     UnsupportedSchema { found: i64, supported: i64 },
+    #[error(
+        "the application metadata database opened read-only and cannot be written this session"
+    )]
+    ReadOnlyMetadata,
+    #[error("stored setup metadata is invalid: {0}")]
+    InvalidSetupMetadata(String),
+    #[error("stored metadata field {field} holds {value} rather than 0 or 1")]
+    InvalidStoredBoolean { field: &'static str, value: i64 },
     #[error("the current user's home directory could not be determined")]
     HomeDirectoryUnavailable,
     #[error("the platform application-data directory could not be determined")]

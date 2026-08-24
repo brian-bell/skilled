@@ -13,8 +13,8 @@ use std::{
 };
 
 use skilled::{
-    Action, AgentKind, AppEnvironment, InventoryPane, SessionIdentity, SkilledApp,
-    tui::RenderFeedback,
+    Action, AgentKind, AppEnvironment, InventoryPane, RegistryAvailability, SessionIdentity,
+    SkilledApp, tui::RenderFeedback,
 };
 
 #[test]
@@ -1045,6 +1045,417 @@ fn session_status_reports_only_what_the_application_knows() {
     // Nothing is scanned yet, so no scan, finding, or timestamp may be claimed.
     assert!(!after_setup.contains("scan"), "{after_setup}");
     assert!(!after_setup.contains("ago"), "{after_setup}");
+}
+
+#[test]
+fn degraded_chrome_withholds_registry_counts_and_mutation_hints() {
+    let temporary = tempfile::tempdir().expect("temporary application directory");
+    let home = temporary.path().join("home");
+    let data = temporary.path().join("data");
+    let skill = home.join(".claude/skills/portable");
+    fs::create_dir_all(&skill).expect("create degraded skill fixture");
+    fs::write(
+        skill.join("SKILL.md"),
+        "---\nname: portable\ndescription: Portable fixture\n---\n",
+    )
+    .expect("write degraded skill fixture");
+    fs::create_dir_all(&data).expect("create established data directory");
+    let mut app =
+        SkilledApp::open(AppEnvironment::new(&home, &data, "")).expect("open degraded application");
+
+    let inventory = buffer(&app, 120, 40);
+    let navigation = row_text(&inventory, 5);
+    assert!(navigation.contains("1 Inventory ·1"), "{navigation}");
+    assert!(navigation.contains("2 Sources"), "{navigation}");
+    assert!(!navigation.contains("2 Sources ·0"), "{navigation}");
+    assert_eq!(
+        style_in_row(&inventory, 5, "●").fg,
+        Some(Color::Rgb(0xee, 0x6b, 0x73))
+    );
+
+    app.update(Action::OpenSources);
+    let sources = text(&buffer(&app, 120, 40));
+    assert!(!sources.contains("a Add source"), "{sources}");
+    assert!(!sources.contains("i Install"), "{sources}");
+
+    app.update(Action::OpenInventory);
+    app.update(Action::OpenSettings);
+    let settings = text(&buffer(&app, 120, 40));
+    assert!(!settings.contains("Enter Rerun"), "{settings}");
+    assert!(settings.contains("Esc Close"), "{settings}");
+}
+
+#[test]
+fn degraded_registry_failure_states_that_the_scan_scope_was_retained() {
+    let harness = Harness::new();
+    drop(harness.completed_setup());
+    let database = harness.directory.path().join("data/skilled.sqlite3");
+    let connection = rusqlite::Connection::open(database).expect("open metadata database");
+    connection
+        .execute_batch(
+            "PRAGMA foreign_keys = OFF;
+             DROP TABLE source_repositories;",
+        )
+        .expect("corrupt source registry");
+    drop(connection);
+
+    let app = SkilledApp::open(harness.environment()).expect("open degraded application");
+    // Compact, so the banner wraps within one pane: a wide screen interleaves
+    // the detail region's rows between the wrapped halves of every sentence.
+    let rendered = text(&buffer(&app, 80, 24));
+    // A sentence the banner wraps is still that sentence, and where it breaks
+    // is the paragraph's business rather than this test's.
+    let unwrapped = unwrapped_text(&rendered);
+
+    // The scan scope is the banner's to state, and it states the retained one
+    // rather than the wider scope of a session that lost its selection.
+    assert!(
+        unwrapped.contains("The agent selection was retained"),
+        "{rendered}"
+    );
+    assert!(
+        !unwrapped.contains("all detected roots were scanned"),
+        "{rendered}"
+    );
+    // The body keeps what the scan observed instead of repeating the banner.
+    assert!(
+        unwrapped.contains("No agent skill root exists yet"),
+        "{rendered}"
+    );
+}
+
+/// A readable but empty registry still states its zero, and still must not
+/// name a key this session refuses. The registry being readable is not the
+/// question the empty state asks: whether a source may be added is decided by
+/// the metadata as a whole.
+#[test]
+fn a_readable_empty_registry_offers_no_add_key_while_other_metadata_is_degraded() {
+    let harness = Harness::new();
+    drop(harness.completed_setup());
+    let database = harness.directory.path().join("data/skilled.sqlite3");
+    let connection = rusqlite::Connection::open(database).expect("open metadata database");
+    connection
+        .execute_batch("UPDATE settings SET value = 'sometimes' WHERE key = 'setup_complete';")
+        .expect("corrupt setup completion");
+    drop(connection);
+
+    let mut app = SkilledApp::open(harness.environment()).expect("open degraded application");
+    assert_eq!(app.registry_availability(), RegistryAvailability::Readable);
+    assert!(!app.can_add_source());
+    app.update(Action::OpenSources);
+    let rendered = text(&buffer(&app, 120, 40));
+
+    assert!(rendered.contains("0 registered"), "{rendered}");
+    assert!(rendered.contains("No sources are registered"), "{rendered}");
+    assert!(!rendered.contains("Press a to register"), "{rendered}");
+    assert!(!rendered.contains("a Add source"), "{rendered}");
+    // The pane beside it has just counted the registry, so nothing on this
+    // screen may call the same registry unavailable.
+    assert!(
+        !rendered.contains("The source registry is unavailable"),
+        "{rendered}"
+    );
+}
+
+/// A filter that matched nothing is a fact about the filter, not about the
+/// roots. Degraded metadata does not turn "these rows were hidden" into "the
+/// roots hold no skill directories" — the subtitle counting `0 of 1 listed`
+/// beside it would be flatly contradicted.
+#[test]
+fn a_degraded_session_lets_a_surviving_filter_speak_for_its_own_empty_table() {
+    let temporary = tempfile::tempdir().expect("temporary application directory");
+    let home = temporary.path().join("home");
+    let data = temporary.path().join("data");
+    let skill = home.join(".claude/skills/portable");
+    fs::create_dir_all(&skill).expect("create degraded skill fixture");
+    fs::write(
+        skill.join("SKILL.md"),
+        "---\nname: portable\ndescription: Portable fixture\n---\n",
+    )
+    .expect("write degraded skill fixture");
+    fs::create_dir_all(&data).expect("create established data directory");
+    let mut app =
+        SkilledApp::open(AppEnvironment::new(&home, &data, "")).expect("open degraded application");
+    assert!(app.metadata_failure().is_some());
+    assert!(app.inventory().row("portable").is_some());
+
+    app.update(Action::BeginInventoryFilter);
+    for character in "nothingmatchesthis".chars() {
+        app.update(Action::AppendInventoryFilter(character));
+    }
+    let rendered = text(&buffer(&app, 120, 40));
+
+    assert!(
+        rendered.contains("No skills match the filter"),
+        "{rendered}"
+    );
+    assert!(!rendered.contains("No skills are installed"), "{rendered}");
+    assert!(
+        !rendered.contains("hold no skill directories"),
+        "{rendered}"
+    );
+    // The degraded fact is still stated, by the banner that owns it.
+    assert!(rendered.contains("metadata unavailable"), "{rendered}");
+}
+
+/// Rerunning setup is the only way to choose an agent, and a degraded session
+/// refuses it. Neither view sends the user to a dialog that will tell them the
+/// action is unavailable.
+#[test]
+fn a_degraded_no_agent_session_is_not_sent_to_a_setup_it_cannot_rerun() {
+    let harness = Harness::new();
+    drop(harness.completed_setup());
+    let database = harness.directory.path().join("data/skilled.sqlite3");
+    let connection = rusqlite::Connection::open(database).expect("open metadata database");
+    connection
+        .execute_batch(
+            "UPDATE configured_agents SET selected = 0;
+             UPDATE settings SET value = 'sometimes' WHERE key = 'setup_complete';",
+        )
+        .expect("deselect every agent and corrupt setup completion");
+    drop(connection);
+
+    let mut app = SkilledApp::open(harness.environment()).expect("open degraded application");
+    assert!(!app.can_rerun_setup());
+    assert!(app.inventory().no_agent_configured());
+
+    let inventory = text(&buffer(&app, 120, 40));
+    assert!(inventory.contains("No agent is configured"), "{inventory}");
+    assert!(!inventory.contains("Rerun setup from"), "{inventory}");
+
+    let update = app.update(Action::OpenDoctor);
+    app.perform_effects(update.effects())
+        .expect("scan for Doctor");
+    let doctor = text(&buffer(&app, 120, 40));
+    assert!(doctor.contains("No agent is configured"), "{doctor}");
+    assert!(!doctor.contains("Rerun setup from"), "{doctor}");
+}
+
+/// The banner carries a path and an operating-system message from outside
+/// Skilled, neither of any length it controls. Unbounded, a long enough
+/// application-data path wraps until the header takes the pane and hides the
+/// very inventory the degraded mode exists to keep showing.
+#[test]
+fn a_long_metadata_failure_path_cannot_crowd_out_the_inventory_it_explains() {
+    let temporary = tempfile::tempdir().expect("temporary application directory");
+    let home = temporary.path().join("home");
+    let skill = home.join(".claude/skills/portable");
+    fs::create_dir_all(&skill).expect("create degraded skill fixture");
+    fs::write(
+        skill.join("SKILL.md"),
+        "---\nname: portable\ndescription: Portable fixture\n---\n",
+    )
+    .expect("write degraded skill fixture");
+    // An application-data path long enough to wrap the banner many times over.
+    let mut data = temporary.path().to_path_buf();
+    for _ in 0..12 {
+        data.push("an-extremely-long-application-data-path-component");
+    }
+    fs::create_dir_all(&data).expect("create established data directory");
+    let mut app =
+        SkilledApp::open(AppEnvironment::new(&home, &data, "")).expect("open degraded application");
+    assert!(app.metadata_failure().is_some());
+
+    let inventory = text(&buffer(&app, 80, 24));
+    assert!(inventory.contains("metadata unavailable"), "{inventory}");
+    // The table the whole mode exists to keep showing still has both its
+    // heading and the row beneath it, rather than a header that ate the pane.
+    assert!(inventory.contains("SKILL"), "{inventory}");
+    assert!(inventory.contains("portable"), "{inventory}");
+    // Two of the path's twelve components reach the banner; the rest are cut.
+    assert!(inventory.contains("..."), "{inventory}");
+
+    let update = app.update(Action::OpenDoctor);
+    app.perform_effects(update.effects())
+        .expect("scan for Doctor");
+    let doctor = text(&buffer(&app, 80, 24));
+    assert!(doctor.contains("metadata unavailable"), "{doctor}");
+    assert!(doctor.contains("..."), "{doctor}");
+    // Doctor's own list survives the same banner.
+    assert!(doctor.contains("SEVERITY"), "{doctor}");
+}
+
+/// Roots that are all absent are the only thing the scan learned, and the
+/// Inventory states it for the same reason Doctor does. The banner above the
+/// table is where the degraded session is reported.
+#[test]
+fn a_degraded_inventory_still_reports_that_no_root_exists() {
+    let temporary = tempfile::tempdir().expect("temporary application directory");
+    let home = temporary.path().join("home");
+    let data = temporary.path().join("data");
+    fs::create_dir_all(&home).expect("create a home with no agent root in it");
+    fs::create_dir_all(&data).expect("create established data directory");
+    let app =
+        SkilledApp::open(AppEnvironment::new(&home, &data, "")).expect("open degraded application");
+    assert!(app.metadata_failure().is_some());
+
+    let rendered = text(&buffer(&app, 120, 40));
+
+    assert!(
+        rendered.contains("No agent skill root exists yet"),
+        "{rendered}"
+    );
+    assert!(
+        !rendered.contains("Application metadata is unavailable"),
+        "{rendered}"
+    );
+    // The failure keeps its banner rather than the body.
+    assert!(rendered.contains("metadata unavailable"), "{rendered}");
+}
+
+/// A registry that survived is a registry Sources counts and Doctor draws a
+/// verdict from, so the inventory must not say its claims are withheld.
+#[test]
+fn a_degraded_inventory_withholds_only_what_it_actually_withholds() {
+    let harness = Harness::new();
+    drop(harness.completed_setup());
+    fs::create_dir_all(harness.directory.path().join("home/.claude/skills"))
+        .expect("create an empty but readable root");
+    let database = harness.directory.path().join("data/skilled.sqlite3");
+    let connection = rusqlite::Connection::open(database).expect("open metadata database");
+    connection
+        .execute_batch("UPDATE settings SET value = 'sometimes' WHERE key = 'setup_complete';")
+        .expect("corrupt setup completion");
+    drop(connection);
+
+    let app = SkilledApp::open(harness.environment()).expect("open degraded application");
+    assert!(app.inventory().registry_is_complete());
+
+    let rendered = text(&buffer(&app, 120, 40));
+
+    assert!(rendered.contains("No skills are installed"), "{rendered}");
+    assert!(rendered.contains("Every write is withheld"), "{rendered}");
+    assert!(!rendered.contains("Registry-backed claims"), "{rendered}");
+}
+
+/// Roots that are all absent are a complete answer about the roots, and the
+/// only one Doctor gives about them. A degraded session repeats its banner
+/// rather than replacing that answer with it.
+#[test]
+fn degraded_doctor_still_reports_that_no_root_exists() {
+    let temporary = tempfile::tempdir().expect("temporary application directory");
+    let home = temporary.path().join("home");
+    let data = temporary.path().join("data");
+    fs::create_dir_all(&home).expect("create a home with no agent root in it");
+    fs::create_dir_all(&data).expect("create established data directory");
+    let mut app =
+        SkilledApp::open(AppEnvironment::new(&home, &data, "")).expect("open degraded application");
+    assert!(app.metadata_failure().is_some());
+
+    let update = app.update(Action::OpenDoctor);
+    app.perform_effects(update.effects())
+        .expect("scan for Doctor");
+    let rendered = text(&buffer(&app, 120, 40));
+
+    assert!(
+        rendered.contains("No agent skill root exists yet"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("no root read"), "{rendered}");
+    // The failure keeps its banner rather than the subtitle and the body.
+    assert!(rendered.contains("metadata unavailable"), "{rendered}");
+}
+
+/// The metadata units recover independently, so a session degraded by a
+/// malformed completion flag can still hold a registry that was read whole.
+/// Doctor states the verdict that survived rather than withholding it: it never
+/// says a complete registry cannot be claimed complete, and it names the one
+/// thing that really did go with the store — the ownership receipts, without
+/// which repairability and a complete finding count cannot be stated.
+#[test]
+fn degraded_doctor_states_a_verdict_its_recovered_registry_supports() {
+    let harness = Harness::new();
+    drop(harness.completed_setup());
+    fs::create_dir_all(harness.directory.path().join("home/.claude/skills"))
+        .expect("create an empty but readable root");
+    let database = harness.directory.path().join("data/skilled.sqlite3");
+    let connection = rusqlite::Connection::open(database).expect("open metadata database");
+    connection
+        .execute_batch("UPDATE settings SET value = 'sometimes' WHERE key = 'setup_complete';")
+        .expect("corrupt setup completion");
+    drop(connection);
+
+    let mut app = SkilledApp::open(harness.environment()).expect("open degraded application");
+    assert!(app.metadata_failure().is_some());
+    assert!(app.inventory().registry_is_complete());
+    assert_eq!(app.inventory().stated_finding_count(), Some(0));
+
+    let update = app.update(Action::OpenDoctor);
+    app.perform_effects(update.effects())
+        .expect("scan for Doctor");
+    let rendered = text(&buffer(&app, 120, 40));
+
+    // The registry survived, so the reason the count is withheld is the receipt
+    // table alone — and the pane header and the body beneath it say the same.
+    assert!(
+        rendered.contains("receipts could not be read"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("Ownership receipts could not be read"),
+        "{rendered}"
+    );
+    assert!(
+        !rendered.contains("cannot claim the registry is complete"),
+        "{rendered}"
+    );
+    assert!(
+        !rendered.contains("A registered source could not be read"),
+        "{rendered}"
+    );
+    // The failure is still stated, by the banner that owns it.
+    assert!(rendered.contains("metadata unavailable"), "{rendered}");
+}
+
+/// Doctor lists what was observed. A root that could not be read is named
+/// nowhere else on that screen, so an unavailable metadata store — which the
+/// banner above already states — must not take its place.
+#[test]
+fn degraded_doctor_still_reports_a_root_it_could_not_read() {
+    let temporary = tempfile::tempdir().expect("temporary application directory");
+    let home = temporary.path().join("home");
+    let data = temporary.path().join("data");
+    fs::create_dir_all(home.join(".claude")).expect("create Claude Code parent");
+    fs::write(home.join(".claude/skills"), "not a directory")
+        .expect("write a file where the root belongs");
+    fs::create_dir_all(&data).expect("create established data directory");
+    let mut app =
+        SkilledApp::open(AppEnvironment::new(&home, &data, "")).expect("open degraded application");
+    assert!(app.metadata_failure().is_some());
+
+    let update = app.update(Action::OpenDoctor);
+    app.perform_effects(update.effects())
+        .expect("scan for Doctor");
+    let rendered = text(&buffer(&app, 120, 40));
+
+    assert!(
+        rendered.contains("An agent skill root could not be read"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("not fully read"), "{rendered}");
+    // The degraded fact keeps its own banner rather than the subtitle.
+    assert!(rendered.contains("metadata unavailable"), "{rendered}");
+}
+
+#[test]
+fn degraded_empty_inventory_agrees_on_the_observed_result_and_metadata_state() {
+    let temporary = tempfile::tempdir().expect("temporary application directory");
+    let home = temporary.path().join("home");
+    let data = temporary.path().join("data");
+    fs::create_dir_all(home.join(".claude/skills")).expect("create empty skill root");
+    fs::create_dir_all(&data).expect("create established data directory");
+    let app =
+        SkilledApp::open(AppEnvironment::new(&home, &data, "")).expect("open degraded application");
+
+    let rendered = text(&buffer(&app, 120, 40));
+
+    assert!(
+        rendered.contains("nothing installed · metadata unavailable"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("No skills are installed"), "{rendered}");
+    assert!(rendered.contains("hold no skill directories"), "{rendered}");
+    assert!(rendered.contains("every write"), "{rendered}");
 }
 
 #[test]
@@ -5378,6 +5789,12 @@ fn text(buffer: &Buffer) -> String {
         .map(|y| row_text(buffer, y))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// The screen with every run of whitespace collapsed to one space, so a
+/// sentence may be asserted without asserting where the paragraph wraps it.
+fn unwrapped_text(rendered: &str) -> String {
+    rendered.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// Whether this buffer was drawn with the window frame, which claims the

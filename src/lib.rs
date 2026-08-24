@@ -24,6 +24,7 @@ pub use app::{
     Action, DoctorItem, DoctorPane, Effect, InventoryPane, SetupStep, SkilledApp, SourcesPane,
     UpdateOutcome, UpdateResult, UpdatesPane, View,
 };
-pub use error::{Error, Result};
+pub use error::{Error, MetadataFailure, Result};
+pub use inventory::RegistryAvailability;
 pub use paths::{AppEnvironment, SessionIdentity};
 pub use runner::run;

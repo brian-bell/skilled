@@ -738,6 +738,13 @@ pub struct InventorySnapshot {
     registry_is_complete: bool,
 }
 
+/// Whether the registered-source data in hand was read successfully.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RegistryAvailability {
+    Readable,
+    Unavailable,
+}
+
 impl InventorySnapshot {
     pub fn rows(&self) -> &[InventoryRow] {
         &self.rows
@@ -894,13 +901,16 @@ impl InventorySnapshot {
     /// lands will leave them [`RootStatus::NotSelected`] and never touch them,
     /// so the gap must say the same rather than claim they are waiting to be
     /// read.
-    pub(crate) fn not_scanned(agents: &[AgentDetection; 3]) -> Self {
+    pub(crate) fn not_scanned(
+        agents: &[AgentDetection; 3],
+        availability: RegistryAvailability,
+    ) -> Self {
         Self {
             rows: Vec::new(),
             selection_findings: Vec::new(),
             // Nothing has been read, so nothing has been found wanting: the
             // count is withheld by the roots being unread, not by the registry.
-            registry_is_complete: true,
+            registry_is_complete: availability == RegistryAvailability::Readable,
             roots: agents.each_ref().map(|agent| RootScan {
                 agent: agent.kind(),
                 path: agent.root().to_path_buf(),
@@ -1024,18 +1034,27 @@ impl InventorySnapshot {
 pub(crate) fn scan_installations(
     agents: &[AgentDetection; 3],
     sources: &[RegisteredSource],
+    availability: RegistryAvailability,
 ) -> InventorySnapshot {
-    scan_with_budget(agents, sources, InspectionBudget::installation_scan())
+    scan_with_budget(
+        agents,
+        sources,
+        availability,
+        InspectionBudget::installation_scan(),
+    )
 }
 
 fn scan_with_budget(
     agents: &[AgentDetection; 3],
     sources: &[RegisteredSource],
+    availability: RegistryAvailability,
     mut budget: InspectionBudget,
 ) -> InventorySnapshot {
     const EXHAUSTED: &str = "the scan exceeded its bounded inspection limit";
 
-    let (index, complete) = ResolutionIndex::of(sources, &mut budget);
+    let (mut index, complete) = ResolutionIndex::of(sources, &mut budget);
+    index.accounts_for_every_source &= availability == RegistryAvailability::Readable;
+    index.metadata_unavailable = availability == RegistryAvailability::Unavailable;
     let mut observations = Vec::new();
     let roots = agents.each_ref().map(|agent| {
         // Selection is checked first: a root the user asked Skilled to leave
@@ -1083,7 +1102,8 @@ fn scan_with_budget(
             row.opencode_resolution = Some(resolution);
         }
     }
-    let registry_is_complete = whole_registry(sources);
+    let registry_is_complete =
+        availability == RegistryAvailability::Readable && whole_registry(sources);
     let selection_findings = selection_findings(agents, sources, &rows, registry_is_complete);
 
     InventorySnapshot {
@@ -1480,6 +1500,7 @@ fn observe(
             resolution,
             Some(canonical),
             index.accounts_for_every_source,
+            index.metadata_unavailable,
             budget,
         );
     }
@@ -1502,6 +1523,7 @@ fn observe(
             None,
             None,
             index.accounts_for_every_source,
+            index.metadata_unavailable,
             budget,
         );
     }
@@ -1537,6 +1559,7 @@ fn classify(
     resolution: Option<VariantRef>,
     resolved_from: Option<PathBuf>,
     accountable: bool,
+    metadata_unavailable: bool,
     budget: &mut InspectionBudget,
 ) -> Result<InstalledSkillObservation, String> {
     let Slot {
@@ -1575,9 +1598,15 @@ fn classify(
                     Finding {
                         code: "install.provenance_unverified",
                         severity: FindingSeverity::Warning,
-                        evidence: "a registered source could not be read, so Skilled cannot \
-                                   tell whether this came from one"
-                            .to_owned(),
+                        evidence: if metadata_unavailable {
+                            "Skilled could not read its own metadata, so it cannot tell whether \
+                             this came from a registered source"
+                                .to_owned()
+                        } else {
+                            "a registered source could not be read, so Skilled cannot tell \
+                             whether this came from one"
+                                .to_owned()
+                        },
                     },
                 )),
             };
@@ -1765,6 +1794,7 @@ struct ResolutionIndex {
     /// of non-membership, and an installation that fails to resolve cannot be
     /// called unmanaged.
     accounts_for_every_source: bool,
+    metadata_unavailable: bool,
 }
 
 impl ResolutionIndex {
@@ -1807,6 +1837,7 @@ impl ResolutionIndex {
                             Self {
                                 by_canonical_path,
                                 accounts_for_every_source,
+                                metadata_unavailable: false,
                             },
                             false,
                         );
@@ -1832,6 +1863,7 @@ impl ResolutionIndex {
             Self {
                 by_canonical_path,
                 accounts_for_every_source,
+                metadata_unavailable: false,
             },
             true,
         )
@@ -1869,7 +1901,12 @@ mod tests {
         let environment = AppEnvironment::new(&home, temporary.path().join("data"), "");
         let agents = detect_agents(&environment);
 
-        let snapshot = scan_with_budget(&agents, &[], InspectionBudget::exhausted());
+        let snapshot = scan_with_budget(
+            &agents,
+            &[],
+            RegistryAvailability::Readable,
+            InspectionBudget::exhausted(),
+        );
 
         assert!(
             snapshot.rows().is_empty(),
@@ -1907,7 +1944,12 @@ mod tests {
         let environment = AppEnvironment::new(&home, temporary.path().join("data"), "");
         let agents = detect_agents(&environment);
 
-        let snapshot = scan_with_budget(&agents, &[], InspectionBudget::installation_scan());
+        let snapshot = scan_with_budget(
+            &agents,
+            &[],
+            RegistryAvailability::Readable,
+            InspectionBudget::installation_scan(),
+        );
 
         assert_eq!(snapshot.rows().len(), 1);
         assert_eq!(snapshot.rows()[0].name(), "installed");
@@ -1928,7 +1970,7 @@ mod tests {
         let mut agents = detect_agents(&environment);
         agents[AgentKind::Codex.index()].set_selected(false);
 
-        let snapshot = InventorySnapshot::not_scanned(&agents);
+        let snapshot = InventorySnapshot::not_scanned(&agents, RegistryAvailability::Readable);
 
         assert!(snapshot.rows().is_empty());
         assert_eq!(
@@ -1957,13 +1999,13 @@ mod tests {
         let environment = AppEnvironment::new(&home, temporary.path().join("data"), "");
         let mut agents = detect_agents(&environment);
 
-        let all_selected = InventorySnapshot::not_scanned(&agents);
+        let all_selected = InventorySnapshot::not_scanned(&agents, RegistryAvailability::Readable);
         assert!(all_selected.scan_pending());
 
         for agent in &mut agents {
             agent.set_selected(false);
         }
-        let none_selected = InventorySnapshot::not_scanned(&agents);
+        let none_selected = InventorySnapshot::not_scanned(&agents, RegistryAvailability::Readable);
         assert!(!none_selected.scan_pending());
         assert!(none_selected.no_agent_configured());
         assert_eq!(none_selected.stated_skill_count(), None);
@@ -1972,7 +2014,12 @@ mod tests {
         // Any real observation means the scan has begun, even when some agents
         // stay deselected beside the ones that were read or found absent.
         agents[AgentKind::ClaudeCode.index()].set_selected(true);
-        let missing = scan_with_budget(&agents, &[], InspectionBudget::installation_scan());
+        let missing = scan_with_budget(
+            &agents,
+            &[],
+            RegistryAvailability::Readable,
+            InspectionBudget::installation_scan(),
+        );
         assert!(matches!(
             missing.root(AgentKind::ClaudeCode).status(),
             RootStatus::Missing
@@ -1987,7 +2034,12 @@ mod tests {
         let blocked = home.join(".claude/skills");
         fs::create_dir_all(home.join(".claude")).expect("create Claude Code parent");
         fs::write(&blocked, "not a directory").expect("block the root with a file");
-        let unreadable = scan_with_budget(&agents, &[], InspectionBudget::installation_scan());
+        let unreadable = scan_with_budget(
+            &agents,
+            &[],
+            RegistryAvailability::Readable,
+            InspectionBudget::installation_scan(),
+        );
         assert!(matches!(
             unreadable.root(AgentKind::ClaudeCode).status(),
             RootStatus::Unreadable { .. }
@@ -1997,7 +2049,12 @@ mod tests {
         // So is a root that was read in full.
         fs::remove_file(&blocked).expect("clear the blocking file");
         fs::create_dir_all(&blocked).expect("create an empty root");
-        let scanned = scan_with_budget(&agents, &[], InspectionBudget::installation_scan());
+        let scanned = scan_with_budget(
+            &agents,
+            &[],
+            RegistryAvailability::Readable,
+            InspectionBudget::installation_scan(),
+        );
         assert_eq!(
             scanned.root(AgentKind::ClaudeCode).status(),
             &RootStatus::Scanned { installed: 0 }
@@ -2015,7 +2072,12 @@ mod tests {
         let environment = AppEnvironment::new(&home, temporary.path().join("data"), "");
         let agents = detect_agents(&environment);
 
-        let absent = scan_with_budget(&agents, &[], InspectionBudget::installation_scan());
+        let absent = scan_with_budget(
+            &agents,
+            &[],
+            RegistryAvailability::Readable,
+            InspectionBudget::installation_scan(),
+        );
 
         assert!(
             absent
@@ -2030,7 +2092,12 @@ mod tests {
 
         // An empty root that exists was read, and zero is what it holds.
         fs::create_dir_all(home.join(".claude/skills")).expect("create an empty root");
-        let read = scan_with_budget(&agents, &[], InspectionBudget::installation_scan());
+        let read = scan_with_budget(
+            &agents,
+            &[],
+            RegistryAvailability::Readable,
+            InspectionBudget::installation_scan(),
+        );
 
         assert_eq!(read.stated_skill_count(), Some(0));
     }

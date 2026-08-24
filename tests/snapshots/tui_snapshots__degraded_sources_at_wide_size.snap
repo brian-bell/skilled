@@ -1,0 +1,44 @@
+---
+source: tests/tui_snapshots.rs
+expression: "normalize_degraded(&temporary, render(&app, 120, 40))"
+---
+ ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁
+▕                                                                                                                      ▏
+▕ ◆ skilled  global                                                                                                    ▏
+▕▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▏
+▕                │                │                │                │                                                  ▏
+▕ 1 Inventory ·1 │ 2 Sources      │ 3 Updates      │ 4 Doctor       │                ● degraded · metadata unavailable ▏
+▕▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁│▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁│▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁│▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁│▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▏
+▕▌ Repositories  registry unav...│   Available variants  no source             │   Details  no selection               ▏
+▕────────────────────────────────│ ────────────────────────────────────────────│ ───────────────────────────────────── ▏
+▕                                │                                             │                                       ▏
+▕                                │                                             │                                       ▏
+▕                                │                                             │                                       ▏
+▕                                │                                             │                                       ▏
+▕                                │                                             │                                       ▏
+▕                                │                                             │                                       ▏
+▕                                │                                             │                                       ▏
+▕                                │                                             │                                       ▏
+▕                                │                                             │                                       ▏
+▕                                │                                             │                                       ▏
+▕                ·               │                                             │                                       ▏
+▕                                │                       ·                     │                   ·                   ▏
+▕ Source registry is unavailable │                                             │                                       ▏
+▕                                │              No source selected             │          No source selected           ▏
+▕   Skilled cannot state which   │                                             │                                       ▏
+▕   sources are registered, and  │  The source registry is unavailable in this │ Select a repository to see its stored ▏
+▕ adding one is disabled for this│                   session.                  │               details.                ▏
+▕            session.            │                                             │                                       ▏
+▕                                │                                             │                                       ▏
+▕                                │                                             │                                       ▏
+▕                                │                                             │                                       ▏
+▕                                │                                             │                                       ▏
+▕                                │                                             │                                       ▏
+▕                                │                                             │                                       ▏
+▕                                │                                             │                                       ▏
+▕                                │                                             │                                       ▏
+▕                                │                                             │                                       ▏
+▕                                │                                             │                                       ▏
+▕                                                                                                                      ▏
+▕ Tab/Shift-Tab Region   1 Inventory   4 Doctor   ? Help   q Quit   Esc Back                                           ▏
+ ▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔

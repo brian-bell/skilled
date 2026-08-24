@@ -152,6 +152,48 @@ fn an_owned_healthy_link_is_replanned_to_the_agent_specific_variant_selected_tod
 }
 
 #[test]
+fn degraded_doctor_withholds_a_repair_offer_built_from_retained_receipts() {
+    let fixture = Fixture::new();
+    let repository = fixture.source("library", "skills", "portable");
+    let mut app = fixture.registered(&repository);
+    fixture.create_root_parents();
+    fixture.install(&mut app);
+    let moved = fixture.directory.path().join("moved-library");
+    fs::rename(&repository, &moved).expect("move checkout");
+    let preview = app
+        .preview_source(&moved)
+        .expect("preview relocated source");
+    app.confirm_source(preview)
+        .expect("register relocated source");
+    drop(app);
+    let database = fixture.directory.path().join("data/skilled.sqlite3");
+    let connection = rusqlite::Connection::open(database).expect("open metadata database");
+    connection
+        .execute(
+            "UPDATE settings SET value = 'sometimes' WHERE key = 'setup_complete'",
+            [],
+        )
+        .expect("malform setup metadata");
+    drop(connection);
+
+    let mut app = fixture.app();
+    dispatch(&mut app, Action::OpenDoctor);
+    let findings = app.doctor_findings();
+
+    assert!(app.metadata_failure().is_some());
+    assert!(
+        findings.iter().all(|entry| !app.can_repair_finding(entry)),
+        "degraded Doctor offered repair for {:?}",
+        findings
+            .iter()
+            .filter(|entry| app.can_repair_finding(entry))
+            .map(|entry| entry.finding().code())
+            .collect::<Vec<_>>()
+    );
+    assert!(!app.can_repair_selection());
+}
+
+#[test]
 fn the_tui_refreshes_registered_sources_before_planning_a_repair() {
     let fixture = Fixture::new();
     let common = fixture.source("common", "skills", "portable");

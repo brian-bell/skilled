@@ -20,7 +20,7 @@ use std::{
 };
 
 use crate::{
-    AgentDetection, AgentKind,
+    AgentDetection, AgentKind, MetadataFailure,
     agents::{adapter, detection_at},
     inventory::{
         Finding, FindingSeverity, InstallationHealth, InstallationObject,
@@ -2307,6 +2307,15 @@ fn slot_disposition(
 }
 
 /// What happened to one target the plan called work.
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum ReceiptFailure {
+    #[error("{0}")]
+    Metadata(MetadataFailure),
+    #[error("{0}")]
+    Other(String),
+}
+
+/// What happened to one target the plan called work.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum StepOutcome {
     /// The link was created and its ownership receipt recorded.
@@ -2314,7 +2323,7 @@ pub enum StepOutcome {
     /// The link was created but the receipt could not be written, so Skilled
     /// does not own something it put on disk. Stated rather than hidden: the
     /// link is real, and a later repair will not recognise it.
-    CreatedUnrecorded(String),
+    CreatedUnrecorded(ReceiptFailure),
     /// A managed directory link was removed.
     Removed,
     /// The skill root was created, but the link could not be. The empty root is
@@ -2383,6 +2392,13 @@ impl ApplyReport {
 
     pub fn step(&self, agent: AgentKind) -> Option<&AppliedStep> {
         self.steps.iter().find(|step| step.agent == agent)
+    }
+
+    pub(crate) fn metadata_failure(&self) -> Option<&MetadataFailure> {
+        self.steps.iter().find_map(|step| match &step.outcome {
+            StepOutcome::CreatedUnrecorded(ReceiptFailure::Metadata(failure)) => Some(failure),
+            _ => None,
+        })
     }
 }
 
@@ -2760,6 +2776,9 @@ fn apply_target(
             "the ownership receipt cannot record this target, so nothing was written: {error}"
         ));
     }
+    // Taken before the guard borrows the store: a receipt that cannot be
+    // written is a failure of this database, and the report names it.
+    let database_path = store.database_path().to_path_buf();
     let mutation = match store.begin_mutation() {
         Ok(mutation) => mutation,
         Err(error) => {
@@ -2841,11 +2860,16 @@ fn apply_target(
         };
     }
     if let Err(error) = mutation.record_receipt(&receipt) {
-        return StepOutcome::CreatedUnrecorded(error.to_string());
+        return StepOutcome::CreatedUnrecorded(ReceiptFailure::Metadata(MetadataFailure::new(
+            database_path,
+            error.to_string(),
+        )));
     }
     match mutation.commit() {
         Ok(()) => StepOutcome::Created,
-        Err(error) => StepOutcome::CreatedUnrecorded(error.to_string()),
+        Err(error) => StepOutcome::CreatedUnrecorded(ReceiptFailure::Metadata(
+            MetadataFailure::new(database_path, error.to_string()),
+        )),
     }
 }
 

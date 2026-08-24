@@ -202,7 +202,7 @@ fn a_missing_registered_checkout_remains_browseable_as_a_source_error() {
 }
 
 #[test]
-fn reopening_refreshes_the_current_head_and_dirty_state() {
+fn reopening_reads_current_source_state_without_writing_a_startup_refresh() {
     let temporary = tempfile::tempdir().expect("temporary application directory");
     let repository = temporary.path().join("source");
     fs::create_dir_all(repository.join("skills/portable")).expect("create common catalog");
@@ -234,7 +234,7 @@ fn reopening_refreshes_the_current_head_and_dirty_state() {
     assert_ne!(reopened.sources()[0].head(), registered_head);
     assert_eq!(reopened.sources()[0].dirty(), Some(false));
     assert!(reopened.sources()[0].source_error().is_none());
-    assert!(reopened.sources()[0].last_scan_at() > 1);
+    assert_eq!(reopened.sources()[0].last_scan_at(), 1);
     let connection = rusqlite::Connection::open(data.join("skilled.sqlite3"))
         .expect("reopen application database");
     let persisted_head: String = connection
@@ -242,7 +242,8 @@ fn reopening_refreshes_the_current_head_and_dirty_state() {
             row.get(0)
         })
         .expect("read refreshed source revision");
-    assert_eq!(persisted_head, current_head);
+    assert_ne!(persisted_head, current_head);
+    assert_eq!(persisted_head, registered_head);
     drop(connection);
     drop(reopened);
     fs::write(repository.join("README.md"), "dirty change\n").expect("write dirty change");

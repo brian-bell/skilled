@@ -10,7 +10,8 @@ Skilled is an early Rust 2024 / Ratatui terminal application for inspecting
 and managing global coding-agent skills. First-run setup, local Git source
 registration, Sources browsing, a read-only installation inventory, OpenCode
 effective resolution across its documented roots, a read-only Doctor findings
-view, installation, receipt-backed repair of incorrect or dangling links,
+view, degraded read-only startup when private metadata is unavailable,
+installation, receipt-backed repair of incorrect or dangling links,
 guarded uninstall, metadata-only Forget Source, and explicit repository update
 checks with guarded fast-forwards — each previewed, confirmed, rescanned, and
 verified — are implemented.
@@ -24,12 +25,14 @@ it never recreates an absent link or root. Uninstall removes only an exact
 receipted link after rechecking its type, target, root, and ownership. Forget
 Source deletes private registration/catalog/receipt metadata only after proving
 every described link inactive; it never deletes a checkout or skill content.
-Updates perform network access only after an explicit check and write only
-through the guarded repository fast-forward. Adoption of unproven links and
-network operations beyond that explicit update check remain unimplemented: do
-not turn their placeholders into behavior unless the active Beads issue places
-that work in scope, and do not display a count, finding, status, or key hint the
-code cannot currently produce.
+A pending destructive metadata migration first creates one consistent, uniquely
+named SQLite backup beside the database; an occupied backup path is never
+overwritten. Updates perform network access only after an explicit check and
+write only through the guarded repository fast-forward. Adoption of unproven
+links and network operations beyond that explicit update check remain
+unimplemented: do not turn their placeholders into behavior unless the active
+Beads issue places that work in scope, and do not display a count, finding,
+status, or key hint the code cannot currently produce.
 
 [GitHub issue #3](https://github.com/brian-bell/skilled/issues/3) is the
 product and technical source of truth. The tracked `spec/tui-prototype.html`
@@ -93,8 +96,10 @@ signal needs both, because colour alone is not an acceptable cue.
   what OpenCode would load, over data the caller already holds. It states no
   findings — `inventory.rs` maps its verdicts to codes and severities.
 - `src/validation.rs`: portable `SKILL.md` front-matter validation.
-- `src/store.rs`: private versioned SQLite metadata and migrations; newer
-  unknown schemas fail closed.
+- `src/store.rs`: private versioned SQLite metadata and transactional
+  migrations; newer unknown schemas fail closed, a store SQLite opened
+  read-only is refused rather than treated as writable, and destructive
+  migrations create a recoverable backup before any pending step runs.
 - `src/theme.rs`: every colour in the application, as semantic roles.
 - `src/viewport.rs`: responsive viewport classes and workspace geometry.
 - `src/components.rs`: pure shared UI primitives.

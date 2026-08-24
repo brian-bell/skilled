@@ -8,8 +8,8 @@ use ratatui::{
 };
 
 use crate::{
-    AgentKind, DoctorItem, DoctorPane, InventoryPane, SessionIdentity, SetupStep, SkilledApp,
-    SourcesPane, UpdatesPane, View,
+    AgentKind, DoctorItem, DoctorPane, InventoryPane, RegistryAvailability, SessionIdentity,
+    SetupStep, SkilledApp, SourcesPane, UpdatesPane, View,
     app::{MAX_INVENTORY_FILTER, SourceRow, catalog_rows},
     components::{self, KeyHint, terminal_safe},
     inventory::{
@@ -130,7 +130,7 @@ pub fn render(frame: &mut Frame<'_>, app: &SkilledApp) -> RenderFeedback {
         View::Doctor => render_doctor(frame, body, app, &findings),
         View::Settings => {
             render_inventory(frame, body, app, airy);
-            render_settings(frame, body);
+            render_settings(frame, body, app);
         }
     }
     if let Some(prompt) = app.pending_operation() {
@@ -404,12 +404,16 @@ fn context_path(identity: &SessionIdentity, width: usize) -> String {
 /// never.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SessionStatus {
+    Degraded,
     SetupInProgress,
     Ready { sources: usize },
 }
 
 impl SessionStatus {
     fn of(app: &SkilledApp) -> Self {
+        if app.metadata_failure().is_some() {
+            return Self::Degraded;
+        }
         match app.view() {
             View::Setup(_) => Self::SetupInProgress,
             _ => Self::Ready {
@@ -420,6 +424,7 @@ impl SessionStatus {
 
     fn tone(self) -> Tone {
         match self {
+            Self::Degraded => Tone::Critical,
             Self::SetupInProgress => Tone::Warning,
             Self::Ready { .. } => Tone::Healthy,
         }
@@ -427,6 +432,7 @@ impl SessionStatus {
 
     fn label(self) -> String {
         match self {
+            Self::Degraded => "degraded · metadata unavailable".to_owned(),
             Self::SetupInProgress => "setup in progress".to_owned(),
             Self::Ready { sources: 1 } => "ready · 1 source registered".to_owned(),
             Self::Ready { sources } => format!("ready · {sources} sources registered"),
@@ -730,8 +736,8 @@ impl Destination {
 
     /// What this destination can honestly say it holds, if anything.
     ///
-    /// The registry is always fully known, so Sources always has a count, zero
-    /// included. The inventory is an observation of the filesystem, and
+    /// Sources has a count only when its registry was read. The inventory is
+    /// an observation of the filesystem, and
     /// whether that observation may be stated as a number is decided by
     /// [`crate::inventory::InventorySnapshot::stated_skill_count`] — the same decision
     /// [`inventory_subtitle`] defers to, so the tab and the subtitle beneath it
@@ -741,7 +747,8 @@ impl Destination {
     fn count(self, app: &SkilledApp) -> Option<usize> {
         match self {
             Self::Inventory => app.inventory().stated_skill_count(),
-            Self::Sources => Some(app.sources().len()),
+            Self::Sources => (app.registry_availability() == RegistryAvailability::Readable)
+                .then(|| app.sources().len()),
             // Findings are observations of the same roots the inventory reads,
             // so the same verdict decides whether either may be stated.
             Self::Doctor => app.stated_finding_count(),
@@ -1217,6 +1224,9 @@ fn render_inventory_skills(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp, 
             )),
         ])
     }));
+    if let Some(line) = metadata_failure_line(app, area.width) {
+        header_lines.push(line);
+    }
 
     // Measured after the lines exist, so a wrapped root status or a second
     // failure reason cannot displace the rule that closes the header.
@@ -1330,6 +1340,9 @@ fn inventory_subtitle(app: &SkilledApp, shown: usize) -> String {
     // empty table rather than say no agent is configured.
     if inventory.no_agent_configured() {
         return "no root read".to_owned();
+    }
+    if app.metadata_failure().is_some() && inventory.stated_skill_count() == Some(0) {
+        return "nothing installed · metadata unavailable".to_owned();
     }
     if !app.inventory_filter().trim().is_empty() {
         return format!("{shown} of {total} listed");
@@ -1570,6 +1583,36 @@ fn installation_tone(health: InstallationHealth) -> Tone {
     }
 }
 
+/// The way out of having no agent chosen, where there is one.
+///
+/// Rerunning setup is the only way to choose an agent, and a degraded session
+/// refuses it — `can_rerun_setup` is what `src/input.rs` filters the key on.
+/// Naming it anyway would send the user to a dialog that says it is
+/// unavailable, so the sentence is dropped rather than reworded: the empty
+/// state's job is to say what was observed, and Settings already explains why
+/// the way out is closed.
+fn choose_an_agent_sentence(app: &SkilledApp) -> &'static str {
+    if app.can_rerun_setup() {
+        " Rerun setup from Settings to choose an agent."
+    } else {
+        ""
+    }
+}
+
+/// What a degraded session is actually withholding.
+///
+/// Writes always. The registry only when it was in fact lost: `open_metadata`
+/// recovers its units independently, so a session degraded by a malformed
+/// completion flag can hold a registry Sources still counts and Doctor still
+/// draws a verdict from. Claiming those are withheld would contradict both.
+fn withheld_claims_sentence(app: &SkilledApp) -> &'static str {
+    if app.inventory().registry_is_complete() {
+        "Every write is withheld for this session."
+    } else {
+        "Registry-backed claims and every write are withheld for this session."
+    }
+}
+
 /// What an empty table can honestly say, given what the scan observed.
 fn inventory_empty_state(app: &SkilledApp) -> (String, String) {
     let roots = app.inventory().roots();
@@ -1588,10 +1631,11 @@ fn inventory_empty_state(app: &SkilledApp) -> (String, String) {
     if app.inventory().no_agent_configured() {
         return (
             "No agent is configured".to_owned(),
-            "Skilled reads the skill root of the agents chosen during setup, \
-             and none are chosen, so it read nothing. Rerun setup from \
-             Settings to choose an agent."
-                .to_owned(),
+            format!(
+                "Skilled reads the skill root of the agents chosen during setup, \
+                 and none are chosen, so it read nothing.{}",
+                choose_an_agent_sentence(app)
+            ),
         );
     }
     if !app.inventory_filter().trim().is_empty() {
@@ -1610,6 +1654,31 @@ fn inventory_empty_state(app: &SkilledApp) -> (String, String) {
              rather than reporting part of it. Each root that failed names its \
              reason above."
                 .to_owned(),
+        );
+    }
+    // The degraded session qualifies the one answer it changes the meaning of
+    // — roots read whole, holding nothing — because a reader is entitled to
+    // know that emptiness was observed rather than inferred from metadata.
+    // Every other answer is the scan's alone: `metadata_failure_line` sits
+    // above this table either way, and a session that learned nothing else
+    // about the roots would be trading its only filesystem result for a
+    // sentence already on screen. Doctor orders these the same way.
+    if app.metadata_failure().is_some()
+        && roots
+            .iter()
+            .any(|root| matches!(root.status(), RootStatus::Scanned { .. }))
+    {
+        let scope = if app.scan_scope_known() {
+            "Skilled retained the agent selection and scanned its selected roots read-only."
+        } else {
+            "Skilled scanned every detected agent root read-only."
+        };
+        return (
+            "No skills are installed".to_owned(),
+            format!(
+                "The agent skill roots Skilled read hold no skill directories. {scope} {}",
+                withheld_claims_sentence(app)
+            ),
         );
     }
     if roots
@@ -1686,14 +1755,25 @@ fn render_doctor_findings(
     app: &SkilledApp,
     findings: &[DoctorItem<'_>],
 ) {
-    let body = render_pane_scaffold(
-        frame,
-        area,
-        "Doctor",
-        &doctor_subtitle(app, findings.len()),
-        app.doctor_pane() == DoctorPane::Findings,
-        false,
-    );
+    let body = if let Some(line) = metadata_failure_line(app, area.width) {
+        render_pane_scaffold_with_status(
+            frame,
+            area,
+            "Doctor",
+            &doctor_subtitle(app, findings.len()),
+            app.doctor_pane() == DoctorPane::Findings,
+            line,
+        )
+    } else {
+        render_pane_scaffold(
+            frame,
+            area,
+            "Doctor",
+            &doctor_subtitle(app, findings.len()),
+            app.doctor_pane() == DoctorPane::Findings,
+            false,
+        )
+    };
 
     if findings.is_empty() {
         let region = body.inner(Margin {
@@ -1742,6 +1822,13 @@ fn doctor_subtitle(app: &SkilledApp, listed: usize) -> String {
     // none of it was read at all. Registry-side findings exist without any
     // root being read, so the second is reachable with a non-empty list and
     // must be settled before the list's own size is spoken about.
+    //
+    // The metadata failure is one of the withholding reasons rather than a
+    // reason of its own: the count is the snapshot's to give, and a session
+    // whose registry survived a malformed completion flag can still give one.
+    // The banner above this subtitle states the failure either way, so a
+    // stateable number is never spent on repeating it.
+    let degraded = app.metadata_failure().is_some();
     match app.stated_finding_count() {
         Some(0) => "nothing to report".to_owned(),
         Some(1) => "1 finding".to_owned(),
@@ -1755,17 +1842,23 @@ fn doctor_subtitle(app: &SkilledApp, listed: usize) -> String {
         None if inventory.unreadable_roots().next().is_some() => "not fully read".to_owned(),
         None if !read_a_root(inventory) && listed > 0 => format!("{listed} listed · no root read"),
         None if !read_a_root(inventory) => "no root read".to_owned(),
-        None if inventory.registry_is_complete()
-            && !app.repair_receipts_readable()
-            && listed > 0 =>
-        {
-            format!("{listed} listed · receipts could not be read")
+        // Behind every answer the roots have, for the same reason the empty
+        // state puts it last: this one is already on screen in the banner. And
+        // narrowed the same way `doctor_empty_state` narrows it, so the pane
+        // header and the body beneath it lead with the same reason: a session
+        // degraded by a malformed completion flag can still hold a registry
+        // that was read whole, and there the receipt table is what is actually
+        // missing.
+        None if degraded && !inventory.registry_is_complete() && listed > 0 => {
+            format!("{listed} listed · metadata unavailable")
         }
-        None if inventory.registry_is_complete() && !app.repair_receipts_readable() => {
-            "receipts could not be read".to_owned()
+        None if degraded && !inventory.registry_is_complete() => "metadata unavailable".to_owned(),
+        None if !inventory.registry_is_complete() && listed > 0 => {
+            format!("{listed} listed · a source could not be read")
         }
-        None if listed > 0 => format!("{listed} listed · a source could not be read"),
-        None => "a source could not be read".to_owned(),
+        None if !inventory.registry_is_complete() => "a source could not be read".to_owned(),
+        None if listed > 0 => format!("{listed} listed · receipts could not be read"),
+        None => "receipts could not be read".to_owned(),
     }
 }
 
@@ -1838,10 +1931,11 @@ fn doctor_empty_state(app: &SkilledApp) -> (&'static str, String, String) {
         return (
             "·",
             "No agent is configured".to_owned(),
-            "Skilled reads the skill root of the agents chosen during setup, \
-             and none are chosen, so it read nothing. Rerun setup from \
-             Settings to choose an agent."
-                .to_owned(),
+            format!(
+                "Skilled reads the skill root of the agents chosen during setup, \
+                 and none are chosen, so it read nothing.{}",
+                choose_an_agent_sentence(app)
+            ),
         );
     }
     if inventory.unreadable_roots().next().is_some() {
@@ -1854,6 +1948,16 @@ fn doctor_empty_state(app: &SkilledApp) -> (&'static str, String, String) {
                 .to_owned(),
         );
     }
+    // After the scan's own answers, because Doctor lists what was observed and
+    // the metadata banner already states the failure above this body. A root
+    // that could not be read is named nowhere else on this screen, so the
+    // degraded session must not take its place.
+    //
+    // And only where the registry was in fact lost with it. `open_metadata`
+    // recovers its units independently, so a session degraded by a malformed
+    // completion flag can hold a registry that was read whole — saying it
+    // cannot be claimed complete would be untrue of the very thing this
+    // sentence names.
     // Nothing was read, so nothing may be said about what is installed. The
     // roots were all accounted for — that is why no count was withheld for
     // them — but accounting for a root that is absent is not reading one.
@@ -1864,6 +1968,15 @@ fn doctor_empty_state(app: &SkilledApp) -> (&'static str, String, String) {
             "Skilled looked for the documented global skill root of each selected \
              agent and found none of them, so it read nothing to report on. It \
              did not create one."
+                .to_owned(),
+        );
+    }
+    if app.metadata_failure().is_some() && !inventory.registry_is_complete() {
+        return (
+            "·",
+            "Application metadata is unavailable".to_owned(),
+            "Skilled kept the read-only scan and diagnosis available, but it cannot claim the \
+             registry is complete or perform writes in this session."
                 .to_owned(),
         );
     }
@@ -2065,8 +2178,8 @@ fn finding_consequence(entry: &DoctorItem<'_>) -> &'static str {
              that failed to install."
         }
         "install.provenance_unverified" => {
-            "A registered source could not be read, so Skilled cannot say whether this \
-             came from one."
+            "Skilled could not read its registry in full, so it cannot say whether this came \
+             from a registered source."
         }
         "variant.duplicate_for_agent" => {
             "Which definition the agent would resolve is not something Skilled can \
@@ -2218,6 +2331,66 @@ fn render_pane_scaffold(
     });
     frame.render_widget(Paragraph::new(lines), header);
     body
+}
+
+/// A Doctor header with the session-wide metadata failure kept above its
+/// finding rows rather than synthesised as a skill finding.
+fn render_pane_scaffold_with_status(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    heading: &str,
+    subtitle: &str,
+    focused: bool,
+    status: Line<'static>,
+) -> Rect {
+    let mut lines = vec![pane_header(heading, subtitle, focused, area.width), status];
+    let height = detail_lines_height(&lines, area.width)
+        .saturating_add(1)
+        .min(usize::from(area.height.saturating_sub(1)));
+    let [header, body] = Layout::vertical([
+        Constraint::Length(u16::try_from(height).unwrap_or(u16::MAX)),
+        Constraint::Min(1),
+    ])
+    .areas(area);
+    lines.push(components::rule(header.width));
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), header);
+    body
+}
+
+/// The banner a degraded session carries above whatever it managed to read.
+///
+/// The path and the operating-system cause both come from outside Skilled and
+/// have no length either it or the user controls. Unbounded, a long enough
+/// application-data path wraps until the header takes the pane and hides the
+/// read-only inventory this whole mode exists to keep showing.
+///
+/// They are bounded apart, two rows each, because they fail differently. A
+/// path loses its middle, where a deep tree says least and both ends name the
+/// file; a cause is a sentence and loses its end. Bounding the two together
+/// would spend the whole budget on a long path and cut the reason off
+/// entirely, which is the half the user can act on. Two rows is past the
+/// length either reaches in practice — the bound is there to stop a
+/// pathological one, not to shorten an ordinary one. The scope sentence is
+/// Skilled's own and known short, so it is stated whole.
+fn metadata_failure_line(app: &SkilledApp, width: u16) -> Option<Line<'static>> {
+    let failure = app.metadata_failure()?;
+    let scope = if app.scan_scope_known() {
+        "The agent selection was retained; selected roots were scanned read-only. \
+         Writes are refused."
+    } else {
+        "The agent selection could not be read; all detected roots were scanned read-only. \
+         Writes are refused."
+    };
+    let badge = components::badge(Tone::Critical, "metadata unavailable");
+    let budget = usize::from(width)
+        .saturating_mul(2)
+        .saturating_sub(badge.width() + 2);
+    let path = terminal_safe_bounded_middle(&failure.database_path().display().to_string(), budget);
+    let cause = terminal_safe_bounded_start(failure.cause(), budget);
+    Some(Line::from(vec![
+        badge,
+        Span::raw(format!(": {path}: {cause}. {scope}")),
+    ]))
 }
 
 /// The gap `components::focused_pane_header` sets between a heading and its
@@ -2850,8 +3023,8 @@ fn inventory_detail_lines(
         // Not knowing where something came from is not the same as knowing it
         // came from nowhere registered.
         RowProvenance::Unverified => lines.push(Line::from(
-            "A registered source could not be read, so Skilled cannot tell whether \
-             this came from one.",
+            "Skilled could not read its registry in full, so it cannot say whether this came \
+             from a registered source.",
         )),
         // Unresolved content is observed, never adopted.
         RowProvenance::Unregistered => lines.push(Line::from(
@@ -3771,23 +3944,45 @@ fn render_sources(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
 }
 
 fn render_source_repositories(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
+    let metadata_unavailable = app.registry_availability() == RegistryAvailability::Unavailable;
+    let subtitle = if metadata_unavailable {
+        "registry unavailable".to_owned()
+    } else {
+        format!("{} registered", app.sources().len())
+    };
     let inner = render_pane_scaffold(
         frame,
         area,
         "Repositories",
-        &format!("{} registered", app.sources().len()),
+        &subtitle,
         app.sources_pane() == SourcesPane::Repositories,
         false,
     );
 
     if app.sources().is_empty() {
-        frame.render_widget(
-            components::empty_state(
-                "·",
+        // Whether the registry could be read and whether a source may be added
+        // are separate questions, and the empty state has to answer both. A
+        // readable registry still states its zero, but any degraded metadata
+        // unit refuses the key, so naming `a` here would advertise something
+        // `input` deliberately filters.
+        let (headline, explanation) = match (metadata_unavailable, app.can_add_source()) {
+            (true, _) => (
+                "Source registry is unavailable",
+                "Skilled cannot state which sources are registered, and adding one is disabled \
+                 for this session.",
+            ),
+            (false, false) => (
+                "No sources are registered",
+                "Adding one is disabled for this session because Skilled could not read its own \
+                 metadata.",
+            ),
+            (false, true) => (
                 "No sources are registered",
                 "Press a to register a local Git checkout.",
-                inner,
             ),
+        };
+        frame.render_widget(
+            components::empty_state("·", headline, explanation, inner),
             inner,
         );
         return;
@@ -3901,13 +4096,25 @@ fn render_source_variants(
     );
 
     let Some(source) = app.selected_source() else {
+        // The same two questions the Repositories pane beside this one asks,
+        // answered the same way: whether the registry could be read decides
+        // what may be claimed about it, and whether metadata is writable
+        // decides whether the key may be named. Reading the session-wide
+        // failure for both would call a registry unavailable that the pane
+        // beside it has just counted.
+        let explanation = match (
+            app.registry_availability() == RegistryAvailability::Unavailable,
+            app.can_add_source(),
+        ) {
+            (true, _) => "The source registry is unavailable in this session.",
+            (false, false) => {
+                "Adding one is disabled for this session because Skilled could not read its own \
+                 metadata."
+            }
+            (false, true) => "Press a to register a local Git checkout.",
+        };
         frame.render_widget(
-            components::empty_state(
-                "·",
-                "No source selected",
-                "Press a to register a local Git checkout.",
-                inner,
-            ),
+            components::empty_state("·", "No source selected", explanation, inner),
             inner,
         );
         return;
@@ -6038,7 +6245,7 @@ fn install_step_verdict(outcome: &StepOutcome) -> (Tone, String) {
             Tone::Warning,
             format!(
                 "link created, but Skilled could not record owning it: {}",
-                terminal_safe(error)
+                terminal_safe(&error.to_string())
             ),
         ),
         StepOutcome::RootCreatedLinkFailed(error) => (
@@ -6503,7 +6710,7 @@ fn worktree_badge(dirty: Option<bool>) -> Span<'static> {
     }
 }
 
-fn render_settings(frame: &mut Frame<'_>, area: Rect) {
+fn render_settings(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
     frame.render_widget(Clear, area);
     frame.render_widget(Block::new().style(theme::app_surface()), area);
     let width = match viewport::classify(area) {
@@ -6515,18 +6722,28 @@ fn render_settings(frame: &mut Frame<'_>, area: Rect) {
     let block = components::dialog_frame("Settings", "global scope");
     let regions = components::dialog_regions(block.inner(popup), 29);
     frame.render_widget(block, popup);
-    frame.render_widget(
-        Paragraph::new(vec![
-            Line::styled("Setup", theme::section_title()),
-            Line::default(),
-            components::list_row(vec![Span::raw("Rerun setup")], true, regions.body.width),
-            Line::default(),
+    let mut lines = vec![
+        Line::styled("Setup", theme::section_title()),
+        Line::default(),
+        components::list_row(vec![Span::raw("Rerun setup")], true, regions.body.width),
+        Line::default(),
+    ];
+    if app.metadata_failure().is_some() {
+        lines.extend([
+            Line::from("Rerunning setup is unavailable while metadata cannot be written."),
+            Line::from("Inventory, Sources, and Doctor remain available read-only."),
+            Line::from("Esc closes Settings."),
+        ]);
+    } else {
+        lines.extend([
             Line::from("Reset setup completion and return to Welcome."),
             Line::from("Agent root and executable detection is refreshed."),
             Line::from("Agent selections and registered sources are retained."),
             Line::from("Enter reruns setup; Esc closes Settings."),
-        ])
-        .wrap(Wrap { trim: false }),
+        ]);
+    }
+    frame.render_widget(
+        Paragraph::new(lines).wrap(Wrap { trim: false }),
         regions.body,
     );
     frame.render_widget(
@@ -6542,15 +6759,23 @@ fn render_settings(frame: &mut Frame<'_>, area: Rect) {
     );
     frame.render_widget(
         Paragraph::new(
-            Line::from(vec![
-                Span::styled("Enter", theme::key_cap()),
-                Span::raw(" "),
-                Span::styled("Rerun", theme::key_label()),
-                Span::raw("   "),
-                Span::styled("Esc", theme::key_cap()),
-                Span::raw(" "),
-                Span::styled("Close", theme::key_label()),
-            ])
+            Line::from(if app.can_rerun_setup() {
+                vec![
+                    Span::styled("Enter", theme::key_cap()),
+                    Span::raw(" "),
+                    Span::styled("Rerun", theme::key_label()),
+                    Span::raw("   "),
+                    Span::styled("Esc", theme::key_cap()),
+                    Span::raw(" "),
+                    Span::styled("Close", theme::key_label()),
+                ]
+            } else {
+                vec![
+                    Span::styled("Esc", theme::key_cap()),
+                    Span::raw(" "),
+                    Span::styled("Close", theme::key_label()),
+                ]
+            })
             .right_aligned(),
         ),
         regions.actions,
@@ -6837,12 +7062,14 @@ fn help_commands(
                     description: "preview installing the focused variant",
                 });
             }
-            commands.extend([
-                HelpCommand {
+            if app.can_add_source() {
+                commands.push(HelpCommand {
                     key: "a",
                     label: "Add source",
                     description: "inspect a local checkout",
-                },
+                });
+            }
+            commands.extend([
                 HelpCommand {
                     key: "1",
                     label: "Inventory",
@@ -6992,23 +7219,29 @@ fn help_commands(
             ]);
             commands
         }
-        View::Settings => vec![
-            HelpCommand {
-                key: "Enter",
-                label: "Rerun setup",
-                description: "reset setup and start again",
-            },
-            HelpCommand {
-                key: "Esc",
-                label: "Close Settings",
-                description: "return to Inventory after help closes",
-            },
-            HelpCommand {
-                key: "?",
-                label: "Help",
-                description: "open this keyboard reference",
-            },
-        ],
+        View::Settings => {
+            let mut commands = Vec::new();
+            if app.can_rerun_setup() {
+                commands.push(HelpCommand {
+                    key: "Enter",
+                    label: "Rerun setup",
+                    description: "reset setup and start again",
+                });
+            }
+            commands.extend([
+                HelpCommand {
+                    key: "Esc",
+                    label: "Close Settings",
+                    description: "return to Inventory after help closes",
+                },
+                HelpCommand {
+                    key: "?",
+                    label: "Help",
+                    description: "open this keyboard reference",
+                },
+            ]);
+            commands
+        }
     }
 }
 
@@ -7246,8 +7479,10 @@ fn context_key_hints(
             if app.can_install_selection() {
                 hints.push(KeyHint::new("i", "Install"));
             }
+            if app.can_add_source() {
+                hints.push(KeyHint::new("a", "Add source"));
+            }
             hints.extend([
-                KeyHint::new("a", "Add source"),
                 KeyHint::new("1", "Inventory"),
                 KeyHint::new("4", "Doctor"),
                 KeyHint::new("?", "Help"),
@@ -7319,11 +7554,17 @@ fn context_key_hints(
             ]);
             hints
         }
-        View::Settings => vec![
-            KeyHint::essential("Enter", "Rerun setup"),
-            KeyHint::new("?", "Help"),
-            KeyHint::essential("Esc", "Close"),
-        ],
+        View::Settings => {
+            let mut hints = Vec::new();
+            if app.can_rerun_setup() {
+                hints.push(KeyHint::essential("Enter", "Rerun setup"));
+            }
+            hints.extend([
+                KeyHint::new("?", "Help"),
+                KeyHint::essential("Esc", "Close"),
+            ]);
+            hints
+        }
     }
 }
 

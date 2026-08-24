@@ -1,0 +1,28 @@
+---
+source: tests/tui_snapshots.rs
+expression: "normalize_degraded(&temporary, render(&app, 80, 24))"
+---
+ ◆ skilled  global                            ● degraded · metadata unavailable
+ Settings   navigation is locked while this dialog is open
+
+
+
+      ┌ Settings ────────────────────────────────────────── global scope ┐
+      │                                                                  │
+      │  Setup                                                           │
+      │                                                                  │
+      │  ▌ Rerun setup                                                   │
+      │                                                                  │
+      │  Rerunning setup is unavailable while metadata cannot be         │
+      │  written.                                                        │
+      │  Inventory, Sources, and Doctor remain available read-only.      │
+      │  Esc closes Settings.                                            │
+      │  ──────────────────────────────────────────────────────────────  │
+      │  No agent is launched                                 Esc Close  │
+      │                                                                  │
+      └──────────────────────────────────────────────────────────────────┘
+
+
+
+
+ ? Help   Esc Close
