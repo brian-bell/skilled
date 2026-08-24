@@ -16,7 +16,7 @@ use skilled::{
     cli::{self, ExitCodeKind},
     operations::{
         ReceiptOperation, RepairDisposition, RepairPrompt, RepairStatus, RepairStepOutcome,
-        plan_repair, probe_repair, verify_repair,
+        VerifyReport, plan_repair, probe_repair, verify_repair,
     },
 };
 
@@ -251,7 +251,7 @@ fn the_tui_refreshes_registered_sources_before_planning_a_repair() {
 #[test]
 fn a_removed_old_link_is_a_partial_apply_exit() {
     assert_eq!(
-        cli::exit_code_for_repair(RepairStatus::PartiallyApplied),
+        cli::exit_code_for_repair(RepairStatus::PartiallyApplied, &VerifyReport::default()),
         ExitCodeKind::PartialApply
     );
 }
@@ -298,6 +298,177 @@ fn repair_refuses_a_target_root_that_cannot_be_enumerated() {
     assert_eq!(fs::read_link(&link).unwrap(), old_target);
 }
 
+/// A repaired link whose ancillary OpenCode check was withheld because a root
+/// could not be read exits as an incomplete verification, not a plain
+/// success: a script reads only the status (skilled-exm). The deselected-root
+/// withholdings in the two tests below stay exit zero — the user's own
+/// selection is what precluded those checks.
+#[test]
+fn an_unreadable_root_makes_a_verified_repair_exit_as_incomplete() {
+    if running_as_root() {
+        // Permission bits decide nothing for the superuser, so the root this
+        // case needs to be unreadable would be read.
+        return;
+    }
+    let fixture = Fixture::new();
+    let common = fixture.source("common", "skills", "portable");
+    let mut app = fixture.registered(&common);
+    fixture.create_root_parents();
+    fixture.install(&mut app);
+    let specific = fixture.source("specific", ".agents/skills", "portable");
+    let preview = app
+        .preview_source(&specific)
+        .expect("preview specific source");
+    app.confirm_source(preview)
+        .expect("register specific source");
+    drop(app);
+    // Claude Code's root is one OpenCode reads too, so sealing it leaves what
+    // OpenCode resolves the name to unestablishable while the repaired Codex
+    // link itself is re-observed.
+    let claude_root = fixture.root(AgentKind::ClaudeCode);
+    fs::set_permissions(&claude_root, fs::Permissions::from_mode(0o000))
+        .expect("seal Claude Code root");
+
+    let mut input = Cursor::new(Vec::<u8>::new());
+    let mut output = Vec::new();
+    let code = cli::run(
+        &[
+            "repair".to_owned(),
+            "--yes".to_owned(),
+            "--skill".to_owned(),
+            "portable".to_owned(),
+            "--agent".to_owned(),
+            "codex".to_owned(),
+        ],
+        fixture.environment(),
+        &mut input,
+        &mut output,
+    );
+    fs::set_permissions(&claude_root, fs::Permissions::from_mode(0o755))
+        .expect("unseal Claude Code root");
+    let output = String::from_utf8(output).unwrap();
+
+    assert_eq!(code, ExitCodeKind::VerificationIncomplete, "{output}");
+    // The link itself was repaired and re-observed: the third answer, not a
+    // failure.
+    assert_eq!(
+        fs::read_link(fixture.root(AgentKind::Codex).join("portable")).unwrap(),
+        specific
+            .join(".agents/skills/portable")
+            .canonicalize()
+            .unwrap()
+    );
+    assert!(
+        output.contains("Verified as far as it could be"),
+        "{output}"
+    );
+    assert!(output.contains("Not established"), "{output}");
+}
+
+/// The same masking one level down: a selected root the scan *did* read can
+/// hold an entry under the repaired name whose resolution could not be
+/// established, and a deselected OpenCode must not turn that gap into a plain
+/// success either.
+#[test]
+fn a_deselected_opencode_does_not_mask_an_unresolvable_entry_in_a_selected_root() {
+    let fixture = Fixture::new();
+    let common = fixture.source("common", "skills", "portable");
+    let mut app = fixture.registered_with(&common, [true, true, false]);
+    fixture.create_root_parents();
+    fixture.install(&mut app);
+    let specific = fixture.source("codex-specific", ".agents/skills", "portable");
+    let preview = app.preview_source(&specific).expect("preview Codex source");
+    app.confirm_source(preview).expect("register Codex source");
+    drop(app);
+    // A symbolic link that resolves through itself: the Claude Code root reads
+    // fine, but what this entry holds under the name cannot be followed.
+    let claude_root = fixture.root(AgentKind::ClaudeCode);
+    let looped = claude_root.join("portable");
+    fs::remove_file(&looped).expect("remove the installed Claude Code link");
+    std::os::unix::fs::symlink("portable", &looped).expect("create a self-referencing link");
+
+    let mut input = Cursor::new(Vec::<u8>::new());
+    let mut output = Vec::new();
+    let code = cli::run(
+        &[
+            "repair".to_owned(),
+            "--yes".to_owned(),
+            "--skill".to_owned(),
+            "portable".to_owned(),
+            "--agent".to_owned(),
+            "codex".to_owned(),
+        ],
+        fixture.environment(),
+        &mut input,
+        &mut output,
+    );
+    let output = String::from_utf8(output).unwrap();
+
+    assert_eq!(code, ExitCodeKind::VerificationIncomplete, "{output}");
+    assert!(output.contains("Not established"), "{output}");
+}
+
+/// Deselecting OpenCode must not mask a selected root that could not be read:
+/// the withheld OpenCode check is then not precluded by selection alone, and
+/// the exit status still owes the incomplete answer.
+#[test]
+fn a_deselected_opencode_does_not_mask_an_unreadable_selected_root() {
+    if running_as_root() {
+        return;
+    }
+    let fixture = Fixture::new();
+    let common = fixture.source("common", "skills", "portable");
+    let mut app = fixture.registered_with(&common, [true, true, false]);
+    fixture.create_root_parents();
+    fixture.install(&mut app);
+    let specific = fixture.source("codex-specific", ".agents/skills", "portable");
+    let preview = app.preview_source(&specific).expect("preview Codex source");
+    app.confirm_source(preview).expect("register Codex source");
+    drop(app);
+    let claude_root = fixture.root(AgentKind::ClaudeCode);
+    fs::create_dir_all(&claude_root).expect("create Claude Code root");
+    fs::set_permissions(&claude_root, fs::Permissions::from_mode(0o000))
+        .expect("seal Claude Code root");
+
+    let mut input = Cursor::new(Vec::<u8>::new());
+    let mut output = Vec::new();
+    let code = cli::run(
+        &[
+            "repair".to_owned(),
+            "--yes".to_owned(),
+            "--skill".to_owned(),
+            "portable".to_owned(),
+            "--agent".to_owned(),
+            "codex".to_owned(),
+        ],
+        fixture.environment(),
+        &mut input,
+        &mut output,
+    );
+    fs::set_permissions(&claude_root, fs::Permissions::from_mode(0o755))
+        .expect("unseal Claude Code root");
+    let output = String::from_utf8(output).unwrap();
+
+    assert_eq!(code, ExitCodeKind::VerificationIncomplete, "{output}");
+    assert!(output.contains("Not established"), "{output}");
+}
+
+/// Probed once and cached: tests in one binary run concurrently, and two
+/// probes sharing a process-id-derived path would race each other's create,
+/// chmod, and remove.
+fn running_as_root() -> bool {
+    static ROOT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ROOT.get_or_init(|| {
+        let probe = tempfile::tempdir().unwrap();
+        let sealed = probe.path().join("sealed");
+        fs::create_dir(&sealed).unwrap();
+        fs::set_permissions(&sealed, fs::Permissions::from_mode(0o000)).unwrap();
+        let readable = fs::read_dir(&sealed).is_ok();
+        fs::set_permissions(&sealed, fs::Permissions::from_mode(0o755)).unwrap();
+        readable
+    })
+}
+
 #[test]
 fn an_opencode_only_repair_withholds_compatibility_roots_without_failing() {
     let fixture = Fixture::new();
@@ -332,6 +503,13 @@ fn an_opencode_only_repair_withholds_compatibility_roots_without_failing() {
         outcome.verification().withheld()[0].agent(),
         AgentKind::OpenCode
     );
+    // The user's own selection is all that precluded the check, so the exit
+    // status stays an ordinary success rather than an incomplete verification.
+    assert!(outcome.verification().is_complete_for_selection());
+    assert_eq!(
+        cli::exit_code_for_repair(outcome.status(), outcome.verification()),
+        ExitCodeKind::Success
+    );
 }
 
 #[test]
@@ -364,6 +542,13 @@ fn a_codex_repair_with_opencode_deselected_withholds_the_ancillary_check() {
     assert_eq!(
         outcome.verification().withheld()[0].agent(),
         AgentKind::OpenCode
+    );
+    // Deselecting OpenCode is what withheld its resolution, so the exit status
+    // stays an ordinary success rather than an incomplete verification.
+    assert!(outcome.verification().is_complete_for_selection());
+    assert_eq!(
+        cli::exit_code_for_repair(outcome.status(), outcome.verification()),
+        ExitCodeKind::Success
     );
 }
 

@@ -332,9 +332,14 @@ signal needs both, because colour alone is not an acceptable cue.
   also checked. A root the scan could not read leaves its check withheld, which
   no surface may report as a pass. This is the inventory's own rule applied to
   the operation that follows it. The exit status is such a surface: `skilled
-  update` reports an incomplete verification as its own status rather than as
-  success, because a script reads only that. Install and repair still exit `0`
-  there; `skilled-exm` has it.
+  update`, `skilled install`, and `skilled repair` all report an incomplete
+  verification as its own status rather than as success, because a script
+  reads only that. A check the user's own agent selection precludes — the
+  ancillary OpenCode resolution over a deselected root — is not incomplete on
+  that surface: `VerifyReport::is_complete_for_selection` draws the same line
+  `counts_are_complete` does, where a deselected root is complete scope and an
+  unreadable one is not, so the ordinary sub-three-agent configuration keeps
+  exiting `0`.
 - `--yes` removes the confirmation and nothing else. Install requires
   `--source`, `--skill`, and `--agents` explicitly; uninstall and repair each
   require `--skill` and `--agent`. Every ownership, collision, path, apply,
