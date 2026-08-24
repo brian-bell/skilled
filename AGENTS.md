@@ -165,9 +165,16 @@ signal needs both, because colour alone is not an acceptable cue.
   removed, a stranger's object is swapped back intact and refused — or, if the
   swap back itself fails, preserved at a reported temporary path while the
   repair reports as partial — and a filesystem that cannot exchange refuses
-  the repair rather than falling back to a destructive rename. Windows keeps
-  its documented non-atomic remove-and-create fallback, tracked as
-  `skilled-tdm`.
+  the repair rather than falling back to a destructive rename. Windows stays
+  remove-then-create — it cannot rename over an existing directory link — but
+  the removal is handle-bound: the destination is pinned with
+  `FILE_FLAG_OPEN_REPARSE_POINT` and delete sharing denied, proven through
+  that handle to be a symbolic link byte-identical to the proven target —
+  the same equivalence the Unix exchange applies to its displaced object —
+  and deleted through the same handle with a POSIX-semantics disposition, so
+  a stranger's object arriving after the recheck is refused rather than
+  deleted, a filesystem that refuses that disposition refuses the repair,
+  and what remains is the install-class fail-if-exists window at creation.
 - Repository updates write through Git only inside the canonical checkout the
   user registered. They begin only after an explicit check, fast-forward to the
   exact previewed object, and never reset, rebase, stash, commit, or push. The
