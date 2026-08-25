@@ -212,7 +212,15 @@ impl Store {
         // mean a semantic validator per historical schema version, and
         // undoing a migration that succeeded because an unrelated field is
         // malformed is the worse of the two. Recorded rather than reopened;
-        // the decision itself is `skilled-2k3.23`.
+        // the decision itself is `skilled-2k3.23`. It runs whether or not this
+        // session can write, which is what a blocked store one schema version
+        // behind runs into: the pending migration fails and the open fails
+        // with it, degrading the session without the values it could still
+        // have read. That is what a write-protected database file has always
+        // done, and the alternative — reading a store through SQL written for
+        // a schema it is not at — trades a stated failure for a stranger one.
+        // Serving a degraded session out of an unmigrated schema is a design
+        // decision of its own rather than a consequence of this one.
         migrate(&mut connection, &sqlite_database_path)?;
         // Write-ahead logging is a write. A store that opened read-only can
         // still be read, and asking it to change its journal mode would turn
@@ -1627,8 +1635,16 @@ static PROBE_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU6
 /// passed a creation-only probe. So both halves have to succeed, and anything
 /// that fails is answered `false`: an unprovable capability is not a proven
 /// one, and a degraded session is the safe reading. A removal that fails
-/// leaves one empty file named for what it is, which is the same directory
-/// telling the session it cannot be written either way.
+/// leaves one empty file named for what it is, and leaves another on every
+/// startup for as long as the directory keeps refusing deletions — a
+/// misconfiguration the session is degraded throughout, and one whose empty
+/// files the user can remove once they have fixed the directory that would
+/// not let Skilled remove them.
+/// A shared probe name would bound that at one file and cost more than it
+/// saves: two Skilled processes starting together would then contend for a
+/// single pathname, and the one whose removal lost would report a perfectly
+/// writable store as unwritable. A false degradation of a working store is
+/// the worse answer.
 ///
 /// The removal unlinks a pathname this call created and no longer holds open,
 /// which is the window `backup_database` documents — bounded the same way, by
