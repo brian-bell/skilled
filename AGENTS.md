@@ -319,7 +319,17 @@ signal needs both, because colour alone is not an acceptable cue.
   directory, which Git's untracked and ignored lists never name because they
   name files. The link would then resolve to something that is not a skill
   rather than losing its target, so the preview cannot state what the write
-  would do. The worktree half is a live read, so the apply guard asks it again
+  would do. One object is the exception, because there the outcome is exact
+  rather than unknown: a regular file the target revision keeps at the candidate
+  itself. The link keeps precisely the target it has and that target stops being
+  a skill, so the plan states the type change on its own line — `target stops
+  being a skill · <name>`, never as a removal — and verification holds the
+  update to the same link resolving to content no agent can load. A symbolic
+  link and a submodule stay refusals: Git records a link as a blob too, and
+  where it leads is exactly what the plan cannot state. The worktree is still
+  asked for a disclosed type change, because an occupant both keeps the
+  directory standing and stops Git writing a file at that path at all.
+  The worktree half is a live read, so the apply guard asks it again
   over the worktree as it then stands: an occupant that arrived after the
   preview refuses the write rather than being applied. Under the apply guard
   that walk is descriptor-bound on Linux and macOS — it descends from the pinned
