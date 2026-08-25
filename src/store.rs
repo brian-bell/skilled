@@ -1621,14 +1621,19 @@ static PROBE_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU6
 /// taking the single writer slot, and would report a store another process was
 /// briefly writing as one that can never be written.
 ///
-/// Anything that fails is answered `false`: an unprovable capability is not a
-/// proven one, and a degraded session is the safe reading. Removing the probe
-/// unlinks a pathname this call created and no longer holds open, which is the
-/// window `backup_database` documents — bounded the same way, by the fact that
-/// anything able to write this directory can already delete the database
-/// itself. A creation that succeeds and a removal that does not leaves the
-/// store writable, which is the truthful answer, and one stray empty file
-/// named for what it is.
+/// Removal is part of the capability rather than tidying up after it: a
+/// rollback-journal commit ends by unlinking the journal, and a directory that
+/// grants creation while denying unlink — an ACL can — would fail there having
+/// passed a creation-only probe. So both halves have to succeed, and anything
+/// that fails is answered `false`: an unprovable capability is not a proven
+/// one, and a degraded session is the safe reading. A removal that fails
+/// leaves one empty file named for what it is, which is the same directory
+/// telling the session it cannot be written either way.
+///
+/// The removal unlinks a pathname this call created and no longer holds open,
+/// which is the window `backup_database` documents — bounded the same way, by
+/// the fact that anything able to write this directory can already delete the
+/// database itself.
 fn journal_creation_permitted(data_dir: &Path) -> bool {
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1646,8 +1651,7 @@ fn journal_creation_permitted(data_dir: &Path) -> bool {
     match options.open(&probe) {
         Ok(file) => {
             drop(file);
-            let _ = fs::remove_file(&probe);
-            true
+            fs::remove_file(&probe).is_ok()
         }
         Err(_) => false,
     }
