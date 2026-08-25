@@ -464,6 +464,103 @@ fn invalid_integer_registry_booleans_force_degraded_mode() {
     }
 }
 
+/// A writable database inside a directory that denies file creation opens
+/// read-write and reads perfectly: SQLite needs the directory only when it
+/// creates the rollback journal or the write-ahead log, which happens at the
+/// first transaction and not at the open. Unprobed, the failure lands on
+/// whichever write runs first: the `journal_mode` pragma at open, which raises
+/// a bare SQLite write error and throws away every value the store was
+/// perfectly able to give up, or — where that pragma has nothing to change —
+/// the first receipt, recorded after `apply_install` has already created the
+/// link. This asserts the third answer: degraded, named as read-only, with
+/// everything readable kept and nothing written anywhere.
+#[cfg(unix)]
+#[test]
+fn a_data_directory_that_denies_journal_creation_degrades_read_only() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temporary = tempfile::tempdir().expect("temporary application directory");
+    let home = temporary.path().join("home");
+    let data = temporary.path().join("data");
+    let skill = home.join(".claude/skills/portable");
+    fs::create_dir_all(&skill).expect("create temporary skill root");
+    fs::write(
+        skill.join("SKILL.md"),
+        "---\nname: portable\ndescription: portable fixture\n---\n",
+    )
+    .expect("write temporary skill");
+    complete_setup(&home, &data);
+    let database = data.join("skilled.sqlite3");
+    // A rollback-journal store is the case the probe exists for: it reads
+    // perfectly out of a sealed directory and only its first *write* needs the
+    // journal. A write-ahead store cannot be read there at all — SQLite needs
+    // its shared-memory sidecar to read one — and that failure already reaches
+    // the session as a metadata failure at open.
+    let connection = rusqlite::Connection::open(&database).expect("open metadata database");
+    let mode: String = connection
+        .query_row("PRAGMA journal_mode = DELETE", [], |row| row.get(0))
+        .expect("set the rollback journal mode");
+    assert_eq!(mode, "delete");
+    drop(connection);
+    let original = fs::read(&database).expect("read metadata database");
+    let before = data_directory_entries(&data);
+    fs::set_permissions(&data, fs::Permissions::from_mode(0o555))
+        .expect("deny creation in the data directory");
+
+    let opened = SkilledApp::open(AppEnvironment::new(&home, &data, ""));
+
+    let after = data_directory_entries(&data);
+    fs::set_permissions(&data, fs::Permissions::from_mode(0o755))
+        .expect("restore the data directory");
+    let app = opened.expect("open degraded application");
+    assert_eq!(app.view(), View::Inventory);
+    assert!(!app.can_add_source());
+    assert!(!app.can_rerun_setup());
+    let failure = app.metadata_failure().expect("metadata failure");
+    assert_eq!(failure.database_path(), database);
+    assert!(failure.cause().contains("read-only"), "{}", failure.cause());
+    // Everything the store can still be read for is kept, exactly as it is for
+    // a write-protected database file.
+    assert!(app.agent(AgentKind::ClaudeCode).selected());
+    assert_eq!(app.registry_availability(), RegistryAvailability::Readable);
+    assert!(app.inventory().row("portable").is_some());
+    assert_eq!(fs::read(&database).expect("reread database"), original);
+    assert_eq!(after, before, "the sealed data directory changed");
+}
+
+/// The probe proves a capability by exercising it, so a data directory that
+/// does allow creation must be left exactly as it was found — no probe file,
+/// and no change to the database the session goes on to write normally.
+#[test]
+fn a_writable_data_directory_keeps_write_access_and_no_probe_residue() {
+    let temporary = tempfile::tempdir().expect("temporary application directory");
+    let home = temporary.path().join("home");
+    let data = temporary.path().join("data");
+    complete_setup(&home, &data);
+
+    let app =
+        SkilledApp::open(AppEnvironment::new(&home, &data, "")).expect("open ready application");
+
+    assert!(app.metadata_failure().is_none());
+    assert!(app.can_add_source());
+    assert!(
+        data_directory_entries(&data)
+            .iter()
+            .all(|name| !name.contains("write-probe")),
+        "the probe left its file behind"
+    );
+}
+
+fn data_directory_entries(data: &std::path::Path) -> Vec<String> {
+    let mut entries: Vec<String> = fs::read_dir(data)
+        .expect("list data directory")
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    entries.sort();
+    entries
+}
+
 #[cfg(unix)]
 #[test]
 fn metadata_leaf_symlinks_are_never_followed_or_modified() {

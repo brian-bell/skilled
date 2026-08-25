@@ -631,13 +631,11 @@ fn open_metadata(data_dir: &Path) -> MetadataStartup {
                         .map(|error| format!("ownership receipts could not be read: {error}"))
                 })
                 // Last, so a value that is actually invalid leads: a store
-                // that opened read-only is a reason this session cannot
-                // write, not a reason to distrust anything it just read.
-                .or_else(|| {
-                    store
-                        .read_only()
-                        .then(|| Error::ReadOnlyMetadata.to_string())
-                })
+                // that cannot be written — its file opened read-only, or its
+                // directory refusing the journal SQLite writes through — is a
+                // reason this session cannot write, not a reason to distrust
+                // anything it just read.
+                .or_else(|| store.write_block().map(|block| block.error().to_string()))
                 .map(|error| MetadataFailure::new(database_path, error.to_string()));
             let registry_availability = if sources.is_ok() {
                 RegistryAvailability::Readable

@@ -50,9 +50,32 @@ const UPDATE_CHECK_UPSERT_IF_NEWER: &str = "INSERT INTO source_update_checks
 pub(crate) struct Store {
     connection: Connection,
     database_path: PathBuf,
-    read_only: bool,
+    write_block: Option<WriteBlock>,
     #[cfg(test)]
     fail_next: std::cell::RefCell<Option<MetadataOperation>>,
+}
+
+/// Why a store that opened successfully still cannot be written this session.
+///
+/// Both answers are properties of the filesystem the store sits on rather than
+/// of anything it holds, so both leave every stored value readable and both
+/// degrade the session the same way.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum WriteBlock {
+    /// SQLite opened a write-protected database file read-only.
+    DatabaseReadOnly,
+    /// The application-data directory refuses the sidecar files SQLite must
+    /// create to write anything at all.
+    DirectoryDeniesJournal,
+}
+
+impl WriteBlock {
+    pub(crate) fn error(self) -> Error {
+        match self {
+            Self::DatabaseReadOnly => Error::ReadOnlyMetadata,
+            Self::DirectoryDeniesJournal => Error::UnwritableMetadataDirectory,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -125,7 +148,8 @@ impl Store {
         // Canonicalizing the already-classified physical directory resolves
         // only the explicitly-supported ancestor chain; the database leaf is
         // still appended afterwards and therefore never followed here.
-        let sqlite_database_path = data_dir.canonicalize()?.join("skilled.sqlite3");
+        let canonical_data_dir = data_dir.canonicalize()?;
+        let sqlite_database_path = canonical_data_dir.join("skilled.sqlite3");
         let mut flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW;
         match fs::symlink_metadata(&database_path) {
             Ok(metadata) => {
@@ -160,14 +184,9 @@ impl Store {
         // cannot happen was ever attempted. Asked at open, it is a metadata
         // failure like any other, and the session degrades to read-only.
         //
-        // This answers for the database file, not for the journal and WAL
-        // sidecars SQLite creates beside it: a writable file in a directory
-        // that denies creation still opens read-write and fails at the first
-        // transaction. Proving that needs a real write, which is the one thing
-        // a read-only startup must not do, so it stays unproven here and the
-        // failure surfaces where it happens — `StepOutcome::CreatedUnrecorded`
-        // states a link whose receipt could not be written rather than hiding
-        // it. Tracked as `skilled-2k3.22`.
+        // This answers for the database file and not for the journal and WAL
+        // sidecars SQLite creates beside it, which is what
+        // `journal_creation_permitted` is asked next.
         //
         // Recorded rather than raised. A store that cannot be written can
         // still be read, and every value it holds — the agent selection, the
@@ -175,7 +194,14 @@ impl Store {
         // knowing. `app::open_metadata` reads them and then takes this as one
         // more reason the session is degraded, alongside the values it found
         // invalid, so nothing readable is discarded to refuse a write.
-        let read_only = connection.is_readonly(rusqlite::MAIN_DB)?;
+        let write_block = if connection.is_readonly(rusqlite::MAIN_DB)? {
+            Some(WriteBlock::DatabaseReadOnly)
+        } else if journal_creation_permitted(&canonical_data_dir) {
+            None
+        } else {
+            Some(WriteBlock::DirectoryDeniesJournal)
+        };
+        let read_only = write_block.is_some();
         // Schema before semantics, deliberately. `app::open_metadata` is what
         // reads stored values and can declare the store unavailable, and it
         // reads them through the current schema — so a supported older
@@ -200,7 +226,7 @@ impl Store {
         Ok(Self {
             connection,
             database_path,
-            read_only,
+            write_block,
             #[cfg(test)]
             fail_next: std::cell::RefCell::new(None),
         })
@@ -210,10 +236,13 @@ impl Store {
         &self.database_path
     }
 
-    /// Whether SQLite opened the database read-only despite being asked for
-    /// write access, which no write on this connection can recover from.
-    pub(crate) fn read_only(&self) -> bool {
-        self.read_only
+    /// Whether this session's metadata writes are blocked, and by what.
+    ///
+    /// Either answer is settled at open and no write on this connection can
+    /// recover from it, so the caller reports it once rather than discovering
+    /// it target by target.
+    pub(crate) fn write_block(&self) -> Option<WriteBlock> {
+        self.write_block
     }
 
     pub(crate) fn begin_mutation(&mut self) -> Result<Mutation<'_>> {
@@ -1558,6 +1587,69 @@ fn migrate_with(
         }
         transaction.commit()?;
         return Ok(backup);
+    }
+}
+
+static PROBE_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Whether the application-data directory permits creating a file beside the
+/// database, which is what SQLite needs before it can write anything.
+///
+/// `Connection::is_readonly` answers for the database file alone. A writable
+/// file inside a directory that denies creation opens read-write and reads
+/// perfectly; the rollback journal or the write-ahead log is created at the
+/// first transaction, and that is where it fails. Unasked, the write that
+/// discovers it is whichever one runs first — the `journal_mode` pragma below
+/// on a rollback-journal store, and otherwise the first receipt, which
+/// `apply_install` records *after* it has created the link, leaving the run to
+/// report `StepOutcome::CreatedUnrecorded`: a real link Skilled does not own.
+/// Asked here it is one more reason the session is degraded, decided before
+/// any mutation is offered, and every value the store is still perfectly able
+/// to give up is kept rather than lost to an opaque SQLite failure at open.
+/// (`skilled-2k3.22`.)
+///
+/// The capability is proven by exercising it, because permission bits are not
+/// the only thing that denies a creation — a read-only mount, an ACL, or a
+/// filesystem quota does too, and only the attempt covers all of them. The
+/// probe is a create-new-and-remove of a uniquely named file of Skilled's own
+/// in the directory beside the database. Two properties make that acceptable
+/// for a startup that may turn out to be read-only: the database, its journal,
+/// and every sidecar SQLite owns are untouched either way, and in the case
+/// this exists to detect the creation *fails*, so a store the user
+/// deliberately sealed is not written to at all. The alternative — beginning
+/// and rolling back an immediate transaction — would prove the same thing by
+/// taking the single writer slot, and would report a store another process was
+/// briefly writing as one that can never be written.
+///
+/// Anything that fails is answered `false`: an unprovable capability is not a
+/// proven one, and a degraded session is the safe reading. Removing the probe
+/// unlinks a pathname this call created and no longer holds open, which is the
+/// window `backup_database` documents — bounded the same way, by the fact that
+/// anything able to write this directory can already delete the database
+/// itself. A creation that succeeds and a removal that does not leaves the
+/// store writable, which is the truthful answer, and one stray empty file
+/// named for what it is.
+fn journal_creation_permitted(data_dir: &Path) -> bool {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let counter = PROBE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let probe = data_dir.join(format!(
+        "skilled-write-probe-{timestamp}-{}-{counter}",
+        std::process::id()
+    ));
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    match options.open(&probe) {
+        Ok(file) => {
+            drop(file);
+            let _ = fs::remove_file(&probe);
+            true
+        }
+        Err(_) => false,
     }
 }
 
