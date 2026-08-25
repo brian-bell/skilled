@@ -4384,3 +4384,183 @@ fn the_plan_discloses_the_signature_program_the_fast_forward_may_run() {
         plan.hooks_disclosure()
     );
 }
+
+/// The preview reads the agent roots when it is built, and then the
+/// confirmation dialog waits. A link created in that window is not in the
+/// affected set the user agreed to: the fast-forward would remove its target
+/// and leave it dangling, and only the post-write scan could say so — after the
+/// repository had already moved. The roots are read again immediately before
+/// the write, and a disagreement refuses it.
+#[test]
+fn an_installation_created_after_the_preview_refuses_the_update() {
+    let mut fixture = fixture();
+    std::fs::remove_dir_all(fixture.seed.join("skills/other")).expect("remove the upstream skill");
+    commit(&fixture.seed, "remove the other skill");
+    git(&fixture.seed, &["push"]);
+
+    fixture
+        .app
+        .perform_effects(&[Effect::CheckUpdates])
+        .expect("start check");
+    finish_update_check(&mut fixture.app);
+    fixture
+        .app
+        .perform_effects(&[Effect::PlanRepositoryUpdate])
+        .expect("plan update");
+    let Some(RepositoryUpdatePrompt::Preview(plan)) = fixture.app.pending_update().cloned() else {
+        panic!("expected a preview: {:?}", fixture.app.pending_update());
+    };
+    assert!(plan.affected().removed.is_empty(), "{:?}", plan.affected());
+
+    // The window: an installation of the very skill this update deletes,
+    // created after the plan was stated and before it was applied.
+    let before = git(&fixture.clone, &["rev-parse", "HEAD"]);
+    let root = fixture._temporary.path().join("home/.claude/skills");
+    std::fs::create_dir_all(&root).expect("agent root");
+    std::os::unix::fs::symlink(fixture.clone.join("skills/other"), root.join("other"))
+        .expect("installed skill");
+
+    fixture
+        .app
+        .perform_effects(&[Effect::ApplyRepositoryUpdate])
+        .expect("apply update");
+
+    let Some(RepositoryUpdatePrompt::Report {
+        apply_error,
+        write_attempted,
+        ..
+    }) = fixture.app.pending_update()
+    else {
+        panic!("expected a report: {:?}", fixture.app.pending_update());
+    };
+    assert!(!write_attempted, "{apply_error:?}");
+    assert!(
+        apply_error
+            .as_deref()
+            .is_some_and(|error| error.contains("installations this update affects changed")),
+        "{apply_error:?}"
+    );
+    assert_eq!(git(&fixture.clone, &["rev-parse", "HEAD"]), before);
+    assert!(root.join("other").join("SKILL.md").is_file());
+}
+
+/// A second agent installing the same skill name during the confirmation is an
+/// installation the update changes just as much as the first, and the disclosed
+/// list of names cannot tell the two apart — it holds one `demo` either way. The
+/// recheck compares the installations behind the names, so the new one is seen.
+#[test]
+fn an_installation_for_another_agent_created_after_the_preview_refuses_the_update() {
+    let mut fixture = fixture();
+    let claude_root = fixture._temporary.path().join("home/.claude/skills");
+    std::fs::create_dir_all(&claude_root).expect("agent root");
+    std::os::unix::fs::symlink(fixture.clone.join("skills/demo"), claude_root.join("demo"))
+        .expect("installed skill");
+    push_update(&fixture, "skills/demo/new.txt");
+
+    fixture
+        .app
+        .perform_effects(&[Effect::CheckUpdates])
+        .expect("start check");
+    finish_update_check(&mut fixture.app);
+    fixture
+        .app
+        .perform_effects(&[Effect::PlanRepositoryUpdate])
+        .expect("plan update");
+    let Some(RepositoryUpdatePrompt::Preview(plan)) = fixture.app.pending_update().cloned() else {
+        panic!("expected a preview: {:?}", fixture.app.pending_update());
+    };
+    assert_eq!(plan.affected().updated, vec!["demo".to_owned()]);
+
+    let before = git(&fixture.clone, &["rev-parse", "HEAD"]);
+    let codex_root = fixture._temporary.path().join("home/.agents/skills");
+    std::fs::create_dir_all(&codex_root).expect("second agent root");
+    std::os::unix::fs::symlink(fixture.clone.join("skills/demo"), codex_root.join("demo"))
+        .expect("second installed skill");
+
+    fixture
+        .app
+        .perform_effects(&[Effect::ApplyRepositoryUpdate])
+        .expect("apply update");
+
+    let Some(RepositoryUpdatePrompt::Report {
+        apply_error,
+        write_attempted,
+        ..
+    }) = fixture.app.pending_update()
+    else {
+        panic!("expected a report: {:?}", fixture.app.pending_update());
+    };
+    assert!(!write_attempted, "{apply_error:?}");
+    assert!(
+        apply_error
+            .as_deref()
+            .is_some_and(|error| error.contains("installations this update affects changed")),
+        "{apply_error:?}"
+    );
+    assert_eq!(git(&fixture.clone, &["rev-parse", "HEAD"]), before);
+    assert!(!fixture.clone.join("skills/demo/new.txt").exists());
+}
+
+/// Some installations are affected without appearing in the affected set at
+/// all: a link aimed at an added skill under a name of its own is stated as a
+/// blocking finding instead, because the update changes its invalid state
+/// without making it load. A plan carrying such a finding is refused outright,
+/// so one raised by a link created after the preview has to refuse the write
+/// too — the recheck compares what the fresh reading finds as well as what it
+/// counts.
+#[test]
+fn a_mismatched_link_created_after_the_preview_refuses_the_update() {
+    let mut fixture = fixture();
+    std::fs::create_dir_all(fixture.seed.join("skills/added")).expect("added skill directory");
+    std::fs::write(
+        fixture.seed.join("skills/added/SKILL.md"),
+        "---\nname: added\ndescription: fixture\n---\n",
+    )
+    .expect("added skill");
+    commit(&fixture.seed, "add a skill");
+    git(&fixture.seed, &["push"]);
+
+    fixture
+        .app
+        .perform_effects(&[Effect::CheckUpdates])
+        .expect("start check");
+    finish_update_check(&mut fixture.app);
+    fixture
+        .app
+        .perform_effects(&[Effect::PlanRepositoryUpdate])
+        .expect("plan update");
+    let Some(RepositoryUpdatePrompt::Preview(plan)) = fixture.app.pending_update().cloned() else {
+        panic!("expected a preview: {:?}", fixture.app.pending_update());
+    };
+    assert!(!plan.is_blocked(), "{:?}", plan.findings());
+    assert_eq!(plan.affected().added, vec!["added".to_owned()]);
+
+    let before = git(&fixture.clone, &["rev-parse", "HEAD"]);
+    let root = fixture._temporary.path().join("home/.claude/skills");
+    std::fs::create_dir_all(&root).expect("agent root");
+    std::os::unix::fs::symlink(fixture.clone.join("skills/added"), root.join("alias"))
+        .expect("mismatched dangling link");
+
+    fixture
+        .app
+        .perform_effects(&[Effect::ApplyRepositoryUpdate])
+        .expect("apply update");
+
+    let Some(RepositoryUpdatePrompt::Report {
+        apply_error,
+        write_attempted,
+        ..
+    }) = fixture.app.pending_update()
+    else {
+        panic!("expected a report: {:?}", fixture.app.pending_update());
+    };
+    assert!(!write_attempted, "{apply_error:?}");
+    assert!(
+        apply_error
+            .as_deref()
+            .is_some_and(|error| error.contains("installations this update affects changed")),
+        "{apply_error:?}"
+    );
+    assert_eq!(git(&fixture.clone, &["rev-parse", "HEAD"]), before);
+    assert!(!fixture.clone.join("skills/added").exists());
+}

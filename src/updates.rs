@@ -1289,6 +1289,16 @@ pub struct AffectedInstallations {
     pub complete: bool,
     pub incomplete_reason: Option<String>,
     expected_dangling: Vec<(String, usize)>,
+    /// The disclosed in-place updates as the row and agent each one is
+    /// installed at, beside the skill names `updated` states.
+    ///
+    /// `updated` is a deduplicated list of names, so two agents holding the
+    /// same name read as one entry there and a third holding it reads as one
+    /// too. That is the right disclosure — the user is told which skills change
+    /// under them — but it cannot answer whether the installations behind those
+    /// names are still the ones the preview saw, which is what
+    /// [`affected_installations_unchanged`] has to decide before the write.
+    updated_installations: Vec<(String, usize)>,
     /// The installations the plan said this update gives a target to, as the
     /// row and agent that will start loading and the upstream skill it was
     /// disclosed as loading.
@@ -1696,6 +1706,7 @@ fn affected_catalog_skills(
         }
     }
     let mut updated = Vec::new();
+    let mut updated_installations = Vec::new();
     let mut removed_changes = Vec::new();
     let mut added_changes = Vec::new();
     let mut restored = Vec::new();
@@ -1778,6 +1789,12 @@ fn affected_catalog_skills(
                 installed_agents.cloned().unwrap_or_default(),
             ));
         } else {
+            updated_installations.extend(
+                installed_agents
+                    .into_iter()
+                    .flatten()
+                    .map(|(row, agent)| (row.clone(), *agent)),
+            );
             updated.extend(
                 installed_agents
                     .into_iter()
@@ -1814,6 +1831,8 @@ fn affected_catalog_skills(
         .collect::<Vec<_>>();
     updated.sort();
     updated.dedup();
+    updated_installations.sort();
+    updated_installations.dedup();
     removed.sort();
     removed.dedup();
     added.sort();
@@ -1943,6 +1962,7 @@ fn affected_catalog_skills(
                 Some("one or more installation roots could not be fully read".into())
             },
             expected_dangling,
+            updated_installations,
             expected_revival,
             vacating_candidates,
         },
@@ -2393,6 +2413,70 @@ pub(crate) fn apply_repository_update_attempt(plan: &RepositoryUpdatePlan) -> (R
         ),
         Err(error) => (Err(error), false),
     }
+}
+
+/// Re-derive the affected installations over a scan taken now, and refuse a
+/// plan they no longer match.
+///
+/// A preview reads the agent roots when it is built, and the confirmation then
+/// waits — in the dialog, or at the typed command's prompt. A link created in
+/// that window is missing from the affected set the user agreed to, so the
+/// fast-forward could remove its target and leave it dangling, and the
+/// post-write scan could only report that as a verification failure once the
+/// repository had already moved. Asked here instead, before the write, so the
+/// disagreement is a refusal rather than an outcome.
+///
+/// The comparison is the whole [`AffectedInstallations`] value, its
+/// verification expectations included, because those are what the confirmed
+/// statement will be held to. What it compares is which installations the
+/// update affects and what it does to each — not which object stands at every
+/// one of them: a link retargeted during the confirmation at different content
+/// that still resolves to the same changed skill keeps the disclosed outcome
+/// for that row and agent, and passes here. Verification's baseline is this
+/// same reading, so such a swap is neither disclosed nor reported; it is the
+/// unproven-link problem rather than this one, and is left where the rest of it
+/// lives.
+///
+/// The reads run against a checkout pinned and proven the same way
+/// [`validate_repository_update`] pins it, and the partial-clone refusal is
+/// re-asked before any object is read, because these are object reads and a
+/// promisor remote configured since the preview would let them fetch lazily.
+/// The apply guard runs afterwards on a handle of its own and re-asks
+/// everything it asks; nothing here is remembered on its behalf.
+pub(crate) fn affected_installations_unchanged(
+    plan: &RepositoryUpdatePlan,
+    source: &RegisteredSource,
+    inventory: &InventorySnapshot,
+) -> Result<bool> {
+    if source.id() != plan.source_id {
+        return Err(crate::Error::AffectedInstallationsChangedAfterPreview);
+    }
+    let checkout = git::RepositoryHandle::open(&plan.path)
+        .map_err(|_| crate::Error::SourceChangedAfterPreview)?;
+    checkout_is_the_planned_repository(plan, &checkout)?;
+    let target: git::GitTarget = (&checkout).into();
+    if git::repository_is_partial_clone(target)? {
+        return Err(crate::Error::SourceChangedAfterPreview);
+    }
+    // Uncancellable for the same reason planning is: this runs where the write
+    // is about to, and there is no answer other than the one it returns.
+    let (affected, findings) = affected_catalog_skills(
+        source,
+        inventory,
+        &plan.changed_files,
+        target,
+        &plan.current_revision,
+        &plan.target_revision,
+        &AtomicBool::new(false),
+    )?
+    .expect("a flag that is never set cannot cancel this analysis");
+    // Some installations this analysis finds are stated as a finding rather
+    // than counted in the set: a link aimed at an added skill under a name of
+    // its own, whose invalid state the update changes without making it load. A
+    // plan carrying any of these is blocked, and `validate_repository_update`
+    // refuses it, so a confirmed plan has none — which makes "the fresh reading
+    // states one" exactly as much a disagreement as a changed count.
+    Ok(findings.is_empty() && affected == plan.affected)
 }
 
 /// Prove the checkout is the one the plan was confirmed against, and return

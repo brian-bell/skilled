@@ -336,7 +336,12 @@ signal needs both, because colour alone is not an acceptable cue.
   check. Both `Effect::CheckUpdates` and `Effect::PlanRepositoryUpdate` rescan
   the roots first, because a check and the preview that follows it decide the
   same installation-dependent findings and a link made while the application
-  stayed open would otherwise be in one and not the other. Whether the document
+  stayed open would otherwise be in one and not the other. The confirmed apply
+  rescans them a last time and refuses a plan whose affected installations no
+  longer match that reading — the dialog and the typed command alike — because
+  the preview's set was read before the confirmation waited, and a link created
+  in that window would otherwise be found only by the post-write scan, once the
+  repository had already moved. Whether the document
   the target keeps is a *valid* skill is not read — `skilled-3o5` has that. A
   rename names the installations it leaves without a target alongside the pair
   of skill names, because a link installed under a name of its own is not named

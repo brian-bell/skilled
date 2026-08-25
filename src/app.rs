@@ -34,9 +34,10 @@ use crate::{
     store::Store,
     updates::{
         CachedUpdateCheck, RepositoryUpdatePlan, RepositoryUpdatePrompt, RepositoryUpdateVerdict,
-        apply_repository_update_attempt, cached_update_check, encode_findings,
-        plan_repository_update, probe_repository_update, probe_repository_update_against,
-        probe_repository_update_cancellable, verify_repository_update,
+        affected_installations_unchanged, apply_repository_update_attempt, cached_update_check,
+        encode_findings, plan_repository_update, probe_repository_update,
+        probe_repository_update_against, probe_repository_update_cancellable,
+        verify_repository_update,
     },
     validation::valid_skill_name,
 };
@@ -2380,8 +2381,15 @@ impl SkilledApp {
         let Some(RepositoryUpdatePrompt::Preview(plan)) = self.pending_update.take() else {
             return;
         };
+        // Rescanned here, not remembered from the preview. The plan states
+        // which installations this update affects, and the dialog has been
+        // waiting for a confirmation since it was built: a link created in that
+        // window belongs to neither the disclosed set nor the before-and-after
+        // comparison, and only this reading can refuse it while the repository
+        // has not moved.
+        self.rescan_installations();
         let before_inventory = self.inventory.clone();
-        let (apply_result, write_attempted) = apply_repository_update_attempt(&plan);
+        let (apply_result, write_attempted) = self.attempt_repository_update(&plan);
         let apply_error = apply_result.err().map(|error| error.to_string());
         // Asked before the first read that follows the write, because every
         // one of them reads objects and a disclosed hook has already had its
@@ -2454,6 +2462,35 @@ impl SkilledApp {
         self.reset_detail_scroll();
     }
 
+    /// Attempt a confirmed fast-forward, refusing first if the installations it
+    /// affects are no longer the ones its preview disclosed.
+    ///
+    /// The caller has just rescanned the roots, so `self.inventory` is the
+    /// reading this decision is made over — and the same reading the
+    /// before-and-after verification uses, which keeps the two from disagreeing
+    /// about what was installed when the write began.
+    ///
+    /// A refusal is reported as a guard refusal, `write_attempted` false: the
+    /// plan is a statement about installations as much as about commits, and
+    /// one that no longer holds is refused whole rather than applied and
+    /// explained afterwards.
+    fn attempt_repository_update(&self, plan: &RepositoryUpdatePlan) -> (crate::Result<()>, bool) {
+        let unchanged = self
+            .sources
+            .iter()
+            .find(|source| source.id() == plan.source_id())
+            .ok_or(crate::Error::AffectedInstallationsChangedAfterPreview)
+            .and_then(|source| affected_installations_unchanged(plan, source, &self.inventory));
+        match unchanged {
+            Ok(true) => apply_repository_update_attempt(plan),
+            Ok(false) => (
+                Err(crate::Error::AffectedInstallationsChangedAfterPreview),
+                false,
+            ),
+            Err(error) => (Err(error), false),
+        }
+    }
+
     pub(crate) fn plan_repository_update_for(
         &mut self,
         source_id: i64,
@@ -2519,8 +2556,11 @@ impl SkilledApp {
         &mut self,
         plan: &RepositoryUpdatePlan,
     ) -> RepositoryApplyOutcome {
+        // The typed command waits for its confirmation exactly as the dialog
+        // does, so the roots are read again here for the same reason.
+        self.rescan_installations();
         let before_inventory = self.inventory.clone();
-        let (apply_result, write_attempted) = apply_repository_update_attempt(plan);
+        let (apply_result, write_attempted) = self.attempt_repository_update(plan);
         let apply_error = apply_result.err().map(|error| error.to_string());
         self.sources = match self.store().and_then(Store::registered_sources) {
             Ok(sources) => sources,
