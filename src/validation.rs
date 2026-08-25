@@ -157,7 +157,28 @@ pub(crate) fn validate_portable_skill_with_budget(
         return Err(PortableValidationError::MissingSkillMd);
     }
     let content = read_bounded_skill_md(&canonical_skill_md, budget)?;
-    let (frontmatter, body) = split_frontmatter(&content)?;
+    let directory_name = skill_directory
+        .file_name()
+        .and_then(OsStr::to_str)
+        .ok_or(PortableValidationError::InvalidName)?;
+    validate_skill_document(directory_name, &content)
+}
+
+/// Decide a `SKILL.md` document that is held in memory rather than on disk,
+/// under the name the skill would be loaded as.
+///
+/// The repository update preview reads the target revision's blob out of Git
+/// and has to decide it exactly as the scanner will decide the file the
+/// fast-forward writes, so the front-matter rules live in one place and both
+/// callers ask this. The name is passed in because it is not always the
+/// document's neighbourhood that supplies it: the scanner validates through the
+/// installation path, so what is compared is the name the agent will load the
+/// skill under.
+pub(crate) fn validate_skill_document(
+    loaded_as: &str,
+    content: &str,
+) -> Result<ValidatedSkill, PortableValidationError> {
+    let (frontmatter, body) = split_frontmatter(content)?;
     let frontmatter: Frontmatter = serde_yaml_ng::from_str(frontmatter)?;
     let name = frontmatter
         .name
@@ -165,10 +186,7 @@ pub(crate) fn validate_portable_skill_with_budget(
     if !valid_skill_name(&name) {
         return Err(PortableValidationError::InvalidName);
     }
-    let directory_name = skill_directory
-        .file_name()
-        .and_then(OsStr::to_str)
-        .ok_or(PortableValidationError::InvalidName)?;
+    let directory_name = loaded_as;
     if name != directory_name {
         return Err(PortableValidationError::NameMismatch {
             name,
@@ -187,6 +205,37 @@ pub(crate) fn validate_portable_skill_with_budget(
         body: body.to_owned(),
         unknown_fields: frontmatter.unknown_fields,
     })
+}
+
+/// The same decision over raw bytes, applying the size and encoding limits the
+/// scanner applies to the file it reads.
+///
+/// A caller holding a Git blob rather than a file has no directory to walk and
+/// no budget to spend, but the verdict has to be the one the scan would reach
+/// over the same bytes — including the two refusals that come before the
+/// front-matter is looked at.
+pub(crate) fn validate_skill_document_bytes(
+    loaded_as: &str,
+    bytes: &[u8],
+) -> Result<ValidatedSkill, PortableValidationError> {
+    if bytes.len() > MAX_SKILL_MD_BYTES {
+        return Err(PortableValidationError::SkillMdTooLarge {
+            max_bytes: MAX_SKILL_MD_BYTES,
+        });
+    }
+    let content = std::str::from_utf8(bytes).map_err(|error| {
+        PortableValidationError::UnreadableSkillMd(io::Error::new(
+            io::ErrorKind::InvalidData,
+            error,
+        ))
+    })?;
+    validate_skill_document(loaded_as, content)
+}
+
+/// The largest `SKILL.md` any surface will inspect, so a caller reading one out
+/// of Git can bound its own read by the same figure.
+pub(crate) const fn max_skill_md_bytes() -> usize {
+    MAX_SKILL_MD_BYTES
 }
 
 pub(crate) fn valid_skill_name(name: &str) -> bool {

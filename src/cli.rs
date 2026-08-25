@@ -868,6 +868,19 @@ fn write_repository_update_plan(
     for name in &plan.affected().removed {
         writeln!(output, "    removed · {}", safe(name))?;
     }
+    // Stated as what the target revision is rather than as what this update
+    // does, because both are true and only the first is true of an
+    // installation that already fails to load. The reason is the finding the
+    // scan will raise afterwards, and verification holds the update to it.
+    for (installed, skill, reason) in &plan.affected().unloadable {
+        writeln!(
+            output,
+            "    does not load at the target revision · {} -> {}",
+            safe(installed),
+            safe(skill)
+        )?;
+        writeln!(output, "      reason · {}", safe(reason))?;
+    }
     for name in &plan.affected().added {
         writeln!(output, "    added upstream, not installed · {}", safe(name))?;
     }

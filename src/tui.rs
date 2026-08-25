@@ -3769,6 +3769,19 @@ fn update_plan_statement_lines(prompt: &RepositoryUpdatePrompt) -> Vec<Line<'sta
     for name in &plan.affected().removed {
         lines.push(Line::raw(format!("  removed · {}", terminal_safe(name))));
     }
+    // Stated as what the target revision is rather than as what this update
+    // does, because both are true and only the first is true of an
+    // installation that already fails to load. The reason is carried below it:
+    // it is the finding the scan will raise afterwards, and verification holds
+    // the update to that exact code.
+    for (installed, skill, reason) in &plan.affected().unloadable {
+        lines.push(Line::raw(format!(
+            "  does not load at the target revision · {} → {}",
+            terminal_safe(installed),
+            terminal_safe(skill)
+        )));
+        lines.push(Line::raw(format!("    reason · {}", terminal_safe(reason))));
+    }
     for name in &plan.affected().added {
         lines.push(Line::raw(format!(
             "  added upstream, not installed · {}",

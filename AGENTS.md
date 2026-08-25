@@ -336,8 +336,18 @@ signal needs both, because colour alone is not an acceptable cue.
   check. Both `Effect::CheckUpdates` and `Effect::PlanRepositoryUpdate` rescan
   the roots first, because a check and the preview that follows it decide the
   same installation-dependent findings and a link made while the application
-  stayed open would otherwise be in one and not the other. Whether the document
-  the target keeps is a *valid* skill is not read — `skilled-3o5` has that. A
+  stayed open would otherwise be in one and not the other. A document the target
+  revision keeps but no longer validates is read too: an installation whose
+  `SKILL.md` fails the portable core there is disclosed as not loading at the
+  target revision rather than as updated in place, under the name its own root
+  holds, because that is the name the scan compares the document's against. That
+  one is stated rather than blocked — upstream's broken front matter is
+  upstream's to fix, and refusing every later fast-forward would strand the
+  checkout — so the preview reads it and the cancellable check does not: a
+  disclosure cannot leave the check offering an update the preview then refuses,
+  which is the only reason the collision, submodule, and occupant findings are
+  decided twice. Verification holds the update to the finding code the preview
+  named, so a different breakage under the same name is still undisclosed. A
   rename names the installations it leaves without a target alongside the pair
   of skill names, because a link installed under a name of its own is not named
   by the pair and verification holds it to that outcome regardless.

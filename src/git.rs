@@ -610,6 +610,7 @@ enum UpdateOp {
     ChangedPaths(String, String),
     CommitSummaries(String, String),
     CatFile(String),
+    BlobContent(String),
     TreeEntryMode {
         revision: String,
         path: PathBuf,
@@ -647,7 +648,7 @@ impl UpdateOp {
             Self::MergeBase(_, _) => "merge-base",
             Self::AheadBehind(_, _) | Self::CommitSummaries(_, _) => "rev-list",
             Self::ChangedPaths(_, _) => "diff-tree",
-            Self::CatFile(_) => "cat-file",
+            Self::CatFile(_) | Self::BlobContent(_) => "cat-file",
             Self::TreeEntryMode { .. } => "ls-tree",
             Self::Status => "status",
             Self::Fetch { .. } => "fetch",
@@ -884,6 +885,13 @@ impl UpdateOp {
                     "-e".into(),
                     format!("{revision}^{{commit}}"),
                 ]
+            }
+            // Addressed by object name rather than `<revision>:<path>`, so a
+            // catalog or skill name can never be read as revision syntax. The
+            // listing that produced the object already established that the
+            // path names a regular file in that tree.
+            Self::BlobContent(object) => {
+                vec!["cat-file".into(), "blob".into(), object.clone()]
             }
             Self::TreeEntryMode { .. } | Self::PublishRef { .. } => {
                 unreachable!("tree and ref operations return above")
@@ -2768,6 +2776,16 @@ fn tree_entry_mode(
     revision: &str,
     path: &Path,
 ) -> Result<Option<Vec<u8>>> {
+    Ok(tree_entry(repository, revision, path)?.map(|(mode, _)| mode))
+}
+
+/// The mode and object name of the entry `path` names in the exact commit
+/// tree, if it names one.
+fn tree_entry(
+    repository: GitTarget<'_>,
+    revision: &str,
+    path: &Path,
+) -> Result<Option<(Vec<u8>, String)>> {
     let bytes = required(
         repository,
         UpdateOp::TreeEntryMode {
@@ -2776,16 +2794,25 @@ fn tree_entry_mode(
         },
     )?;
     // `<mode> SP <type> SP <object> TAB <name>`, NUL-terminated per record.
-    Ok(bytes
+    bytes
         .split(|byte| *byte == 0)
         .filter(|record| !record.is_empty())
-        .find_map(|record| {
-            record
+        .map(|record| {
+            let attributes = record
                 .split(|byte| *byte == b'\t')
                 .next()
-                .and_then(|attributes| attributes.split(|byte| *byte == b' ').next())
-                .map(<[u8]>::to_vec)
-        }))
+                .ok_or(Error::InvalidGitOutput)?;
+            let mut fields = attributes.split(|byte| *byte == b' ');
+            let mode = fields.next().ok_or(Error::InvalidGitOutput)?.to_vec();
+            let object = fields
+                .nth(1)
+                .and_then(|object| std::str::from_utf8(object).ok())
+                .ok_or(Error::InvalidGitOutput)?
+                .to_owned();
+            Ok((mode, object))
+        })
+        .next()
+        .transpose()
 }
 
 /// Whether `path` names a regular file — not a directory, and not a symbolic
@@ -2810,6 +2837,100 @@ pub fn tree_regular_file_exists(
     path: &Path,
 ) -> Result<bool> {
     Ok(tree_entry_mode(repository, revision, path)?.is_some_and(|mode| mode.starts_with(b"100")))
+}
+
+/// The bytes of the regular file `path` names in the exact commit tree, if it
+/// names one.
+///
+/// `None` is "no regular file there", the same answer
+/// [`tree_regular_file_exists`] gives as `false`; a directory, a symbolic link,
+/// and a submodule are all `None` for the reasons recorded there.
+///
+/// The read stops at `limit` bytes and truncates rather than failing, so a
+/// caller can hand in one byte more than it is willing to accept and tell a
+/// document that is too large from one that fits — the same shape the scanner's
+/// own bounded read of a `SKILL.md` has.
+///
+/// Stops is the operative word. The content is a blob the *repository* supplies
+/// and the explicit check reads this on its cancellable worker, so a reader
+/// that merely retained a bounded prefix would still have Git decompress and
+/// pipe a blob of any size the upstream cared to commit, uninterruptibly.
+/// `run_truncating` ends the process the moment the limit is reached instead,
+/// which bounds the work rather than only the memory.
+pub fn tree_regular_file_content(
+    repository: GitTarget<'_>,
+    revision: &str,
+    path: &Path,
+    limit: usize,
+) -> Result<Option<Vec<u8>>> {
+    let Some((mode, object)) = tree_entry(repository, revision, path)? else {
+        return Ok(None);
+    };
+    if !mode.starts_with(b"100") {
+        return Ok(None);
+    }
+    run_truncating(repository, &UpdateOp::BlobContent(object), limit).map(Some)
+}
+
+/// Run one Git process and keep at most `limit` bytes of its standard output,
+/// ending it as soon as that much has arrived.
+///
+/// A process cut short has no exit status worth consulting — it was killed —
+/// so the truncated prefix is the answer, and the caller is expected to have
+/// asked for one byte more than it can accept so that a full buffer is itself
+/// the "too large" verdict. A process that reaches its own end is held to its
+/// status as every other read is.
+fn run_truncating(repository: GitTarget<'_>, op: &UpdateOp, limit: usize) -> Result<Vec<u8>> {
+    let arguments = op.arguments();
+    let mut child = command(repository, op)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(Error::GitUnavailable)?;
+    let mut stdout = child.stdout.take().ok_or(Error::InvalidGitOutput)?;
+    let mut stderr = child.stderr.take().ok_or(Error::InvalidGitOutput)?;
+    // Drained on its own thread for the reason every other piped read here is:
+    // a full stderr pipe blocks the process this thread is reading from.
+    let stderr_reader = std::thread::spawn(move || read_bounded(&mut stderr, limit));
+    let mut retained = vec![0_u8; limit];
+    let mut filled = 0;
+    let mut failure = None;
+    while filled < limit {
+        match stdout.read(&mut retained[filled..]) {
+            Ok(0) => break,
+            Ok(read) => filled += read,
+            Err(error) => {
+                failure = Some(error);
+                break;
+            }
+        }
+    }
+    retained.truncate(filled);
+    let truncated = filled == limit;
+    if truncated || failure.is_some() {
+        let _ = child.kill();
+    }
+    drop(stdout);
+    let status = child.wait().map_err(Error::GitUnavailable)?;
+    let stderr = stderr_reader
+        .join()
+        .map_err(|_| io::Error::other("Git stderr reader panicked"))??;
+    if let Some(error) = failure {
+        return Err(Error::GitUnavailable(error));
+    }
+    if !truncated && !status.success() {
+        return Err(git_error(
+            repository,
+            &arguments,
+            &Output {
+                status,
+                stdout: retained,
+                stderr,
+            },
+        ));
+    }
+    Ok(retained)
 }
 
 /// Whether the exact commit tree holds anything at all at `path`.
