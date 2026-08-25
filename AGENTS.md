@@ -202,8 +202,19 @@ signal needs both, because colour alone is not an acceptable cue.
   executable Git runs for `status` and `fetch` alike, and `core.hooksPath` does
   not reach it — and the partial-clone refusal is re-asked before the preview's
   object reads and again in the apply guard, rather than remembered from the
-  check, so neither can make Git fetch lazily. Reads that follow the write are
-  not covered; `skilled-cbq` has that. The transport half of the claim is a
+  check, so neither can make Git fetch lazily. The reads that follow the write
+  are covered by that refusal too, asked once more at the boundary between the
+  fast-forward and the first read after it: the plan discloses that the merge
+  may run the checkout's hooks, a `post-merge` hook can configure a promisor
+  remote, and refreshing the registered source (`status` and `cat-file`) and
+  reading HEAD and the worktree for verification would then fetch. Only those
+  repository-dependent postconditions are withheld — the agent roots are always
+  scanned and the disclosed installations always compared, because walking a
+  filesystem cannot make Git fetch anything. The withheld evidence names which
+  of the three cases it was: a marker observed, an inspection that could not
+  answer, or a write the guard refused before it ran. A report that established
+  no repository postcondition is incomplete, which no surface may reduce to a
+  pass, the exit status included. The transport half of the claim is a
   refusal rather than a suppression: a checkout that names a program for Git
   to run while fetching — `core.sshCommand`, `core.askPass`, `core.gitProxy`,
   `core.alternateRefsCommand`, a credential helper,

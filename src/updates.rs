@@ -2374,9 +2374,101 @@ pub fn apply_repository_update(plan: &RepositoryUpdatePlan) -> Result<()> {
     git::fast_forward((&checkout).into(), &plan.target_revision)
 }
 
-/// Apply while reporting whether Git's write operation was reached. Callers
-/// use the distinction to rescan after every refusal without turning a
-/// pre-write guard into a failed postcondition.
+/// Whether the reads that follow a fast-forward may touch the repository.
+///
+/// The plan discloses that the merge may run the checkout's own hooks, and
+/// configuring a promisor remote is one of the things a `post-merge` hook can
+/// do. Everything Skilled reads next touches objects — refreshing the
+/// registered source runs `status` and `cat-file`, and
+/// [`verify_repository_update`] reads HEAD and the worktree — so a marker that
+/// arrived during the write would let those reads fetch over the network,
+/// which is exactly the access an explicit check exists to bound
+/// (`skilled-cbq`).
+///
+/// Scanning the agent roots is not one of those reads: it walks the
+/// filesystem and cannot make Git fetch anything, so it always runs and the
+/// installations the plan disclosed are always compared. Only the
+/// repository-dependent postconditions are withheld, and the reason names
+/// which of the three cases it was — a marker actually observed, an
+/// inspection that could not answer, or a write the guard refused before it
+/// ever ran.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PostWriteRepositoryReads {
+    /// Nothing stands between the reads and the repository.
+    Permitted,
+    /// The repository was not read, for the stated reason.
+    Withheld(String),
+}
+
+impl PostWriteRepositoryReads {
+    /// Decide once, at the boundary between the write and the first read after
+    /// it.
+    ///
+    /// Carried from there rather than re-derived: two independent readings
+    /// could disagree, and the reason the report states has to be the reason
+    /// the reads were actually withheld. Reading the promisor markers is a
+    /// configuration read, which no promisor remote can turn into a fetch.
+    ///
+    /// Asked whether or not the write was reached. A refused fast-forward
+    /// leaves the repository unwritten, but a marker a third party wrote
+    /// between the preview and the guard is standing either way, and the reads
+    /// that would follow are the same reads.
+    ///
+    /// One observation, and a marker written after it is not covered: a hook
+    /// can leave a background child that configures a promisor remote once
+    /// this has answered. That residual is the same check-to-spawn window the
+    /// re-asked pre-write guards carry, narrowed the same way — asked as late
+    /// as anything can be asked and still be asked before the reads.
+    /// [`git::UpdateOp::environment`] backstops it for every read that goes
+    /// through the Git boundary, which sets `GIT_NO_LAZY_FETCH` on all of them
+    /// but the merge; the source refresh in `source.rs` runs its own Git
+    /// commands and does not, which is the part this gate is the only cover
+    /// for.
+    pub fn decide(path: &Path, write_attempted: bool) -> Self {
+        match git::repository_is_partial_clone(path.into()) {
+            Ok(false) => Self::Permitted,
+            Ok(true) if write_attempted => Self::Withheld(
+                "the repository configures a promisor remote after the fast-forward, so its \
+                 post-update state was not read: an object read there could fetch over the network"
+                    .to_owned(),
+            ),
+            Ok(true) => Self::Withheld(
+                "the fast-forward was refused before writing and the repository configures a \
+                 promisor remote, so its state was not read: an object read there could fetch \
+                 over the network"
+                    .to_owned(),
+            ),
+            Err(error) => Self::Withheld(format!(
+                "whether the repository configures a promisor remote could not be determined, so \
+                 its post-update state was not read: {error}"
+            )),
+        }
+    }
+
+    /// The stated reason, for a caller deciding whether to read the checkout.
+    pub fn withheld_reason(&self) -> Option<&str> {
+        match self {
+            Self::Permitted => None,
+            Self::Withheld(reason) => Some(reason),
+        }
+    }
+}
+
+/// The outcome of one guarded fast-forward attempt.
+///
+/// `write_attempted` reports whether Git's write operation was reached, so
+/// callers rescan after every refusal without turning a pre-write guard into a
+/// failed postcondition. `reads` is the gate every later read of the checkout
+/// passes through, decided here because here is the only place that sits
+/// between the write and the first read after it.
+pub(crate) struct RepositoryApplyAttempt {
+    pub(crate) result: Result<()>,
+    pub(crate) write_attempted: bool,
+    pub(crate) reads: PostWriteRepositoryReads,
+}
+
+/// Apply while reporting whether Git's write operation was reached, and
+/// whether the checkout may be read afterwards.
 ///
 /// The guard and the write are two Git invocations, and `merge --ff-only`
 /// takes no expected-current-revision to condition its write on, so another
@@ -2385,13 +2477,20 @@ pub fn apply_repository_update(plan: &RepositoryUpdatePlan) -> Result<()> {
 /// the previewed object. Verification re-reads the result, but the window is
 /// not closed; it is the update counterpart of `apply_install`'s pathname
 /// window and is tracked as `skilled-8tr`.
-pub(crate) fn apply_repository_update_attempt(plan: &RepositoryUpdatePlan) -> (Result<()>, bool) {
-    match validate_repository_update(plan) {
+pub(crate) fn apply_repository_update_attempt(
+    plan: &RepositoryUpdatePlan,
+) -> RepositoryApplyAttempt {
+    let (result, write_attempted) = match validate_repository_update(plan) {
         Ok(checkout) => (
             git::fast_forward((&checkout).into(), &plan.target_revision),
             true,
         ),
         Err(error) => (Err(error), false),
+    };
+    RepositoryApplyAttempt {
+        result,
+        write_attempted,
+        reads: PostWriteRepositoryReads::decide(&plan.path, write_attempted),
     }
 }
 
@@ -2507,13 +2606,21 @@ fn checkout_is_the_planned_repository(
     Ok(())
 }
 
-pub fn verify_repository_update(
+/// The half of verification that reads the repository itself.
+///
+/// Withheld reads leave every one of these postconditions unestablished, which
+/// is a reason to say so rather than a reason to guess: nothing here has an
+/// answer that does not come from reading objects at the path.
+fn verify_repository_state(
     plan: &RepositoryUpdatePlan,
-    before: &InventorySnapshot,
-    after: &InventorySnapshot,
-) -> RepositoryVerifyReport {
-    let mut failures = Vec::new();
-    let mut withheld = Vec::new();
+    reads: &PostWriteRepositoryReads,
+    failures: &mut Vec<String>,
+    withheld: &mut Vec<String>,
+) {
+    if let Some(reason) = reads.withheld_reason() {
+        withheld.push(reason.to_owned());
+        return;
+    }
     // Establish what is standing at the path before believing anything read
     // through it. The guards and the write are separate processes over a
     // pathname, so a checkout replaced in between would answer every question
@@ -2559,6 +2666,26 @@ pub fn verify_repository_update(
             "the updated repository could not be identified, so its state was not checked: {error}"
         )),
     }
+}
+
+/// Check a fast-forward against the plan that was confirmed.
+///
+/// `reads` is the gate [`apply_repository_update_attempt`] decided between the
+/// write and the first read after it. When it is withheld, the repository is
+/// not read at all and its postconditions are recorded as unestablished with
+/// the reason stated — the report is then incomplete, which no surface may
+/// reduce to a pass. The installation comparison below it runs regardless:
+/// scanning agent roots walks the filesystem and cannot make Git fetch
+/// anything, so withholding it would give up evidence for nothing.
+pub fn verify_repository_update(
+    plan: &RepositoryUpdatePlan,
+    before: &InventorySnapshot,
+    after: &InventorySnapshot,
+    reads: &PostWriteRepositoryReads,
+) -> RepositoryVerifyReport {
+    let mut failures = Vec::new();
+    let mut withheld = Vec::new();
+    verify_repository_state(plan, reads, &mut failures, &mut withheld);
 
     let inventory_complete = |snapshot: &InventorySnapshot| {
         snapshot.counts_are_complete() && snapshot.registry_is_complete()

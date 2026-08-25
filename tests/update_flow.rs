@@ -7,9 +7,9 @@ use ratatui::{Terminal, backend::TestBackend};
 use skilled::{
     Action, AppEnvironment, Effect, SkilledApp, tui,
     updates::{
-        RepositoryUpdatePrompt, RepositoryUpdateVerdict, apply_repository_update,
-        classify_repository_update, plan_repository_update, probe_repository_update,
-        probe_repository_update_against, verify_repository_update,
+        PostWriteRepositoryReads, RepositoryUpdatePrompt, RepositoryUpdateVerdict,
+        apply_repository_update, classify_repository_update, plan_repository_update,
+        probe_repository_update, probe_repository_update_against, verify_repository_update,
     },
 };
 
@@ -881,7 +881,12 @@ fn deleting_one_file_inside_an_installed_skill_is_an_update_not_a_removal() {
         .app
         .perform_effects(&[Effect::ScanInstallations])
         .expect("scan after update");
-    let report = verify_repository_update(&plan, &before, fixture.app.inventory());
+    let report = verify_repository_update(
+        &plan,
+        &before,
+        fixture.app.inventory(),
+        &PostWriteRepositoryReads::Permitted,
+    );
     assert!(report.is_verified(), "{:?}", report.failures());
     assert!(report.is_complete(), "{:?}", report.withheld());
 }
@@ -970,7 +975,12 @@ fn deleting_an_uninstalled_sibling_edition_does_not_disclose_or_verify_a_removal
     apply_repository_update(&plan).expect("fast-forward");
     app.perform_effects(&[Effect::ScanInstallations])
         .expect("scan after update");
-    let report = verify_repository_update(&plan, &before, app.inventory());
+    let report = verify_repository_update(
+        &plan,
+        &before,
+        app.inventory(),
+        &PostWriteRepositoryReads::Permitted,
+    );
     assert!(report.is_verified(), "{:?}", report.failures());
     assert!(report.is_complete(), "{:?}", report.withheld());
 }
@@ -1215,7 +1225,12 @@ fn an_undisclosed_post_merge_health_regression_fails_verification() {
         .app
         .perform_effects(&[Effect::ScanInstallations])
         .expect("scan after update");
-    let report = verify_repository_update(&plan, &before, fixture.app.inventory());
+    let report = verify_repository_update(
+        &plan,
+        &before,
+        fixture.app.inventory(),
+        &PostWriteRepositoryReads::Permitted,
+    );
 
     assert!(!report.is_verified());
     assert!(report.is_complete());
@@ -1274,7 +1289,12 @@ fn an_undisclosed_installation_created_after_the_merge_fails_verification() {
         .app
         .perform_effects(&[Effect::ScanInstallations])
         .expect("scan after update");
-    let report = verify_repository_update(&plan, &before, fixture.app.inventory());
+    let report = verify_repository_update(
+        &plan,
+        &before,
+        fixture.app.inventory(),
+        &PostWriteRepositoryReads::Permitted,
+    );
 
     assert!(!report.is_verified());
     assert!(report.is_complete());
@@ -1312,7 +1332,12 @@ fn a_post_merge_hook_that_dirties_an_unrelated_tracked_file_fails_verification()
     std::fs::set_permissions(&hook, permissions).expect("executable hook");
 
     apply_repository_update(&plan).expect("fast-forward");
-    let report = verify_repository_update(&plan, fixture.app.inventory(), fixture.app.inventory());
+    let report = verify_repository_update(
+        &plan,
+        fixture.app.inventory(),
+        fixture.app.inventory(),
+        &PostWriteRepositoryReads::Permitted,
+    );
 
     assert!(!report.is_verified());
     assert!(
@@ -1367,7 +1392,12 @@ fn a_hook_regression_to_an_unmanaged_installation_fails_verification() {
         .app
         .perform_effects(&[Effect::ScanInstallations])
         .expect("scan after update");
-    let report = verify_repository_update(&plan, &before, fixture.app.inventory());
+    let report = verify_repository_update(
+        &plan,
+        &before,
+        fixture.app.inventory(),
+        &PostWriteRepositoryReads::Permitted,
+    );
 
     assert!(!report.is_verified());
     assert!(report.failures().iter().any(|failure| {
@@ -1412,7 +1442,12 @@ fn a_hook_created_broken_installation_fails_verification() {
         .app
         .perform_effects(&[Effect::ScanInstallations])
         .expect("scan after update");
-    let report = verify_repository_update(&plan, &before, fixture.app.inventory());
+    let report = verify_repository_update(
+        &plan,
+        &before,
+        fixture.app.inventory(),
+        &PostWriteRepositoryReads::Permitted,
+    );
 
     assert!(!report.is_verified());
     assert!(report.failures().iter().any(|failure| {
@@ -1431,7 +1466,12 @@ fn verification_rejects_the_target_revision_on_another_branch() {
     apply_repository_update(&plan).expect("fast-forward");
     git(&fixture.clone, &["switch", "-c", "other"]);
 
-    let report = verify_repository_update(&plan, fixture.app.inventory(), fixture.app.inventory());
+    let report = verify_repository_update(
+        &plan,
+        fixture.app.inventory(),
+        fixture.app.inventory(),
+        &PostWriteRepositoryReads::Permitted,
+    );
 
     assert!(!report.is_verified());
     assert!(
@@ -3639,7 +3679,12 @@ fn a_hook_that_substitutes_a_different_dangling_link_fails_verification() {
         .app
         .perform_effects(&[Effect::ScanInstallations])
         .expect("scan after update");
-    let report = verify_repository_update(&plan, &before, fixture.app.inventory());
+    let report = verify_repository_update(
+        &plan,
+        &before,
+        fixture.app.inventory(),
+        &PostWriteRepositoryReads::Permitted,
+    );
 
     assert!(!report.is_verified(), "{:?}", report.failures());
     assert!(
@@ -3703,7 +3748,12 @@ fn a_hook_that_retargets_an_updated_installation_fails_verification() {
         .app
         .perform_effects(&[Effect::ScanInstallations])
         .expect("scan after update");
-    let report = verify_repository_update(&plan, &before, fixture.app.inventory());
+    let report = verify_repository_update(
+        &plan,
+        &before,
+        fixture.app.inventory(),
+        &PostWriteRepositoryReads::Permitted,
+    );
 
     assert!(!report.is_verified(), "{:?}", report.failures());
     assert!(
@@ -3826,7 +3876,12 @@ fn an_installation_named_apart_from_its_skill_is_matched_by_what_it_resolves_to(
         .app
         .perform_effects(&[Effect::ScanInstallations])
         .expect("scan after update");
-    let report = verify_repository_update(&plan, &before, fixture.app.inventory());
+    let report = verify_repository_update(
+        &plan,
+        &before,
+        fixture.app.inventory(),
+        &PostWriteRepositoryReads::Permitted,
+    );
     assert!(report.is_verified(), "{:?}", report.failures());
     assert!(report.is_complete(), "{:?}", report.withheld());
 }
@@ -4383,4 +4438,361 @@ fn the_plan_discloses_the_signature_program_the_fast_forward_may_run() {
         "{}",
         plan.hooks_disclosure()
     );
+}
+
+/// Install an executable `post-merge` hook in the fixture checkout.
+fn write_post_merge_hook(fixture: &Fixture, script: &str) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let hooks = fixture.clone.join(".git/hooks");
+    std::fs::create_dir_all(&hooks).expect("hooks directory");
+    let hook = hooks.join("post-merge");
+    std::fs::write(&hook, script).expect("post-merge hook");
+    let mut permissions = std::fs::metadata(&hook)
+        .expect("hook metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&hook, permissions).expect("executable hook");
+}
+
+/// A hook script that turns the checkout into a partial clone.
+const PROMISOR_HOOK: &str = "#!/bin/sh\ngit config core.repositoryformatversion 1\n\
+                             git config extensions.partialClone origin\n";
+
+/// The plan discloses that the fast-forward may run the checkout's hooks, and
+/// configuring a promisor remote is one of the things a `post-merge` hook can
+/// do. Everything Skilled reads next touches objects — refreshing the
+/// registered source runs `status` and `cat-file`, verification reads HEAD and
+/// the worktree — so a marker that appeared during the write would let those
+/// reads fetch over the network, outside the one step entitled to it.
+#[test]
+fn a_post_merge_promisor_marker_withholds_the_repository_postconditions() {
+    let mut fixture = fixture();
+    let root = fixture._temporary.path().join("home/.claude/skills");
+    std::fs::create_dir_all(&root).expect("agent root");
+    std::os::unix::fs::symlink(fixture.clone.join("skills/demo"), root.join("demo"))
+        .expect("installed skill");
+    let before_head = git(&fixture.clone, &["rev-parse", "HEAD"]);
+    let target = push_update(&fixture, "skills/demo/new.txt");
+    fixture
+        .app
+        .perform_effects(&[Effect::CheckUpdates])
+        .expect("start check");
+    finish_update_check(&mut fixture.app);
+    fixture
+        .app
+        .perform_effects(&[Effect::PlanRepositoryUpdate])
+        .expect("plan update");
+    write_post_merge_hook(&fixture, PROMISOR_HOOK);
+
+    fixture
+        .app
+        .perform_effects(&[Effect::ApplyRepositoryUpdate])
+        .expect("apply update");
+
+    assert_eq!(git(&fixture.clone, &["rev-parse", "HEAD"]), target);
+    let Some(RepositoryUpdatePrompt::Report { verification, .. }) = fixture.app.pending_update()
+    else {
+        panic!("an applied update reports");
+    };
+    assert!(verification.is_verified(), "{:?}", verification.failures());
+    assert!(!verification.is_complete());
+    assert!(
+        verification
+            .withheld()
+            .iter()
+            .any(|withheld| withheld.contains("promisor remote")),
+        "{:?}",
+        verification.withheld()
+    );
+    // Nothing may claim to have read the repository afterwards.
+    assert!(
+        !verification
+            .withheld()
+            .iter()
+            .any(|withheld| withheld.contains("HEAD")),
+        "{:?}",
+        verification.withheld()
+    );
+    // The registered source was not re-inspected either: that refresh runs
+    // `status` and `cat-file` over the same objects.
+    assert_eq!(fixture.app.sources()[0].head(), before_head);
+
+    // The record still reaches Doctor on the next launch: a verification that
+    // established no repository postcondition is not superseded by the state
+    // it could not read.
+    let reopened = SkilledApp::open(AppEnvironment::new(
+        fixture._temporary.path().join("home"),
+        fixture._temporary.path().join("data"),
+        "",
+    ))
+    .expect("reopen app");
+    let check = &reopened.update_checks()[0];
+    assert!(!check.superseded_by(&reopened.sources()[0]));
+    assert!(
+        check
+            .findings()
+            .iter()
+            .any(|finding| finding.code() == "update.verification_incomplete"),
+        "{:?}",
+        check.findings()
+    );
+}
+
+/// Withholding the repository reads withholds nothing else. Scanning the agent
+/// roots cannot make Git fetch anything, so the installations the plan
+/// disclosed are still compared and an undisclosed regression is still a
+/// failure rather than an unexamined absence.
+#[test]
+fn withheld_repository_reads_still_compare_the_installations() {
+    let mut fixture = fixture();
+    let root = fixture._temporary.path().join("home/.claude/skills");
+    std::fs::create_dir_all(&root).expect("agent root");
+    for name in ["demo", "other"] {
+        std::os::unix::fs::symlink(fixture.clone.join("skills").join(name), root.join(name))
+            .expect("installed skill");
+    }
+    push_update(&fixture, "skills/demo/new.txt");
+    fixture
+        .app
+        .perform_effects(&[Effect::CheckUpdates])
+        .expect("start check");
+    finish_update_check(&mut fixture.app);
+    fixture
+        .app
+        .perform_effects(&[Effect::PlanRepositoryUpdate])
+        .expect("plan update");
+    write_post_merge_hook(&fixture, &format!("{PROMISOR_HOOK}rm -rf skills/other\n"));
+
+    fixture
+        .app
+        .perform_effects(&[Effect::ApplyRepositoryUpdate])
+        .expect("apply update");
+
+    let Some(RepositoryUpdatePrompt::Report { verification, .. }) = fixture.app.pending_update()
+    else {
+        panic!("an applied update reports");
+    };
+    assert!(!verification.is_verified());
+    assert!(!verification.is_complete());
+    assert!(
+        verification
+            .failures()
+            .iter()
+            .any(|failure| failure.contains("other")),
+        "{:?}",
+        verification.failures()
+    );
+    assert!(
+        verification
+            .withheld()
+            .iter()
+            .any(|withheld| withheld.contains("promisor remote")),
+        "{:?}",
+        verification.withheld()
+    );
+
+    // Failed and incomplete are two answers, not one. The durable record keeps
+    // both, or Doctor would report a disagreement while losing the fact that
+    // the repository itself was never read.
+    let reopened = SkilledApp::open(AppEnvironment::new(
+        fixture._temporary.path().join("home"),
+        fixture._temporary.path().join("data"),
+        "",
+    ))
+    .expect("reopen app");
+    let codes = reopened.update_checks()[0]
+        .findings()
+        .iter()
+        .map(|finding| finding.code())
+        .collect::<Vec<_>>();
+    assert!(codes.contains(&"update.verification_failed"), "{codes:?}");
+    assert!(
+        codes.contains(&"update.verification_incomplete"),
+        "{codes:?}"
+    );
+}
+
+/// Withholding the Git reads must not withhold the worktree walk behind them.
+/// A disclosed restoration is verified by resolving the link into the skill the
+/// plan named, and that resolution reads the catalog as it stands on disk — a
+/// filesystem walk no promisor remote can turn into a fetch. Left at the
+/// pre-update candidate list, the revived link would resolve to nothing and a
+/// restoration that happened exactly as promised would be reported as a
+/// critical failure.
+#[test]
+fn withheld_repository_reads_still_resolve_a_revived_installation() {
+    let mut fixture = fixture();
+    let root = fixture._temporary.path().join("home/.claude/skills");
+    std::fs::create_dir_all(&root).expect("agent root");
+    std::os::unix::fs::symlink(fixture.clone.join("skills/added"), root.join("added"))
+        .expect("dangling link");
+    std::fs::create_dir_all(fixture.seed.join("skills/added")).expect("added skill directory");
+    std::fs::write(
+        fixture.seed.join("skills/added/SKILL.md"),
+        "---\nname: added\ndescription: fixture\n---\n",
+    )
+    .expect("added skill");
+    commit(&fixture.seed, "add the skill the link points at");
+    git(&fixture.seed, &["push"]);
+    fixture
+        .app
+        .perform_effects(&[Effect::CheckUpdates])
+        .expect("start check");
+    finish_update_check(&mut fixture.app);
+    fixture
+        .app
+        .perform_effects(&[Effect::PlanRepositoryUpdate])
+        .expect("plan update");
+    let Some(RepositoryUpdatePrompt::Preview(plan)) = fixture.app.pending_update().cloned() else {
+        panic!("expected a preview: {:?}", fixture.app.pending_update());
+    };
+    assert_eq!(
+        plan.affected().restored,
+        vec![("added".to_owned(), "added".to_owned())]
+    );
+    write_post_merge_hook(&fixture, PROMISOR_HOOK);
+
+    fixture
+        .app
+        .perform_effects(&[Effect::ApplyRepositoryUpdate])
+        .expect("apply update");
+
+    let Some(RepositoryUpdatePrompt::Report { verification, .. }) = fixture.app.pending_update()
+    else {
+        panic!("an applied update reports");
+    };
+    assert!(verification.is_verified(), "{:?}", verification.failures());
+    assert!(!verification.is_complete());
+    assert!(
+        verification
+            .withheld()
+            .iter()
+            .any(|withheld| withheld.contains("promisor remote")),
+        "{:?}",
+        verification.withheld()
+    );
+}
+
+/// The withheld reads are withheld from one checkout, not from the registry.
+/// Every other registered source is a different repository, which this update's
+/// hooks never touched — waiving its head-containment gate would let a checkout
+/// replaced anywhere else be adopted on the strength of an unrelated update.
+#[test]
+fn withholding_one_checkouts_reads_still_inspects_the_other_sources() {
+    let mut fixture = fixture();
+    let second = fixture._temporary.path().join("second");
+    Command::new("git")
+        .args(["clone", "--branch", "main"])
+        .arg(&fixture.remote)
+        .arg(&second)
+        .output()
+        .expect("second clone");
+    let preview = fixture
+        .app
+        .preview_source(&second)
+        .expect("preview second clone");
+    fixture
+        .app
+        .confirm_source(preview)
+        .expect("register second clone");
+    let registered_head = git(&second, &["rev-parse", "HEAD"]);
+
+    push_update(&fixture, "skills/demo/new.txt");
+    fixture
+        .app
+        .perform_effects(&[Effect::CheckUpdates])
+        .expect("start check");
+    finish_update_check(&mut fixture.app);
+    fixture
+        .app
+        .perform_effects(&[Effect::PlanRepositoryUpdate])
+        .expect("plan update");
+    write_post_merge_hook(&fixture, PROMISOR_HOOK);
+    // A change to the unrelated checkout, which the reload must still see.
+    std::fs::write(second.join("local.txt"), "local\n").expect("local file");
+    commit(&second, "unrelated local commit");
+    let moved_head = git(&second, &["rev-parse", "HEAD"]);
+    assert_ne!(moved_head, registered_head);
+
+    fixture
+        .app
+        .perform_effects(&[Effect::ApplyRepositoryUpdate])
+        .expect("apply update");
+
+    let canonical_second = second.canonicalize().expect("canonical second clone");
+    let reloaded = fixture
+        .app
+        .sources()
+        .iter()
+        .find(|source| source.git_top_level() == canonical_second)
+        .expect("the second source is still registered");
+    assert_eq!(reloaded.head(), moved_head);
+}
+
+/// A marker that arrives before the guard refuses is not the same observation
+/// as one a hook wrote afterwards, and the withheld evidence says which it was.
+#[test]
+fn a_promisor_marker_before_a_refused_write_withholds_and_says_so() {
+    let mut fixture = fixture();
+    push_update(&fixture, "skills/demo/new.txt");
+    fixture
+        .app
+        .perform_effects(&[Effect::CheckUpdates])
+        .expect("start check");
+    finish_update_check(&mut fixture.app);
+    fixture
+        .app
+        .perform_effects(&[Effect::PlanRepositoryUpdate])
+        .expect("plan update");
+    let before_head = git(&fixture.clone, &["rev-parse", "HEAD"]);
+    git(
+        &fixture.clone,
+        &["config", "core.repositoryformatversion", "1"],
+    );
+    git(
+        &fixture.clone,
+        &["config", "extensions.partialClone", "origin"],
+    );
+
+    fixture
+        .app
+        .perform_effects(&[Effect::ApplyRepositoryUpdate])
+        .expect("observe refused update");
+
+    assert_eq!(git(&fixture.clone, &["rev-parse", "HEAD"]), before_head);
+    let Some(RepositoryUpdatePrompt::Report {
+        verification,
+        apply_error: Some(_),
+        write_attempted: false,
+        ..
+    }) = fixture.app.pending_update()
+    else {
+        panic!("a refused update reports its guard refusal");
+    };
+    assert!(!verification.is_complete());
+    assert!(
+        verification
+            .withheld()
+            .iter()
+            .any(|withheld| withheld.contains("promisor remote") && withheld.contains("before")),
+        "{:?}",
+        verification.withheld()
+    );
+}
+
+/// Not being able to tell is its own answer. A repository whose promisor
+/// configuration cannot be read is withheld for that reason rather than
+/// reported as a marker nobody observed.
+#[test]
+fn an_unreadable_promisor_configuration_is_withheld_as_an_inspection_failure() {
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let absent = temporary.path().join("absent");
+
+    let reads = PostWriteRepositoryReads::decide(&absent, true);
+
+    let PostWriteRepositoryReads::Withheld(reason) = &reads else {
+        panic!("an unreadable repository withholds its reads");
+    };
+    assert!(reason.contains("could not be determined"), "{reason}");
 }

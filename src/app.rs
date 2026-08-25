@@ -2381,15 +2381,27 @@ impl SkilledApp {
             return;
         };
         let before_inventory = self.inventory.clone();
-        let (apply_result, write_attempted) = apply_repository_update_attempt(&plan);
-        let apply_error = apply_result.err().map(|error| error.to_string());
-        // Asked before the first read that follows the write, because every
-        // one of them reads objects and a disclosed hook has already had its
-        // turn. Refreshing the registered source runs `status` and
-        // `cat-file`; the rescan resolves links into the checkout; and
-        // verification reads HEAD. None of them may run against a repository
-        // that has become able to fetch on their behalf.
-        self.sources = match self.store().and_then(Store::registered_sources) {
+        let attempt = apply_repository_update_attempt(&plan);
+        let (write_attempted, reads) = (attempt.write_attempted, attempt.reads);
+        let apply_error = attempt.result.err().map(|error| error.to_string());
+        // Decided before the first read that follows the write, because every
+        // read of the checkout touches objects and a disclosed hook has
+        // already had its turn. Refreshing the registered source runs `status`
+        // and `cat-file`, and verification reads HEAD and the worktree —
+        // neither may run against a repository that has become able to fetch
+        // on their behalf, so a withheld gate takes the stored inspection as
+        // recorded. The catalogs are still walked either way: that is
+        // filesystem work, and the resolution the installation comparison below
+        // depends on reads the skill candidates as they now stand. Only this
+        // plan's own checkout is left uninspected: every other registered
+        // source is a repository this update never touched.
+        self.sources = match self.store().and_then(|store| {
+            if reads.withheld_reason().is_none() {
+                store.registered_sources()
+            } else {
+                store.registered_sources_leaving_uninspected(plan.path())
+            }
+        }) {
             Ok(sources) => sources,
             Err(error) => {
                 self.pending_update = Some(RepositoryUpdatePrompt::StateUnavailable {
@@ -2401,8 +2413,12 @@ impl SkilledApp {
                 return;
             }
         };
+        // Always: the scan walks the agent roots and cannot make Git fetch
+        // anything, so the installations the plan disclosed are compared
+        // whether or not the repository itself could be read.
         self.rescan_installations();
-        let verification = verify_repository_update(&plan, &before_inventory, &self.inventory);
+        let verification =
+            verify_repository_update(&plan, &before_inventory, &self.inventory, &reads);
         // A generation of its own, always. This record is a later observation
         // than the check it followed, and reusing that check's generation
         // would leave it losing the conditional upsert to anything another
@@ -2520,9 +2536,20 @@ impl SkilledApp {
         plan: &RepositoryUpdatePlan,
     ) -> RepositoryApplyOutcome {
         let before_inventory = self.inventory.clone();
-        let (apply_result, write_attempted) = apply_repository_update_attempt(plan);
-        let apply_error = apply_result.err().map(|error| error.to_string());
-        self.sources = match self.store().and_then(Store::registered_sources) {
+        let attempt = apply_repository_update_attempt(plan);
+        let (write_attempted, reads) = (attempt.write_attempted, attempt.reads);
+        let apply_error = attempt.result.err().map(|error| error.to_string());
+        // The same gate the screens take, for the same reason: the checkout
+        // inspection runs `status` and `cat-file` over the objects, while the
+        // catalog walk it also does is filesystem work that always runs, and
+        // only this plan's own checkout is left uninspected.
+        self.sources = match self.store().and_then(|store| {
+            if reads.withheld_reason().is_none() {
+                store.registered_sources()
+            } else {
+                store.registered_sources_leaving_uninspected(plan.path())
+            }
+        }) {
             Ok(sources) => sources,
             Err(error) => {
                 return RepositoryApplyOutcome {
@@ -2536,7 +2563,8 @@ impl SkilledApp {
             }
         };
         self.rescan_installations();
-        let verification = verify_repository_update(plan, &before_inventory, &self.inventory);
+        let verification =
+            verify_repository_update(plan, &before_inventory, &self.inventory, &reads);
         // The same fresh generation the screens take, and the same refusal to
         // cache under one no other process can be held off from reusing.
         let bookkeeping_error = match self.reserve_generations(1) {
@@ -2579,24 +2607,29 @@ impl SkilledApp {
         verification: &crate::updates::RepositoryVerifyReport,
         checked_at: i64,
     ) -> CachedUpdateCheck {
-        let (verdict, detail) = if !verification.is_verified() {
-            (
-                RepositoryUpdateVerdict::Blocked,
-                format!(
-                    "update.verification_failed|{}",
-                    verification.failures().join("; ")
-                ),
-            )
-        } else if !verification.is_complete() {
-            (
-                RepositoryUpdateVerdict::Blocked,
-                format!(
-                    "update.verification_incomplete|{}",
-                    verification.withheld().join("; ")
-                ),
-            )
-        } else {
+        // Failed and incomplete are two answers, not a ranking. A hook can
+        // damage an installation and leave the repository unreadable in the
+        // same breath, and recording only the disagreement would take the
+        // reason nothing was established out of Doctor with it.
+        let mut findings = Vec::new();
+        if !verification.is_verified() {
+            findings.push(Finding::new(
+                "update.verification_failed",
+                FindingSeverity::Critical,
+                verification.failures().join("; "),
+            ));
+        }
+        if !verification.is_complete() {
+            findings.push(Finding::new(
+                "update.verification_incomplete",
+                FindingSeverity::Warning,
+                verification.withheld().join("; "),
+            ));
+        }
+        let (verdict, detail) = if findings.is_empty() {
             (RepositoryUpdateVerdict::UpToDate, String::new())
+        } else {
+            (RepositoryUpdateVerdict::Blocked, encode_findings(&findings))
         };
         self.repository_result_check(plan, checked_at, verdict, detail)
     }
@@ -2619,7 +2652,10 @@ impl SkilledApp {
                 FindingSeverity::Critical,
                 verification.failures().join("; "),
             ));
-        } else if !verification.is_complete() {
+        }
+        // Not an `else`: the same write can disagree with the plan and leave
+        // the repository unread, and both are evidence Doctor keeps.
+        if !verification.is_complete() {
             findings.push(Finding::new(
                 "update.verification_incomplete",
                 FindingSeverity::Warning,
