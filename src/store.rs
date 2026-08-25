@@ -1619,8 +1619,8 @@ static PROBE_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU6
 /// The capability is proven by exercising it, because permission bits are not
 /// the only thing that denies a creation — a read-only mount, an ACL, or a
 /// filesystem quota does too, and only the attempt covers all of them. The
-/// probe is a create-new-and-remove of a uniquely named file of Skilled's own
-/// in the directory beside the database. Two properties make that acceptable
+/// probe creates a uniquely named file of Skilled's own in the directory
+/// beside the database, fills a page of it durably, and removes it again. Two properties make that acceptable
 /// for a startup that may turn out to be read-only: the database, its journal,
 /// and every sidecar SQLite owns are untouched either way, and in the case
 /// this exists to detect the creation *fails*, so a store the user
@@ -1664,13 +1664,28 @@ fn journal_creation_permitted(data_dir: &Path) -> bool {
     options.write(true).create_new(true);
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-    match options.open(&probe) {
-        Ok(file) => {
-            drop(file);
-            fs::remove_file(&probe).is_ok()
+    let written = match options.open(&probe) {
+        Ok(mut file) => {
+            use std::io::Write;
+
+            // One SQLite page of content, durably. An empty file proves the
+            // directory entry and nothing about the blocks a journal needs, so
+            // a filesystem or quota with no space left would pass a
+            // creation-only probe; and delayed allocation means a `write` that
+            // returns can still fail to find those blocks, which is what the
+            // flush asks about. Capacity is a moment rather than a standing
+            // property either way — it can be gone by the next transaction,
+            // and no probe can promise otherwise — so this narrows the window
+            // rather than closing it.
+            file.write_all(&[0u8; 4096])
+                .and_then(|()| file.sync_all())
+                .is_ok()
         }
-        Err(_) => false,
-    }
+        Err(_) => return false,
+    };
+    // The removal is attempted whatever the write did: a probe that could not
+    // be filled is still a probe that should not be left behind.
+    fs::remove_file(&probe).is_ok() && written
 }
 
 static BACKUP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
