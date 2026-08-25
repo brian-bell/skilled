@@ -1161,11 +1161,18 @@ fn path_text(path: &Path) -> Result<String> {
 /// in-memory registry a caller narrowed to match a commit that already
 /// happened, both still apply.
 ///
-/// Scope is registration metadata only. The scanned skill candidates a
-/// selection also narrows over are filesystem observations rather than stored
-/// rows; the apply guard revalidates the chosen variant's own directory against
-/// the filesystem immediately before writing, and a candidate appearing beneath
-/// an already-registered catalog is not covered here.
+/// Scope is registration metadata only, and deliberately so. The scanned skill
+/// candidates a selection also narrows over are filesystem observations rather
+/// than stored rows: a skill directory added under an already-registered
+/// catalog after the preview changes the same selection without changing a
+/// single row here. The apply guard revalidates the chosen variant's own
+/// directory against the filesystem immediately before writing, but it does not
+/// re-scan the registry's other catalogs, and this fingerprint does not stand
+/// for what such a scan would find. Closing that would mean walking every
+/// registered catalog while the metadata mutation guard is held — unbounded
+/// filesystem work inside a transaction that exists to freeze metadata, which
+/// is the line `apply_repair_target` already draws — so it belongs to a
+/// separate decision rather than to this one.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct RegistryFingerprint(u64);
 
