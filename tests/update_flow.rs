@@ -1420,6 +1420,94 @@ fn a_hook_created_broken_installation_fails_verification() {
     }));
 }
 
+/// The guard and the write are separate Git processes, and `merge --ff-only`
+/// takes no expected-current-revision, so a branch moved in between can leave
+/// the fast-forward landing on the previewed object from somewhere other than
+/// the previewed starting point — applying a range the user never saw. The
+/// merge is simulated here as the racing process would leave it: the branch is
+/// advanced to an intermediate commit first, and the fast-forward to the
+/// planned target then runs over that.
+#[test]
+fn verification_rejects_a_fast_forward_that_started_from_another_revision() {
+    let fixture = fixture();
+    let intermediate = push_update(&fixture, "skills/demo/first.txt");
+    push_update(&fixture, "skills/demo/second.txt");
+    let source = fixture.app.sources()[0].clone();
+    let probe = probe_repository_update(&source, true);
+    let plan =
+        plan_repository_update(&source, &probe, fixture.app.inventory()).expect("plan update");
+    assert_ne!(plan.current_revision(), intermediate);
+    assert_ne!(plan.target_revision(), intermediate);
+
+    git(&fixture.clone, &["merge", "--ff-only", &intermediate]);
+    git(
+        &fixture.clone,
+        &["merge", "--ff-only", plan.target_revision()],
+    );
+    let report = verify_repository_update(&plan, fixture.app.inventory(), fixture.app.inventory());
+
+    assert!(report.is_complete(), "{:?}", report.withheld());
+    assert!(!report.is_verified());
+    assert!(
+        report
+            .failures()
+            .iter()
+            .any(|failure| failure.contains(&intermediate)),
+        "{:?}",
+        report.failures()
+    );
+}
+
+/// A repository that logs no reference updates cannot say where the
+/// fast-forward started, and an unanswerable check is withheld rather than
+/// passed — the three-answer rule the rest of verification keeps.
+#[test]
+fn an_unlogged_fast_forward_withholds_its_starting_revision() {
+    let fixture = fixture();
+    push_update(&fixture, "skills/demo/new.txt");
+    let source = fixture.app.sources()[0].clone();
+    let probe = probe_repository_update(&source, true);
+    let plan =
+        plan_repository_update(&source, &probe, fixture.app.inventory()).expect("plan update");
+    git(
+        &fixture.clone,
+        &["config", "core.logAllRefUpdates", "false"],
+    );
+    std::fs::remove_dir_all(fixture.clone.join(".git/logs")).expect("discard reference logs");
+
+    apply_repository_update(&plan).expect("fast-forward");
+    let report = verify_repository_update(&plan, fixture.app.inventory(), fixture.app.inventory());
+
+    assert!(report.is_verified(), "{:?}", report.failures());
+    assert!(!report.is_complete());
+    assert!(
+        report
+            .withheld()
+            .iter()
+            .any(|withheld| withheld.contains("reference log")),
+        "{:?}",
+        report.withheld()
+    );
+}
+
+/// The ordinary applied update starts from the revision the preview stated,
+/// so the same check has to leave it verified and complete.
+#[test]
+fn verification_accepts_a_fast_forward_from_the_previewed_revision() {
+    let fixture = fixture();
+    push_update(&fixture, "skills/demo/new.txt");
+    let source = fixture.app.sources()[0].clone();
+    let probe = probe_repository_update(&source, true);
+    let plan =
+        plan_repository_update(&source, &probe, fixture.app.inventory()).expect("plan update");
+
+    apply_repository_update(&plan).expect("fast-forward");
+    let report = verify_repository_update(&plan, fixture.app.inventory(), fixture.app.inventory());
+
+    assert!(report.is_verified(), "{:?}", report.failures());
+    assert!(report.is_complete(), "{:?}", report.withheld());
+}
+
 #[test]
 fn verification_rejects_the_target_revision_on_another_branch() {
     let fixture = fixture();

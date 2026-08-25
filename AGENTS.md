@@ -289,7 +289,14 @@ signal needs both, because colour alone is not an acceptable cue.
   verification. The confirmation gate covers the complete plan statement, the
   incoming commit summaries included, because those are what the fast-forward
   brings in; the untruncated changed-file listing is non-gating evidence below
-  it. A disclosed removal is verified as the same link, raw target included,
+  it. Where the fast-forward *started* is verified too, not only where it
+  landed: `merge --ff-only` takes no expected-current-revision, so a branch
+  another process moved between the guard and the write can land on the
+  previewed object having applied a range nobody was shown. The log entry the
+  merge left on the branch names its starting point, and a start other than
+  the previewed revision is a verification failure; a repository that logs no
+  reference updates leaves the check withheld rather than passed.
+  A disclosed removal is verified as the same link, raw target included,
   and not merely as some dangling entry under the same name. Every other
   installation is held to the same test: a fast-forward writes inside the
   repository and nowhere near an agent root, so a link whose raw target changed
