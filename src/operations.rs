@@ -34,7 +34,7 @@ use crate::{
     source::{
         RegisteredSource, RevisionLookup, SkillValidation, contains_revision, look_up_revision,
     },
-    store::Store,
+    store::{RegistryFingerprint, Store},
     validation::{
         InspectionBudget, PortableValidationError, valid_skill_name,
         validate_portable_skill_with_budget,
@@ -765,6 +765,9 @@ impl OpenCodeOutlook {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InstallPlan {
     variant: VariantRef,
+    /// The registry this plan's selection was decided over, so the mutation
+    /// guard can refuse a write the registry has since stopped agreeing with.
+    registry: RegistryFingerprint,
     source_checkout: PathBuf,
     source_revision: String,
     source_dir: PathBuf,
@@ -850,6 +853,9 @@ pub enum RepairDisposition {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RepairPlan {
     agent: AgentKind,
+    /// The registry this plan's selection was decided over. Install's field,
+    /// for the same guard.
+    registry: RegistryFingerprint,
     skill_name: String,
     link_path: PathBuf,
     recorded_target: PathBuf,
@@ -968,7 +974,12 @@ pub fn plan_repair(
 ) -> RepairPlan {
     debug_assert_eq!(probe.target_agent, agent);
     let target = probe.target(agent);
-    let mut plan = empty_repair_plan(agent, skill_name, target.link_path.clone());
+    let mut plan = empty_repair_plan(
+        agent,
+        RegistryFingerprint::of_registry(sources),
+        skill_name,
+        target.link_path.clone(),
+    );
 
     if let Some(finding) = repair_root_finding(&target.root) {
         plan.disposition = RepairDisposition::Blocked { finding };
@@ -1155,9 +1166,15 @@ pub fn plan_repair(
     plan
 }
 
-fn empty_repair_plan(agent: AgentKind, skill_name: &str, link_path: PathBuf) -> RepairPlan {
+fn empty_repair_plan(
+    agent: AgentKind,
+    registry: RegistryFingerprint,
+    skill_name: &str,
+    link_path: PathBuf,
+) -> RepairPlan {
     RepairPlan {
         agent,
+        registry,
         skill_name: skill_name.to_owned(),
         link_path,
         recorded_target: PathBuf::new(),
@@ -1874,6 +1891,7 @@ pub fn plan_install(
 
     Ok(InstallPlan {
         variant: variant.clone(),
+        registry: RegistryFingerprint::of_registry(sources),
         source_checkout: source.checkout.clone(),
         source_revision: source.revision.clone(),
         source_dir,
@@ -2849,6 +2867,27 @@ fn apply_target(
             ));
         }
     }
+    // The chosen row surviving is not the choice surviving. A source or catalog
+    // another process registered after the preview can answer to this skill
+    // name too, and the spec 6.4 selection this plan rests on would then be a
+    // duplicate conflict or name a different variant. The registry is compared
+    // whole under the guard, after the plan's own registration, so the more
+    // specific refusal is the one a changed registration reports.
+    match mutation.registry_fingerprint() {
+        Ok(fingerprint) if fingerprint == plan.registry => {}
+        Ok(_) => {
+            return StepOutcome::Failed(
+                "the registered sources changed after the plan was shown, so the variant this \
+                 link would resolve to is no longer settled and nothing was written"
+                    .to_owned(),
+            );
+        }
+        Err(error) => {
+            return StepOutcome::Failed(format!(
+                "the registered sources could not be re-read, so nothing was written: {error}"
+            ));
+        }
+    }
     if let Err(reason) = recheck_source_identity(plan) {
         return StepOutcome::Failed(format!("{reason}, so nothing was written"));
     }
@@ -3157,6 +3196,25 @@ fn apply_repair_target(plan: &RepairPlan, store: &mut Store, home: &Path) -> Rep
         Err(error) => {
             return RepairStepOutcome::Failed(format!(
                 "the source registration could not be re-read, so nothing was written: {error}"
+            ));
+        }
+    }
+    // Install's reasoning again, for the selection rather than the row: a
+    // source registered after the preview can offer a competing variant of this
+    // name, and the replacement this repair would install is then one candidate
+    // of two rather than the one the registry resolves to.
+    match mutation.registry_fingerprint() {
+        Ok(fingerprint) if fingerprint == plan.registry => {}
+        Ok(_) => {
+            return RepairStepOutcome::Failed(
+                "the registered sources changed after the plan was shown, so the variant this \
+                 link would resolve to is no longer settled and nothing was written"
+                    .to_owned(),
+            );
+        }
+        Err(error) => {
+            return RepairStepOutcome::Failed(format!(
+                "the registered sources could not be re-read, so nothing was written: {error}"
             ));
         }
     }
@@ -6389,6 +6447,7 @@ mod tests {
     fn an_old_link_removed_before_replacement_failure_is_a_partial_repair() {
         let mut plan = empty_repair_plan(
             AgentKind::Codex,
+            RegistryFingerprint::of_registry(&[]),
             "portable",
             PathBuf::from("/home/example/.agents/skills/portable"),
         );
@@ -6411,6 +6470,7 @@ mod tests {
     fn a_residual_temporary_link_is_a_partial_repair() {
         let mut plan = empty_repair_plan(
             AgentKind::Codex,
+            RegistryFingerprint::of_registry(&[]),
             "portable",
             PathBuf::from("/home/example/.agents/skills/portable"),
         );
@@ -6438,6 +6498,7 @@ mod tests {
     fn a_replacement_in_a_moved_root_is_a_partial_repair() {
         let mut plan = empty_repair_plan(
             AgentKind::Codex,
+            RegistryFingerprint::of_registry(&[]),
             "portable",
             PathBuf::from("/home/example/.agents/skills/portable"),
         );
@@ -6464,6 +6525,7 @@ mod tests {
     fn a_stranded_displaced_object_is_a_partial_repair() {
         let mut plan = empty_repair_plan(
             AgentKind::Codex,
+            RegistryFingerprint::of_registry(&[]),
             "portable",
             PathBuf::from("/home/example/.agents/skills/portable"),
         );
