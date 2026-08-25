@@ -3043,12 +3043,18 @@ impl RepairApplyReport {
 /// back to a destructive rename. `replace_directory_symlink` carries the full
 /// syscall-level argument that closed the skilled-2k3.6.1 window.
 ///
-/// Windows cannot atomically rename over an existing directory symlink. Its
-/// fallback removes the directory link with `remove_dir` and creates the new
-/// one, and is therefore explicitly non-atomic. A creation failure after the
-/// removal is a partial apply and is reported as such rather than as an inert
-/// refusal, and the remove-and-create pathname window that remains there is
-/// tracked as `skilled-tdm`.
+/// Windows cannot atomically rename over an existing directory symlink, so
+/// its replacement stays remove-then-create — but the removal no longer
+/// trusts the pathname. The destination is pinned once with
+/// `FILE_FLAG_OPEN_REPARSE_POINT`, proven through that handle to be the
+/// exact symbolic link the recheck read, and deleted through the same handle
+/// with a POSIX-semantics disposition, so an object that arrived after the
+/// recheck is refused rather than deleted
+/// (`remove_proven_directory_symlink` carries the argument; skilled-tdm was
+/// the `remove_dir` window this closed). What remains is an install-class
+/// fail-if-exists window at creation, and a creation failure after the
+/// removal is a partial apply reported as such rather than as an inert
+/// refusal.
 ///
 /// The metadata mutation guard covers the replacement for the same reason it
 /// covers install's creation. A repair makes a link active and records a
@@ -3194,7 +3200,7 @@ fn apply_repair_target(plan: &RepairPlan, store: &mut Store, home: &Path) -> Rep
                  replacement is impossible and nothing was written: {error}"
             ));
         }
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         Err(ReplaceLinkError::ConcurrentlyReplaced { observed }) => {
             return RepairStepOutcome::Failed(format!(
                 "the destination changed after the final recheck — {observed}; the arriving \
@@ -4018,14 +4024,251 @@ fn remove_proven_temporary(
     }
 }
 
+/// The reparse tag Windows gives a name-surrogate symbolic link — the object
+/// `std::os::windows::fs::symlink_dir` creates and the only object repair
+/// ever placed at an installation path. A junction carries a different tag
+/// and is refused as unproven.
+#[cfg_attr(not(windows), allow(dead_code))]
+const IO_REPARSE_TAG_SYMLINK: u32 = 0xA000_000C;
+
+/// The flag marking a symbolic link's substitute name as relative rather
+/// than a full NT path.
+#[cfg_attr(not(windows), allow(dead_code))]
+const SYMLINK_FLAG_RELATIVE: u32 = 0x0000_0001;
+
+/// Parse a `REPARSE_DATA_BUFFER` as a symbolic link's substitute name and
+/// relative flag, exactly as stored.
+///
+/// Deliberately raw: `std::fs::read_link` converts the substitute name to a
+/// user-facing spelling through `GetFullPathNameW` round-trips this parser
+/// cannot reproduce, so the proof does not try to speak that dialect.
+/// Instead both the stored name and the proven target are reduced through
+/// [`comparable_symlink_target`] before they are compared.
+///
+/// Pure over bytes, and compiled on every platform, so the byte-layout
+/// handling is pinned by tests that run where development happens rather
+/// than only where the syscall does.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn symlink_reparse_target(buffer: &[u8]) -> Result<(Vec<u16>, bool), &'static str> {
+    const HEADER: usize = 8;
+    const PATH_BUFFER: usize = 20;
+    if buffer.len() < PATH_BUFFER {
+        return Err("the reparse data is too short to be a symbolic link");
+    }
+    let field = |at: usize| u16::from_le_bytes([buffer[at], buffer[at + 1]]);
+    let tag = u32::from_le_bytes([buffer[0], buffer[1], buffer[2], buffer[3]]);
+    if tag != IO_REPARSE_TAG_SYMLINK {
+        return Err("the object is a reparse point but not a symbolic link");
+    }
+    let data_length = field(4) as usize;
+    let end = HEADER
+        .checked_add(data_length)
+        .filter(|end| *end <= buffer.len())
+        .ok_or("the reparse data states a length beyond what was read")?;
+    let substitute_offset = field(8) as usize;
+    let substitute_length = field(10) as usize;
+    let flags = u32::from_le_bytes([buffer[16], buffer[17], buffer[18], buffer[19]]);
+    if !substitute_length.is_multiple_of(2) || !substitute_offset.is_multiple_of(2) {
+        return Err("the reparse data names a target on an odd byte boundary");
+    }
+    let start = PATH_BUFFER
+        .checked_add(substitute_offset)
+        .filter(|start| *start <= end)
+        .ok_or("the reparse data places its target outside what was read")?;
+    let stop = start
+        .checked_add(substitute_length)
+        .filter(|stop| *stop <= end)
+        .ok_or("the reparse data places its target outside what was read")?;
+    let (pairs, _remainder) = buffer[start..stop].as_chunks::<2>();
+    let target: Vec<u16> = pairs.iter().map(|pair| u16::from_le_bytes(*pair)).collect();
+    Ok((target, flags & SYMLINK_FLAG_RELATIVE != 0))
+}
+
+/// Reduce one spelling of a symbolic link target to the form the ownership
+/// proof compares.
+///
+/// The same absolute target has several spellings across the two sides of
+/// that comparison: the reparse data stores the NT form (`\??\C:\x`,
+/// `\??\UNC\server\share`), while `std::fs::read_link` — which is what the
+/// final recheck read and what receipts were recorded against — reports the
+/// user form (`C:\x`, `\\server\share`), keeping the verbatim `\\?\` prefix
+/// only where the path needs it. Stripping the NT or verbatim prefix and
+/// rewriting a namespaced `UNC\` to `\\` maps every one of those spellings of
+/// one target to one sequence, and touches nothing else: a relative name —
+/// one literally starting `UNC\` included — carries no prefix and passes
+/// through untouched, and every unit after the prefix is compared exactly,
+/// trailing dots and spaces included, because the prefixes decide only which
+/// namespace interprets those same units.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn comparable_symlink_target(units: &[u16]) -> Vec<u16> {
+    // `\??\` and `\\?\` in UTF-16.
+    const NT_PREFIX: [u16; 4] = [92, 63, 63, 92];
+    const VERBATIM_PREFIX: [u16; 4] = [92, 92, 63, 92];
+    // `UNC\` in UTF-16.
+    const UNC: [u16; 4] = [85, 78, 67, 92];
+    let Some(rest) = units
+        .strip_prefix(&NT_PREFIX)
+        .or_else(|| units.strip_prefix(&VERBATIM_PREFIX))
+    else {
+        return units.to_vec();
+    };
+    if let Some(share) = rest.strip_prefix(&UNC) {
+        let mut comparable = vec![92, 92];
+        comparable.extend_from_slice(share);
+        return comparable;
+    }
+    rest.to_vec()
+}
+
+/// Verify and delete the proven directory symbolic link through one handle.
+///
+/// This is the skilled-tdm closure of the Windows remove-and-create window.
+/// `remove_dir` re-resolved the pathname and deleted whatever directory-like
+/// object had arrived there — a stranger's directory symlink or an empty
+/// directory included. Here the destination is opened once with
+/// `FILE_FLAG_OPEN_REPARSE_POINT`, so the handle pins the link object itself
+/// rather than what it points at; the reparse data is read through that
+/// handle and must name the proven target byte for byte; and the deletion is
+/// `SetFileInformationByHandle` with POSIX-semantics disposition on the same
+/// handle, so exactly the verified object is removed whatever the pathname
+/// has come to name meanwhile. A filesystem that refuses the POSIX-semantics
+/// disposition refuses the repair rather than falling back to a pathname
+/// delete — the same stance the Unix side takes on a filesystem that cannot
+/// exchange.
+///
+/// The open itself is still pathname-resolved. An ancestor of the
+/// destination renamed between the final recheck and this open re-resolves
+/// the pathname through whatever now stands there, and a byte-identical
+/// decoy link in a substituted root would be pinned, proven, and removed in
+/// the stranger's directory, with the replacement then created beside it.
+/// Reaching that requires the home-directory write access `apply_install`
+/// records as the boundary of what any pathname discipline can defend, and
+/// closing it needs an NT relative open bound to a pinned root handle —
+/// tracked as `skilled-se9` rather than half-built here, because no
+/// development or CI platform of this project can compile or exercise it.
+///
+/// What the proof establishes is byte-identity, not object identity: a
+/// symbolic link substituted after the final recheck with the very same
+/// target is accepted and removed. That is the equivalence the Unix
+/// exchange applies to its displaced object for the same reason — a
+/// directory link carries nothing but its target, so two links with
+/// identical raw targets are interchangeable for every claim the plan
+/// makes, and nothing an owner could lose distinguishes them. Everything
+/// else — a different target, another object kind, another reparse tag — is
+/// a stranger's object and is refused with it untouched.
+#[cfg(windows)]
+fn remove_proven_directory_symlink(
+    link_path: &Path,
+    proven_target: &Path,
+) -> Result<(), ReplaceLinkError> {
+    use std::mem::size_of;
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        DELETE, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
+        FILE_DISPOSITION_FLAG_DELETE, FILE_DISPOSITION_FLAG_POSIX_SEMANTICS,
+        FILE_DISPOSITION_INFO_EX, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+        FILE_READ_ATTRIBUTES, FILE_SHARE_READ, FileDispositionInfoEx,
+        MAXIMUM_REPARSE_DATA_BUFFER_SIZE, SetFileInformationByHandle,
+    };
+    use windows_sys::Win32::System::IO::DeviceIoControl;
+    use windows_sys::Win32::System::Ioctl::FSCTL_GET_REPARSE_POINT;
+
+    // Delete sharing is denied on purpose: Rust's default share mode would
+    // let another process rename or unlink the pinned object between the
+    // proof below and the disposition, and the disposition follows the
+    // object — the proven link would then be deleted wherever the rename
+    // took it, outside the path the plan showed. Without delete sharing a
+    // concurrent rename or delete fails while this handle is open, which is
+    // the Windows spelling of the name binding the Unix exchange gets from
+    // its pinned parent descriptor. An object someone else already holds
+    // with conflicting access fails this open instead, and an unopenable
+    // destination is a refusal.
+    let file = fs::OpenOptions::new()
+        .access_mode(FILE_READ_ATTRIBUTES | DELETE)
+        .share_mode(FILE_SHARE_READ)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
+        .open(link_path)
+        .map_err(ReplaceLinkError::Unchanged)?;
+    let metadata = file.metadata().map_err(ReplaceLinkError::Unchanged)?;
+    // Both attributes, not the reparse point alone: a *file* symbolic link
+    // carries the same reparse tag and can carry the same target bytes, and
+    // the object repair proved and receipted is a directory link.
+    if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0
+        || metadata.file_attributes() & FILE_ATTRIBUTE_DIRECTORY == 0
+    {
+        return Err(ReplaceLinkError::ConcurrentlyReplaced {
+            observed: "an object that is not a directory symbolic link occupies the destination"
+                .to_owned(),
+        });
+    }
+    let mut buffer = vec![0_u8; MAXIMUM_REPARSE_DATA_BUFFER_SIZE as usize];
+    let mut returned: u32 = 0;
+    // SAFETY: the handle is open, the buffer outlives the call, and the
+    // returned length is bounded by the buffer length handed in.
+    let read = unsafe {
+        DeviceIoControl(
+            file.as_raw_handle(),
+            FSCTL_GET_REPARSE_POINT,
+            std::ptr::null(),
+            0,
+            buffer.as_mut_ptr().cast(),
+            buffer.len() as u32,
+            &mut returned,
+            std::ptr::null_mut(),
+        )
+    };
+    if read == 0 {
+        return Err(ReplaceLinkError::Unchanged(io::Error::last_os_error()));
+    }
+    buffer.truncate(returned as usize);
+    let (target, target_is_relative) = symlink_reparse_target(&buffer).map_err(|reason| {
+        ReplaceLinkError::ConcurrentlyReplaced {
+            observed: reason.to_owned(),
+        }
+    })?;
+    let proven: Vec<u16> = proven_target.as_os_str().encode_wide().collect();
+    // The relative flag has to agree with the proven target's own shape
+    // before the names are compared: the flag decides how the stored units
+    // resolve, so the same units under the other flag are a different link.
+    if target_is_relative == proven_target.is_absolute()
+        || comparable_symlink_target(&target) != comparable_symlink_target(&proven)
+    {
+        return Err(ReplaceLinkError::ConcurrentlyReplaced {
+            observed: format!(
+                "a symbolic link to {} occupies the destination",
+                String::from_utf16_lossy(&target)
+            ),
+        });
+    }
+    let disposition = FILE_DISPOSITION_INFO_EX {
+        Flags: FILE_DISPOSITION_FLAG_DELETE | FILE_DISPOSITION_FLAG_POSIX_SEMANTICS,
+    };
+    // SAFETY: the handle is open and the structure matches the class named.
+    let marked = unsafe {
+        SetFileInformationByHandle(
+            file.as_raw_handle(),
+            FileDispositionInfoEx,
+            (&disposition as *const FILE_DISPOSITION_INFO_EX).cast(),
+            size_of::<FILE_DISPOSITION_INFO_EX>() as u32,
+        )
+    };
+    if marked == 0 {
+        return Err(ReplaceLinkError::Unchanged(io::Error::last_os_error()));
+    }
+    drop(file);
+    Ok(())
+}
+
 #[cfg(windows)]
 fn replace_directory_symlink(
     target: &Path,
     link_path: &Path,
-    _proven_target: &Path,
+    proven_target: &Path,
     _base: &Path,
 ) -> Result<LinkReplacement, ReplaceLinkError> {
-    fs::remove_dir(link_path).map_err(ReplaceLinkError::Unchanged)?;
+    remove_proven_directory_symlink(link_path, proven_target)?;
     create_directory_symlink(target, link_path)
         .map(|()| LinkReplacement { residue: None })
         .map_err(ReplaceLinkError::RemovedOldLink)
@@ -4054,8 +4297,10 @@ enum ReplaceLinkError {
     #[cfg(unix)]
     ExchangeUnsupported(io::Error),
     /// An object that is not the proven link arrived at the destination after
-    /// the final recheck. It was swapped back intact and nothing was written.
-    #[cfg(unix)]
+    /// the final recheck. On Unix it was swapped back intact; on Windows it
+    /// was never touched, because the handle-bound proof refused before any
+    /// disposition was set. Nothing was written either way.
+    #[cfg(any(unix, windows))]
     ConcurrentlyReplaced { observed: String },
     /// The proven old link was removed before replacement creation failed.
     #[cfg(windows)]
@@ -5737,6 +5982,122 @@ impl Receipt {
 mod tests {
     use super::*;
     use crate::store::Store;
+
+    /// The Windows repair deletes only an object it has proven through the
+    /// same handle, and the proof reads the reparse data itself. The parser
+    /// and the normalisation the comparison rests on are pure so their
+    /// answers can be pinned on every platform.
+    mod reparse {
+        use super::super::{
+            IO_REPARSE_TAG_SYMLINK, SYMLINK_FLAG_RELATIVE, comparable_symlink_target,
+            symlink_reparse_target,
+        };
+
+        fn reparse_buffer(tag: u32, flags: u32, substitute: &[u16]) -> Vec<u8> {
+            let mut bytes = Vec::new();
+            let name: Vec<u8> = substitute
+                .iter()
+                .flat_map(|unit| unit.to_le_bytes())
+                .collect();
+            let data_length = (12 + name.len()) as u16;
+            bytes.extend_from_slice(&tag.to_le_bytes());
+            bytes.extend_from_slice(&data_length.to_le_bytes());
+            bytes.extend_from_slice(&0_u16.to_le_bytes()); // Reserved
+            bytes.extend_from_slice(&0_u16.to_le_bytes()); // SubstituteNameOffset
+            bytes.extend_from_slice(&(name.len() as u16).to_le_bytes());
+            bytes.extend_from_slice(&(name.len() as u16).to_le_bytes()); // PrintNameOffset
+            bytes.extend_from_slice(&0_u16.to_le_bytes()); // PrintNameLength
+            bytes.extend_from_slice(&flags.to_le_bytes());
+            bytes.extend_from_slice(&name);
+            bytes
+        }
+
+        fn wide(text: &str) -> Vec<u16> {
+            text.encode_utf16().collect()
+        }
+
+        #[test]
+        fn the_substitute_name_and_relative_flag_are_reported_raw() {
+            let buffer = reparse_buffer(IO_REPARSE_TAG_SYMLINK, 0, &wide("\\??\\C:\\skills\\demo"));
+            assert_eq!(
+                symlink_reparse_target(&buffer),
+                Ok((wide("\\??\\C:\\skills\\demo"), false))
+            );
+            let buffer = reparse_buffer(
+                IO_REPARSE_TAG_SYMLINK,
+                SYMLINK_FLAG_RELATIVE,
+                &wide("..\\demo"),
+            );
+            assert_eq!(
+                symlink_reparse_target(&buffer),
+                Ok((wide("..\\demo"), true))
+            );
+        }
+
+        #[test]
+        fn a_mount_point_is_not_a_symbolic_link() {
+            // IO_REPARSE_TAG_MOUNT_POINT: a junction is a different object,
+            // and Skilled never installed one.
+            let buffer = reparse_buffer(0xA000_0003, 0, &wide("\\??\\C:\\elsewhere"));
+            assert!(symlink_reparse_target(&buffer).is_err());
+        }
+
+        #[test]
+        fn a_length_beyond_the_buffer_is_refused() {
+            let mut buffer = reparse_buffer(IO_REPARSE_TAG_SYMLINK, 0, &wide("\\??\\C:\\x"));
+            buffer[4] = 0xFF;
+            buffer[5] = 0x7F;
+            assert!(symlink_reparse_target(&buffer).is_err());
+        }
+
+        #[test]
+        fn a_target_region_outside_the_stated_data_is_refused() {
+            let mut buffer = reparse_buffer(IO_REPARSE_TAG_SYMLINK, 0, &wide("\\??\\C:\\x"));
+            // SubstituteNameOffset pushed past the stated data length.
+            buffer[8] = 0xF0;
+            assert!(symlink_reparse_target(&buffer).is_err());
+        }
+
+        /// One comparable spelling for the raw substitute name and every form
+        /// `std::fs::read_link` reports for the same target: the NT and
+        /// verbatim prefixes come off, a namespaced `UNC\` becomes the
+        /// familiar `\\`, and everything else is untouched.
+        #[test]
+        fn nt_verbatim_and_user_spellings_of_one_target_compare_equal() {
+            for (stored, reported) in [
+                ("\\??\\C:\\skills\\demo", "C:\\skills\\demo"),
+                (
+                    "\\??\\UNC\\server\\share\\skill",
+                    "\\\\server\\share\\skill",
+                ),
+                // A path read_link keeps verbatim still names the same object.
+                ("\\??\\C:\\needs verbatim.", "\\\\?\\C:\\needs verbatim."),
+                ("..\\demo", "..\\demo"),
+            ] {
+                assert_eq!(
+                    comparable_symlink_target(&wide(stored)),
+                    comparable_symlink_target(&wide(reported)),
+                    "{stored} should compare equal to {reported}"
+                );
+            }
+        }
+
+        #[test]
+        fn distinct_targets_stay_distinct_after_normalisation() {
+            for (one, other) in [
+                ("\\??\\C:\\skills\\demo", "C:\\skills\\demo2"),
+                // A relative directory literally named UNC is not a share.
+                ("UNC\\server\\share", "\\\\server\\share"),
+                ("\\??\\C:\\skills\\demo.", "C:\\skills\\demo"),
+            ] {
+                assert_ne!(
+                    comparable_symlink_target(&wide(one)),
+                    comparable_symlink_target(&wide(other)),
+                    "{one} must not compare equal to {other}"
+                );
+            }
+        }
+    }
 
     /// Creating only the root is still a filesystem mutation. It is not a
     /// written link for verification, but it makes a failed step a partial

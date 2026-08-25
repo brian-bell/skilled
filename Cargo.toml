@@ -22,6 +22,21 @@ thiserror = "2.0.19"
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# The Windows counterpart of the libc promotion above, for the repair's
+# handle-bound proven removal (`operations::remove_proven_directory_symlink`):
+# `DeviceIoControl(FSCTL_GET_REPARSE_POINT)` and
+# `SetFileInformationByHandle(FileDispositionInfoEx)` have no std spelling,
+# and their constants and structures are ABI facts that must not be
+# transcribed by hand. Microsoft's generated declarations, no transitive
+# code of its own, compiled only for Windows targets.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.60", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_System_Ioctl",
+] }
+
 [dev-dependencies]
 insta = "1.48.0"
 tempfile = "3.27.0"
