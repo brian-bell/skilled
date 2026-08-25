@@ -417,6 +417,15 @@ impl InspectedSource {
         self.repository_identity.as_ref()
     }
 
+    /// The same inspection with its identity withheld: what was read at the
+    /// path, minus the claim that it is the registered repository. The store
+    /// hands this out for rows that recorded no identity, where that claim
+    /// cannot be proven.
+    pub(crate) fn without_repository_identity(mut self) -> Self {
+        self.repository_identity = None;
+        self
+    }
+
     pub fn branch(&self) -> Option<&str> {
         self.branch.as_deref()
     }

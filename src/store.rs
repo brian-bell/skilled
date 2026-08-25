@@ -668,9 +668,26 @@ impl Store {
                         last_scan_at,
                     )
                 }
+                // Head containment stays the gate for every row, the
+                // identity-less ones included. It is the only sameness
+                // evidence a pre-schema-9 row has: waving such a row through
+                // without it would let a wholly different repository standing
+                // at the path load without an error and be installed from,
+                // and a row that recorded its identity is treated exactly the
+                // same way when the stored head vanishes.
                 Ok(current) => match contains_revision(&git_top_level, stored_inspected.head()) {
                     Ok(true) if refresh => {
                         let refreshed_at = current_timestamp();
+                        // The stored identity is never written here. A row
+                        // registered after schema 9 recorded it at
+                        // registration and the mismatch check above already
+                        // held the standing checkout to it; a row from before
+                        // schema 9 stored none, and adopting whatever stands
+                        // at the path would let a replacement clone that
+                        // merely contains the stored head become the
+                        // registered repository for every later update.
+                        // Re-registration is the only way an identity is
+                        // recorded (skilled-t0f).
                         self.connection.execute(
                             "UPDATE source_repositories SET
                                 remote_url = ?1,
@@ -678,9 +695,8 @@ impl Store {
                                 head_revision = ?3,
                                 dirty = ?4,
                                 dirty_known = ?5,
-                                last_scan_at = ?6,
-                                repository_identity = COALESCE(repository_identity, ?7)
-                             WHERE id = ?8",
+                                last_scan_at = ?6
+                             WHERE id = ?7",
                             params![
                                 current.remote_url(),
                                 current.branch(),
@@ -688,10 +704,6 @@ impl Store {
                                 current.dirty().unwrap_or(false),
                                 current.dirty().is_some(),
                                 refreshed_at,
-                                current
-                                    .repository_identity()
-                                    .map(|identity| identity.storage_key())
-                                    .transpose()?,
                                 id,
                             ],
                         )?;
@@ -714,6 +726,18 @@ impl Store {
                     Some(error.to_string()),
                     last_scan_at,
                 ),
+            };
+            // A row from before schema 9 proves no identity, and the one the
+            // live inspection just read describes whatever is standing at the
+            // path — possibly a replacement clone that contains the stored
+            // head. Handing it out as the source's identity would let the
+            // update pipeline treat the standing checkout as the registered
+            // one, so the source carries none and updates refuse until the
+            // user re-registers the checkout (skilled-t0f).
+            let inspected = if stored_repository_identity.is_none() {
+                inspected.without_repository_identity()
+            } else {
+                inspected
             };
             let mut catalog_statement = self.connection.prepare(
                 "SELECT relative_path, classification, claude_code, codex, opencode

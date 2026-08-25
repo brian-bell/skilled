@@ -2210,6 +2210,11 @@ fn finding_consequence(entry: &DoctorItem<'_>) -> &'static str {
             "The registered checkout could not be read, so nothing can be said about what \
              it holds or whether it is current."
         }
+        "source.identity_unproven" => {
+            "This source predates Skilled recording repository identities, so no update can \
+             prove the checkout is the one registered. Updates stay disabled until the source \
+             is re-registered at the same path."
+        }
         "source.detached_head" => {
             "HEAD is not on a branch here, so there is no branch for a fast-forward to \
              advance."

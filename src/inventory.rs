@@ -707,6 +707,7 @@ pub(crate) fn doctor_order(code: &str) -> u8 {
         "source.dirty"
         | "source.diverged"
         | "source.missing"
+        | "source.identity_unproven"
         | "source.detached_head"
         | "source.no_upstream"
         | "source.upstream_unfetched"
@@ -1880,6 +1881,18 @@ impl ResolutionIndex {
 mod tests {
     use super::*;
     use crate::{AppEnvironment, agents::detect_agents};
+
+    /// An identity-unproven source is a blocked repository update, and Doctor
+    /// lists it in that group — not among the informational findings the
+    /// unplaced-code fallback sorts with.
+    #[test]
+    fn an_unproven_identity_sorts_with_the_blocked_repository_updates() {
+        assert_eq!(
+            doctor_order("source.identity_unproven"),
+            doctor_order("source.dirty")
+        );
+        assert!(doctor_order("source.identity_unproven") < doctor_order("install.unmanaged"));
+    }
 
     /// A scan whose resolution index could not be finished cannot decide that
     /// anything is unmanaged, because the entry that would have resolved an

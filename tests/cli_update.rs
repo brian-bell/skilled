@@ -388,6 +388,196 @@ fn an_incomplete_verification_does_not_exit_as_a_plain_success() {
     assert!(output.contains("Not established:"), "{output}");
 }
 
+/// A row stored before schema 9 has no recorded repository identity, and a
+/// different clone of the same repository standing at the registered path
+/// contains the stored head just as the original would. Nothing can tell the
+/// two apart, so the identity must never be adopted from whatever is standing
+/// there, and an update against the row is refused with re-registration as
+/// the remedy (skilled-t0f).
+#[test]
+fn a_pre_identity_source_is_refused_an_update_and_never_adopts_the_standing_checkout() {
+    let (temporary, environment, _seed, clone) = fixture();
+    let database = temporary.path().join("data/skilled.sqlite3");
+    let stored_identity = || -> Option<String> {
+        let connection = rusqlite::Connection::open(&database).expect("open metadata");
+        connection
+            .query_row(
+                "SELECT repository_identity FROM source_repositories",
+                [],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .expect("read stored identity")
+    };
+    assert!(stored_identity().is_some(), "registration records identity");
+    {
+        let connection = rusqlite::Connection::open(&database).expect("open metadata");
+        connection
+            .execute(
+                "UPDATE source_repositories SET repository_identity = NULL",
+                [],
+            )
+            .expect("simulate a pre-schema-9 row");
+    }
+    // A different clone of the same repository, holding the same head, takes
+    // the registered path.
+    let remote = temporary.path().join("remote.git");
+    let replacement = temporary.path().join("replacement");
+    let output = Command::new("git")
+        .args(["clone", "--branch", "main"])
+        .arg(&remote)
+        .arg(&replacement)
+        .output()
+        .expect("clone replacement");
+    assert!(output.status.success(), "{output:?}");
+    std::fs::remove_dir_all(&clone).expect("remove registered checkout");
+    std::fs::rename(&replacement, &clone).expect("stand the replacement at the path");
+
+    let mut input = Cursor::new(Vec::<u8>::new());
+    let mut output = Vec::new();
+    let code = cli::run(
+        &[
+            "update".into(),
+            "--source".into(),
+            clone.display().to_string(),
+            "--yes".into(),
+        ],
+        environment.clone(),
+        &mut input,
+        &mut output,
+    );
+    let output = String::from_utf8(output).expect("utf-8 output");
+
+    assert_eq!(code, ExitCodeKind::Blocked, "{output}");
+    assert!(output.contains("source.identity_unproven"), "{output}");
+    assert!(output.contains("re-register"), "{output}");
+    // The standing checkout's identity was not recorded: the row still says
+    // it was never proven.
+    assert_eq!(stored_identity(), None);
+
+    // The recorded check is what the Updates list advertises and what Doctor
+    // reads, and a fresh check would only repeat this refusal: nothing the
+    // source reports about the standing checkout may supersede it.
+    let reopened = SkilledApp::open(environment.clone()).expect("reopen app");
+    assert_eq!(reopened.update_checks().len(), 1);
+    let check = &reopened.update_checks()[0];
+    assert!(
+        !check.superseded_by(&reopened.sources()[0]),
+        "the identity-unproven check must outlive the source re-read"
+    );
+    assert!(
+        check
+            .findings()
+            .iter()
+            .any(|finding| finding.code() == "source.identity_unproven"),
+        "{:?}",
+        check.findings()
+    );
+    drop(reopened);
+
+    // The condition the check records is the absence of a recorded identity,
+    // and no observation of the standing checkout changes that: a moved HEAD
+    // would only make a fresh check repeat the same refusal, so it does not
+    // supersede this one.
+    std::fs::write(clone.join("local.txt"), "local\n").expect("local change");
+    commit(&clone, "local commit");
+    let moved = SkilledApp::open(environment).expect("reopen after HEAD moved");
+    assert!(
+        !moved.update_checks()[0].superseded_by(&moved.sources()[0]),
+        "a moved HEAD must not supersede an identity-unproven check"
+    );
+}
+
+/// The other half of the same bead: a pre-schema-9 row whose path still holds
+/// the originally registered checkout keeps every non-update surface working
+/// without user action, and re-registering the checkout — the stated remedy —
+/// records its identity and restores updates.
+#[test]
+fn re_registering_a_pre_identity_source_restores_updates() {
+    let (temporary, environment, seed, clone) = fixture();
+    let database = temporary.path().join("data/skilled.sqlite3");
+    {
+        let connection = rusqlite::Connection::open(&database).expect("open metadata");
+        connection
+            .execute(
+                "UPDATE source_repositories SET repository_identity = NULL",
+                [],
+            )
+            .expect("simulate a pre-schema-9 row");
+    }
+    // The registry still loads the source without an error: the checkout is
+    // the one registered, and only updates are gated on the proof.
+    let app = SkilledApp::open(environment.clone()).expect("open app");
+    assert_eq!(app.sources().len(), 1);
+    assert!(app.sources()[0].source_error().is_none());
+    drop(app);
+
+    // An explicit check first, so the refusal is on record the way Updates
+    // and Doctor would hold it.
+    let mut input = Cursor::new(Vec::<u8>::new());
+    let mut output = Vec::new();
+    let code = cli::run(
+        &[
+            "update".into(),
+            "--source".into(),
+            clone.display().to_string(),
+            "--yes".into(),
+        ],
+        environment.clone(),
+        &mut input,
+        &mut output,
+    );
+    assert_eq!(
+        code,
+        ExitCodeKind::Blocked,
+        "{}",
+        String::from_utf8_lossy(&output)
+    );
+
+    // Re-registering the same path records the identity again — and that is
+    // exactly the condition the cached refusal tracks, so recording it is
+    // what supersedes the check.
+    let mut app = SkilledApp::open(environment.clone()).expect("reopen app");
+    let preview = app.preview_source(&clone).expect("preview same checkout");
+    app.confirm_source(preview).expect("re-register checkout");
+    drop(app);
+    let after = SkilledApp::open(environment.clone()).expect("reopen after re-registration");
+    assert!(
+        after.update_checks()[0].superseded_by(&after.sources()[0]),
+        "re-registration must supersede the identity-unproven check"
+    );
+    drop(after);
+    let connection = rusqlite::Connection::open(&database).expect("open metadata");
+    let recorded: Option<String> = connection
+        .query_row(
+            "SELECT repository_identity FROM source_repositories",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read stored identity");
+    drop(connection);
+    assert!(recorded.is_some(), "re-registration records identity");
+
+    std::fs::write(seed.join("skills/demo/new.txt"), "new\n").expect("incoming file");
+    commit(&seed, "upstream change");
+    git(&seed, &["push"]);
+    let mut input = Cursor::new(Vec::<u8>::new());
+    let mut output = Vec::new();
+    let code = cli::run(
+        &[
+            "update".into(),
+            "--source".into(),
+            clone.display().to_string(),
+            "--yes".into(),
+        ],
+        environment,
+        &mut input,
+        &mut output,
+    );
+    let output = String::from_utf8(output).expect("utf-8 output");
+    assert_eq!(code, ExitCodeKind::Success, "{output}");
+    assert!(clone.join("skills/demo/new.txt").is_file());
+}
+
 fn running_as_root() -> bool {
     // Reading a mode-0 directory succeeds only for the superuser.
     let probe = std::env::temp_dir().join(format!("skilled-root-probe-cli-{}", std::process::id()));

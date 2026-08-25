@@ -267,7 +267,17 @@ signal needs both, because colour alone is not an acceptable cue.
   or changed known dirtiness supersedes the cached verdict; opening Updates is
   therefore a metadata-only operation and never performs network access. A
   recorded verification finding is exempt: it is an observation of the state it
-  would otherwise be superseded by, and Doctor must not lose it.
+  would otherwise be superseded by, and Doctor must not lose it. So is
+  `source.identity_unproven`, which records a fact about the registration
+  rather than the checkout: no observation of the standing checkout changes
+  what a fresh check would answer, and only the identity being recorded by
+  re-registration — or the source becoming unreadable — supersedes it. A
+  source registered before identities were recorded never adopts the identity
+  of whatever stands at its path; updates against it are refused with that
+  finding until the user re-registers the checkout, and every other surface
+  works over the row exactly as far as it did before — a checkout still
+  containing the stored head loads without user action, while one that does
+  not is refused as changed, the same head-containment reading every row gets.
 - Repository update verification keeps the same three answers as installation
   verification. The confirmation gate covers the complete plan statement, the
   incoming commit summaries included, because those are what the fast-forward
