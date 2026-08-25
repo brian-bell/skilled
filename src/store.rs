@@ -20,32 +20,45 @@ use crate::{
     validation::InspectionBudget,
 };
 
-const SCHEMA_VERSION: i64 = 10;
+const SCHEMA_VERSION: i64 = 11;
 const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+/// Record one check, unless the stored row was written under a later
+/// generation.
+///
+/// Ordering is the `generation` column's job alone. `checked_at` states when
+/// the check ran and is carried across unchanged by a record that reports on
+/// an earlier check — a post-apply verification — so comparing it here would
+/// decline exactly the writes that matter most: the verification would lose to
+/// whatever a second Skilled process recorded while the preview was open, and
+/// the store would report that it had been saved.
 const UPDATE_CHECK_UPSERT: &str = "INSERT INTO source_update_checks
-        (source_id, checked_at, local_revision, local_reference, upstream_ref,
+        (source_id, checked_at, generation, local_revision, local_reference, upstream_ref,
          upstream_revision, merge_base, ahead, behind, dirty, dirty_known, verdict, detail)
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
      ON CONFLICT(source_id) DO UPDATE SET
-        checked_at=excluded.checked_at, local_revision=excluded.local_revision,
+        checked_at=excluded.checked_at, generation=excluded.generation,
+        local_revision=excluded.local_revision,
         local_reference=excluded.local_reference, upstream_ref=excluded.upstream_ref,
         upstream_revision=excluded.upstream_revision,
         merge_base=excluded.merge_base, ahead=excluded.ahead, behind=excluded.behind,
         dirty=excluded.dirty, dirty_known=excluded.dirty_known,
         verdict=excluded.verdict, detail=excluded.detail
-     WHERE excluded.checked_at >= source_update_checks.checked_at";
+     WHERE excluded.generation >= source_update_checks.generation";
+/// The same write for a batch, where a repeated generation is a stale worker's
+/// result rather than a restatement of the stored row.
 const UPDATE_CHECK_UPSERT_IF_NEWER: &str = "INSERT INTO source_update_checks
-        (source_id, checked_at, local_revision, local_reference, upstream_ref,
+        (source_id, checked_at, generation, local_revision, local_reference, upstream_ref,
          upstream_revision, merge_base, ahead, behind, dirty, dirty_known, verdict, detail)
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
      ON CONFLICT(source_id) DO UPDATE SET
-        checked_at=excluded.checked_at, local_revision=excluded.local_revision,
+        checked_at=excluded.checked_at, generation=excluded.generation,
+        local_revision=excluded.local_revision,
         local_reference=excluded.local_reference, upstream_ref=excluded.upstream_ref,
         upstream_revision=excluded.upstream_revision,
         merge_base=excluded.merge_base, ahead=excluded.ahead, behind=excluded.behind,
         dirty=excluded.dirty, dirty_known=excluded.dirty_known,
         verdict=excluded.verdict, detail=excluded.detail
-     WHERE excluded.checked_at > source_update_checks.checked_at";
+     WHERE excluded.generation > source_update_checks.generation";
 
 pub(crate) struct Store {
     connection: Connection,
@@ -455,35 +468,37 @@ impl Store {
 
     pub(crate) fn update_checks(&self) -> Result<Vec<CachedUpdateCheck>> {
         let mut statement = self.connection.prepare(
-            "SELECT source_id, checked_at, local_revision, local_reference, upstream_ref,
-                    upstream_revision, merge_base, ahead, behind, dirty, dirty_known, verdict, detail
+            "SELECT source_id, checked_at, generation, local_revision, local_reference,
+                    upstream_ref, upstream_revision, merge_base, ahead, behind, dirty,
+                    dirty_known, verdict, detail
              FROM source_update_checks ORDER BY source_id",
         )?;
         let rows = statement.query_map([], |row| {
-            let verdict: String = row.get(11)?;
+            let verdict: String = row.get(12)?;
             let verdict = RepositoryUpdateVerdict::parse(&verdict).ok_or_else(|| {
                 rusqlite::Error::InvalidColumnType(
-                    11,
+                    12,
                     "verdict".into(),
                     rusqlite::types::Type::Text,
                 )
             })?;
-            let ahead: i64 = row.get(7)?;
-            let behind: i64 = row.get(8)?;
+            let ahead: i64 = row.get(8)?;
+            let behind: i64 = row.get(9)?;
             Ok(CachedUpdateCheck {
                 source_id: row.get(0)?,
                 checked_at: row.get(1)?,
-                local_revision: row.get(2)?,
-                local_reference: row.get(3)?,
-                upstream_ref: row.get(4)?,
-                upstream_revision: row.get(5)?,
-                merge_base: row.get(6)?,
+                generation: row.get(2)?,
+                local_revision: row.get(3)?,
+                local_reference: row.get(4)?,
+                upstream_ref: row.get(5)?,
+                upstream_revision: row.get(6)?,
+                merge_base: row.get(7)?,
                 ahead: ahead as usize,
                 behind: behind as usize,
-                dirty: row.get(9)?,
-                dirty_known: row.get(10)?,
+                dirty: row.get(10)?,
+                dirty_known: row.get(11)?,
                 verdict,
-                detail: row.get(12)?,
+                detail: row.get(13)?,
             })
         })?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
@@ -492,10 +507,11 @@ impl Store {
     /// Hand out `count` update-check generations no other allocation will
     /// reuse, and return the first of them.
     ///
-    /// The generation both dates a check and orders it: the conditional upsert
+    /// The generation orders a check's write, and only that — when the check
+    /// ran is `checked_at`, which nothing compares. The conditional upsert
     /// behind a recorded check keeps an older result from displacing a newer
-    /// one, so two checks that share a value make one of them disappear into a
-    /// store that reported success. A counter held in each process cannot
+    /// one, so two records that share a generation make one of them disappear
+    /// into a store that reported success. A counter held in each process cannot
     /// prevent that — two Skilled processes running checks after the clock has
     /// moved behind the last stored value will each hand out the same number —
     /// so the high-water mark lives beside the data it orders and is advanced
@@ -524,7 +540,7 @@ impl Store {
         // an earlier generation, and the conditional upsert would then decline
         // every new check while reporting that it succeeded.
         let recorded: Option<i64> = transaction.query_row(
-            "SELECT MAX(checked_at) FROM source_update_checks",
+            "SELECT MAX(generation) FROM source_update_checks",
             [],
             |row| row.get(0),
         )?;
@@ -546,6 +562,7 @@ impl Store {
             params![
                 check.source_id,
                 check.checked_at,
+                check.generation,
                 check.local_revision,
                 check.local_reference,
                 check.upstream_ref,
@@ -572,6 +589,7 @@ impl Store {
                 params![
                     check.source_id,
                     check.checked_at,
+                    check.generation,
                     check.local_revision,
                     check.local_reference,
                     check.upstream_ref,
@@ -1260,9 +1278,9 @@ mod tests {
             .connection
             .execute(
                 "INSERT INTO source_update_checks
-                    (source_id, checked_at, local_revision, ahead, behind, dirty, dirty_known,
-                     verdict, detail)
-                 VALUES (1, 9_000, 'head', 0, 0, 0, 1, 'up_to_date', '')",
+                    (source_id, checked_at, generation, local_revision, ahead, behind, dirty,
+                     dirty_known, verdict, detail)
+                 VALUES (1, 9_000, 9_000, 'head', 0, 0, 0, 1, 'up_to_date', '')",
                 [],
             )
             .expect("check recorded before the setting existed");
@@ -1288,9 +1306,13 @@ mod tests {
                 [],
             )
             .expect("source fixture");
-        let check = |checked_at, detail: &str| CachedUpdateCheck {
+        let check = |generation, detail: &str| CachedUpdateCheck {
             source_id: 1,
-            checked_at,
+            // Deliberately not the generation: what orders these writes is the
+            // generation alone, and a displayed time that runs the other way
+            // must not change the outcome.
+            checked_at: 1_000 - generation,
+            generation,
             local_revision: "head".into(),
             local_reference: Some("refs/heads/main".into()),
             upstream_ref: None,
@@ -1311,7 +1333,8 @@ mod tests {
             .expect("stale batch");
 
         let checks = store.update_checks().expect("stored checks");
-        assert_eq!(checks[0].checked_at, 20);
+        assert_eq!(checks[0].generation, 20);
+        assert_eq!(checks[0].checked_at, 980);
         assert_eq!(checks[0].detail, "newer");
         store
             .record_update_check(&check(10, "older single"))
@@ -1500,6 +1523,19 @@ const MIGRATIONS: &[Migration] = &[
               );
               INSERT OR IGNORE INTO source_id_sequence (singleton, next_id)
               SELECT 1, COALESCE(MAX(id), 0) + 1 FROM source_repositories;",
+    },
+    Migration {
+        version: 11,
+        destructive: false,
+        // `checked_at` used to order these writes as well as date them, which
+        // is why the seed is the value each row already holds: those are the
+        // generations its checks were recorded under, and
+        // `reserve_update_check_generations` reads them as its high-water
+        // mark. Seeding a constant instead would put every upgraded row at the
+        // same point in the order, where one of them displaces the rest.
+        sql: "ALTER TABLE source_update_checks
+                ADD COLUMN generation INTEGER NOT NULL DEFAULT 0;
+              UPDATE source_update_checks SET generation = checked_at;",
     },
 ];
 
@@ -1733,6 +1769,47 @@ mod migration_tests {
             2
         );
         assert!(connection.prepare("SELECT * FROM legacy").is_err());
+    }
+
+    /// A check recorded before the ordering generation had a column of its own
+    /// was ordered by the value it was dated with, so that value is the
+    /// generation it carries. Seeding the column with anything else — zero,
+    /// most obviously — would put every upgraded row behind the next check to
+    /// be reserved, which is harmless, or ahead of it, which silently drops
+    /// results.
+    #[test]
+    fn upgrading_seeds_each_checks_generation_from_the_value_that_ordered_it() {
+        let temporary = tempfile::tempdir().expect("temporary data directory");
+        let database = temporary.path().join("skilled.sqlite3");
+        let mut connection = Connection::open(&database).expect("create database");
+        let before: Vec<Migration> = MIGRATIONS
+            .iter()
+            .copied()
+            .filter(|migration| migration.version < 11)
+            .collect();
+        migrate_with(&mut connection, &database, &before).expect("migrate to schema 10");
+        connection
+            .execute_batch(
+                "INSERT INTO source_repositories
+                    (id, label, canonical_path, head_revision, dirty, dirty_known, last_scan_at)
+                 VALUES (1, 'source', '/source', 'head', 0, 1, 0);
+                 INSERT INTO source_update_checks
+                    (source_id, checked_at, local_revision, ahead, behind, dirty, dirty_known,
+                     verdict, detail)
+                 VALUES (1, 9000, 'head', 0, 0, 0, 1, 'up_to_date', '');",
+            )
+            .expect("check recorded before the generation column existed");
+
+        migrate_with(&mut connection, &database, MIGRATIONS)
+            .expect("migrate to the current schema");
+
+        assert_eq!(
+            connection
+                .query_row("SELECT generation FROM source_update_checks", [], |row| row
+                    .get::<_, i64>(0))
+                .expect("read seeded generation"),
+            9000
+        );
     }
 
     #[test]

@@ -33,10 +33,11 @@ use crate::{
     },
     store::Store,
     updates::{
-        CachedUpdateCheck, RepositoryUpdatePlan, RepositoryUpdatePrompt, RepositoryUpdateVerdict,
-        apply_repository_update_attempt, cached_update_check, encode_findings,
-        plan_repository_update, probe_repository_update, probe_repository_update_against,
-        probe_repository_update_cancellable, verify_repository_update,
+        CachedUpdateCheck, CheckStamp, RepositoryUpdatePlan, RepositoryUpdatePrompt,
+        RepositoryUpdateVerdict, apply_repository_update_attempt, cached_update_check,
+        encode_findings, plan_repository_update, probe_repository_update,
+        probe_repository_update_against, probe_repository_update_cancellable,
+        verify_repository_update,
     },
     validation::valid_skill_name,
 };
@@ -760,7 +761,7 @@ impl SkilledApp {
         let sources = startup.sources;
         let update_checks = startup.update_checks;
         for check in &update_checks {
-            note_generation(check.checked_at);
+            note_generation(check.generation);
         }
         // Setup reads the installation roots at its own step, after the user
         // has chosen which agents Skilled should configure. Reading them
@@ -2170,7 +2171,14 @@ impl SkilledApp {
                         source,
                         &probe,
                         &inventory,
-                        first_generation.saturating_add(i64::try_from(index).unwrap_or(i64::MAX)),
+                        CheckStamp {
+                            // The clock now, which is when this check ran; the
+                            // generation was reserved before the run began, so
+                            // it orders the write and dates nothing.
+                            checked_at: wall_clock(),
+                            generation: first_generation
+                                .saturating_add(i64::try_from(index).unwrap_or(i64::MAX)),
+                        },
                         &worker_cancelled,
                     ) else {
                         let _ = sender.send(UpdateCheckMessage::Cancelled);
@@ -2419,21 +2427,17 @@ impl SkilledApp {
         // the cache goes without, and it says so.
         let persistence_error = match self.reserve_generations(1) {
             Err(error) => Some(error),
-            Ok(checked_at) => {
+            Ok(generation) => {
+                let stamp = self.post_apply_stamp(plan.source_id(), generation);
                 let check = if write_attempted {
                     apply_error.as_deref().map_or_else(
-                        || self.repository_verification_check(&plan, &verification, checked_at),
+                        || self.repository_verification_check(&plan, &verification, stamp),
                         |error| {
-                            self.repository_apply_failure_check(
-                                &plan,
-                                error,
-                                &verification,
-                                checked_at,
-                            )
+                            self.repository_apply_failure_check(&plan, error, &verification, stamp)
                         },
                     )
                 } else {
-                    self.superseded_repository_check(plan.source_id(), checked_at)
+                    self.superseded_repository_check(plan.source_id(), stamp)
                 };
                 self.store()
                     .and_then(|store| store.record_update_check(&check))
@@ -2492,7 +2496,10 @@ impl SkilledApp {
             &source,
             &probe,
             &self.inventory,
-            generation,
+            CheckStamp {
+                checked_at: wall_clock(),
+                generation,
+            },
             &AtomicBool::new(false),
         )
         .expect("a flag that is never set cannot cancel this check");
@@ -2541,21 +2548,17 @@ impl SkilledApp {
         // cache under one no other process can be held off from reusing.
         let bookkeeping_error = match self.reserve_generations(1) {
             Err(error) => Some(error),
-            Ok(checked_at) => {
+            Ok(generation) => {
+                let stamp = self.post_apply_stamp(plan.source_id(), generation);
                 let check = if write_attempted {
                     apply_error.as_deref().map_or_else(
-                        || self.repository_verification_check(plan, &verification, checked_at),
+                        || self.repository_verification_check(plan, &verification, stamp),
                         |error| {
-                            self.repository_apply_failure_check(
-                                plan,
-                                error,
-                                &verification,
-                                checked_at,
-                            )
+                            self.repository_apply_failure_check(plan, error, &verification, stamp)
                         },
                     )
                 } else {
-                    self.superseded_repository_check(plan.source_id(), checked_at)
+                    self.superseded_repository_check(plan.source_id(), stamp)
                 };
                 self.store()
                     .and_then(|store| store.record_update_check(&check))
@@ -2573,11 +2576,32 @@ impl SkilledApp {
         }
     }
 
+    /// The stamp a record written after an apply carries.
+    ///
+    /// A freshly reserved generation, so the record outranks whatever another
+    /// Skilled process wrote while the preview was open — and the check time of
+    /// the check the apply followed, because no check ran after the write.
+    /// Dating this record with its own generation, or with the clock, would
+    /// have Updates state a check that never happened.
+    ///
+    /// The cached check is gone only if something removed the row while the
+    /// preview was open, and there is then no check time to carry. The clock is
+    /// the honest answer there: it dates this observation, which is the only
+    /// one the row will hold.
+    fn post_apply_stamp(&self, source_id: i64, generation: i64) -> CheckStamp {
+        CheckStamp {
+            checked_at: self
+                .update_check_for(source_id)
+                .map_or_else(wall_clock, |check| check.checked_at),
+            generation,
+        }
+    }
+
     fn repository_verification_check(
         &self,
         plan: &RepositoryUpdatePlan,
         verification: &crate::updates::RepositoryVerifyReport,
-        checked_at: i64,
+        stamp: CheckStamp,
     ) -> CachedUpdateCheck {
         let (verdict, detail) = if !verification.is_verified() {
             (
@@ -2598,7 +2622,7 @@ impl SkilledApp {
         } else {
             (RepositoryUpdateVerdict::UpToDate, String::new())
         };
-        self.repository_result_check(plan, checked_at, verdict, detail)
+        self.repository_result_check(plan, stamp, verdict, detail)
     }
 
     fn repository_apply_failure_check(
@@ -2606,7 +2630,7 @@ impl SkilledApp {
         plan: &RepositoryUpdatePlan,
         error: &str,
         verification: &crate::updates::RepositoryVerifyReport,
-        checked_at: i64,
+        stamp: CheckStamp,
     ) -> CachedUpdateCheck {
         let mut findings = vec![Finding::new(
             "update.apply_failed",
@@ -2628,7 +2652,7 @@ impl SkilledApp {
         }
         self.repository_result_check(
             plan,
-            checked_at,
+            stamp,
             RepositoryUpdateVerdict::Blocked,
             encode_findings(&findings),
         )
@@ -2637,7 +2661,7 @@ impl SkilledApp {
     fn repository_result_check(
         &self,
         plan: &RepositoryUpdatePlan,
-        checked_at: i64,
+        stamp: CheckStamp,
         verdict: RepositoryUpdateVerdict,
         detail: String,
     ) -> CachedUpdateCheck {
@@ -2648,7 +2672,8 @@ impl SkilledApp {
         let dirty = source.and_then(RegisteredSource::dirty);
         CachedUpdateCheck {
             source_id: plan.source_id(),
-            checked_at,
+            checked_at: stamp.checked_at,
+            generation: stamp.generation,
             local_revision: source
                 .map(RegisteredSource::head)
                 .unwrap_or(plan.target_revision())
@@ -2675,7 +2700,7 @@ impl SkilledApp {
         }
     }
 
-    fn superseded_repository_check(&self, source_id: i64, checked_at: i64) -> CachedUpdateCheck {
+    fn superseded_repository_check(&self, source_id: i64, stamp: CheckStamp) -> CachedUpdateCheck {
         let source = self
             .sources
             .iter()
@@ -2683,7 +2708,8 @@ impl SkilledApp {
             .expect("an update plan retains its registered source");
         CachedUpdateCheck {
             source_id,
-            checked_at,
+            checked_at: stamp.checked_at,
+            generation: stamp.generation,
             local_revision: source.head().to_owned(),
             // Nothing was written, so the only reference available is the one
             // the source records, which Git printed in its shortest unambiguous
@@ -3813,6 +3839,7 @@ mod tests {
         let check = CachedUpdateCheck {
             source_id: 99,
             checked_at: 0,
+            generation: 0,
             local_revision: "abc".into(),
             local_reference: None,
             upstream_ref: None,
