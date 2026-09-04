@@ -79,6 +79,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # Keep macos-15 on pull requests for this confirmation tip. A
+        # follow-up may move Darwin to main-only / workflow_dispatch.
         os: [ubuntu-24.04, macos-15]
     runs-on: ${{ matrix.os }}
     steps:

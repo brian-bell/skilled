@@ -91,7 +91,7 @@ fn the_exact_cargo_package_installs_and_honors_the_release_contract() {
     let recorded = String::from_utf8_lossy(&recorded);
     let visible = visible_text(&recorded);
     assert!(
-        visible.contains("application metadata schema 99 is newer than supported schema 10"),
+        future_schema_refusal_is_visible(&visible),
         "recorded TUI:\n{recorded}\nvisible:\n{visible}\n{}",
         diagnostics(&refused)
     );
@@ -113,14 +113,46 @@ fn the_exact_cargo_package_installs_and_honors_the_release_contract() {
 #[test]
 fn visible_text_joins_a_wrapped_schema_refusal() {
     let recorded = "application metadata schema\r\n\u{1b}[0m99 is newer than supported schema 10.";
+    let visible = visible_text(recorded);
     assert!(
-        visible_text(recorded)
-            .contains("application metadata schema 99 is newer than supported schema 10")
+        visible.contains("application metadata schema 99 is newer than supported schema 10"),
+        "{visible}"
+    );
+    assert!(future_schema_refusal_is_visible(&visible), "{visible}");
+}
+
+#[test]
+fn future_schema_gate_accepts_csi_glued_schema_version() {
+    // macOS Application Support paths wrap so `schema` ends a row and `99`
+    // starts the next, separated by CSI cursor addressing rather than
+    // whitespace. After CSI strip the tokens glue to `schema99`.
+    let recorded = "application metadata schema\u{1b}[8;1H99 is newer than supported schema 10.";
+    let visible = visible_text(recorded);
+    assert!(
+        visible.contains("schema99"),
+        "CSI-stripped recording should glue the wrapped tokens: {visible}"
+    );
+    assert!(
+        !visible.contains("application metadata schema 99 is newer than supported schema 10"),
+        "the glued recording must not satisfy the old spanning phrase: {visible}"
+    );
+    assert!(
+        future_schema_refusal_is_visible(&visible),
+        "the release gate must still pass after that glue: {visible}"
     );
 }
 
-/// Strip CSI/OSC and collapse whitespace so an 80-column wrap still reads as
-/// one sentence. macOS Application Support paths split `schema` from `99`.
+/// The future-schema gate looks for substrings that cannot span an 80-column
+/// wrap. Ratatui/`script` on macOS can place `schema` at the end of one row
+/// and `99` at the start of the next, with CSI cursor addressing and no
+/// whitespace between them; after CSI strip those tokens glue to `schema99`.
+fn future_schema_refusal_is_visible(visible: &str) -> bool {
+    visible.contains("99 is newer than supported schema 10")
+        && visible.contains("application metadata schema")
+}
+
+/// Strip CSI/OSC and collapse whitespace so a wrap that left a newline still
+/// reads as one sentence. CSI-only addressing leaves no separator to collapse.
 fn visible_text(recorded: &str) -> String {
     let mut out = String::new();
     let mut chars = recorded.chars().peekable();
