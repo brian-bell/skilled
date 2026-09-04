@@ -89,11 +89,10 @@ fn the_exact_cargo_package_installs_and_honors_the_release_contract() {
     let recorded =
         fs::read(future_runtime.join("typescript")).expect("read the recorded future-schema TUI");
     let recorded = String::from_utf8_lossy(&recorded);
-    // The banner wraps the cause to the 80-column minimum, so the sentence is
-    // not one contiguous recorded line. The schema numbers are.
+    let visible = visible_text(&recorded);
     assert!(
-        recorded.contains("schema 99") && recorded.contains("supported schema 10"),
-        "recorded TUI:\n{recorded}\n{}",
+        visible.contains("application metadata schema 99 is newer than supported schema 10"),
+        "recorded TUI:\n{recorded}\nvisible:\n{visible}\n{}",
         diagnostics(&refused)
     );
     assert_eq!(
@@ -109,6 +108,56 @@ fn the_exact_cargo_package_installs_and_honors_the_release_contract() {
         !future_data.join("skilled.sqlite3-shm").exists(),
         "the older packaged executable created a shared-memory sidecar beside the future database"
     );
+}
+
+#[test]
+fn visible_text_joins_a_wrapped_schema_refusal() {
+    let recorded = "application metadata schema\r\n\u{1b}[0m99 is newer than supported schema 10.";
+    assert!(
+        visible_text(recorded)
+            .contains("application metadata schema 99 is newer than supported schema 10")
+    );
+}
+
+/// Strip CSI/OSC and collapse whitespace so an 80-column wrap still reads as
+/// one sentence. macOS Application Support paths split `schema` from `99`.
+fn visible_text(recorded: &str) -> String {
+    let mut out = String::new();
+    let mut chars = recorded.chars().peekable();
+    while let Some(character) = chars.next() {
+        if character == '\u{1b}' {
+            match chars.next() {
+                Some('[') => {
+                    for next in chars.by_ref() {
+                        if ('\u{40}'..='\u{7e}').contains(&next) {
+                            break;
+                        }
+                    }
+                }
+                Some(']') => {
+                    while let Some(next) = chars.next() {
+                        if next == '\u{7}' {
+                            break;
+                        }
+                        if next == '\u{1b}' && chars.peek() == Some(&'\\') {
+                            chars.next();
+                            break;
+                        }
+                    }
+                }
+                Some(_) | None => {}
+            }
+            continue;
+        }
+        if character.is_whitespace() {
+            if !out.is_empty() && !out.ends_with(' ') {
+                out.push(' ');
+            }
+        } else if !character.is_control() {
+            out.push(character);
+        }
+    }
+    out
 }
 
 fn run(command: &mut Command, context: &str) -> std::process::Output {
