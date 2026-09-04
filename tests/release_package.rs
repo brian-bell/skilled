@@ -1,5 +1,4 @@
 use std::{
-    collections::BTreeMap,
     fs,
     io::Write,
     path::{Path, PathBuf},
@@ -79,27 +78,36 @@ fn the_exact_cargo_package_installs_and_honors_the_release_contract() {
         )
         .expect("create future schema fixture");
     drop(connection);
-    let before = snapshot_tree(&future_runtime);
+    let before = fs::read(&database).expect("read future database");
 
-    let refused = run(
-        Command::new(&executable)
-            .env("HOME", future_runtime.join("home"))
-            .env("XDG_DATA_HOME", future_runtime.join("data"))
-            .env("PATH", future_runtime.join("bin")),
-        "start the installed binary against future metadata",
-    );
-    assert!(!refused.status.success(), "{}", diagnostics(&refused));
-    assert!(refused.stdout.is_empty(), "{}", diagnostics(&refused));
-    let error = String::from_utf8_lossy(&refused.stderr);
+    // A newer schema no longer exits before the TUI starts: the session opens
+    // degraded and read-only, the same way `SkilledApp::open` does in-process.
+    // Drive it through a pseudo-terminal so the packaged binary can show that
+    // refusal, then prove it did not write through the future database.
+    let refused = run_tui_smoke(&executable, &future_runtime);
+    assert!(refused.status.success(), "{}", diagnostics(&refused));
+    let recorded =
+        fs::read(future_runtime.join("typescript")).expect("read the recorded future-schema TUI");
+    let recorded = String::from_utf8_lossy(&recorded);
+    // The banner wraps the cause to the 80-column minimum, so the sentence is
+    // not one contiguous recorded line. The schema numbers are.
     assert!(
-        error.contains("application metadata schema 99 is newer than supported schema 5"),
-        "{}",
+        recorded.contains("schema 99") && recorded.contains("supported schema 10"),
+        "recorded TUI:\n{recorded}\n{}",
         diagnostics(&refused)
     );
     assert_eq!(
-        snapshot_tree(&future_runtime),
+        fs::read(&database).expect("reread future database"),
         before,
         "the older packaged executable modified future application data"
+    );
+    assert!(
+        !future_data.join("skilled.sqlite3-wal").exists(),
+        "the older packaged executable created a write-ahead log beside the future database"
+    );
+    assert!(
+        !future_data.join("skilled.sqlite3-shm").exists(),
+        "the older packaged executable created a shared-memory sidecar beside the future database"
     );
 }
 
@@ -128,14 +136,30 @@ fn installed_executable(root: &Path) -> std::path::PathBuf {
 }
 
 fn run_tui_smoke(executable: &Path, runtime: &Path) -> std::process::Output {
+    fs::create_dir_all(runtime).expect("create runtime directory for the recorded TUI");
+    let typescript = runtime.join("typescript");
+    // A piped `script(1)` PTY starts at 0×0, which draws nothing. 80×24 is the
+    // documented minimum layout, and the schema-refusal banner has to be on
+    // screen for the release gate to observe it. `stty` is addressed
+    // absolutely because the smoke PATH is an empty isolated directory.
+    let stty = if cfg!(target_os = "macos") {
+        "/bin/stty"
+    } else {
+        "/usr/bin/stty"
+    };
+    let launch = format!("{stty} cols 80 rows 24; exec {}", shell_quote(executable));
     let mut command = Command::new("/usr/bin/script");
     if cfg!(target_os = "macos") {
-        command.args(["-q", "/dev/null"]).arg(executable);
+        command
+            .args(["-q"])
+            .arg(&typescript)
+            .args(["sh", "-c"])
+            .arg(&launch);
     } else if cfg!(target_os = "linux") {
         command
             .args(["-q", "-e", "-c"])
-            .arg(format!("exec {}", shell_quote(executable)))
-            .arg("/dev/null");
+            .arg(&launch)
+            .arg(&typescript);
     } else {
         panic!("the release package gate supports the advertised macOS and Linux platforms");
     }
@@ -190,32 +214,4 @@ fn application_data_dir(runtime: &Path) -> PathBuf {
     } else {
         panic!("the release package gate supports the advertised macOS and Linux platforms")
     }
-}
-
-fn snapshot_tree(root: &Path) -> BTreeMap<PathBuf, Option<Vec<u8>>> {
-    fn visit(root: &Path, path: &Path, snapshot: &mut BTreeMap<PathBuf, Option<Vec<u8>>>) {
-        let mut entries: Vec<_> = fs::read_dir(path)
-            .unwrap_or_else(|error| panic!("read {path:?}: {error}"))
-            .map(|entry| entry.expect("read directory entry"))
-            .collect();
-        entries.sort_by_key(|entry| entry.file_name());
-        for entry in entries {
-            let path = entry.path();
-            let relative = path
-                .strip_prefix(root)
-                .expect("snapshot entry is beneath its root")
-                .to_owned();
-            let file_type = entry.file_type().expect("read snapshot entry type");
-            if file_type.is_dir() {
-                snapshot.insert(relative, None);
-                visit(root, &path, snapshot);
-            } else {
-                snapshot.insert(relative, Some(fs::read(&path).expect("read snapshot file")));
-            }
-        }
-    }
-
-    let mut snapshot = BTreeMap::new();
-    visit(root, root, &mut snapshot);
-    snapshot
 }
