@@ -2517,9 +2517,17 @@ pub fn apply_repository_update(plan: &RepositoryUpdatePlan) -> Result<()> {
 /// takes no expected-current-revision to condition its write on, so another
 /// process that moves the branch in between can leave the fast-forward
 /// applying a different range than the one previewed while still landing on
-/// the previewed object. Verification re-reads the result, but the window is
-/// not closed; it is the update counterpart of `apply_install`'s pathname
-/// window and is tracked as `skilled-8tr`.
+/// the previewed object. Git offers no way to refuse that at the write — the
+/// merge reads HEAD itself, inside its own process, and no flag asserts what
+/// it must find there — so the outcome is held to the guard's revision
+/// afterwards instead: [`verify_repository_update`] reads the log entry the
+/// merge left on the branch, and a fast-forward that started anywhere but the
+/// previewed revision is a verification failure rather than a silent apply
+/// (`skilled-8tr`). Replacing the merge with plumbing that does take an
+/// expected old value was rejected: it would trade one disclosed write for
+/// several, and the plan states the hooks, monitor, filters, and signature
+/// program `merge` runs. The pre-write pathname window itself remains, as
+/// `apply_install`'s does.
 pub(crate) fn apply_repository_update_attempt(plan: &RepositoryUpdatePlan) -> (Result<()>, bool) {
     match validate_repository_update(plan) {
         Ok(checkout) => (
@@ -2655,10 +2663,23 @@ fn checkout_is_the_planned_repository(
     Ok(())
 }
 
+/// Verify a fast-forward whose write was attempted. Application flows that
+/// can refuse before spawning Git use the attempt-aware observation below.
 pub fn verify_repository_update(
     plan: &RepositoryUpdatePlan,
     before: &InventorySnapshot,
     after: &InventorySnapshot,
+) -> RepositoryVerifyReport {
+    verify_repository_update_attempt(plan, before, after, true)
+}
+
+/// A refused guard still needs a fresh state observation, but no merge ran
+/// whose starting revision could be attributed to this attempt.
+pub(crate) fn verify_repository_update_attempt(
+    plan: &RepositoryUpdatePlan,
+    before: &InventorySnapshot,
+    after: &InventorySnapshot,
+    write_attempted: bool,
 ) -> RepositoryVerifyReport {
     let mut failures = Vec::new();
     let mut withheld = Vec::new();
@@ -2675,7 +2696,41 @@ pub fn verify_repository_update(
             match git::head_state((&plan.path).into()) {
                 Ok(head)
                     if head.reference() == Some(plan.current_reference.as_str())
-                        && head.revision() == plan.target_revision => {}
+                        && head.revision() == plan.target_revision =>
+                {
+                    // Landing on the previewed object is not the same as
+                    // having come from the previewed one. The guard read HEAD
+                    // in a process of its own and `merge --ff-only` takes no
+                    // expected-current-revision, so a branch another process
+                    // moved in between leaves the fast-forward applying a
+                    // range the user never saw while still ending here. The
+                    // merge's own log entry names where it started, and that
+                    // is what the disclosure has to be held to.
+                    //
+                    // Asked only in this arm on purpose: a HEAD that is not at
+                    // the target has already failed for a reason that says
+                    // more. A refused guard must not attribute another
+                    // process's merge to this attempt, even at the target.
+                    if write_attempted {
+                        match git::previous_revision_of(
+                            (&plan.path).into(),
+                            &plan.current_reference,
+                        ) {
+                            Ok(Some(previous)) if previous == plan.current_revision => {}
+                            Ok(Some(previous)) => failures.push(format!(
+                                "{} was fast-forwarded from {previous}, not the {} the preview described, so the changes applied are not the ones that were confirmed",
+                                plan.current_reference, plan.current_revision
+                            )),
+                            Ok(None) => withheld.push(format!(
+                                "{} keeps no reference log, so the revision the fast-forward started from was not checked",
+                                plan.current_reference
+                            )),
+                            Err(error) => withheld.push(format!(
+                                "the revision the fast-forward started from could not be checked: {error}"
+                            )),
+                        }
+                    }
+                }
                 Ok(head) => failures.push(format!(
                     "HEAD is {} at {}, expected {} at {}",
                     head.revision(),

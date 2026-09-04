@@ -50,16 +50,23 @@ struct StaleConfirmation {
     database_to_break: Option<PathBuf>,
     cache_to_break: Option<PathBuf>,
     changed: bool,
+    revisions: Vec<String>,
 }
 
 impl StaleConfirmation {
     fn change_checkout(&mut self) {
         if !self.changed {
-            std::fs::write(
-                self.checkout.join("skills/demo/SKILL.md"),
-                "changed after preview\n",
-            )
-            .expect("change checkout after preview");
+            if self.revisions.is_empty() {
+                std::fs::write(
+                    self.checkout.join("skills/demo/SKILL.md"),
+                    "changed after preview\n",
+                )
+                .expect("change checkout after preview");
+            } else {
+                for revision in &self.revisions {
+                    git(&self.checkout, &["merge", "--ff-only", revision]);
+                }
+            }
             if let Some(database) = &self.database_to_break {
                 let connection = rusqlite::Connection::open(database).expect("open metadata");
                 connection
@@ -251,6 +258,7 @@ fn a_guard_refusal_after_confirmation_is_blocked_without_claiming_a_failed_write
         database_to_break: None,
         cache_to_break: None,
         changed: false,
+        revisions: Vec::new(),
     };
     let mut output = Vec::new();
 
@@ -274,6 +282,45 @@ fn a_guard_refusal_after_confirmation_is_blocked_without_claiming_a_failed_write
 }
 
 #[test]
+fn a_guard_refusal_at_the_target_does_not_attribute_an_external_fast_forward() {
+    let (_temporary, environment, seed, clone) = fixture();
+    let mut revisions = Vec::new();
+    for name in ["first.txt", "second.txt"] {
+        std::fs::write(seed.join(name), "incoming\n").expect("incoming file");
+        commit(&seed, name);
+        revisions.push(git(&seed, &["rev-parse", "HEAD"]));
+    }
+    git(&seed, &["push"]);
+    let mut input = StaleConfirmation {
+        input: Cursor::new(b"y\n".to_vec()),
+        checkout: clone.clone(),
+        database_to_break: None,
+        cache_to_break: None,
+        changed: false,
+        revisions,
+    };
+    let mut output = Vec::new();
+    let code = cli::run(
+        &[
+            "update".into(),
+            "--source".into(),
+            clone.display().to_string(),
+        ],
+        environment,
+        &mut input,
+        &mut output,
+    );
+    let output = String::from_utf8(output).expect("utf-8");
+    assert_eq!(code, ExitCodeKind::Blocked, "{output}");
+    assert!(output.contains("Blocked: nothing was written."), "{output}");
+    assert!(!output.contains("was fast-forwarded from"), "{output}");
+    assert!(
+        !output.contains("not the ones that were confirmed"),
+        "{output}"
+    );
+}
+
+#[test]
 fn a_guard_refusal_with_an_unavailable_refresh_is_not_reported_as_an_ordinary_block() {
     let (temporary, environment, seed, clone) = fixture();
     std::fs::write(seed.join("upstream.txt"), "incoming\n").expect("incoming file");
@@ -285,6 +332,7 @@ fn a_guard_refusal_with_an_unavailable_refresh_is_not_reported_as_an_ordinary_bl
         database_to_break: Some(temporary.path().join("data/skilled.sqlite3")),
         cache_to_break: None,
         changed: false,
+        revisions: Vec::new(),
     };
     let mut output = Vec::new();
 
@@ -317,6 +365,7 @@ fn a_guard_refusal_with_a_cache_failure_keeps_the_refreshed_state_distinct() {
         database_to_break: None,
         cache_to_break: Some(temporary.path().join("data/skilled.sqlite3")),
         changed: false,
+        revisions: Vec::new(),
     };
     let mut output = Vec::new();
 
