@@ -1679,6 +1679,61 @@ fn a_failed_apply_refreshes_and_reports_the_post_attempt_state() {
 }
 
 #[test]
+fn a_guard_refusal_at_the_target_does_not_claim_another_processes_write() {
+    for unlogged in [false, true] {
+        let mut fixture = fixture();
+        let intermediate = push_update(&fixture, "skills/demo/first.txt");
+        push_update(&fixture, "skills/demo/second.txt");
+        fixture
+            .app
+            .perform_effects(&[Effect::CheckUpdates])
+            .expect("check");
+        finish_update_check(&mut fixture.app);
+        fixture
+            .app
+            .perform_effects(&[Effect::PlanRepositoryUpdate])
+            .expect("plan");
+        let plan = match fixture.app.pending_update().expect("preview") {
+            RepositoryUpdatePrompt::Preview(plan) => plan.clone(),
+            other => panic!("expected preview: {other:?}"),
+        };
+        git(&fixture.clone, &["merge", "--ff-only", &intermediate]);
+        git(
+            &fixture.clone,
+            &["merge", "--ff-only", plan.target_revision()],
+        );
+        if unlogged {
+            git(
+                &fixture.clone,
+                &["config", "core.logAllRefUpdates", "false"],
+            );
+            std::fs::remove_dir_all(fixture.clone.join(".git/logs")).expect("discard logs");
+        }
+        let report = {
+            fixture
+                .app
+                .perform_effects(&[Effect::ApplyRepositoryUpdate])
+                .expect("refuse");
+            match fixture.app.pending_update().expect("report") {
+                RepositoryUpdatePrompt::Report {
+                    verification,
+                    write_attempted,
+                    apply_error,
+                    ..
+                } => {
+                    assert!(!write_attempted);
+                    assert!(apply_error.is_some());
+                    verification.clone()
+                }
+                other => panic!("expected report: {other:?}"),
+            }
+        };
+        assert!(report.is_verified(), "{:?}", report.failures());
+        assert!(report.is_complete(), "{:?}", report.withheld());
+    }
+}
+
+#[test]
 fn a_failed_fast_forward_caches_the_apply_and_verification_failures() {
     let mut fixture = fixture();
     push_update(&fixture, "skills/demo/new.txt");

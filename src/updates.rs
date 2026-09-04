@@ -2515,10 +2515,23 @@ fn checkout_is_the_planned_repository(
     Ok(())
 }
 
+/// Verify a fast-forward whose write was attempted. Application flows that
+/// can refuse before spawning Git use the attempt-aware observation below.
 pub fn verify_repository_update(
     plan: &RepositoryUpdatePlan,
     before: &InventorySnapshot,
     after: &InventorySnapshot,
+) -> RepositoryVerifyReport {
+    verify_repository_update_attempt(plan, before, after, true)
+}
+
+/// A refused guard still needs a fresh state observation, but no merge ran
+/// whose starting revision could be attributed to this attempt.
+pub(crate) fn verify_repository_update_attempt(
+    plan: &RepositoryUpdatePlan,
+    before: &InventorySnapshot,
+    after: &InventorySnapshot,
+    write_attempted: bool,
 ) -> RepositoryVerifyReport {
     let mut failures = Vec::new();
     let mut withheld = Vec::new();
@@ -2548,25 +2561,26 @@ pub fn verify_repository_update(
                     //
                     // Asked only in this arm on purpose: a HEAD that is not at
                     // the target has already failed for a reason that says
-                    // more, and a refused write — where nothing moved at all —
-                    // must not also be reported as having applied the wrong
-                    // range.
-                    match git::previous_revision_of(
-                        (&plan.path).into(),
-                        &plan.current_reference,
-                    ) {
-                        Ok(Some(previous)) if previous == plan.current_revision => {}
-                        Ok(Some(previous)) => failures.push(format!(
-                            "{} was fast-forwarded from {previous}, not the {} the preview described, so the changes applied are not the ones that were confirmed",
-                            plan.current_reference, plan.current_revision
-                        )),
-                        Ok(None) => withheld.push(format!(
-                            "{} keeps no reference log, so the revision the fast-forward started from was not checked",
-                            plan.current_reference
-                        )),
-                        Err(error) => withheld.push(format!(
-                            "the revision the fast-forward started from could not be checked: {error}"
-                        )),
+                    // more. A refused guard must not attribute another
+                    // process's merge to this attempt, even at the target.
+                    if write_attempted {
+                        match git::previous_revision_of(
+                            (&plan.path).into(),
+                            &plan.current_reference,
+                        ) {
+                            Ok(Some(previous)) if previous == plan.current_revision => {}
+                            Ok(Some(previous)) => failures.push(format!(
+                                "{} was fast-forwarded from {previous}, not the {} the preview described, so the changes applied are not the ones that were confirmed",
+                                plan.current_reference, plan.current_revision
+                            )),
+                            Ok(None) => withheld.push(format!(
+                                "{} keeps no reference log, so the revision the fast-forward started from was not checked",
+                                plan.current_reference
+                            )),
+                            Err(error) => withheld.push(format!(
+                                "the revision the fast-forward started from could not be checked: {error}"
+                            )),
+                        }
                     }
                 }
                 Ok(head) => failures.push(format!(
