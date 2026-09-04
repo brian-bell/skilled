@@ -14,7 +14,7 @@ view, degraded read-only startup when private metadata is unavailable,
 installation, receipt-backed repair of incorrect or dangling links,
 guarded uninstall, metadata-only Forget Source, and explicit repository update
 checks with guarded fast-forwards — each previewed, confirmed, rescanned, and
-verified — are implemented.
+verified — are implemented, as is the testable 0.2.0 Cargo release identity.
 
 Filesystem mutation stays narrow. Installation creates one directory symbolic
 link per agent and may create the documented skill root when its own parent
@@ -50,11 +50,14 @@ SSH remotes, OpenSSH 8.4 or newer.
 
 ```bash
 cargo run
+cargo run -- --version
 cargo run -- install --source <id-or-path> --skill <name> --agents claude-code
 cargo run -- uninstall --skill <name> --agent claude-code
 cargo run -- repair --skill <name> --agent claude-code
 cargo build --release
 cargo test --all-targets
+cargo package --locked
+cargo test --test release_package -- --ignored
 cargo fmt --check
 cargo clippy --all-targets --all-features -- -D warnings
 ```
@@ -111,8 +114,9 @@ signal needs both, because colour alone is not an acceptable cue.
   paths, plus the session identity (user, host, operating system) gathered
   once at startup — every segment optional, omitted rather than invented, and
   injected by tests so they never read the real environment.
-- `src/main.rs`: no arguments runs the interactive application; anything else is
-  a command, reported through an exit status.
+- `src/main.rs`: `--version` reports the package identity before process
+  environment discovery; no arguments runs the interactive application, and
+  anything else is a command reported through an exit status.
 
 ## Invariants
 
