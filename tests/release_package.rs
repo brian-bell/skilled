@@ -140,8 +140,9 @@ fn run_tui_smoke(executable: &Path, runtime: &Path) -> std::process::Output {
     let typescript = runtime.join("typescript");
     // A piped `script(1)` PTY starts at 0×0, which draws nothing. 80×24 is the
     // documented minimum layout, and the schema-refusal banner has to be on
-    // screen for the release gate to observe it. `stty` is addressed
-    // absolutely because the smoke PATH is an empty isolated directory.
+    // screen for the release gate to observe it. `stty` and macOS `/bin/sh`
+    // are addressed absolutely because the smoke PATH is an empty isolated
+    // directory.
     let stty = if cfg!(target_os = "macos") {
         "/bin/stty"
     } else {
@@ -153,7 +154,7 @@ fn run_tui_smoke(executable: &Path, runtime: &Path) -> std::process::Output {
         command
             .args(["-q"])
             .arg(&typescript)
-            .args(["sh", "-c"])
+            .args(["/bin/sh", "-c"])
             .arg(&launch);
     } else if cfg!(target_os = "linux") {
         command
