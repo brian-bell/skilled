@@ -36,7 +36,7 @@ use crate::{
         CachedUpdateCheck, RepositoryUpdatePlan, RepositoryUpdatePrompt, RepositoryUpdateVerdict,
         apply_repository_update_attempt, cached_update_check, encode_findings,
         plan_repository_update, probe_repository_update, probe_repository_update_against,
-        probe_repository_update_cancellable, verify_repository_update,
+        probe_repository_update_cancellable, verify_repository_update_attempt,
     },
     validation::valid_skill_name,
 };
@@ -2405,7 +2405,12 @@ impl SkilledApp {
             }
         };
         self.rescan_installations();
-        let verification = verify_repository_update(&plan, &before_inventory, &self.inventory);
+        let verification = verify_repository_update_attempt(
+            &plan,
+            &before_inventory,
+            &self.inventory,
+            write_attempted,
+        );
         // A generation of its own for every answer but the verified one. A
         // failure is a later observation than the check it followed, and
         // reusing that check's generation would leave it losing the
@@ -2549,7 +2554,12 @@ impl SkilledApp {
             }
         };
         self.rescan_installations();
-        let verification = verify_repository_update(plan, &before_inventory, &self.inventory);
+        let verification = verify_repository_update_attempt(
+            plan,
+            &before_inventory,
+            &self.inventory,
+            write_attempted,
+        );
         // The same fresh generation the screens take, and the same refusal to
         // cache under one no other process can be held off from reusing.
         let bookkeeping_error = match self.reserve_generations(1) {
