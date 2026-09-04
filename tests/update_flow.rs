@@ -4076,6 +4076,17 @@ fn replacing_a_removed_skill_directory_with_a_file_verifies_as_disclosed() {
         fixture.clone.join("skills/demo").is_file(),
         "the fast-forward should have replaced the directory with a file"
     );
+    // A proven non-directory is nothing OpenCode can load, not an unreadable
+    // root whose effective resolution is still unknown (PR #49 review).
+    assert_eq!(
+        fixture
+            .app
+            .inventory()
+            .row("demo")
+            .unwrap()
+            .opencode_resolution(),
+        Some(&skilled::resolution::OpenCodeResolution::NothingVisible)
+    );
     let report = verify_repository_update(&plan, &before, fixture.app.inventory());
 
     assert!(report.is_verified(), "{:?}", report.failures());
