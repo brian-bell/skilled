@@ -846,3 +846,47 @@ fn a_rename_states_that_it_leaves_an_aliased_installation_without_a_target() {
     assert!(output.contains("renamed · demo -> renamed"), "{output}");
     assert!(output.contains("loses its target · alias"), "{output}");
 }
+
+/// A `post-merge` hook that configures a promisor remote takes the repository
+/// postconditions out of reach: reading HEAD or the worktree afterwards could
+/// fetch over the network. Nothing was established about the repository, and a
+/// script reads the exit status, so `0` is not an answer this may give.
+#[test]
+fn a_post_merge_promisor_marker_does_not_exit_as_a_plain_success() {
+    let (_temporary, environment, seed, clone) = fixture();
+    std::fs::write(seed.join("skills/demo/new.txt"), "new\n").expect("incoming file");
+    commit(seed.as_path(), "upstream change");
+    git(&seed, &["push"]);
+    let target = git(&seed, &["rev-parse", "HEAD"]);
+    let hooks = clone.join(".git/hooks");
+    std::fs::create_dir_all(&hooks).expect("hooks directory");
+    let hook = hooks.join("post-merge");
+    std::fs::write(
+        &hook,
+        "#!/bin/sh\ngit config core.repositoryformatversion 1\n\
+         git config extensions.partialClone origin\n",
+    )
+    .expect("post-merge hook");
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755))
+        .expect("executable hook");
+
+    let mut input = Cursor::new(Vec::<u8>::new());
+    let mut output = Vec::new();
+    let code = cli::run(
+        &[
+            "update".into(),
+            "--source".into(),
+            clone.display().to_string(),
+            "--yes".into(),
+        ],
+        environment,
+        &mut input,
+        &mut output,
+    );
+
+    let output = String::from_utf8(output).expect("utf-8 output");
+    assert_eq!(code, ExitCodeKind::VerificationIncomplete, "{output}");
+    assert_ne!(code.code(), 0);
+    assert_eq!(git(&clone, &["rev-parse", "HEAD"]), target);
+    assert!(output.contains("promisor remote"), "{output}");
+}

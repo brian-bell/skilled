@@ -123,6 +123,15 @@ pub(crate) struct Mutation<'store> {
     fail_next: &'store std::cell::RefCell<Option<MetadataOperation>>,
 }
 
+/// How much of a registered checkout one source load may read.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SourceInspection {
+    /// Inspect the checkout with Git and record what it reports.
+    Refreshed,
+    /// Inspect the checkout with Git, but record nothing.
+    Observed,
+}
+
 impl Store {
     /// Open only a physical application-data directory and regular database
     /// leaf, without following either checked leaf as a symbolic link.
@@ -697,7 +706,51 @@ impl Store {
         self.load_registered_sources(true)
     }
 
+    /// Load the registered sources, running no Git object reads against the checkout at
+    /// `uninspected`.
+    ///
+    /// For that row the stored inspection stands as recorded — head, branch,
+    /// dirtiness. An object-free identity check must match the registration
+    /// before the catalog walk is allowed; that walk is plain
+    /// filesystem work. It exists for the one caller that may not read a
+    /// repository objects: after a fast-forward whose disclosed hooks may have
+    /// configured a promisor remote, where `inspect_local_source`'s `status`
+    /// and `contains_revision`'s `cat-file` could fetch over the network (see
+    /// `updates::PostWriteRepositoryReads`). The catalogs still have to be
+    /// re-read, because a link the update revives resolves through the skill
+    /// candidates on disk and a stale list would report a restoration that
+    /// happened exactly as promised as a failure.
+    ///
+    /// Scoped to one path on purpose. Every other registered source is a
+    /// different repository, which this update's hooks did not touch and whose
+    /// inspection is exactly as safe as it always was — waiving the
+    /// head-containment gate for all of them would let a checkout replaced
+    /// anywhere else be adopted as its registered source on the strength of an
+    /// unrelated update.
+    pub(crate) fn registered_sources_leaving_uninspected(
+        &self,
+        uninspected: &Path,
+    ) -> Result<Vec<RegisteredSource>> {
+        self.load_sources(SourceInspection::Refreshed, Some(uninspected))
+    }
+
     pub(crate) fn load_registered_sources(&self, refresh: bool) -> Result<Vec<RegisteredSource>> {
+        self.load_sources(
+            if refresh {
+                SourceInspection::Refreshed
+            } else {
+                SourceInspection::Observed
+            },
+            None,
+        )
+    }
+
+    fn load_sources(
+        &self,
+        inspection: SourceInspection,
+        uninspected: Option<&Path>,
+    ) -> Result<Vec<RegisteredSource>> {
+        let refresh = inspection == SourceInspection::Refreshed;
         #[cfg(test)]
         self.fail_if(MetadataOperation::ReadSources)?;
         let mut statement = self.connection.prepare(
@@ -746,53 +799,81 @@ impl Store {
                 remote_url,
                 dirty_known.then_some(dirty),
             );
-            let (inspected, source_error, refreshed_at) = match inspect_local_source(&git_top_level)
-            {
-                Ok(current) if current.git_top_level() != git_top_level => (
-                    stored_inspected.clone(),
-                    Some(format!(
-                        "source now resolves to a different Git checkout: {}",
-                        current.git_top_level().display()
-                    )),
-                    last_scan_at,
-                ),
-                Ok(current)
-                    if stored_repository_identity.as_deref()
-                        != current
-                            .repository_identity()
-                            .map(|identity| identity.storage_key())
-                            .transpose()?
-                            .as_deref()
-                        && stored_repository_identity.is_some() =>
-                {
-                    (
+            // Object reads are withheld, but accepting catalogs still requires
+            // the registered identity. rev-parse --absolute-git-dir reads no
+            // object and cannot lazily fetch. A missing, replaced, or
+            // unidentifiable checkout stays unavailable; a proven one retains
+            // its identity without refreshing its stored HEAD or dirtiness.
+            let uninspected_row = uninspected.is_some_and(|path| path == git_top_level);
+            let (inspected, source_error, refreshed_at) = if uninspected_row {
+                let identity = crate::git::repository_git_dir(git_top_level.as_path().into())
+                    .and_then(crate::source::repository_identity_from_git_dir);
+                match identity {
+                    Ok(identity)
+                        if stored_repository_identity.as_deref()
+                            == Some(identity.storage_key()?.as_str()) =>
+                    {
+                        (stored_inspected.clone().with_repository_identity(identity), None, last_scan_at)
+                    }
+                    Ok(_) => (
                         stored_inspected.clone(),
-                        Some("source path now contains a different Git checkout".to_owned()),
+                        Some("source identity could not be proven against its registration while object reads are withheld".to_owned()),
                         last_scan_at,
-                    )
+                    ),
+                    Err(error) => (
+                        stored_inspected.clone(),
+                        Some(format!("source identity could not be checked while object reads are withheld: {error}")),
+                        last_scan_at,
+                    ),
                 }
-                // Head containment stays the gate for every row, the
-                // identity-less ones included. It is the only sameness
-                // evidence a pre-schema-9 row has: waving such a row through
-                // without it would let a wholly different repository standing
-                // at the path load without an error and be installed from,
-                // and a row that recorded its identity is treated exactly the
-                // same way when the stored head vanishes.
-                Ok(current) => match contains_revision(&git_top_level, stored_inspected.head()) {
-                    Ok(true) if refresh => {
-                        let refreshed_at = current_timestamp();
-                        // The stored identity is never written here. A row
-                        // registered after schema 9 recorded it at
-                        // registration and the mismatch check above already
-                        // held the standing checkout to it; a row from before
-                        // schema 9 stored none, and adopting whatever stands
-                        // at the path would let a replacement clone that
-                        // merely contains the stored head become the
-                        // registered repository for every later update.
-                        // Re-registration is the only way an identity is
-                        // recorded (skilled-t0f).
-                        self.connection.execute(
-                            "UPDATE source_repositories SET
+            } else {
+                match inspect_local_source(&git_top_level) {
+                    Ok(current) if current.git_top_level() != git_top_level => (
+                        stored_inspected.clone(),
+                        Some(format!(
+                            "source now resolves to a different Git checkout: {}",
+                            current.git_top_level().display()
+                        )),
+                        last_scan_at,
+                    ),
+                    Ok(current)
+                        if stored_repository_identity.as_deref()
+                            != current
+                                .repository_identity()
+                                .map(|identity| identity.storage_key())
+                                .transpose()?
+                                .as_deref()
+                            && stored_repository_identity.is_some() =>
+                    {
+                        (
+                            stored_inspected.clone(),
+                            Some("source path now contains a different Git checkout".to_owned()),
+                            last_scan_at,
+                        )
+                    }
+                    // Head containment stays the gate for every row, the
+                    // identity-less ones included. It is the only sameness
+                    // evidence a pre-schema-9 row has: waving such a row through
+                    // without it would let a wholly different repository standing
+                    // at the path load without an error and be installed from,
+                    // and a row that recorded its identity is treated exactly the
+                    // same way when the stored head vanishes.
+                    Ok(current) => match contains_revision(&git_top_level, stored_inspected.head())
+                    {
+                        Ok(true) if refresh => {
+                            let refreshed_at = current_timestamp();
+                            // The stored identity is never written here. A row
+                            // registered after schema 9 recorded it at
+                            // registration and the mismatch check above already
+                            // held the standing checkout to it; a row from before
+                            // schema 9 stored none, and adopting whatever stands
+                            // at the path would let a replacement clone that
+                            // merely contains the stored head become the
+                            // registered repository for every later update.
+                            // Re-registration is the only way an identity is
+                            // recorded (skilled-t0f).
+                            self.connection.execute(
+                                "UPDATE source_repositories SET
                                 remote_url = ?1,
                                 branch = ?2,
                                 head_revision = ?3,
@@ -800,35 +881,36 @@ impl Store {
                                 dirty_known = ?5,
                                 last_scan_at = ?6
                              WHERE id = ?7",
-                            params![
-                                current.remote_url(),
-                                current.branch(),
-                                current.head(),
-                                current.dirty().unwrap_or(false),
-                                current.dirty().is_some(),
-                                refreshed_at,
-                                id,
-                            ],
-                        )?;
-                        (current, None, refreshed_at)
-                    }
-                    Ok(true) => (current, None, last_scan_at),
-                    Ok(false) => (
-                        stored_inspected.clone(),
-                        Some("source path now contains a different Git checkout".to_owned()),
-                        last_scan_at,
-                    ),
+                                params![
+                                    current.remote_url(),
+                                    current.branch(),
+                                    current.head(),
+                                    current.dirty().unwrap_or(false),
+                                    current.dirty().is_some(),
+                                    refreshed_at,
+                                    id,
+                                ],
+                            )?;
+                            (current, None, refreshed_at)
+                        }
+                        Ok(true) => (current, None, last_scan_at),
+                        Ok(false) => (
+                            stored_inspected.clone(),
+                            Some("source path now contains a different Git checkout".to_owned()),
+                            last_scan_at,
+                        ),
+                        Err(error) => (
+                            stored_inspected.clone(),
+                            Some(error.to_string()),
+                            last_scan_at,
+                        ),
+                    },
                     Err(error) => (
                         stored_inspected.clone(),
                         Some(error.to_string()),
                         last_scan_at,
                     ),
-                },
-                Err(error) => (
-                    stored_inspected.clone(),
-                    Some(error.to_string()),
-                    last_scan_at,
-                ),
+                }
             };
             // A row from before schema 9 proves no identity, and the one the
             // live inspection just read describes whatever is standing at the
