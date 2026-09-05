@@ -44,6 +44,16 @@ pub enum Error {
         "the application metadata database opened read-only and cannot be written this session"
     )]
     ReadOnlyMetadata,
+    /// The database opened read-write inside a directory that refuses the
+    /// sidecar files SQLite creates to write anything.
+    ///
+    /// It is the same outcome as a write-protected database — nothing can be
+    /// recorded this session — reported as its own cause because the thing to
+    /// change is the directory rather than the file.
+    #[error(
+        "the application metadata directory denies the journal files SQLite must create, so metadata is read-only this session"
+    )]
+    UnwritableMetadataDirectory,
     #[error("stored setup metadata is invalid: {0}")]
     InvalidSetupMetadata(String),
     #[error("stored metadata field {field} holds {value} rather than 0 or 1")]

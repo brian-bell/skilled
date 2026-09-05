@@ -101,8 +101,11 @@ signal needs both, because colour alone is not an acceptable cue.
 - `src/validation.rs`: portable `SKILL.md` front-matter validation.
 - `src/store.rs`: private versioned SQLite metadata and transactional
   migrations; newer unknown schemas fail closed, a store SQLite opened
-  read-only is refused rather than treated as writable, and destructive
-  migrations create a recoverable backup before any pending step runs.
+  read-only — or one whose application-data directory refuses the journal
+  sidecars SQLite writes through, proven at open by a create-and-remove probe
+  of Skilled's own file — is refused rather than treated as writable, and
+  destructive migrations create a recoverable backup before any pending step
+  runs.
 - `src/theme.rs`: every colour in the application, as semantic roles.
 - `src/viewport.rs`: responsive viewport classes and workspace geometry.
 - `src/components.rs`: pure shared UI primitives.
