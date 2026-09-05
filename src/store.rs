@@ -1201,15 +1201,31 @@ impl Mutation<'_> {
         link_path: &Path,
         link_target: &Path,
     ) -> Result<usize> {
-        Ok(self.transaction.execute(
-            "DELETE FROM operation_receipts
-             WHERE agent = ?1 AND link_path = ?2 AND link_target = ?3",
-            params![
-                agent_identifier(agent),
-                stored_path(link_path)?,
-                stored_path(link_target)?,
-            ],
-        )?)
+        // The verified target came from read_link; a Windows receipt may have
+        // stored the creation plan's verbatim spelling instead. Match at that
+        // boundary, then delete using each receipt's original SQL text. Never
+        // normalize stored evidence or broaden SQL equality for other callers.
+        let receipts = self.receipts()?;
+        let mut deleted = 0;
+        for receipt in receipts.iter().filter(|receipt| {
+            receipt.agent() == agent
+                && receipt.link_path() == link_path
+                && crate::operations::observed_target_matches_recorded(
+                    link_target,
+                    receipt.link_target(),
+                )
+        }) {
+            deleted += self.transaction.execute(
+                "DELETE FROM operation_receipts
+                 WHERE agent = ?1 AND link_path = ?2 AND link_target = ?3",
+                params![
+                    agent_identifier(agent),
+                    stored_path(link_path)?,
+                    stored_path(receipt.link_target())?,
+                ],
+            )?;
+        }
+        Ok(deleted)
     }
 
     /// Remove one source's private metadata inside the guard that already

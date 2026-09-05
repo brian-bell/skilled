@@ -941,11 +941,40 @@ impl RepairPlan {
     }
 }
 
+/// Compare a `read_link` observation with a target recorded from a creation
+/// plan. Windows canonical source paths use the verbatim namespace, while
+/// `read_link` may return its user spelling. Only this representation boundary
+/// permits the namespace bridge; two observations or two receipts still compare
+/// their native strings exactly so a rewrite cannot hide behind it.
+pub(crate) fn observed_target_matches_recorded(observed: &Path, recorded: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        observed.is_absolute() == recorded.is_absolute()
+            && windows_observed_target_matches_recorded(
+                &observed.as_os_str().encode_wide().collect::<Vec<_>>(),
+                &recorded.as_os_str().encode_wide().collect::<Vec<_>>(),
+            )
+    }
+    #[cfg(not(windows))]
+    {
+        observed.as_os_str() == recorded.as_os_str()
+    }
+}
+
+// Pure UTF-16 boundary so namespace and non-Unicode regressions run on every
+// host; no path parsing, case folding, or lossy conversion is involved.
+#[cfg(any(windows, test))]
+fn windows_observed_target_matches_recorded(observed: &[u16], recorded: &[u16]) -> bool {
+    comparable_symlink_target(observed) == comparable_symlink_target(recorded)
+}
+
 /// The newest receipt that proves ownership of the observed link.
 ///
 /// A path-only receipt is insufficient: receipts outlive links, so a third
 /// party can remove and recreate one at the same path. Byte-identical target
-/// spelling is the evidence that the object still names what Skilled recorded.
+/// spelling is the evidence that the object still names what Skilled recorded,
+/// with Windows' creation-plan/read-link namespace bridge applied.
 pub fn receipt_for<'a>(
     receipts: &'a [Receipt],
     agent: AgentKind,
@@ -955,7 +984,7 @@ pub fn receipt_for<'a>(
     receipts.iter().rev().find(|receipt| {
         receipt.agent() == agent
             && receipt.link_path() == link_path
-            && receipt.link_target() == observed_target
+            && observed_target_matches_recorded(observed_target, receipt.link_target())
     })
 }
 
@@ -1771,7 +1800,7 @@ fn uninstall_disposition(slot: &TargetProbe, receipts: &[&Receipt]) -> Uninstall
         } => {
             let matching_receipts: Vec<Receipt> = receipts
                 .iter()
-                .filter(|receipt| receipt.link_target == *target)
+                .filter(|receipt| observed_target_matches_recorded(target, receipt.link_target()))
                 .map(|receipt| (*receipt).clone())
                 .collect();
             if !matching_receipts.is_empty() {
@@ -3453,14 +3482,14 @@ fn repair_destination_unchanged(plan: &RepairPlan, root: &Path, home: &Path) -> 
                 resolution: Err((io::ErrorKind::NotFound, _)),
             },
             RepairDisposition::ReplaceLink { dangling: true },
-        ) if target == plan.recorded_target() => Ok(()),
+        ) if target.as_os_str() == plan.recorded_target().as_os_str() => Ok(()),
         (
             RepairEntryProbe::Symlink {
                 target,
                 resolution: Ok(_),
             },
             RepairDisposition::ReplaceLink { dangling: false },
-        ) if target == plan.recorded_target() => Ok(()),
+        ) if target.as_os_str() == plan.recorded_target().as_os_str() => Ok(()),
         _ => Err(
             "the entry or its resolution changed after the plan was shown, so nothing was written"
                 .to_owned(),
@@ -3857,6 +3886,28 @@ fn replace_directory_symlink(
     proven_target: &Path,
     base: &Path,
 ) -> Result<LinkReplacement, ReplaceLinkError> {
+    replace_directory_symlink_with(
+        target,
+        link_path,
+        proven_target,
+        base,
+        exchange_in,
+        remove_proven_temporary,
+    )
+}
+
+/// Keep the exchange and cleanup boundaries injectable so tests can introduce
+/// arrivals and failures at the exact syscall boundary, without timing races.
+/// Production always supplies the descriptor-bound implementations above.
+#[cfg(unix)]
+fn replace_directory_symlink_with(
+    target: &Path,
+    link_path: &Path,
+    proven_target: &Path,
+    base: &Path,
+    mut exchange: impl FnMut(&fs::File, &std::ffi::CStr, &std::ffi::CStr) -> io::Result<()>,
+    mut cleanup: impl FnMut(&fs::File, &std::ffi::CStr, &Path) -> TemporaryCleanup,
+) -> Result<LinkReplacement, ReplaceLinkError> {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     let parent = link_path.parent().ok_or_else(|| {
@@ -3904,7 +3955,7 @@ fn replace_directory_symlink(
     // holds a link byte-identical to the proven raw target may be written —
     // the same ownership standard every other repair decision applies.
     match read_link_in(&dir, &destination_name) {
-        Ok(raw) if raw == proven_target => {}
+        Ok(raw) if raw.as_os_str() == proven_target.as_os_str() => {}
         Ok(raw) => {
             return Err(ReplaceLinkError::ConcurrentlyReplaced {
                 observed: format!("a symbolic link to {} arrived there", raw.display()),
@@ -3921,50 +3972,46 @@ fn replace_directory_symlink(
         Err(error) => return Err(ReplaceLinkError::Unchanged(error)),
     }
     symlink_in(&dir, target, &temporary_name).map_err(ReplaceLinkError::Unchanged)?;
-    if let Err(error) = exchange_in(&dir, &temporary_name, &destination_name) {
+    if let Err(error) = exchange(&dir, &temporary_name, &destination_name) {
         // The destination is untouched; the only write so far is the
         // temporary link, and even that is re-proven before removal.
-        return Err(
-            match remove_proven_temporary(&dir, &temporary_name, target) {
-                TemporaryCleanup::Removed if exchange_unsupported(&error) => {
-                    ReplaceLinkError::ExchangeUnsupported(error)
-                }
-                TemporaryCleanup::Removed => ReplaceLinkError::Unchanged(error),
-                TemporaryCleanup::NotProven { observed } => ReplaceLinkError::ResidualTemporary {
-                    path: residual_path(),
-                    detail: format!(
-                        "the atomic exchange failed ({error}), and by then {observed} the temporary \
+        return Err(match cleanup(&dir, &temporary_name, target) {
+            TemporaryCleanup::Removed if exchange_unsupported(&error) => {
+                ReplaceLinkError::ExchangeUnsupported(error)
+            }
+            TemporaryCleanup::Removed => ReplaceLinkError::Unchanged(error),
+            TemporaryCleanup::NotProven { observed } => ReplaceLinkError::ResidualTemporary {
+                path: residual_path(),
+                detail: format!(
+                    "the atomic exchange failed ({error}), and by then {observed} the temporary \
                      path, so it was preserved"
-                    ),
-                },
-                TemporaryCleanup::RemoveFailed(cleanup_error) => {
-                    ReplaceLinkError::ResidualTemporary {
-                        path: residual_path(),
-                        detail: format!(
-                            "the atomic exchange failed ({error}), then removing the temporary link \
-                     failed: {cleanup_error}"
-                        ),
-                    }
-                }
+                ),
             },
-        );
+            TemporaryCleanup::RemoveFailed(cleanup_error) => ReplaceLinkError::ResidualTemporary {
+                path: residual_path(),
+                detail: format!(
+                    "the atomic exchange failed ({error}), then removing the temporary link \
+                     failed: {cleanup_error}"
+                ),
+            },
+        });
     }
     // The exchange moved whatever occupied the destination to the temporary
     // path: this read describes exactly the object the replacement displaced.
     let outcome = match read_link_in(&dir, &temporary_name) {
-        Ok(raw) if raw == proven_target => {
-            match remove_proven_temporary(&dir, &temporary_name, proven_target) {
+        Ok(raw) if raw.as_os_str() == proven_target.as_os_str() => {
+            match cleanup(&dir, &temporary_name, proven_target) {
                 TemporaryCleanup::Removed => Ok(None),
                 TemporaryCleanup::NotProven { observed } => Ok(Some(format!(
                     "after the displaced proven link was verified, {observed} the temporary \
                      path, so it was preserved"
                 ))),
                 TemporaryCleanup::RemoveFailed(cleanup_error) => {
-                    match exchange_in(&dir, &temporary_name, &destination_name) {
+                    match exchange(&dir, &temporary_name, &destination_name) {
                         // The revert touched the public destination again, so what
                         // it displaced to the temporary path must be re-proven as
                         // Skilled's own replacement before it may be removed.
-                        Ok(()) => match remove_proven_temporary(&dir, &temporary_name, target) {
+                        Ok(()) => match cleanup(&dir, &temporary_name, target) {
                             TemporaryCleanup::Removed => {
                                 Err(ReplaceLinkError::Unchanged(io::Error::new(
                                     cleanup_error.kind(),
@@ -4002,7 +4049,7 @@ fn replace_directory_symlink(
                         // is claimed only after re-reading, through the pinned
                         // descriptor, that the replacement is still there.
                         Err(revert_error) => match read_link_in(&dir, &destination_name) {
-                            Ok(raw) if raw == target => Ok(Some(format!(
+                            Ok(raw) if raw.as_os_str() == target.as_os_str() => Ok(Some(format!(
                                 "the displaced proven old link could not be removed \
                                  ({cleanup_error}) and the exchange could not be reverted \
                                  ({revert_error})"
@@ -4026,12 +4073,12 @@ fn replace_directory_symlink(
                 Ok(raw) => format!("a symbolic link to {} arrived there", raw.display()),
                 Err(_) => "an object that is not a symbolic link arrived there".to_owned(),
             };
-            match exchange_in(&dir, &temporary_name, &destination_name) {
+            match exchange(&dir, &temporary_name, &destination_name) {
                 // As above: the revert exchanged with the public destination,
                 // so only Skilled's own replacement may be removed from the
                 // temporary path afterwards; anything else arrived at the
                 // destination during the attempt and is preserved.
-                Ok(()) => match remove_proven_temporary(&dir, &temporary_name, target) {
+                Ok(()) => match cleanup(&dir, &temporary_name, target) {
                     TemporaryCleanup::Removed => {
                         Err(ReplaceLinkError::ConcurrentlyReplaced { observed })
                     }
@@ -4058,7 +4105,7 @@ fn replace_directory_symlink(
                 // destination, so the receipt-recording success is claimed
                 // only after re-reading the replacement there.
                 Err(revert_error) => match read_link_in(&dir, &destination_name) {
-                    Ok(raw) if raw == target => Ok(Some(format!(
+                    Ok(raw) if raw.as_os_str() == target.as_os_str() => Ok(Some(format!(
                         "{observed} and could not be swapped back ({revert_error}); the \
                          replacement link is live and the arriving object is preserved here"
                     ))),
@@ -4127,7 +4174,7 @@ fn remove_proven_temporary(
     proven: &Path,
 ) -> TemporaryCleanup {
     match read_link_in(dir, name) {
-        Ok(raw) if raw == proven => match unlink_in(dir, name) {
+        Ok(raw) if raw.as_os_str() == proven.as_os_str() => match unlink_in(dir, name) {
             Ok(()) => TemporaryCleanup::Removed,
             Err(error) => TemporaryCleanup::RemoveFailed(error),
         },
@@ -4207,7 +4254,7 @@ fn symlink_reparse_target(buffer: &[u8]) -> Result<(Vec<u16>, bool), &'static st
 /// The same absolute target has several spellings across the two sides of
 /// that comparison: the reparse data stores the NT form (`\??\C:\x`,
 /// `\??\UNC\server\share`), while `std::fs::read_link` — which is what the
-/// final recheck read and what receipts were recorded against — reports the
+/// final recheck reads — reports the
 /// user form (`C:\x`, `\\server\share`), keeping the verbatim `\\?\` prefix
 /// only where the path needs it. Stripping the NT or verbatim prefix and
 /// rewriting a namespaced `UNC\` to `\\` maps every one of those spellings of
@@ -4552,7 +4599,8 @@ pub fn verify_repair(
         };
     };
     match observed.object() {
-        InstallationObject::Symlink { target } if target == expected_target => {}
+        InstallationObject::Symlink { target }
+            if observed_target_matches_recorded(target, expected_target) => {}
         InstallationObject::Symlink { target } => {
             failures.push(VerifyFailure {
                 agent: step.agent,
@@ -4790,7 +4838,7 @@ fn apply_uninstall_target(
     if !receipts.iter().any(|receipt| {
         receipt.agent == target.agent
             && receipt.link_path == target.link_path
-            && receipt.link_target == *link_target
+            && observed_target_matches_recorded(link_target, receipt.link_target())
     }) {
         return StepOutcome::Failed(
             "the matching ownership receipt disappeared after the plan was shown, so nothing was removed"
@@ -4798,7 +4846,7 @@ fn apply_uninstall_target(
         );
     }
     match fs::read_link(&target.link_path) {
-        Ok(current) if current == *link_target => {}
+        Ok(current) if current.as_os_str() == link_target.as_os_str() => {}
         Ok(_) => {
             return StepOutcome::Failed(
                 "the link target changed after the plan was shown, so nothing was removed"
@@ -5169,7 +5217,9 @@ fn exact_link_is_inactive(link_path: &Path, link_target: &Path) -> io::Result<bo
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(true),
         Err(error) => Err(error),
         Ok(metadata) if !metadata.file_type().is_symlink() => Ok(true),
-        Ok(_) => fs::read_link(link_path).map(|target| target != link_target),
+        Ok(_) => {
+            fs::read_link(link_path).map(|target| target.as_os_str() != link_target.as_os_str())
+        }
     }
 }
 
@@ -5284,7 +5334,9 @@ pub fn probe_forget(source: &RegisteredSource, receipts: &[Receipt]) -> ForgetPr
                 ForgetObservation::Inactive("the path is no longer a symbolic link".to_owned())
             }
             Ok(_) => match fs::read_link(receipt.link_path()) {
-                Ok(target) if target == receipt.link_target() => ForgetObservation::Active,
+                Ok(target) if observed_target_matches_recorded(&target, receipt.link_target()) => {
+                    ForgetObservation::Active
+                }
                 Ok(target) => ForgetObservation::Inactive(format!(
                     "the link now points to {}",
                     target.display()
@@ -6026,7 +6078,7 @@ impl ReceiptOperation {
 /// in this release recreates a link from one, and the inventory scanner does
 /// not consult them at all — they are read here only to tell a link Skilled put
 /// down from one it found.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq)]
 pub struct Receipt {
     operation: ReceiptOperation,
     agent: AgentKind,
@@ -6036,6 +6088,22 @@ pub struct Receipt {
     source_id: Option<i64>,
     catalog_relative_path: Option<PathBuf>,
     variant_relative_path: Option<PathBuf>,
+}
+
+// Only the target carries raw ownership evidence. Destination and catalog paths
+// retain their semantic path equality; changing the recorded target's native
+// spelling must also invalidate a confirmation-time receipt-set comparison.
+impl PartialEq for Receipt {
+    fn eq(&self, other: &Self) -> bool {
+        self.operation == other.operation
+            && self.agent == other.agent
+            && self.skill_name == other.skill_name
+            && self.link_path == other.link_path
+            && self.link_target.as_os_str() == other.link_target.as_os_str()
+            && self.source_id == other.source_id
+            && self.catalog_relative_path == other.catalog_relative_path
+            && self.variant_relative_path == other.variant_relative_path
+    }
 }
 
 impl Receipt {
@@ -6330,6 +6398,9 @@ mod tests {
                 // A relative directory literally named UNC is not a share.
                 ("UNC\\server\\share", "\\\\server\\share"),
                 ("\\??\\C:\\skills\\demo.", "C:\\skills\\demo"),
+                (r"\??\C:\skills\demo", r"C:\skills\demo\."),
+                (r"\??\C:\skills\demo", r"C:\skills\\demo"),
+                (r"\??\C:\skills\demo", r"C:\skills\Demo"),
             ] {
                 assert_ne!(
                     comparable_symlink_target(&wide(one)),
@@ -6337,6 +6408,15 @@ mod tests {
                     "{one} must not compare equal to {other}"
                 );
             }
+        }
+
+        #[test]
+        fn namespace_bridge_preserves_unpaired_utf16_units() {
+            let stored = [92, 63, 63, 92, 67, 58, 92, 0xd800];
+            let reported = [67, 58, 92, 0xd800];
+            let distinct = [67, 58, 92, 0xd801];
+            assert_eq!(comparable_symlink_target(&stored), reported);
+            assert_ne!(comparable_symlink_target(&stored), distinct);
         }
     }
 
@@ -7047,5 +7127,489 @@ mod tests {
             .map(|entry| entry.expect("entry").file_name())
             .collect();
         assert_eq!(entries, vec![std::ffi::OsString::from("portable")]);
+    }
+}
+
+#[cfg(test)]
+mod raw_ownership_tests {
+    use super::*;
+    fn receipt(target: &Path) -> Receipt {
+        Receipt::new(
+            ReceiptOperation::Install,
+            AgentKind::Codex,
+            "demo".into(),
+            "/home/example/.codex/skills/demo".into(),
+            target.into(),
+            None,
+            None,
+            None,
+        )
+    }
+    #[test]
+    fn raw_receipt_match_rejects_dot_rewrite() {
+        let r = receipt(Path::new("/skills/demo"));
+        assert!(
+            receipt_for(
+                std::slice::from_ref(&r),
+                r.agent(),
+                r.link_path(),
+                Path::new("/skills/demo/./")
+            )
+            .is_none()
+        );
+    }
+    #[test]
+    fn receipt_equality_rejects_dot_rewrite() {
+        assert_ne!(
+            receipt(Path::new("/skills/demo")),
+            receipt(Path::new("/skills/demo/./"))
+        );
+    }
+    #[test]
+    fn uninstall_rejects_dot_rewrite() {
+        let r = receipt(Path::new("/skills/demo"));
+        let slot = TargetProbe {
+            agent: r.agent(),
+            link_path: r.link_path().into(),
+            root: RootProbe::Present,
+            entry: EntryProbe::Symlink {
+                target: "/skills/demo/./".into(),
+                canonical: None,
+                target_state: UninstallTargetState::Unreadable("fixture".into()),
+            },
+            content: SlotContent::Unknown,
+        };
+        assert!(matches!(
+            uninstall_disposition(&slot, &[&r]),
+            UninstallDisposition::Blocked { .. }
+        ));
+    }
+    #[cfg(unix)]
+    #[test]
+    fn cleanup_preserves_dot_rewrite() {
+        let f = tempfile::tempdir().unwrap();
+        let proven = f.path().join("target");
+        let changed = PathBuf::from(format!("{}/./", proven.display()));
+        std::os::unix::fs::symlink(&changed, f.path().join("temp")).unwrap();
+        let dir = open_pinned_parent_via(f.path(), f.path()).unwrap();
+        let name = entry_name_arg(std::ffi::OsStr::new("temp")).unwrap();
+        let result = remove_proven_temporary(&dir, &name, &proven);
+        assert!(
+            matches!(result, TemporaryCleanup::NotProven { .. }),
+            "raw-distinct temporary link was deleted: exists={}",
+            fs::symlink_metadata(f.path().join("temp")).is_ok()
+        );
+    }
+    #[cfg(unix)]
+    #[test]
+    fn replace_preserves_dot_rewrite() {
+        let f = tempfile::tempdir().unwrap();
+        let root = f.path().join("skills");
+        fs::create_dir(&root).unwrap();
+        let old = f.path().join("old");
+        let changed = PathBuf::from(format!("{}/./", old.display()));
+        let new = f.path().join("new");
+        let link = root.join("demo");
+        std::os::unix::fs::symlink(&changed, &link).unwrap();
+        let result = replace_directory_symlink(&new, &link, &old, f.path());
+        assert!(
+            result.is_err(),
+            "raw-distinct stranger was replaced: {:?}",
+            fs::read_link(&link)
+        );
+    }
+    #[cfg(unix)]
+    #[test]
+    fn exact_liveness_rejects_dot_rewrite() {
+        let f = tempfile::tempdir().unwrap();
+        let link = f.path().join("demo");
+        std::os::unix::fs::symlink("/skills/demo/./", &link).unwrap();
+        assert!(exact_link_is_inactive(&link, Path::new("/skills/demo")).unwrap());
+    }
+
+    #[test]
+    fn receipt_targets_preserve_native_spelling_but_destinations_keep_path_equality() {
+        for (one, other) in [
+            ("/skills/demo", "/skills/demo/./"),
+            ("/skills/demo", "/skills//demo"),
+            ("/skills/demo", "/skills/demo/"),
+            ("../skills/demo", "../skills/./demo"),
+        ] {
+            let original = receipt(Path::new(one));
+            assert_eq!(original, original.clone());
+            assert_ne!(original, receipt(Path::new(other)));
+            assert!(
+                receipt_for(
+                    std::slice::from_ref(&original),
+                    original.agent(),
+                    original.link_path(),
+                    Path::new(other)
+                )
+                .is_none()
+            );
+            let mut same_destination = original.clone();
+            same_destination.link_path.push(".");
+            assert_eq!(original, same_destination);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn receipt_targets_preserve_non_utf8_bytes() {
+        use std::os::unix::ffi::OsStringExt;
+        let target = PathBuf::from(std::ffi::OsString::from_vec(b"/skills/\xff".to_vec()));
+        let rewritten = PathBuf::from(std::ffi::OsString::from_vec(b"/skills/\xff/./".to_vec()));
+        assert_eq!(receipt(&target), receipt(&target));
+        assert_ne!(receipt(&target), receipt(&rewritten));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn receipt_targets_preserve_unpaired_utf16_units() {
+        use std::os::windows::ffi::OsStringExt;
+        let target = PathBuf::from(std::ffi::OsString::from_wide(&[67, 58, 92, 0xd800]));
+        let rewritten = PathBuf::from(std::ffi::OsString::from_wide(&[67, 58, 92, 0xd800, 92, 46]));
+        assert_eq!(receipt(&target), receipt(&target));
+        assert_ne!(receipt(&target), receipt(&rewritten));
+    }
+
+    // Each arrival happens after the pinned-destination proof. These tests
+    // exercise the exchange/recovery branches, not just the earlier refusal.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn exchange_and_recovery_preserve_raw_distinct_arrivals() {
+        #[derive(Clone, Copy, Debug)]
+        enum Arrival {
+            Displaced,
+            FailedExchangeTemporary,
+            CleanupRevertTemporary,
+            StrangerRevertTemporary,
+            FailedCleanupRevert,
+            FailedStrangerRevert,
+        }
+        for arrival in [
+            Arrival::Displaced,
+            Arrival::FailedExchangeTemporary,
+            Arrival::CleanupRevertTemporary,
+            Arrival::StrangerRevertTemporary,
+            Arrival::FailedCleanupRevert,
+            Arrival::FailedStrangerRevert,
+        ] {
+            let fixture = tempfile::tempdir().unwrap();
+            let root = fixture.path();
+            let old = root.join("old");
+            let new = root.join("new");
+            let stranger = PathBuf::from(format!("{}/./", old.display()));
+            let rewritten = PathBuf::from(format!("{}/./", new.display()));
+            let destination = root.join("demo");
+            std::os::unix::fs::symlink(&old, &destination).unwrap();
+            let mut exchanges = 0;
+            let mut cleanups = 0;
+            let replace_at = |dir: &fs::File, name: &std::ffi::CStr, target: &Path| {
+                unlink_in(dir, name).unwrap();
+                symlink_in(dir, target, name).unwrap();
+            };
+            let result = replace_directory_symlink_with(
+                &new,
+                &destination,
+                &old,
+                root,
+                |dir, temporary, public| {
+                    exchanges += 1;
+                    if exchanges == 1 {
+                        if matches!(arrival, Arrival::FailedExchangeTemporary) {
+                            replace_at(dir, temporary, &rewritten);
+                            return Err(io::Error::from_raw_os_error(libc::ENOTSUP));
+                        }
+                        if matches!(
+                            arrival,
+                            Arrival::Displaced
+                                | Arrival::StrangerRevertTemporary
+                                | Arrival::FailedStrangerRevert
+                        ) {
+                            replace_at(dir, public, &stranger);
+                        }
+                    } else if !matches!(arrival, Arrival::Displaced) {
+                        replace_at(dir, public, &rewritten);
+                        if matches!(
+                            arrival,
+                            Arrival::FailedCleanupRevert | Arrival::FailedStrangerRevert
+                        ) {
+                            return Err(io::Error::other("injected revert failure"));
+                        }
+                    }
+                    exchange_in(dir, temporary, public)
+                },
+                |dir, name, proven| {
+                    cleanups += 1;
+                    if cleanups == 1
+                        && matches!(
+                            arrival,
+                            Arrival::CleanupRevertTemporary | Arrival::FailedCleanupRevert
+                        )
+                    {
+                        TemporaryCleanup::RemoveFailed(io::Error::other("injected cleanup failure"))
+                    } else {
+                        remove_proven_temporary(dir, name, proven)
+                    }
+                },
+            );
+            let error = result
+                .expect_err("an arriving raw-distinct object cannot establish repair success");
+            if matches!(arrival, Arrival::Displaced) {
+                assert!(
+                    matches!(error, ReplaceLinkError::ConcurrentlyReplaced { .. }),
+                    "{arrival:?}: {error:?}"
+                );
+                assert_eq!(
+                    fs::read_link(&destination).unwrap().as_os_str(),
+                    stranger.as_os_str()
+                );
+                assert_eq!(fs::read_dir(root).unwrap().count(), 1);
+            } else {
+                let ReplaceLinkError::ResidualTemporary { path, .. } = error else {
+                    panic!("{arrival:?}: {error:?}");
+                };
+                let expected_residue = match arrival {
+                    Arrival::FailedCleanupRevert => &old,
+                    Arrival::FailedStrangerRevert => &stranger,
+                    _ => &rewritten,
+                };
+                assert_eq!(
+                    fs::read_link(path).unwrap().as_os_str(),
+                    expected_residue.as_os_str(),
+                    "{arrival:?}"
+                );
+                let expected_public = match arrival {
+                    Arrival::FailedExchangeTemporary | Arrival::CleanupRevertTemporary => &old,
+                    Arrival::StrangerRevertTemporary => &stranger,
+                    _ => &rewritten,
+                };
+                assert_eq!(
+                    fs::read_link(&destination).unwrap().as_os_str(),
+                    expected_public.as_os_str(),
+                    "{arrival:?}"
+                );
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn repair_recheck_refuses_raw_rewrites_of_resolving_and_dangling_links() {
+        for dangling in [false, true] {
+            let fixture = tempfile::tempdir().unwrap();
+            let home = fixture.path().join("home");
+            let root = home.join(".agents/skills");
+            fs::create_dir_all(&root).unwrap();
+            let target = fixture.path().join("target");
+            if !dangling {
+                fs::create_dir(&target).unwrap();
+            }
+            let link = root.join("demo");
+            std::os::unix::fs::symlink(&target, &link).unwrap();
+            let mut plan = empty_repair_plan(
+                AgentKind::Codex,
+                RegistryFingerprint::of_registry(&[]),
+                "demo",
+                link.clone(),
+            );
+            plan.recorded_target = target.clone();
+            plan.disposition = RepairDisposition::ReplaceLink { dangling };
+            assert!(repair_destination_unchanged(&plan, &root, &home).is_ok());
+            let changed = PathBuf::from(format!("{}/./", target.display()));
+            fs::remove_file(&link).unwrap();
+            std::os::unix::fs::symlink(&changed, &link).unwrap();
+            assert!(repair_destination_unchanged(&plan, &root, &home).is_err());
+            assert_eq!(
+                fs::read_link(&link).unwrap().as_os_str(),
+                changed.as_os_str()
+            );
+        }
+    }
+
+    #[test]
+    fn windows_observations_match_canonical_receipt_namespaces_only() {
+        let wide = |s: &str| s.encode_utf16().collect::<Vec<_>>();
+        for (observed, recorded) in [
+            (r"C:\skills\demo", r"\\?\C:\skills\demo"),
+            (r"\\server\share\demo", r"\\?\UNC\server\share\demo"),
+            (r"\\?\C:\needs verbatim.", r"\\?\C:\needs verbatim."),
+            (r"..\demo", r"..\demo"),
+        ] {
+            assert!(
+                windows_observed_target_matches_recorded(&wide(observed), &wide(recorded)),
+                "{observed} / {recorded}"
+            );
+        }
+        for observed in [
+            r"C:\skills\demo\.",
+            r"C:\skills\\demo",
+            r"C:\skills\demo\",
+            r"C:\skills\Demo",
+            r"C:\skills\demo.",
+            r"C:\skills\demo ",
+            r"C:skills\demo",
+        ] {
+            assert!(
+                !windows_observed_target_matches_recorded(
+                    &wide(observed),
+                    &wide(r"\\?\C:\skills\demo")
+                ),
+                "{observed}"
+            );
+        }
+        assert!(!windows_observed_target_matches_recorded(
+            &wide(r"UNC\server\share"),
+            &wide(r"\\?\UNC\server\share")
+        ));
+        let recorded = [92, 92, 63, 92, 67, 58, 92, 0xd800];
+        assert!(windows_observed_target_matches_recorded(
+            &[67, 58, 92, 0xd800],
+            &recorded
+        ));
+        assert!(!windows_observed_target_matches_recorded(
+            &[67, 58, 92, 0xd801],
+            &recorded
+        ));
+    }
+
+    #[test]
+    fn receipt_cleanup_preserves_other_raw_targets() {
+        let fixture = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&fixture.path().join("data")).unwrap();
+        let original = receipt(Path::new("/skills/demo"));
+        let changed = receipt(Path::new("/skills/demo/./"));
+        let mutation = store.begin_mutation().unwrap();
+        mutation.record_receipt(&original).unwrap();
+        mutation.record_receipt(&changed).unwrap();
+        assert_eq!(
+            mutation
+                .delete_receipts_for_link(
+                    original.agent(),
+                    original.link_path(),
+                    original.link_target()
+                )
+                .unwrap(),
+            1
+        );
+        mutation.commit().unwrap();
+        assert_eq!(store.receipts().unwrap(), vec![changed]);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn canonical_windows_receipt_owns_live_link_and_is_removed_after_uninstall() {
+        use crate::source::InspectedSource;
+        let fixture = tempfile::tempdir().unwrap();
+        let home = fixture.path().join("home");
+        let root = home.join(".claude/skills");
+        let directory = fixture.path().join("target");
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir(&directory).unwrap();
+        fs::write(directory.join("content"), b"preserved").unwrap();
+        let target = directory.canonicalize().unwrap();
+        let link = root.join("demo");
+        std::os::windows::fs::symlink_dir(&target, &link)
+            .expect("Windows symlink privilege or Developer Mode");
+        let observed = fs::read_link(&link).unwrap();
+        assert_ne!(
+            observed.as_os_str(),
+            target.as_os_str(),
+            "fixture must exercise read_link's namespace conversion"
+        );
+        let receipt = Receipt::new(
+            ReceiptOperation::Install,
+            AgentKind::ClaudeCode,
+            "demo".into(),
+            link.clone(),
+            target.clone(),
+            Some(1),
+            None,
+            None,
+        );
+        let source = RegisteredSource::new(
+            1,
+            "fixture".into(),
+            InspectedSource::from_stored(
+                fixture.path().to_path_buf(),
+                None,
+                "head".into(),
+                None,
+                None,
+            ),
+            Vec::new(),
+            0,
+            None,
+        );
+        assert!(
+            receipt_for(
+                std::slice::from_ref(&receipt),
+                receipt.agent(),
+                &link,
+                &observed
+            )
+            .is_some()
+        );
+        let probe = probe_forget(&source, std::slice::from_ref(&receipt));
+        assert!(plan_forget(&source, std::slice::from_ref(&receipt), &probe).is_blocked());
+        let slot = TargetProbe {
+            agent: receipt.agent(),
+            link_path: link.clone(),
+            root: RootProbe::Present,
+            entry: probe_entry(&link),
+            content: SlotContent::Unknown,
+        };
+        let disposition = uninstall_disposition(&slot, &[&receipt]);
+        assert!(matches!(
+            disposition,
+            UninstallDisposition::RemoveLink { .. }
+        ));
+        let plan = UninstallPlan {
+            skill_name: "demo".into(),
+            targets: vec![UninstallTarget {
+                agent: receipt.agent(),
+                link_path: link.clone(),
+                disposition,
+            }],
+            warnings: Vec::new(),
+            opencode_outlook: None,
+        };
+        let mut store = Store::open(&fixture.path().join("data")).unwrap();
+        let mutation = store.begin_mutation().unwrap();
+        mutation.record_receipt(&receipt).unwrap();
+        mutation.commit().unwrap();
+        assert!(matches!(
+            apply_uninstall_target(&plan, &plan.targets[0], &store, &home),
+            StepOutcome::Removed
+        ));
+        assert!(fs::symlink_metadata(&link).is_err());
+        assert_eq!(fs::read(directory.join("content")).unwrap(), b"preserved");
+        let applied = ApplyReport {
+            steps: vec![AppliedStep {
+                agent: receipt.agent(),
+                link_path: link,
+                outcome: StepOutcome::Removed,
+            }],
+        };
+        let verification = VerifyReport {
+            held: vec![
+                VerifyPass {
+                    agent: receipt.agent(),
+                    postcondition: Postcondition::LinkGone,
+                },
+                VerifyPass {
+                    agent: receipt.agent(),
+                    postcondition: Postcondition::ContentSurvived,
+                },
+            ],
+            ..VerifyReport::default()
+        };
+        assert!(
+            finalize_uninstall(&plan, &applied, &verification, &mut store)
+                .failures()
+                .is_empty()
+        );
+        assert!(store.receipts().unwrap().is_empty());
     }
 }

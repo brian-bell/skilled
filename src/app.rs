@@ -21,10 +21,11 @@ use crate::{
         ForgetOutcome, ForgetPlan, ForgetPrompt, InstallOutcome, InstallPlan, InstallPrompt,
         OperationPrompt, Receipt, RepairOfferStatus, RepairOutcome, RepairOverlay, RepairPlan,
         RepairPrompt, UninstallOutcome, UninstallPlan, UninstallPrompt, apply_forget,
-        apply_install, apply_repair, apply_uninstall, finalize_uninstall, plan_forget,
-        plan_forget_unreadable_receipts, plan_install, plan_repair, plan_uninstall, probe_forget,
-        probe_install, probe_repair, probe_uninstall, probe_uninstall_content, verify_forget,
-        verify_install, verify_repair, verify_uninstall,
+        apply_install, apply_repair, apply_uninstall, finalize_uninstall,
+        observed_target_matches_recorded, plan_forget, plan_forget_unreadable_receipts,
+        plan_install, plan_repair, plan_uninstall, probe_forget, probe_install, probe_repair,
+        probe_uninstall, probe_uninstall_content, verify_forget, verify_install, verify_repair,
+        verify_uninstall,
     },
     resolution::VariantRef,
     source::{
@@ -1128,7 +1129,7 @@ impl SkilledApp {
                 receipts.iter().any(|receipt| {
                     receipt.agent() == agent
                         && receipt.link_path() == observation.path()
-                        && receipt.link_target() == target
+                        && observed_target_matches_recorded(target, receipt.link_target())
                 })
             })
         })

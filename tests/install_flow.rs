@@ -1728,3 +1728,119 @@ fn initialize_repository(repository: &Path) {
         assert!(output.status.success(), "Git command failed: {output:?}");
     }
 }
+
+#[test]
+fn raw_rewrites_remove_uninstall_availability_and_allow_forgetting_inactive_receipts() {
+    let fixture = Fixture::new();
+    let repository = fixture.source("library", &["portable"]);
+    let mut app = fixture.registered(&repository);
+    fixture.create_root_parents();
+    focus_first_variant(&mut app);
+    dispatch(&mut app, Action::BeginInstall);
+    dispatch(&mut app, Action::ConfirmOperation);
+    dispatch(&mut app, Action::DismissOperation);
+    dispatch(&mut app, Action::OpenInventory);
+    assert!(app.can_uninstall_selection());
+    let mut rewritten = Vec::new();
+    for (agent, _) in ROOTS {
+        let link = fixture.root(agent).join("portable");
+        let target = fs::read_link(&link).unwrap();
+        let changed = PathBuf::from(format!("{}/./", target.display()));
+        fs::remove_file(&link).unwrap();
+        symlink(&changed, &link).unwrap();
+        rewritten.push((link, changed));
+    }
+    dispatch(&mut app, Action::OpenSources);
+    dispatch(&mut app, Action::OpenInventory);
+    assert!(!app.can_uninstall_selection());
+    dispatch(&mut app, Action::OpenSources);
+    dispatch(&mut app, Action::BeginForgetSource);
+    assert!(
+        matches!(app.pending_operation(), Some(OperationPrompt::Forget(ForgetPrompt::Preview(plan))) if plan.is_executable())
+    );
+    dispatch(&mut app, Action::ConfirmOperation);
+    assert!(
+        matches!(app.pending_operation(), Some(OperationPrompt::Forget(ForgetPrompt::Report(outcome))) if outcome.status() == ForgetStatus::Forgotten)
+    );
+    assert!(app.receipts().unwrap().is_empty());
+    for (link, target) in rewritten {
+        assert_eq!(fs::read_link(link).unwrap().as_os_str(), target.as_os_str());
+    }
+    assert!(repository.join("skills/portable/SKILL.md").is_file());
+}
+
+#[test]
+fn uninstall_refuses_a_raw_target_rewritten_after_confirmation_preview() {
+    let fixture = Fixture::new();
+    let repository = fixture.source("library", &["portable"]);
+    let mut app = fixture.registered(&repository);
+    fixture.create_root_parents();
+    focus_first_variant(&mut app);
+    dispatch(&mut app, Action::BeginInstall);
+    dispatch(&mut app, Action::ConfirmOperation);
+    dispatch(&mut app, Action::DismissOperation);
+    dispatch(&mut app, Action::OpenInventory);
+    dispatch(&mut app, Action::BeginUninstall);
+    assert!(
+        matches!(app.pending_operation(), Some(OperationPrompt::Uninstall(UninstallPrompt::Preview(plan))) if plan.is_executable())
+    );
+    let link = fixture.root(AgentKind::ClaudeCode).join("portable");
+    let changed = PathBuf::from(format!("{}/./", fs::read_link(&link).unwrap().display()));
+    fs::remove_file(&link).unwrap();
+    symlink(&changed, &link).unwrap();
+    dispatch(&mut app, Action::ConfirmOperation);
+    let Some(OperationPrompt::Uninstall(UninstallPrompt::Report(outcome))) =
+        app.pending_operation()
+    else {
+        panic!("uninstall report");
+    };
+    assert!(
+        matches!(outcome.applied().step(AgentKind::ClaudeCode).map(|step| step.outcome()), Some(StepOutcome::Failed(reason)) if reason.contains("link target changed"))
+    );
+    assert_eq!(
+        fs::read_link(&link).unwrap().as_os_str(),
+        changed.as_os_str()
+    );
+    assert_eq!(app.receipts().unwrap().len(), 3);
+    for (agent, _) in ROOTS {
+        assert!(fixture.root(agent).join("portable").is_dir());
+    }
+}
+
+#[test]
+fn forget_refuses_a_raw_receipt_target_changed_after_preview() {
+    let fixture = Fixture::new();
+    let repository = fixture.source("library", &["portable"]);
+    let mut app = fixture.registered(&repository);
+    fixture.create_root_parents();
+    focus_first_variant(&mut app);
+    dispatch(&mut app, Action::BeginInstall);
+    dispatch(&mut app, Action::ConfirmOperation);
+    dispatch(&mut app, Action::DismissOperation);
+    for (agent, _) in ROOTS {
+        fs::remove_file(fixture.root(agent).join("portable")).unwrap();
+    }
+    dispatch(&mut app, Action::OpenInventory);
+    dispatch(&mut app, Action::OpenSources);
+    dispatch(&mut app, Action::BeginForgetSource);
+    assert!(
+        matches!(app.pending_operation(), Some(OperationPrompt::Forget(ForgetPrompt::Preview(plan))) if plan.is_executable())
+    );
+    let connection = Connection::open(fixture.path().join("data/skilled.sqlite3")).unwrap();
+    connection
+        .execute(
+            "UPDATE operation_receipts SET link_target = link_target || '/./'",
+            [],
+        )
+        .unwrap();
+    dispatch(&mut app, Action::ConfirmOperation);
+    let Some(OperationPrompt::Forget(ForgetPrompt::Report(outcome))) = app.pending_operation()
+    else {
+        panic!("forget report");
+    };
+    assert!(
+        matches!(outcome.applied(), ForgetApply::Failed(reason) if reason.contains("receipt set changed"))
+    );
+    assert_eq!(app.sources().len(), 1);
+    assert_eq!(app.receipts().unwrap().len(), 3);
+}

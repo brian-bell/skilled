@@ -851,18 +851,26 @@ fn a_confirmed_dangling_link_is_atomically_repaired_rescanned_and_receipted() {
     dispatch(&mut app, Action::DismissRepair);
     let alias = fixture.directory.path().join("alias-to-repaired-variant");
     std::os::unix::fs::symlink(verified_plan.new_target().unwrap(), &alias).unwrap();
-    fs::remove_file(&link).unwrap();
-    std::os::unix::fs::symlink(&alias, &link).unwrap();
-    dispatch(&mut app, Action::OpenInventory);
-    let verification = verify_repair(&verified_plan, &verified_apply, app.inventory());
-    assert!(!verification.is_verified());
-    assert!(
-        verification.failures()[0]
-            .observed()
-            .contains("instead of the planned target"),
-        "{:?}",
-        verification.failures()
-    );
+    for target in [
+        alias,
+        PathBuf::from(format!(
+            "{}/./",
+            verified_plan.new_target().unwrap().display()
+        )),
+    ] {
+        fs::remove_file(&link).unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        dispatch(&mut app, Action::OpenInventory);
+        let verification = verify_repair(&verified_plan, &verified_apply, app.inventory());
+        assert!(!verification.is_verified());
+        assert!(
+            verification.failures()[0]
+                .observed()
+                .contains("instead of the planned target"),
+            "{:?}",
+            verification.failures()
+        );
+    }
 }
 
 #[test]
@@ -914,6 +922,63 @@ fn a_repair_source_relocated_after_preview_is_refused_without_modifying_the_link
         "{report}"
     );
     assert_eq!(fs::read_link(&link).unwrap(), old_target);
+    assert_no_repair_temporary(&fixture.root(AgentKind::Codex));
+}
+
+#[test]
+fn a_raw_target_rewritten_after_repair_preview_is_refused() {
+    let fixture = Fixture::new();
+    let repository = fixture.source("library", "skills", "portable");
+    let mut app = fixture.registered(&repository);
+    fixture.create_root_parents();
+    fixture.install(&mut app);
+    let old_target = repository.join("skills/portable").canonicalize().unwrap();
+    let moved = fixture.directory.path().join("moved-library");
+    fs::rename(&repository, &moved).unwrap();
+    let preview = app.preview_source(&moved).unwrap();
+    app.confirm_source(preview).unwrap();
+    let link = fixture.root(AgentKind::Codex).join("portable");
+
+    dispatch(&mut app, Action::OpenDoctor);
+    dispatch(&mut app, Action::MoveDoctorSelection(1));
+    dispatch(&mut app, Action::BeginRepair);
+    assert!(matches!(
+        app.pending_repair(),
+        Some(RepairPrompt::Preview(plan)) if plan.is_executable()
+    ));
+    let changed = PathBuf::from(format!("{}/./", old_target.display()));
+    fs::remove_file(&link).unwrap();
+    std::os::unix::fs::symlink(&changed, &link).unwrap();
+    app.note_detail_max_scroll(Some(0));
+    dispatch(&mut app, Action::ConfirmRepair);
+
+    let Some(RepairPrompt::Report(outcome)) = app.pending_repair() else {
+        panic!("repair should report its guarded refusal");
+    };
+    assert_eq!(outcome.status(), RepairStatus::NotApplied);
+    assert!(matches!(
+        outcome.applied().step().map(|step| step.outcome()),
+        Some(RepairStepOutcome::Failed(reason))
+            if reason.contains("entry or its resolution changed")
+    ));
+    assert!(
+        !outcome.verification().is_verified(),
+        "a refused apply did not observe a repaired link"
+    );
+    assert!(
+        !outcome.verification().is_complete(),
+        "a refused apply has no completed repair postcondition"
+    );
+    let report = render_text(&app, 120, 60);
+    assert!(!report.contains("Repaired and verified"), "{report}");
+    assert!(
+        report.contains("there was no repaired link to verify"),
+        "{report}"
+    );
+    assert_eq!(
+        fs::read_link(&link).unwrap().as_os_str(),
+        changed.as_os_str()
+    );
     assert_no_repair_temporary(&fixture.root(AgentKind::Codex));
 }
 
@@ -1224,6 +1289,46 @@ fn a_repointed_link_is_not_owned_by_a_path_only_receipt() {
         Some("repair.unproven_link")
     );
     assert_eq!(fs::read_link(&link).unwrap(), before);
+}
+
+#[test]
+fn a_dot_rewritten_link_is_not_owned_by_a_receipt() {
+    let fixture = Fixture::new();
+    let repository = fixture.source("library", "skills", "portable");
+    let mut app = fixture.registered(&repository);
+    fixture.create_root_parents();
+    fixture.install(&mut app);
+    let link = fixture.root(AgentKind::Codex).join("portable");
+    let original = fs::read_link(&link).unwrap();
+    fs::remove_file(&link).expect("remove installed link");
+    std::os::unix::fs::symlink(PathBuf::from(format!("{}/./", original.display())), &link)
+        .expect("repoint link by hand");
+    let before = fs::read_link(&link).unwrap();
+    let probe = probe_repair(
+        app.agents(),
+        app.sources(),
+        "portable",
+        AgentKind::Codex,
+        app.home(),
+    );
+
+    let plan = plan_repair(
+        app.agents(),
+        app.sources(),
+        "portable",
+        AgentKind::Codex,
+        &probe,
+        &app.receipts().unwrap(),
+    );
+
+    assert_eq!(
+        plan.blocking_finding().map(|finding| finding.code()),
+        Some("repair.unproven_link")
+    );
+    assert_eq!(
+        fs::read_link(&link).unwrap().as_os_str(),
+        before.as_os_str()
+    );
 }
 
 #[test]
