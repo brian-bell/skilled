@@ -507,6 +507,25 @@ fn a_data_directory_that_denies_journal_creation_degrades_read_only() {
     fs::set_permissions(&data, fs::Permissions::from_mode(0o555))
         .expect("deny creation in the data directory");
 
+    // Privileged processes and some filesystems do not enforce mode bits.
+    // Establish the denial independently of the application under test.
+    let permission_probe = data.join("permission-test-probe");
+    match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&permission_probe)
+    {
+        Ok(file) => {
+            drop(file);
+            fs::set_permissions(&data, fs::Permissions::from_mode(0o755))
+                .expect("restore the data directory");
+            fs::remove_file(permission_probe).expect("remove permission test probe");
+            eprintln!("skipping: directory mode bits do not deny file creation");
+            return;
+        }
+        Err(error) => assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied),
+    }
+
     let opened = SkilledApp::open(AppEnvironment::new(&home, &data, ""));
 
     let after = data_directory_entries(&data);

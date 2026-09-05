@@ -1978,9 +1978,9 @@ static PROBE_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU6
 /// passed a creation-only probe. So both halves have to succeed, and anything
 /// that fails is answered `false`: an unprovable capability is not a proven
 /// one, and a degraded session is the safe reading. A removal that fails
-/// leaves one empty file named for what it is, and leaves another on every
+/// leaves one probe file named for what it is, and leaves another on every
 /// startup for as long as the directory keeps refusing deletions — a
-/// misconfiguration the session is degraded throughout, and one whose empty
+/// misconfiguration the session is degraded throughout, and one whose probe
 /// files the user can remove once they have fixed the directory that would
 /// not let Skilled remove them.
 /// A shared probe name would bound that at one file and cost more than it
