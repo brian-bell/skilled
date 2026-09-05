@@ -5244,3 +5244,66 @@ fn the_update_preview_states_an_installation_that_stops_loading() {
         "{screen}"
     );
 }
+
+/// Exercise the production registry refresh, not a scan against stale variants.
+#[test]
+fn disclosed_invalidations_verify_after_refresh_for_existing_and_revived_links() {
+    for revived in [false, true] {
+        let mut fixture = fixture();
+        let name = if revived { "added" } else { "demo" };
+        let root = fixture._temporary.path().join("home/.claude/skills");
+        std::fs::create_dir_all(&root).unwrap();
+        std::os::unix::fs::symlink(fixture.clone.join("skills").join(name), root.join(name))
+            .unwrap();
+        std::fs::create_dir_all(fixture.seed.join("skills").join(name)).unwrap();
+        std::fs::write(
+            fixture.seed.join("skills").join(name).join("SKILL.md"),
+            "no frontmatter at all\n",
+        )
+        .unwrap();
+        commit(&fixture.seed, "invalid target document");
+        git(&fixture.seed, &["push"]);
+        fixture
+            .app
+            .perform_effects(&[Effect::CheckUpdates])
+            .unwrap();
+        finish_update_check(&mut fixture.app);
+        fixture
+            .app
+            .perform_effects(&[Effect::PlanRepositoryUpdate])
+            .unwrap();
+        let Some(RepositoryUpdatePrompt::Preview(plan)) = fixture.app.pending_update() else {
+            panic!("preview");
+        };
+        assert!(
+            plan.affected().restored.is_empty(),
+            "revived={revived}: {:?}",
+            plan.affected()
+        );
+        assert_eq!(
+            plan.affected().unloadable.len(),
+            1,
+            "revived={revived}: {:?}",
+            plan.affected()
+        );
+        fixture
+            .app
+            .perform_effects(&[Effect::ApplyRepositoryUpdate])
+            .unwrap();
+        let Some(RepositoryUpdatePrompt::Report {
+            verification,
+            apply_error,
+            ..
+        }) = fixture.app.pending_update()
+        else {
+            panic!("report");
+        };
+        assert!(apply_error.is_none(), "{apply_error:?}");
+        assert!(
+            verification.is_verified(),
+            "revived={revived}: {:?}",
+            verification.failures()
+        );
+        assert!(verification.is_complete(), "{:?}", verification.withheld());
+    }
+}

@@ -1311,11 +1311,8 @@ pub struct AffectedInstallations {
     /// point into. The two differ whenever a link was installed under another
     /// name.
     ///
-    /// That the target will exist is what has been established, and it is all
-    /// that is claimed: whether the directory the update creates validates as
-    /// a skill is not read here, so a link may gain a target and still be
-    /// unloadable. Verification reads the result and reports that on its own
-    /// account, the same as for any other installation.
+    /// The preview validates its target document before promising that it
+    /// starts loading. Invalid documents are disclosed in `unloadable` instead.
     pub restored: Vec<(String, String)>,
     /// One upstream skill moving to another name, beside the installations the
     /// move leaves without a target that the pair does not already name. Every
@@ -1409,7 +1406,7 @@ pub struct AffectedInstallations {
     /// The evidence rather than the code alone for the same reason one step
     /// down — missing, unterminated, and unparseable front matter are one code
     /// between them, and the reason the preview showed is the specific one.
-    expected_invalidation: Vec<(String, usize, String, String)>,
+    expected_invalidation: Vec<(String, usize, String, String, PathBuf)>,
     /// Every candidate this update was disclosed as emptying, relative to the
     /// checkout, whether by removal or as the old side of a rename.
     ///
@@ -1903,21 +1900,40 @@ fn affected_catalog_skills(
                 .into_iter()
                 .map(|installed| (installed, name.clone())),
         );
-        if !revived.is_empty() {
-            // The installation that starts loading is the one the root holds,
-            // which need not be named after the directory it points at. Naming
-            // the upstream skill alone would have the user confirm a plan that
-            // does not mention the installation it changes, and would collapse
-            // several links aimed at one directory into a single line.
-            restored.extend(revived.iter().map(|(row, _)| (row.clone(), name.clone())));
-            expected_revival.extend(revived.iter().map(|(row, agent)| {
-                (
+        let document = if documents == TargetDocuments::Read
+            && target_keeps_skill
+            && (!revived.is_empty() || installed.contains_key(&key))
+        {
+            Some(target_skill_document(
+                repository,
+                target_revision,
+                &change.candidate_path,
+            )?)
+        } else {
+            None
+        };
+        for (row, agent) in &revived {
+            if let Some((code, message)) = document
+                .as_ref()
+                .and_then(|document| target_document_verdict(row, document.as_deref()))
+            {
+                unloadable.push((row.clone(), name.clone(), message.clone()));
+                expected_invalidation.push((
+                    row.clone(),
+                    *agent,
+                    code.to_owned(),
+                    message,
+                    change.candidate_path.clone(),
+                ));
+            } else {
+                restored.push((row.clone(), name.clone()));
+                expected_revival.push((
                     row.clone(),
                     *agent,
                     name.clone(),
                     change.candidate_path.clone(),
-                )
-            }));
+                ));
+            }
         }
         let installed_agents = installed.get(&(catalog_path.clone(), name.clone()));
         if installed_agents.is_none() {
@@ -1933,20 +1949,8 @@ fn affected_catalog_skills(
                 installed_agents.cloned().unwrap_or_default(),
             ));
         } else {
-            // The document is read once for the candidate and decided once per
-            // name a root holds it under, because the name is half of what the
-            // portable core checks and the blob is the same for every agent.
-            // One extra local Git process, and only for a candidate this
-            // update touches that something is actually installed from — and
-            // only where the caller asked for the documents at all.
-            let document = match documents {
-                TargetDocuments::Read => Some(target_skill_document(
-                    repository,
-                    target_revision,
-                    &change.candidate_path,
-                )?),
-                TargetDocuments::Unread => None,
-            };
+            // Share the bounded document read with any dangling links aimed
+            // at this candidate, then validate under each installed name.
             let mut verdicts = std::collections::BTreeMap::new();
             for (row, agent) in installed_agents.into_iter().flatten() {
                 let verdict = verdicts.entry(row.clone()).or_insert_with(|| {
@@ -1962,6 +1966,7 @@ fn affected_catalog_skills(
                             *agent,
                             (*code).to_owned(),
                             message.clone(),
+                            change.candidate_path.clone(),
                         ));
                     }
                     None => {
@@ -2016,10 +2021,6 @@ fn affected_catalog_skills(
         .collect::<Vec<_>>();
     updated.sort();
     updated.dedup();
-    unloadable.sort();
-    unloadable.dedup();
-    expected_invalidation.sort();
-    expected_invalidation.dedup();
     updated_installations.sort();
     updated_installations.dedup();
     removed.sort();
@@ -2048,12 +2049,38 @@ fn affected_catalog_skills(
                     .into_iter()
                     .map(|installed| (installed, new.clone())),
             );
-            restored.extend(revived.iter().map(|(row, _)| (row.clone(), new.clone())));
-            expected_revival.extend(
-                revived.into_iter().map(|(row, agent)| {
-                    (row, agent, new.clone(), new_change.candidate_path.clone())
-                }),
-            );
+            let document = if documents == TargetDocuments::Read && !revived.is_empty() {
+                Some(target_skill_document(
+                    repository,
+                    target_revision,
+                    &new_change.candidate_path,
+                )?)
+            } else {
+                None
+            };
+            for (row, agent) in revived {
+                if let Some((code, message)) = document
+                    .as_ref()
+                    .and_then(|document| target_document_verdict(&row, document.as_deref()))
+                {
+                    unloadable.push((row.clone(), new.clone(), message.clone()));
+                    expected_invalidation.push((
+                        row,
+                        agent,
+                        code.to_owned(),
+                        message,
+                        new_change.candidate_path.clone(),
+                    ));
+                } else {
+                    restored.push((row.clone(), new.clone()));
+                    expected_revival.push((
+                        row,
+                        agent,
+                        new.clone(),
+                        new_change.candidate_path.clone(),
+                    ));
+                }
+            }
         }
         // A rename nothing is installed from changes nothing about what any
         // agent loads, so it is not an affected installation and saying so
@@ -2116,6 +2143,10 @@ fn affected_catalog_skills(
         aliases.dedup();
         renamed.push((old, new, aliases));
     }
+    unloadable.sort();
+    unloadable.dedup();
+    expected_invalidation.sort();
+    expected_invalidation.dedup();
     renamed.sort();
     renamed.dedup();
     replaced.sort();
@@ -3048,8 +3079,11 @@ pub(crate) fn verify_repository_update_attempt(
             .affected
             .expected_invalidation
             .iter()
-            .map(|(name, agent, code, evidence)| {
-                ((name.as_str(), *agent), (code.as_str(), evidence.as_str()))
+            .map(|(name, agent, code, evidence, path)| {
+                (
+                    (name.as_str(), *agent),
+                    (code.as_str(), evidence.as_str(), path.as_path()),
+                )
             })
             .collect::<std::collections::BTreeMap<_, _>>();
         let expected_non_loadable = plan
@@ -3114,20 +3148,20 @@ pub(crate) fn verify_repository_update_attempt(
                 // to the document the preview read, and it is compared whole
                 // because one code covers several distinct failures and the
                 // reason on screen named one of them.
-                if let Some((expected_code, expected_evidence)) =
+                if let Some((expected_code, expected_evidence, expected_path)) =
                     expected_invalidation.get(&(row.name(), observation.agent().index()))
                 {
                     match after_observation {
-                        // The resolution is compared for the reason the
-                        // undisclosed branch below compares it: the raw target
-                        // is only the first hop, and an intermediate alias
-                        // retargeted at another registered variant holding an
-                        // equally invalid document would leave the link, the
-                        // health, and the finding all agreeing with a plan that
-                        // was about a different variant.
+                        // Registry refresh may omit an invalid candidate, and
+                        // a revived link had no resolution before the write.
+                        // Any remaining provenance must name the planned path;
+                        // an obsolete VariantRef is not a postcondition.
                         Some(after)
                             if after.object() == observation.object()
-                                && after.resolution() == observation.resolution()
+                                && after.resolution().is_none_or(|variant| {
+                                    variant.source_id() == plan.source_id
+                                        && variant.variant_relative_path() == *expected_path
+                                })
                                 && after.health() == InstallationHealth::Broken
                                 && after.findings().iter().any(|finding| {
                                     finding.code() == *expected_code
@@ -3306,7 +3340,7 @@ pub(crate) fn verify_repository_update_attempt(
             // something the plan did not state.
             let disclosed_invalidation = expected_invalidation
                 .get(&(entry.skill_name(), entry.agent().index()))
-                .is_some_and(|(code, evidence)| {
+                .is_some_and(|(code, evidence, _)| {
                     entry.finding().code() == *code && entry.finding().evidence() == *evidence
                 });
             // What a disclosed replacement produces is a validation failure,

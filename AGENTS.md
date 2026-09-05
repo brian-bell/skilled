@@ -365,7 +365,7 @@ signal needs both, because colour alone is not an acceptable cue.
   longer match that reading — the dialog and the typed command alike — because
   the preview's set was read before the confirmation waited, and a link created
   in that window would otherwise be found only by the post-write scan, once the
-  repository had already moved.. A document the target
+  repository had already moved. A document the target
   revision keeps but no longer validates is read too: an installation whose
   `SKILL.md` fails the portable core there is disclosed as not loading at the
   target revision rather than as updated in place, under the name its own root
