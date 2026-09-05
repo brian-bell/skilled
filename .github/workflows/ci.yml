@@ -88,7 +88,9 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Exercise the Windows Git guard regression
-        run: cargo test --test windows_unsetenvvars
+        run: |
+          cargo test --test source_registration a_replacement_checkout_at_the_same_path_is_a_recoverable_source_error
+          cargo test --test windows_unsetenvvars
 
   package:
     name: Release package (Rust 1.97, ${{ matrix.os }})
