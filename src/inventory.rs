@@ -31,7 +31,13 @@ use crate::{
 pub const MAX_ROOT_CHILDREN: usize = 4_096;
 
 /// What kind of filesystem object occupies an installation slot.
-#[derive(Clone, Debug, Eq, PartialEq)]
+///
+/// Equality preserves the target spelling returned by `read_link`. `Path`
+/// equality normalizes components, which would hide a retarget from update
+/// verification when both spellings resolve to the same skill. Comparing the
+/// native strings preserves Unix bytes and Windows encoding without lossy
+/// conversion or filesystem resolution.
+#[derive(Clone, Debug, Eq)]
 pub enum InstallationObject {
     /// A symbolic link, carrying the target exactly as it was recorded.
     Symlink { target: PathBuf },
@@ -41,6 +47,20 @@ pub enum InstallationObject {
     NotADirectory,
     /// The entry exists but its type could not be read.
     Unknown,
+}
+
+impl PartialEq for InstallationObject {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Symlink { target: left }, Self::Symlink { target: right }) => {
+                left.as_os_str() == right.as_os_str()
+            }
+            (Self::Directory, Self::Directory)
+            | (Self::NotADirectory, Self::NotADirectory)
+            | (Self::Unknown, Self::Unknown) => true,
+            _ => false,
+        }
+    }
 }
 
 impl InstallationObject {
@@ -1895,6 +1915,63 @@ impl ResolutionIndex {
 mod tests {
     use super::*;
     use crate::{AppEnvironment, agents::detect_agents};
+
+    #[test]
+    fn symlink_object_equality_preserves_raw_target_spelling() {
+        let link = |target: &str| InstallationObject::Symlink {
+            target: target.into(),
+        };
+        for (one, other) in [
+            ("/skills/demo", "/skills/demo/./"),
+            ("/skills/demo", "/skills//demo"),
+            ("/skills/demo", "/skills/demo/"),
+            ("skills/demo", "skills/./demo"),
+            ("skills/demo", "skills/other"),
+        ] {
+            assert_eq!(link(one), link(one));
+            assert_ne!(link(one), link(other), "{one} versus {other}");
+        }
+        let objects = [
+            link("demo"),
+            InstallationObject::Directory,
+            InstallationObject::NotADirectory,
+            InstallationObject::Unknown,
+        ];
+        for (i, one) in objects.iter().enumerate() {
+            for (j, other) in objects.iter().enumerate() {
+                assert_eq!(one == other, i == j);
+            }
+        }
+    }
+
+    #[test]
+    fn symlink_object_equality_preserves_non_unicode_targets() {
+        #[cfg(unix)]
+        let target = {
+            use std::os::unix::ffi::OsStringExt;
+            std::ffi::OsString::from_vec(b"skills/\xff".to_vec())
+        };
+        #[cfg(windows)]
+        let target = {
+            use std::os::windows::ffi::OsStringExt;
+            std::ffi::OsString::from_wide(&[115, 47, 0xd800])
+        };
+        #[cfg(any(unix, windows))]
+        {
+            let mut changed = target.clone();
+            changed.push("/./");
+            let original = InstallationObject::Symlink {
+                target: target.into(),
+            };
+            assert_eq!(original, original.clone());
+            assert_ne!(
+                original,
+                InstallationObject::Symlink {
+                    target: changed.into()
+                }
+            );
+        }
+    }
 
     #[test]
     fn only_a_proven_non_directory_read_error_settles_content_as_unloadable() {
