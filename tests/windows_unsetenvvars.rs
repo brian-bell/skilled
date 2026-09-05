@@ -89,7 +89,12 @@ fn fixture() -> GitFixture {
     };
     new_git(&["init", "--bare"], &remote);
     new_git(&["init", "-b", "main"], &seed);
-    std::fs::write(seed.join("README.md"), "fixture\n").expect("write fixture");
+    std::fs::create_dir_all(seed.join("skills/demo")).expect("create fixture catalog");
+    std::fs::write(
+        seed.join("skills/demo/SKILL.md"),
+        "---\nname: demo\ndescription: fixture\n---\n",
+    )
+    .expect("write fixture skill");
     let git = |repository: &Path, arguments: &[&str]| {
         let output = isolated_git(&home, repository)
             .args(arguments)
