@@ -671,9 +671,10 @@ impl UpdateOp {
     /// changed, and it is not reached through `core.hooksPath`: pointing the
     /// hook search at the null device leaves it running. Observed on Git 2.50,
     /// it runs during `status` and during `fetch` alike, so a check described
-    /// as reading would execute a repository-supplied command on the way. Every
-    /// inspection therefore turns it off; Git falls back to reading the
-    /// worktree itself, which is what an inspection is entitled to do.
+    /// as reading would execute a repository-supplied command on the way. Git
+    /// 2.55 also permits configured hooks that do not use `core.hooksPath`.
+    /// Every inspection therefore turns the monitor off and disables the one
+    /// hook event an explicit check can cause by publishing a tracking ref.
     ///
     /// The fast-forward is deliberately absent. It hands Git the repository's
     /// own configuration — the same reason a smudge filter may run there — and
@@ -682,7 +683,12 @@ impl UpdateOp {
     fn suppressed_repository_code(&self) -> Vec<OsString> {
         match self {
             Self::Merge(_) => Vec::new(),
-            _ => vec!["-c".into(), "core.fsmonitor=false".into()],
+            _ => vec![
+                "-c".into(),
+                "core.fsmonitor=false".into(),
+                "-c".into(),
+                "hook.reference-transaction.enabled=false".into(),
+            ],
         }
     }
 
@@ -4222,6 +4228,13 @@ mod tests {
                 "{:?}",
                 update.arguments
             );
+            assert!(
+                update.arguments.iter().any(|argument| {
+                    argument == OsStr::new("hook.reference-transaction.enabled=false")
+                }),
+                "{:?}",
+                update.arguments
+            );
         }
     }
 
@@ -4250,14 +4263,25 @@ mod tests {
     /// reach it. A check offered as reading may not execute one; the
     /// fast-forward keeps the repository's own configuration and discloses it.
     #[test]
-    fn inspections_suppress_the_filesystem_monitor_and_the_merge_does_not() {
+    fn inspections_suppress_repository_code_and_the_merge_does_not() {
         for fixture in update_operation_fixtures() {
-            let suppressed = fixture
+            let monitor_suppressed = fixture
                 .arguments
                 .iter()
                 .any(|argument| argument == OsStr::new("core.fsmonitor=false"));
+            let hook_suppressed = fixture
+                .arguments
+                .iter()
+                .any(|argument| argument == OsStr::new("hook.reference-transaction.enabled=false"));
             assert_eq!(
-                suppressed,
+                monitor_suppressed,
+                fixture.subcommand != "merge",
+                "{}: {:?}",
+                fixture.subcommand,
+                fixture.arguments
+            );
+            assert_eq!(
+                hook_suppressed,
                 fixture.subcommand != "merge",
                 "{}: {:?}",
                 fixture.subcommand,
