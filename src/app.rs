@@ -1128,7 +1128,7 @@ impl SkilledApp {
                 receipts.iter().any(|receipt| {
                     receipt.agent() == agent
                         && receipt.link_path() == observation.path()
-                        && receipt.link_target() == target
+                        && receipt.link_target().as_os_str() == target.as_os_str()
                 })
             })
         })
