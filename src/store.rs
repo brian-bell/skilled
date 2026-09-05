@@ -454,7 +454,11 @@ impl Store {
     }
 
     pub(crate) fn update_checks(&self) -> Result<Vec<CachedUpdateCheck>> {
-        let mut statement = self.connection.prepare(
+        Self::update_checks_on(&self.connection)
+    }
+
+    fn update_checks_on(connection: &Connection) -> Result<Vec<CachedUpdateCheck>> {
+        let mut statement = connection.prepare(
             "SELECT source_id, checked_at, local_revision, local_reference, upstream_ref,
                     upstream_revision, merge_base, ahead, behind, dirty, dirty_known, verdict, detail
              FROM source_update_checks ORDER BY source_id",
@@ -541,7 +545,51 @@ impl Store {
     }
 
     pub(crate) fn record_update_check(&self, check: &CachedUpdateCheck) -> Result<()> {
-        self.connection.execute(
+        Self::record_update_check_on(&self.connection, check)
+    }
+
+    /// A successful verification has two dates: its upstream reading belongs
+    /// to the plan, but its proof that the write succeeded is new. Clear an
+    /// earlier failed-write observation using the latter, while retaining the
+    /// former on the replacement so a concurrent explicit check can still win
+    /// even if it has reserved its generation but not yet saved its result.
+    /// The immediate transaction prevents another writer from changing the
+    /// inspected row between that decision and the conditional upsert.
+    pub(crate) fn record_verified_update_check(
+        &mut self,
+        check: &CachedUpdateCheck,
+        verified_at: i64,
+    ) -> Result<()> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let earlier_failure = Self::update_checks_on(&transaction)?
+            .into_iter()
+            .any(|stored| {
+                stored.source_id == check.source_id
+                    && stored.checked_at < verified_at
+                    && stored.findings().iter().any(|finding| {
+                        matches!(
+                            finding.code(),
+                            "update.apply_failed"
+                                | "update.verification_failed"
+                                | "update.verification_incomplete"
+                        )
+                    })
+            });
+        if earlier_failure {
+            transaction.execute(
+                "DELETE FROM source_update_checks WHERE source_id = ?1",
+                [check.source_id],
+            )?;
+        }
+        Self::record_update_check_on(&transaction, check)?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    fn record_update_check_on(connection: &Connection, check: &CachedUpdateCheck) -> Result<()> {
+        connection.execute(
             UPDATE_CHECK_UPSERT,
             params![
                 check.source_id,
@@ -1320,6 +1368,99 @@ mod tests {
             store.update_checks().expect("checks after stale single")[0].detail,
             "newer"
         );
+    }
+
+    #[test]
+    fn verified_results_clear_only_earlier_failures_and_keep_check_ordering() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let mut store = Store::open(&temporary.path().join("data")).expect("store");
+        store
+            .connection
+            .execute(
+                "INSERT INTO source_repositories
+             (id, label, canonical_path, head_revision, dirty, dirty_known, last_scan_at)
+             VALUES (1, 'source', '/source', 'head', 0, 1, 0)",
+                [],
+            )
+            .expect("source");
+        let mut check = CachedUpdateCheck {
+            source_id: 1,
+            checked_at: 10,
+            local_revision: "head".into(),
+            local_reference: Some("refs/heads/main".into()),
+            upstream_ref: None,
+            upstream_revision: None,
+            merge_base: None,
+            ahead: 0,
+            behind: 0,
+            dirty: false,
+            dirty_known: true,
+            verdict: RepositoryUpdateVerdict::UpToDate,
+            detail: String::new(),
+        };
+        for code in [
+            "update.apply_failed",
+            "update.verification_failed",
+            "update.verification_incomplete",
+        ] {
+            let mut failure = check.clone();
+            failure.checked_at = 20;
+            failure.verdict = RepositoryUpdateVerdict::Blocked;
+            failure.detail = crate::updates::encode_findings(&[crate::inventory::Finding::new(
+                code,
+                crate::inventory::FindingSeverity::Critical,
+                "earlier failure".into(),
+            )]);
+            store
+                .record_update_check(&failure)
+                .expect("earlier failure");
+            store
+                .record_verified_update_check(&check, 30)
+                .expect("later success");
+            let stored = &store.update_checks().unwrap()[0];
+            assert_eq!(stored.verdict, RepositoryUpdateVerdict::UpToDate);
+            assert_eq!(stored.checked_at, 10);
+        }
+        // A check reserved before verification finished can persist after it.
+        let mut available = check.clone();
+        available.checked_at = 20;
+        available.verdict = RepositoryUpdateVerdict::Available;
+        available.behind = 1;
+        store
+            .record_update_checks(&[available])
+            .expect("delayed explicit check");
+        store
+            .record_verified_update_check(&check, 30)
+            .expect("success after explicit check");
+        assert_eq!(
+            store.update_checks().unwrap()[0].verdict,
+            RepositoryUpdateVerdict::Available
+        );
+
+        // A failure observed after this verification must not be cleared.
+        let mut later = check.clone();
+        later.checked_at = 40;
+        later.verdict = RepositoryUpdateVerdict::Blocked;
+        later.detail = "update.verification_failed|later failure".into();
+        store.record_update_check(&later).expect("later failure");
+        store
+            .record_verified_update_check(&check, 30)
+            .expect("delayed success");
+        assert_eq!(store.update_checks().unwrap()[0].checked_at, 40);
+        // Unrelated blocked checks are still explicit observations, not an
+        // earlier failed write this success can answer for.
+        check.checked_at = 50;
+        check.verdict = RepositoryUpdateVerdict::Blocked;
+        check.detail = "source.fetch_failed|network failed".into();
+        store.record_update_check(&check).expect("blocked check");
+        let mut success = check.clone();
+        success.checked_at = 10;
+        success.verdict = RepositoryUpdateVerdict::UpToDate;
+        success.detail.clear();
+        store
+            .record_verified_update_check(&success, 60)
+            .expect("success");
+        assert_eq!(store.update_checks().unwrap()[0].detail, check.detail);
     }
 
     #[test]

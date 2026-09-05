@@ -50,16 +50,23 @@ struct StaleConfirmation {
     database_to_break: Option<PathBuf>,
     cache_to_break: Option<PathBuf>,
     changed: bool,
+    revisions: Vec<String>,
 }
 
 impl StaleConfirmation {
     fn change_checkout(&mut self) {
         if !self.changed {
-            std::fs::write(
-                self.checkout.join("skills/demo/SKILL.md"),
-                "changed after preview\n",
-            )
-            .expect("change checkout after preview");
+            if self.revisions.is_empty() {
+                std::fs::write(
+                    self.checkout.join("skills/demo/SKILL.md"),
+                    "changed after preview\n",
+                )
+                .expect("change checkout after preview");
+            } else {
+                for revision in &self.revisions {
+                    git(&self.checkout, &["merge", "--ff-only", revision]);
+                }
+            }
             if let Some(database) = &self.database_to_break {
                 let connection = rusqlite::Connection::open(database).expect("open metadata");
                 connection
@@ -288,6 +295,7 @@ fn a_guard_refusal_after_confirmation_is_blocked_without_claiming_a_failed_write
         database_to_break: None,
         cache_to_break: None,
         changed: false,
+        revisions: Vec::new(),
     };
     let mut output = Vec::new();
 
@@ -311,6 +319,45 @@ fn a_guard_refusal_after_confirmation_is_blocked_without_claiming_a_failed_write
 }
 
 #[test]
+fn a_guard_refusal_at_the_target_does_not_attribute_an_external_fast_forward() {
+    let (_temporary, environment, seed, clone) = fixture();
+    let mut revisions = Vec::new();
+    for name in ["first.txt", "second.txt"] {
+        std::fs::write(seed.join(name), "incoming\n").expect("incoming file");
+        commit(&seed, name);
+        revisions.push(git(&seed, &["rev-parse", "HEAD"]));
+    }
+    git(&seed, &["push"]);
+    let mut input = StaleConfirmation {
+        input: Cursor::new(b"y\n".to_vec()),
+        checkout: clone.clone(),
+        database_to_break: None,
+        cache_to_break: None,
+        changed: false,
+        revisions,
+    };
+    let mut output = Vec::new();
+    let code = cli::run(
+        &[
+            "update".into(),
+            "--source".into(),
+            clone.display().to_string(),
+        ],
+        environment,
+        &mut input,
+        &mut output,
+    );
+    let output = String::from_utf8(output).expect("utf-8");
+    assert_eq!(code, ExitCodeKind::Blocked, "{output}");
+    assert!(output.contains("Blocked: nothing was written."), "{output}");
+    assert!(!output.contains("was fast-forwarded from"), "{output}");
+    assert!(
+        !output.contains("not the ones that were confirmed"),
+        "{output}"
+    );
+}
+
+#[test]
 fn a_guard_refusal_with_an_unavailable_refresh_is_not_reported_as_an_ordinary_block() {
     let (temporary, environment, seed, clone) = fixture();
     std::fs::write(seed.join("upstream.txt"), "incoming\n").expect("incoming file");
@@ -322,6 +369,7 @@ fn a_guard_refusal_with_an_unavailable_refresh_is_not_reported_as_an_ordinary_bl
         database_to_break: Some(temporary.path().join("data/skilled.sqlite3")),
         cache_to_break: None,
         changed: false,
+        revisions: Vec::new(),
     };
     let mut output = Vec::new();
 
@@ -354,6 +402,7 @@ fn a_guard_refusal_with_a_cache_failure_keeps_the_refreshed_state_distinct() {
         database_to_break: None,
         cache_to_break: Some(temporary.path().join("data/skilled.sqlite3")),
         changed: false,
+        revisions: Vec::new(),
     };
     let mut output = Vec::new();
 
@@ -667,6 +716,47 @@ fn running_as_root() -> bool {
     std::fs::set_permissions(&probe, std::fs::Permissions::from_mode(0o755)).expect("unseal probe");
     std::fs::remove_dir_all(&probe).expect("remove probe");
     readable
+}
+
+/// The type change is disclosed on the confirmation the command prints, and
+/// what it discloses is what verification then holds the update to — so the
+/// run reports a verified success rather than a blocked plan (`skilled-ott`).
+#[test]
+fn replacing_a_skill_directory_with_a_file_is_disclosed_applied_and_verified() {
+    let (_temporary, environment, seed, clone) = fixture();
+    let root = _temporary.path().join("home/.claude/skills");
+    std::fs::create_dir_all(&root).expect("agent root");
+    std::os::unix::fs::symlink(clone.join("skills/demo"), root.join("demo"))
+        .expect("installed skill");
+
+    std::fs::remove_dir_all(seed.join("skills/demo")).expect("remove skill directory");
+    std::fs::write(seed.join("skills/demo"), "not a skill directory\n").expect("replacement file");
+    commit(&seed, "replace skill directory with file");
+    git(&seed, &["push"]);
+    let target = git(&seed, &["rev-parse", "HEAD"]);
+
+    let mut input = Cursor::new(Vec::<u8>::new());
+    let mut output = Vec::new();
+    let code = cli::run(
+        &[
+            "update".into(),
+            "--source".into(),
+            clone.display().to_string(),
+            "--yes".into(),
+        ],
+        environment.clone(),
+        &mut input,
+        &mut output,
+    );
+    let output = String::from_utf8(output).expect("utf-8 output");
+    assert_eq!(code, ExitCodeKind::Success, "{output}");
+    assert!(
+        output.contains("target stops being a skill \u{b7} demo"),
+        "{output}"
+    );
+    assert!(!output.contains("removed \u{b7} demo"), "{output}");
+    assert_eq!(git(&clone, &["rev-parse", "HEAD"]), target);
+    assert!(clone.join("skills/demo").is_file());
 }
 
 /// The cached check is what the Updates list advertises and what Doctor reads,
