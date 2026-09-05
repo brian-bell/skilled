@@ -2452,8 +2452,14 @@ impl SkilledApp {
                 } else {
                     self.superseded_repository_check(plan.source_id(), checked_at)
                 };
-                self.store()
-                    .and_then(|store| store.record_update_check(&check))
+                self.store_mut()
+                    .and_then(|store| {
+                        if check.verdict == RepositoryUpdateVerdict::UpToDate {
+                            store.record_verified_update_check(&check, checked_at)
+                        } else {
+                            store.record_update_check(&check)
+                        }
+                    })
                     .and_then(|()| self.store().and_then(Store::update_checks))
                     .map(|checks| self.update_checks = checks)
                     .err()
@@ -2587,8 +2593,14 @@ impl SkilledApp {
                 } else {
                     self.superseded_repository_check(plan.source_id(), checked_at)
                 };
-                self.store()
-                    .and_then(|store| store.record_update_check(&check))
+                self.store_mut()
+                    .and_then(|store| {
+                        if check.verdict == RepositoryUpdateVerdict::UpToDate {
+                            store.record_verified_update_check(&check, checked_at)
+                        } else {
+                            store.record_update_check(&check)
+                        }
+                    })
                     .and_then(|()| self.store().and_then(Store::update_checks))
                     .map(|checks| self.update_checks = checks)
                     .err()
@@ -2631,6 +2643,10 @@ impl SkilledApp {
     /// and leaves the user's own explicit check as the only thing that decides
     /// availability, which is what "cached update findings exist only after an
     /// explicit check" already asks of every other surface.
+    ///
+    /// Persistence separately uses the completion generation to clear an
+    /// earlier failed-write observation. The replacement keeps the plan's
+    /// generation so a delayed explicit availability check can still win.
     ///
     /// A failure or an incomplete result takes the fresh generation and
     /// outranks everything, as it did before: it is the only record that a

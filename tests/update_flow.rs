@@ -2987,6 +2987,83 @@ fn a_verification_failure_outranks_a_check_another_process_ran_meanwhile() {
     );
 }
 
+#[test]
+fn a_later_verified_apply_clears_another_processes_earlier_apply_failure() {
+    let mut fixture = fixture();
+    let environment = AppEnvironment::new(
+        fixture._temporary.path().join("home"),
+        fixture._temporary.path().join("data"),
+        "",
+    );
+    let root = fixture._temporary.path().join("home/.claude/skills");
+    std::fs::create_dir_all(&root).expect("agent root");
+    std::os::unix::fs::symlink(fixture.clone.join("skills/demo"), root.join("demo"))
+        .expect("installed skill");
+    push_update(&fixture, "skills/demo/new.txt");
+    fixture
+        .app
+        .perform_effects(&[Effect::CheckUpdates])
+        .expect("check");
+    finish_update_check(&mut fixture.app);
+    fixture
+        .app
+        .perform_effects(&[Effect::PlanRepositoryUpdate])
+        .expect("plan");
+    let planned_at = fixture.app.update_checks()[0].checked_at;
+
+    // The second process reaches Git, but signature policy rejects the
+    // unsigned fixture commit without advancing HEAD. Its failure is newer
+    // than the first process's plan, but older than its successful retry.
+    let mut other = SkilledApp::open(environment.clone()).expect("second process");
+    other
+        .perform_effects(&[Effect::CheckUpdates])
+        .expect("second check");
+    finish_update_check(&mut other);
+    other
+        .perform_effects(&[Effect::PlanRepositoryUpdate])
+        .expect("second plan");
+    git(
+        &fixture.clone,
+        &["config", "merge.verifySignatures", "true"],
+    );
+    other
+        .perform_effects(&[Effect::ApplyRepositoryUpdate])
+        .expect("failed apply");
+    let failure = &other.update_checks()[0];
+    assert!(failure.checked_at > planned_at);
+    assert!(
+        failure
+            .findings()
+            .iter()
+            .any(|finding| finding.code() == "update.apply_failed")
+    );
+    git(
+        &fixture.clone,
+        &["config", "merge.verifySignatures", "false"],
+    );
+
+    fixture
+        .app
+        .perform_effects(&[Effect::ApplyRepositoryUpdate])
+        .expect("successful retry");
+    let Some(RepositoryUpdatePrompt::Report {
+        verification,
+        apply_error,
+        ..
+    }) = fixture.app.pending_update()
+    else {
+        panic!("expected report");
+    };
+    assert!(apply_error.is_none());
+    assert!(verification.is_verified() && verification.is_complete());
+    let reopened = SkilledApp::open(environment).expect("reopen");
+    assert_eq!(
+        reopened.update_checks()[0].verdict,
+        RepositoryUpdateVerdict::UpToDate
+    );
+    assert!(reopened.doctor_findings().is_empty());
+}
+
 fn await_file(path: &Path, complaint: &str) {
     let deadline = Instant::now() + Duration::from_secs(60);
     while !path.exists() && Instant::now() < deadline {
