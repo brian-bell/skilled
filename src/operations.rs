@@ -941,11 +941,40 @@ impl RepairPlan {
     }
 }
 
+/// Compare a `read_link` observation with a target recorded from a creation
+/// plan. Windows canonical source paths use the verbatim namespace, while
+/// `read_link` may return its user spelling. Only this representation boundary
+/// permits the namespace bridge; two observations or two receipts still compare
+/// their native strings exactly so a rewrite cannot hide behind it.
+pub(crate) fn observed_target_matches_recorded(observed: &Path, recorded: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        observed.is_absolute() == recorded.is_absolute()
+            && windows_observed_target_matches_recorded(
+                &observed.as_os_str().encode_wide().collect::<Vec<_>>(),
+                &recorded.as_os_str().encode_wide().collect::<Vec<_>>(),
+            )
+    }
+    #[cfg(not(windows))]
+    {
+        observed.as_os_str() == recorded.as_os_str()
+    }
+}
+
+// Pure UTF-16 boundary so namespace and non-Unicode regressions run on every
+// host; no path parsing, case folding, or lossy conversion is involved.
+#[cfg(any(windows, test))]
+fn windows_observed_target_matches_recorded(observed: &[u16], recorded: &[u16]) -> bool {
+    comparable_symlink_target(observed) == comparable_symlink_target(recorded)
+}
+
 /// The newest receipt that proves ownership of the observed link.
 ///
 /// A path-only receipt is insufficient: receipts outlive links, so a third
 /// party can remove and recreate one at the same path. Byte-identical target
-/// spelling is the evidence that the object still names what Skilled recorded.
+/// spelling is the evidence that the object still names what Skilled recorded,
+/// with Windows' creation-plan/read-link namespace bridge applied.
 pub fn receipt_for<'a>(
     receipts: &'a [Receipt],
     agent: AgentKind,
@@ -955,7 +984,7 @@ pub fn receipt_for<'a>(
     receipts.iter().rev().find(|receipt| {
         receipt.agent() == agent
             && receipt.link_path() == link_path
-            && receipt.link_target().as_os_str() == observed_target.as_os_str()
+            && observed_target_matches_recorded(observed_target, receipt.link_target())
     })
 }
 
@@ -1771,7 +1800,7 @@ fn uninstall_disposition(slot: &TargetProbe, receipts: &[&Receipt]) -> Uninstall
         } => {
             let matching_receipts: Vec<Receipt> = receipts
                 .iter()
-                .filter(|receipt| receipt.link_target.as_os_str() == target.as_os_str())
+                .filter(|receipt| observed_target_matches_recorded(target, receipt.link_target()))
                 .map(|receipt| (*receipt).clone())
                 .collect();
             if !matching_receipts.is_empty() {
@@ -4225,7 +4254,7 @@ fn symlink_reparse_target(buffer: &[u8]) -> Result<(Vec<u16>, bool), &'static st
 /// The same absolute target has several spellings across the two sides of
 /// that comparison: the reparse data stores the NT form (`\??\C:\x`,
 /// `\??\UNC\server\share`), while `std::fs::read_link` — which is what the
-/// final recheck read and what receipts were recorded against — reports the
+/// final recheck reads — reports the
 /// user form (`C:\x`, `\\server\share`), keeping the verbatim `\\?\` prefix
 /// only where the path needs it. Stripping the NT or verbatim prefix and
 /// rewriting a namespaced `UNC\` to `\\` maps every one of those spellings of
@@ -4571,7 +4600,7 @@ pub fn verify_repair(
     };
     match observed.object() {
         InstallationObject::Symlink { target }
-            if target.as_os_str() == expected_target.as_os_str() => {}
+            if observed_target_matches_recorded(target, expected_target) => {}
         InstallationObject::Symlink { target } => {
             failures.push(VerifyFailure {
                 agent: step.agent,
@@ -4809,7 +4838,7 @@ fn apply_uninstall_target(
     if !receipts.iter().any(|receipt| {
         receipt.agent == target.agent
             && receipt.link_path == target.link_path
-            && receipt.link_target.as_os_str() == link_target.as_os_str()
+            && observed_target_matches_recorded(link_target, receipt.link_target())
     }) {
         return StepOutcome::Failed(
             "the matching ownership receipt disappeared after the plan was shown, so nothing was removed"
@@ -5305,7 +5334,7 @@ pub fn probe_forget(source: &RegisteredSource, receipts: &[Receipt]) -> ForgetPr
                 ForgetObservation::Inactive("the path is no longer a symbolic link".to_owned())
             }
             Ok(_) => match fs::read_link(receipt.link_path()) {
-                Ok(target) if target.as_os_str() == receipt.link_target().as_os_str() => {
+                Ok(target) if observed_target_matches_recorded(&target, receipt.link_target()) => {
                     ForgetObservation::Active
                 }
                 Ok(target) => ForgetObservation::Inactive(format!(
@@ -7397,5 +7426,190 @@ mod raw_ownership_tests {
                 changed.as_os_str()
             );
         }
+    }
+
+    #[test]
+    fn windows_observations_match_canonical_receipt_namespaces_only() {
+        let wide = |s: &str| s.encode_utf16().collect::<Vec<_>>();
+        for (observed, recorded) in [
+            (r"C:\skills\demo", r"\\?\C:\skills\demo"),
+            (r"\\server\share\demo", r"\\?\UNC\server\share\demo"),
+            (r"\\?\C:\needs verbatim.", r"\\?\C:\needs verbatim."),
+            (r"..\demo", r"..\demo"),
+        ] {
+            assert!(
+                windows_observed_target_matches_recorded(&wide(observed), &wide(recorded)),
+                "{observed} / {recorded}"
+            );
+        }
+        for observed in [
+            r"C:\skills\demo\.",
+            r"C:\skills\\demo",
+            r"C:\skills\demo\",
+            r"C:\skills\Demo",
+            r"C:\skills\demo.",
+            r"C:\skills\demo ",
+            r"C:skills\demo",
+        ] {
+            assert!(
+                !windows_observed_target_matches_recorded(
+                    &wide(observed),
+                    &wide(r"\\?\C:\skills\demo")
+                ),
+                "{observed}"
+            );
+        }
+        assert!(!windows_observed_target_matches_recorded(
+            &wide(r"UNC\server\share"),
+            &wide(r"\\?\UNC\server\share")
+        ));
+        let recorded = [92, 92, 63, 92, 67, 58, 92, 0xd800];
+        assert!(windows_observed_target_matches_recorded(
+            &[67, 58, 92, 0xd800],
+            &recorded
+        ));
+        assert!(!windows_observed_target_matches_recorded(
+            &[67, 58, 92, 0xd801],
+            &recorded
+        ));
+    }
+
+    #[test]
+    fn receipt_cleanup_preserves_other_raw_targets() {
+        let fixture = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&fixture.path().join("data")).unwrap();
+        let original = receipt(Path::new("/skills/demo"));
+        let changed = receipt(Path::new("/skills/demo/./"));
+        let mutation = store.begin_mutation().unwrap();
+        mutation.record_receipt(&original).unwrap();
+        mutation.record_receipt(&changed).unwrap();
+        assert_eq!(
+            mutation
+                .delete_receipts_for_link(
+                    original.agent(),
+                    original.link_path(),
+                    original.link_target()
+                )
+                .unwrap(),
+            1
+        );
+        mutation.commit().unwrap();
+        assert_eq!(store.receipts().unwrap(), vec![changed]);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn canonical_windows_receipt_owns_live_link_and_is_removed_after_uninstall() {
+        use crate::source::InspectedSource;
+        let fixture = tempfile::tempdir().unwrap();
+        let home = fixture.path().join("home");
+        let root = home.join(".claude/skills");
+        let directory = fixture.path().join("target");
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir(&directory).unwrap();
+        fs::write(directory.join("content"), b"preserved").unwrap();
+        let target = directory.canonicalize().unwrap();
+        let link = root.join("demo");
+        std::os::windows::fs::symlink_dir(&target, &link)
+            .expect("Windows symlink privilege or Developer Mode");
+        let observed = fs::read_link(&link).unwrap();
+        assert_ne!(
+            observed.as_os_str(),
+            target.as_os_str(),
+            "fixture must exercise read_link's namespace conversion"
+        );
+        let receipt = Receipt::new(
+            ReceiptOperation::Install,
+            AgentKind::ClaudeCode,
+            "demo".into(),
+            link.clone(),
+            target.clone(),
+            Some(1),
+            None,
+            None,
+        );
+        let source = RegisteredSource::new(
+            1,
+            "fixture".into(),
+            InspectedSource::from_stored(
+                fixture.path().to_path_buf(),
+                None,
+                "head".into(),
+                None,
+                None,
+            ),
+            Vec::new(),
+            0,
+            None,
+        );
+        assert!(
+            receipt_for(
+                std::slice::from_ref(&receipt),
+                receipt.agent(),
+                &link,
+                &observed
+            )
+            .is_some()
+        );
+        let probe = probe_forget(&source, std::slice::from_ref(&receipt));
+        assert!(plan_forget(&source, std::slice::from_ref(&receipt), &probe).is_blocked());
+        let slot = TargetProbe {
+            agent: receipt.agent(),
+            link_path: link.clone(),
+            root: RootProbe::Present,
+            entry: probe_entry(&link),
+            content: SlotContent::Unknown,
+        };
+        let disposition = uninstall_disposition(&slot, &[&receipt]);
+        assert!(matches!(
+            disposition,
+            UninstallDisposition::RemoveLink { .. }
+        ));
+        let plan = UninstallPlan {
+            skill_name: "demo".into(),
+            targets: vec![UninstallTarget {
+                agent: receipt.agent(),
+                link_path: link.clone(),
+                disposition,
+            }],
+            warnings: Vec::new(),
+            opencode_outlook: None,
+        };
+        let mut store = Store::open(&fixture.path().join("data")).unwrap();
+        let mutation = store.begin_mutation().unwrap();
+        mutation.record_receipt(&receipt).unwrap();
+        mutation.commit().unwrap();
+        assert!(matches!(
+            apply_uninstall_target(&plan, &plan.targets[0], &store, &home),
+            StepOutcome::Removed
+        ));
+        assert!(fs::symlink_metadata(&link).is_err());
+        assert_eq!(fs::read(directory.join("content")).unwrap(), b"preserved");
+        let applied = ApplyReport {
+            steps: vec![AppliedStep {
+                agent: receipt.agent(),
+                link_path: link,
+                outcome: StepOutcome::Removed,
+            }],
+        };
+        let verification = VerifyReport {
+            held: vec![
+                VerifyPass {
+                    agent: receipt.agent(),
+                    postcondition: Postcondition::LinkGone,
+                },
+                VerifyPass {
+                    agent: receipt.agent(),
+                    postcondition: Postcondition::ContentSurvived,
+                },
+            ],
+            ..VerifyReport::default()
+        };
+        assert!(
+            finalize_uninstall(&plan, &applied, &verification, &mut store)
+                .failures()
+                .is_empty()
+        );
+        assert!(store.receipts().unwrap().is_empty());
     }
 }
