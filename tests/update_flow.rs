@@ -1823,6 +1823,7 @@ fn a_guard_refusal_caches_the_current_blocker_not_a_failed_postcondition() {
         .perform_effects(&[Effect::PlanRepositoryUpdate])
         .expect("plan update");
     let checked_at = fixture.app.update_checks()[0].checked_at;
+    let generation = fixture.app.update_checks()[0].generation;
     std::fs::write(
         fixture.clone.join("skills/demo/old.txt"),
         "late local edit\n",
@@ -1839,12 +1840,15 @@ fn a_guard_refusal_caches_the_current_blocker_not_a_failed_postcondition() {
     // observation than the check it refused on behalf of. Recording it under
     // the earlier generation would leave it losing the conditional upsert to
     // anything another process wrote in between, and the blocker would be
-    // dropped by a store that reported success.
+    // dropped by a store that reported success. It is still the check that
+    // ran which the record is dated by: the guard read the checkout, it did
+    // not check for an update.
     assert!(
-        fixture.app.update_checks()[0].checked_at > checked_at,
-        "{} is not later than {checked_at}",
-        fixture.app.update_checks()[0].checked_at
+        fixture.app.update_checks()[0].generation > generation,
+        "{} is not later than {generation}",
+        fixture.app.update_checks()[0].generation
     );
+    assert_eq!(fixture.app.update_checks()[0].checked_at, checked_at);
     assert!(findings.iter().any(|finding| {
         finding.code() == "source.changed_after_preview"
             && finding.evidence().contains("check updates again")
@@ -2886,7 +2890,9 @@ fn an_update_check_writes_only_the_tracking_ref() {
 /// so it must outrank anything another Skilled process recorded while the
 /// preview was open. Reusing the earlier check's generation would have the
 /// conditional upsert decline it and report success, and the failure would
-/// exist nowhere once the report is dismissed.
+/// exist nowhere once the report is dismissed. Outranking is the ordering
+/// generation's job alone: the record still states when the check ran, because
+/// no check ran after the write.
 #[test]
 fn a_verification_failure_outranks_a_check_another_process_ran_meanwhile() {
     use std::os::unix::fs::PermissionsExt;
@@ -2936,8 +2942,9 @@ fn a_verification_failure_outranks_a_check_another_process_ran_meanwhile() {
         .perform_effects(&[Effect::CheckUpdates])
         .expect("second process check");
     finish_update_check(&mut other);
-    let meanwhile = other.update_checks()[0].checked_at;
+    let meanwhile = other.update_checks()[0].generation;
 
+    let checked_at = fixture.app.update_checks()[0].checked_at;
     fixture
         .app
         .perform_effects(&[Effect::ApplyRepositoryUpdate])
@@ -2946,9 +2953,13 @@ fn a_verification_failure_outranks_a_check_another_process_ran_meanwhile() {
     let reopened = SkilledApp::open(environment).expect("reopen app");
     let stored = &reopened.update_checks()[0];
     assert!(
-        stored.checked_at > meanwhile,
+        stored.generation > meanwhile,
         "{} did not outrank {meanwhile}",
-        stored.checked_at
+        stored.generation
+    );
+    assert_eq!(
+        stored.checked_at, checked_at,
+        "the record states a check time no check ran at"
     );
     assert_eq!(stored.verdict, RepositoryUpdateVerdict::Blocked);
     assert!(
@@ -2959,6 +2970,228 @@ fn a_verification_failure_outranks_a_check_another_process_ran_meanwhile() {
         "{:?}",
         stored.findings()
     );
+}
+
+#[test]
+fn a_later_verified_apply_clears_another_processes_earlier_apply_failure() {
+    let mut fixture = fixture();
+    let environment = AppEnvironment::new(
+        fixture._temporary.path().join("home"),
+        fixture._temporary.path().join("data"),
+        "",
+    );
+    let root = fixture._temporary.path().join("home/.claude/skills");
+    std::fs::create_dir_all(&root).expect("agent root");
+    std::os::unix::fs::symlink(fixture.clone.join("skills/demo"), root.join("demo"))
+        .expect("installed skill");
+    push_update(&fixture, "skills/demo/new.txt");
+    fixture
+        .app
+        .perform_effects(&[Effect::CheckUpdates])
+        .expect("check");
+    finish_update_check(&mut fixture.app);
+    fixture
+        .app
+        .perform_effects(&[Effect::PlanRepositoryUpdate])
+        .expect("plan");
+    let planned_at = fixture.app.update_checks()[0].generation;
+
+    // The second process reaches Git, but signature policy rejects the
+    // unsigned fixture commit without advancing HEAD. Its failure is newer
+    // than the first process's plan, but older than its successful retry.
+    let mut other = SkilledApp::open(environment.clone()).expect("second process");
+    other
+        .perform_effects(&[Effect::CheckUpdates])
+        .expect("second check");
+    finish_update_check(&mut other);
+    other
+        .perform_effects(&[Effect::PlanRepositoryUpdate])
+        .expect("second plan");
+    git(
+        &fixture.clone,
+        &["config", "merge.verifySignatures", "true"],
+    );
+    other
+        .perform_effects(&[Effect::ApplyRepositoryUpdate])
+        .expect("failed apply");
+    let failure = &other.update_checks()[0];
+    assert!(failure.generation > planned_at);
+    assert!(
+        failure
+            .findings()
+            .iter()
+            .any(|finding| finding.code() == "update.apply_failed")
+    );
+    git(
+        &fixture.clone,
+        &["config", "merge.verifySignatures", "false"],
+    );
+
+    fixture
+        .app
+        .perform_effects(&[Effect::ApplyRepositoryUpdate])
+        .expect("successful retry");
+    let Some(RepositoryUpdatePrompt::Report {
+        verification,
+        apply_error,
+        ..
+    }) = fixture.app.pending_update()
+    else {
+        panic!("expected report");
+    };
+    assert!(apply_error.is_none());
+    assert!(verification.is_verified() && verification.is_complete());
+    let reopened = SkilledApp::open(environment).expect("reopen");
+    assert_eq!(
+        reopened.update_checks()[0].verdict,
+        RepositoryUpdateVerdict::UpToDate
+    );
+    assert!(reopened.doctor_findings().is_empty());
+}
+
+fn await_file(path: &Path, complaint: &str) {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !path.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(path.exists(), "{complaint}");
+}
+
+/// Which side of this apply's own record the concurrent check lands on. Both
+/// are the same race — a check begun against the checkout this apply has
+/// already moved — and neither may lose its availability to a verdict the
+/// apply synthesized without reading an upstream.
+#[derive(Clone, Copy)]
+enum ConcurrentCheck {
+    RecordsBeforeTheApply,
+    RecordsAfterTheApply,
+}
+
+#[test]
+fn a_verified_apply_keeps_an_availability_another_process_recorded_meanwhile() {
+    a_verified_apply_keeps_a_concurrent_availability(ConcurrentCheck::RecordsBeforeTheApply);
+}
+
+#[test]
+fn a_verified_apply_keeps_an_availability_another_process_records_afterwards() {
+    a_verified_apply_keeps_a_concurrent_availability(ConcurrentCheck::RecordsAfterTheApply);
+}
+
+/// The verified record answers only for the object the plan named: it states
+/// `UpToDate` without re-reading the upstream. A check another process began
+/// against the checkout this apply had already moved read the upstream more
+/// recently, and replacing its result would hide a known-available update
+/// until somebody checked again — whether that process wrote its row before
+/// this apply's or after it.
+///
+/// The interleaving is staged where the race actually is, by holding the merge
+/// inside its own `post-merge` hook until the concurrent check has at least
+/// reserved its generation against the moved checkout.
+fn a_verified_apply_keeps_a_concurrent_availability(ordering: ConcurrentCheck) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut fixture = fixture();
+    let environment = AppEnvironment::new(
+        fixture._temporary.path().join("home"),
+        fixture._temporary.path().join("data"),
+        "",
+    );
+    let root = fixture._temporary.path().join("home/.claude/skills");
+    std::fs::create_dir_all(&root).expect("agent root");
+    std::os::unix::fs::symlink(fixture.clone.join("skills/demo"), root.join("demo"))
+        .expect("installed skill");
+    let target = push_update(&fixture, "skills/demo/new.txt");
+
+    fixture
+        .app
+        .perform_effects(&[Effect::CheckUpdates])
+        .expect("start check");
+    finish_update_check(&mut fixture.app);
+    let planned_at = fixture.app.update_checks()[0].generation;
+    fixture
+        .app
+        .perform_effects(&[Effect::PlanRepositoryUpdate])
+        .expect("plan update");
+
+    // Pushed after the preview and never fetched by this process, so the apply
+    // guard still sees the tracking ref the plan named.
+    let later = push_update(&fixture, "skills/demo/later.txt");
+    assert_ne!(later, target);
+
+    let merged = fixture._temporary.path().join("merged");
+    let go = fixture._temporary.path().join("go");
+    let hook = fixture.clone.join(".git/hooks/post-merge");
+    std::fs::write(
+        &hook,
+        format!(
+            "#!/bin/sh\n: > '{}'\ni=0\nwhile [ ! -e '{}' ] && [ $i -lt 600 ]; do\n  sleep 0.1\n  i=$((i+1))\ndone\n",
+            merged.display(),
+            go.display()
+        ),
+    )
+    .expect("post-merge hook");
+    let mut permissions = std::fs::metadata(&hook)
+        .expect("hook metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&hook, permissions).expect("executable hook");
+
+    let recorded = fixture._temporary.path().join("recorded");
+    let concurrent_environment = environment.clone();
+    let concurrent_recorded = recorded.clone();
+    let concurrent = std::thread::spawn(move || {
+        await_file(&merged, "the merge never reached its hook");
+        let mut other = SkilledApp::open(concurrent_environment).expect("second process");
+        // Reserves this check's generation against the moved checkout.
+        other
+            .perform_effects(&[Effect::CheckUpdates])
+            .expect("second process check");
+        match ordering {
+            ConcurrentCheck::RecordsBeforeTheApply => {
+                finish_update_check(&mut other);
+                std::fs::write(&go, b"go").expect("release the merge");
+            }
+            ConcurrentCheck::RecordsAfterTheApply => {
+                std::fs::write(&go, b"go").expect("release the merge");
+                await_file(&concurrent_recorded, "the apply never recorded its result");
+                finish_update_check(&mut other);
+            }
+        }
+        other.update_checks()[0].clone()
+    });
+
+    fixture
+        .app
+        .perform_effects(&[Effect::ApplyRepositoryUpdate])
+        .expect("apply update");
+    std::fs::write(&recorded, b"recorded").expect("release the concurrent record");
+    let meanwhile = concurrent.join().expect("concurrent check");
+
+    let Some(RepositoryUpdatePrompt::Report { verification, .. }) = fixture.app.pending_update()
+    else {
+        panic!("expected a report: {:?}", fixture.app.pending_update());
+    };
+    assert!(verification.is_verified(), "{:?}", verification.failures());
+    assert!(verification.is_complete(), "{:?}", verification.withheld());
+    assert_eq!(git(&fixture.clone, &["rev-parse", "HEAD"]), target);
+
+    // The concurrent check read the checkout the merge had already moved, so
+    // its availability describes the state this apply left behind.
+    assert_eq!(meanwhile.verdict, RepositoryUpdateVerdict::Available);
+    assert_eq!(meanwhile.local_revision, target);
+    assert_eq!(meanwhile.upstream_revision.as_deref(), Some(later.as_str()));
+    assert!(
+        meanwhile.generation > planned_at,
+        "{} is not later than {planned_at}",
+        meanwhile.generation
+    );
+
+    let reopened = SkilledApp::open(environment).expect("reopen app");
+    let stored = &reopened.update_checks()[0];
+    assert_eq!(stored.verdict, RepositoryUpdateVerdict::Available);
+    assert_eq!(stored.upstream_revision.as_deref(), Some(later.as_str()));
+    assert_eq!(stored.checked_at, meanwhile.checked_at);
+    assert!(!stored.superseded_by(&reopened.sources()[0]));
 }
 
 /// A relative link target is not ambiguous: the operating system resolves it
