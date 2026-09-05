@@ -639,6 +639,47 @@ fn running_as_root() -> bool {
     readable
 }
 
+/// The type change is disclosed on the confirmation the command prints, and
+/// what it discloses is what verification then holds the update to — so the
+/// run reports a verified success rather than a blocked plan (`skilled-ott`).
+#[test]
+fn replacing_a_skill_directory_with_a_file_is_disclosed_applied_and_verified() {
+    let (_temporary, environment, seed, clone) = fixture();
+    let root = _temporary.path().join("home/.claude/skills");
+    std::fs::create_dir_all(&root).expect("agent root");
+    std::os::unix::fs::symlink(clone.join("skills/demo"), root.join("demo"))
+        .expect("installed skill");
+
+    std::fs::remove_dir_all(seed.join("skills/demo")).expect("remove skill directory");
+    std::fs::write(seed.join("skills/demo"), "not a skill directory\n").expect("replacement file");
+    commit(&seed, "replace skill directory with file");
+    git(&seed, &["push"]);
+    let target = git(&seed, &["rev-parse", "HEAD"]);
+
+    let mut input = Cursor::new(Vec::<u8>::new());
+    let mut output = Vec::new();
+    let code = cli::run(
+        &[
+            "update".into(),
+            "--source".into(),
+            clone.display().to_string(),
+            "--yes".into(),
+        ],
+        environment.clone(),
+        &mut input,
+        &mut output,
+    );
+    let output = String::from_utf8(output).expect("utf-8 output");
+    assert_eq!(code, ExitCodeKind::Success, "{output}");
+    assert!(
+        output.contains("target stops being a skill \u{b7} demo"),
+        "{output}"
+    );
+    assert!(!output.contains("removed \u{b7} demo"), "{output}");
+    assert_eq!(git(&clone, &["rev-parse", "HEAD"]), target);
+    assert!(clone.join("skills/demo").is_file());
+}
+
 /// The cached check is what the Updates list advertises and what Doctor reads,
 /// so a finding the preview would block on has to be recorded by the check
 /// itself. Otherwise the list keeps offering an update the preview then

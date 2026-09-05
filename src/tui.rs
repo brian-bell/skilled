@@ -3769,6 +3769,14 @@ fn update_plan_statement_lines(prompt: &RepositoryUpdatePrompt) -> Vec<Line<'sta
     for name in &plan.affected().removed {
         lines.push(Line::raw(format!("  removed · {}", terminal_safe(name))));
     }
+    // Distinct from a removal because the outcome is: the link keeps its
+    // target, and the target stops being a skill.
+    for name in &plan.affected().replaced {
+        lines.push(Line::raw(format!(
+            "  target stops being a skill · {}",
+            terminal_safe(name)
+        )));
+    }
     for name in &plan.affected().added {
         lines.push(Line::raw(format!(
             "  added upstream, not installed · {}",
