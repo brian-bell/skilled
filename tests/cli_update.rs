@@ -890,3 +890,51 @@ fn a_post_merge_promisor_marker_does_not_exit_as_a_plain_success() {
     assert_eq!(git(&clone, &["rev-parse", "HEAD"]), target);
     assert!(output.contains("promisor remote"), "{output}");
 }
+
+#[test]
+fn a_hook_with_a_lexically_equivalent_retarget_returns_verification_failure() {
+    let (temporary, environment, seed, clone) = fixture();
+    let root = temporary.path().join("home/.claude/skills");
+    std::fs::create_dir_all(&root).unwrap();
+    let link = root.join("demo");
+    let target = clone.join("skills/demo");
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+    std::fs::write(seed.join("skills/demo/new.txt"), "incoming").unwrap();
+    commit(&seed, "update demo");
+    git(&seed, &["push"]);
+    let hook = clone.join(".git/hooks/post-merge");
+    std::fs::write(
+        &hook,
+        format!(
+            "#!/bin/sh\nrm -f '{link}'\nln -s '{target}/./' '{link}'\n",
+            link = link.display(),
+            target = target.display(),
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut output = Vec::new();
+    let code = cli::run(
+        &[
+            "update".into(),
+            "--source".into(),
+            clone.display().to_string(),
+            "--yes".into(),
+        ],
+        environment,
+        &mut Cursor::new(Vec::<u8>::new()),
+        &mut output,
+    );
+    let output = String::from_utf8(output).unwrap();
+    assert_eq!(code, ExitCodeKind::VerificationFailed, "{output}");
+    assert!(output.contains("Not verified:"), "{output}");
+    assert!(output.contains("retargeted without disclosure"), "{output}");
+    assert!(!output.contains("Verified: HEAD"), "{output}");
+    assert_eq!(
+        git(&clone, &["rev-parse", "HEAD"]),
+        git(&seed, &["rev-parse", "HEAD"])
+    );
+    let observed = std::fs::read_link(&link).unwrap();
+    assert_eq!(observed, target);
+    assert_ne!(observed.as_os_str(), target.as_os_str());
+}

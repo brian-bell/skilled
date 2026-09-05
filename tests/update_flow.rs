@@ -5807,3 +5807,97 @@ fn a_replacement_directory_is_unavailable_when_post_attempt_reads_are_withheld()
             .all(|catalog| catalog.candidates().is_empty())
     );
 }
+
+/// Every disclosed outcome must preserve the observed spelling of the link.
+#[test]
+fn lexically_equivalent_retargets_fail_every_update_verification_branch() {
+    for change in ["update", "remove", "replace", "revive", "invalidate"] {
+        let mut fixture = fixture();
+        let name = if change == "revive" { "added" } else { "demo" };
+        let relative = format!("skills/{name}");
+        let root = fixture._temporary.path().join("home/.claude/skills");
+        std::fs::create_dir_all(&root).unwrap();
+        let link = root.join(name);
+        let original = fixture.clone.join(&relative);
+        std::os::unix::fs::symlink(&original, &link).unwrap();
+        fixture
+            .app
+            .perform_effects(&[Effect::ScanInstallations])
+            .unwrap();
+        let before = fixture.app.inventory().clone();
+        let incoming = fixture.seed.join(&relative);
+        match change {
+            "remove" => std::fs::remove_dir_all(&incoming).unwrap(),
+            "replace" => {
+                std::fs::remove_dir_all(&incoming).unwrap();
+                std::fs::write(&incoming, "not a directory").unwrap();
+            }
+            "revive" => {
+                std::fs::create_dir_all(&incoming).unwrap();
+                std::fs::write(
+                    incoming.join("SKILL.md"),
+                    "---\nname: added\ndescription: fixture\n---\n",
+                )
+                .unwrap();
+            }
+            "invalidate" => {
+                std::fs::write(incoming.join("SKILL.md"), "---\nname: demo\n---\n").unwrap();
+            }
+            _ => std::fs::write(incoming.join("new.txt"), "new").unwrap(),
+        }
+        commit(&fixture.seed, change);
+        git(&fixture.seed, &["push"]);
+        let source = fixture.app.sources()[0].clone();
+        let probe = probe_repository_update(&source, true);
+        let plan = plan_repository_update(&source, &probe, &before).unwrap();
+        assert!(!plan.is_blocked(), "{change}: {:?}", plan.findings());
+        apply_repository_update(&plan).unwrap();
+        // Refresh catalog variants before scanning, as the runner does after apply.
+        let preview = fixture.app.preview_source(&fixture.clone).unwrap();
+        fixture.app.confirm_source(preview).unwrap();
+        fixture
+            .app
+            .perform_effects(&[Effect::ScanInstallations])
+            .unwrap();
+        let report = verify_repository_update(
+            &plan,
+            &before,
+            fixture.app.inventory(),
+            &PostWriteRepositoryReads::Permitted,
+        );
+        assert!(
+            report.is_verified(),
+            "unchanged {change}: {:?}",
+            report.failures()
+        );
+        assert!(report.is_complete(), "{change}: {:?}", report.withheld());
+
+        // Interior dot preserves resolution even when the target becomes a file.
+        let rewritten = fixture.clone.join(format!("skills/./{name}"));
+        assert_eq!(original, rewritten);
+        assert_ne!(original.as_os_str(), rewritten.as_os_str());
+        std::fs::remove_file(&link).unwrap();
+        std::os::unix::fs::symlink(&rewritten, &link).unwrap();
+        fixture
+            .app
+            .perform_effects(&[Effect::ScanInstallations])
+            .unwrap();
+        let report = verify_repository_update(
+            &plan,
+            &before,
+            fixture.app.inventory(),
+            &PostWriteRepositoryReads::Permitted,
+        );
+        assert!(
+            !report.is_verified(),
+            "retargeted {change}: {:?}",
+            report.failures()
+        );
+        assert!(
+            report
+                .failures()
+                .iter()
+                .any(|failure| failure.contains(name))
+        );
+    }
+}
