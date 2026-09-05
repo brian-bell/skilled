@@ -600,6 +600,8 @@ enum UpdateOp {
     RefState(String),
     ConfigGet(String),
     TransportSettings,
+    #[cfg_attr(not(windows), allow(dead_code))]
+    WindowsUnsetenvvars,
     TransportPolicy,
     UserSshCommand,
     RemoteUrl(String),
@@ -643,6 +645,7 @@ impl UpdateOp {
             | Self::FilterSettings
             | Self::PromisorSettings
             | Self::TransportSettings
+            | Self::WindowsUnsetenvvars
             | Self::TransportPolicy
             | Self::UserSshCommand => "config",
             Self::CheckAttr => "check-attr",
@@ -820,6 +823,16 @@ impl UpdateOp {
                 "--null".into(),
                 "--get-regexp".into(),
                 TRANSPORT_CODE_PATTERN.into(),
+            ],
+            // Git for Windows applies this setting just before it spawns its
+            // first child. `--show-scope` lets the update guard distinguish a
+            // checkout's list from the user's own global or system choice.
+            Self::WindowsUnsetenvvars => vec![
+                "config".into(),
+                "--show-scope".into(),
+                "--null".into(),
+                "--get-regexp".into(),
+                r"^core\.unsetenvvars$".into(),
             ],
             // Which transports the user permits, read with the scope that says
             // the permission is theirs. The fetch's allowlist may only narrow
@@ -1571,6 +1584,68 @@ pub(crate) fn repository_transport_code_cancellable(
     Ok(Some(parse_transport_settings(output.stdout)))
 }
 
+/// A checkout-controlled `core.unsetenvvars` entry that would remove an
+/// environment guard from a Git for Windows child process.
+///
+/// Git for Windows reads the last value it sees and removes every
+/// comma-separated name immediately before its first child spawn. The setting
+/// is absent from Unix Git, so querying it there would only add an inspection
+/// process with no safety effect. On Windows the scope is essential: a global
+/// or system list remains the user's configuration, while a local or worktree
+/// value that removes one of Skilled's guards blocks the check before Git can
+/// reach a transport child.
+#[cfg(windows)]
+pub(crate) fn repository_windows_unsetenvvars_code(
+    repository: GitTarget<'_>,
+) -> Result<Option<String>> {
+    let op = UpdateOp::WindowsUnsetenvvars;
+    let arguments = op.arguments();
+    let output = run(repository, op)?;
+    if !output.status.success() {
+        if output.status.code() == Some(1) && output.stdout.is_empty() {
+            return Ok(None);
+        }
+        return Err(git_error(repository, &arguments, &output));
+    }
+    Ok(parse_windows_unsetenvvars(output.stdout))
+}
+
+#[cfg(not(windows))]
+pub(crate) fn repository_windows_unsetenvvars_code(
+    _repository: GitTarget<'_>,
+) -> Result<Option<String>> {
+    Ok(None)
+}
+
+#[cfg(windows)]
+pub(crate) fn repository_windows_unsetenvvars_code_cancellable(
+    repository: GitTarget<'_>,
+    cancelled: &AtomicBool,
+    child_slot: &Mutex<Option<Child>>,
+) -> Result<Option<Option<String>>> {
+    let op = UpdateOp::WindowsUnsetenvvars;
+    let arguments = op.arguments();
+    let Some(output) = run_cancellable(repository, &op, cancelled, child_slot)? else {
+        return Ok(None);
+    };
+    if !output.status.success() {
+        if output.status.code() == Some(1) && output.stdout.is_empty() {
+            return Ok(Some(None));
+        }
+        return Err(git_error(repository, &arguments, &output));
+    }
+    Ok(Some(parse_windows_unsetenvvars(output.stdout)))
+}
+
+#[cfg(not(windows))]
+pub(crate) fn repository_windows_unsetenvvars_code_cancellable(
+    _repository: GitTarget<'_>,
+    _cancelled: &AtomicBool,
+    _child_slot: &Mutex<Option<Child>>,
+) -> Result<Option<Option<String>>> {
+    Ok(Some(None))
+}
+
 /// The transport allowlist to hand this fetch, narrowed to what the caller and
 /// the user already permit.
 ///
@@ -1852,6 +1927,50 @@ fn parse_user_ssh_command(bytes: Vec<u8>) -> Option<String> {
         command = Some(value.trim().to_owned());
     }
     command.filter(|command| !command.is_empty())
+}
+
+/// Return the protected name a checkout's effective Windows-only unset list
+/// would remove. Git processes configuration in order and replaces this
+/// scalar each time, so only the final record decides the child environment.
+/// Windows environment names are case-insensitive; Git passes each component
+/// directly to `unsetenv`, so whitespace remains part of the name rather than
+/// being silently normalised.
+#[cfg(any(windows, test))]
+fn parse_windows_unsetenvvars(bytes: Vec<u8>) -> Option<String> {
+    const PROTECTED: &[&str] = &[
+        "GIT_ALLOW_PROTOCOL",
+        "GIT_ASKPASS",
+        "GIT_DIR",
+        "GIT_LITERAL_PATHSPECS",
+        "GIT_NO_LAZY_FETCH",
+        "GIT_OPTIONAL_LOCKS",
+        "GIT_PROTOCOL_FROM_USER",
+        "GIT_SSH_COMMAND",
+        "GIT_TERMINAL_PROMPT",
+        "GIT_WORK_TREE",
+        "SSH_ASKPASS_REQUIRE",
+    ];
+    let mut records = bytes
+        .split(|byte| *byte == 0)
+        .filter(|record| !record.is_empty())
+        .map(String::from_utf8_lossy);
+    let mut effective = None;
+    while let (Some(scope), Some(entry)) = (records.next(), records.next()) {
+        let (_, value) = entry.split_once('\n').unwrap_or((entry.as_ref(), ""));
+        effective = Some((scope.into_owned(), value.to_owned()));
+    }
+    let (scope, value) = effective?;
+    if !matches!(scope.as_str(), "local" | "worktree") {
+        return None;
+    }
+    value
+        .split(',')
+        .find(|name| {
+            PROTECTED
+                .iter()
+                .any(|protected| name.eq_ignore_ascii_case(protected))
+        })
+        .map(str::to_owned)
 }
 
 /// The first repository-scoped setting that actually names a program.
@@ -3418,6 +3537,49 @@ fn path_from_bytes(bytes: Vec<u8>) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn windows_unsetenvvars_only_refuses_the_effective_repository_guard_removal() {
+        let records = |pairs: &[(&str, &str)]| {
+            let mut bytes = Vec::new();
+            for (scope, value) in pairs {
+                bytes.extend_from_slice(scope.as_bytes());
+                bytes.push(0);
+                bytes.extend_from_slice(b"core.unsetenvvars\n");
+                bytes.extend_from_slice(value.as_bytes());
+                bytes.push(0);
+            }
+            bytes
+        };
+
+        assert_eq!(
+            parse_windows_unsetenvvars(records(&[("local", "GIT_ALLOW_PROTOCOL")])),
+            Some("GIT_ALLOW_PROTOCOL".to_owned())
+        );
+        assert_eq!(
+            parse_windows_unsetenvvars(records(&[("worktree", "git_askpass,OTHER")])),
+            Some("git_askpass".to_owned())
+        );
+        // The final scalar wins, as Git for Windows does while it reads config.
+        assert_eq!(
+            parse_windows_unsetenvvars(records(&[
+                ("global", "GIT_ALLOW_PROTOCOL"),
+                ("local", "UNRELATED"),
+            ])),
+            None
+        );
+        // A user's own setting remains their choice; only checkout scope is
+        // refused here.
+        assert_eq!(
+            parse_windows_unsetenvvars(records(&[("global", "GIT_ALLOW_PROTOCOL")])),
+            None
+        );
+        // Git passes names through without trimming.
+        assert_eq!(
+            parse_windows_unsetenvvars(records(&[("local", " GIT_ALLOW_PROTOCOL")])),
+            None
+        );
+    }
     use std::ffi::OsStr;
     #[cfg(unix)]
     use std::os::unix::process::ExitStatusExt;

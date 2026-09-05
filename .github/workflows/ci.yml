@@ -74,6 +74,22 @@ jobs:
       - name: cargo build --release
         run: cargo build --release
 
+  windows-git-guards:
+    name: Windows Git child-process guards
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Exercise the Windows Git guard regression
+        run: cargo test --test windows_unsetenvvars
+
   package:
     name: Release package (Rust 1.97, ${{ matrix.os }})
     strategy:

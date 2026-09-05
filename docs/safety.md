@@ -227,6 +227,16 @@ would overrule it wherever the user set it — fast-forwarding to an unsigned
 tip Git had been told to refuse. Re-reading the object the preview named
 settles which object is merged, not who vouches for it.
 
+Git for Windows alone also accepts `core.unsetenvvars`, a last-value-wins
+comma-separated list it applies immediately before starting a child process.
+An effective local or worktree value that names one of Skilled's transport,
+prompting, routing, locking, or lazy-fetch guards refuses the explicit check;
+the same setting in global or system configuration remains the user's own
+choice. This guard is re-asked immediately before fetch with the other
+checkout-configured transport refusals. It prevents a checkout from removing
+the boundaries Skilled exports, but does not close the general
+configuration-edit-to-fetch gap described by `skilled-88j`.
+
 ### Fetch and ref publication
 
 The fetch writes no ref at all. Git dereferences a symbolic ref when it
