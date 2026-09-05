@@ -1070,6 +1070,16 @@ fn a_repair_whose_selection_became_a_duplicate_after_the_preview_writes_nothing(
             .all(|receipt| receipt.operation() != ReceiptOperation::Repair),
         "no repair receipt may name a selection the registry no longer makes"
     );
+    let rendered = render_text(&app, 100, 30);
+    assert!(rendered.contains("nothing written"), "{rendered}");
+    assert!(!rendered.contains("already applied"), "{rendered}");
+    insta::assert_snapshot!(
+        "refused_repair_heading",
+        rendered
+            .lines()
+            .find(|line| line.contains("Repair result"))
+            .unwrap()
+    );
 }
 
 #[test]

@@ -1207,10 +1207,10 @@ impl RegistryFingerprint {
 
     /// Order is not registry state, so the records are sorted before hashing:
     /// two readings of the same rows fingerprint alike however each arrived.
-    fn of_records(records: impl Iterator<Item = String>) -> Self {
+    fn of_records(records: impl Iterator<Item = RegistryRecord>) -> Self {
         use std::hash::{Hash, Hasher};
 
-        let mut records: Vec<String> = records.collect();
+        let mut records: Vec<RegistryRecord> = records.collect();
         records.sort_unstable();
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         records.hash(&mut hasher);
@@ -1218,11 +1218,17 @@ impl RegistryFingerprint {
     }
 }
 
-/// The unit separator keeps a field's own text from spelling a record boundary,
-/// and the leading letter keeps a source record from colliding with a catalog
-/// one.
-fn source_fingerprint_record(id: i64, label: &str, canonical_path: &str) -> String {
-    format!("s\u{1f}{id}\u{1f}{label}\u{1f}{canonical_path}")
+/// Derived hashing preserves field boundaries even when a label or path
+/// contains control characters; concatenating with a separator would let two
+/// different registrations spell the same record before hashing.
+#[derive(Eq, Hash, Ord, PartialEq, PartialOrd)]
+enum RegistryRecord {
+    Source(i64, String, String),
+    Catalog(i64, String, String, bool, bool, bool),
+}
+
+fn source_fingerprint_record(id: i64, label: &str, canonical_path: &str) -> RegistryRecord {
+    RegistryRecord::Source(id, label.to_owned(), canonical_path.to_owned())
 }
 
 fn catalog_fingerprint_record(
@@ -1232,12 +1238,14 @@ fn catalog_fingerprint_record(
     claude_code: bool,
     codex: bool,
     opencode: bool,
-) -> String {
-    format!(
-        "c\u{1f}{source_id}\u{1f}{relative_path}\u{1f}{classification}\u{1f}{}\u{1f}{}\u{1f}{}",
-        u8::from(claude_code),
-        u8::from(codex),
-        u8::from(opencode)
+) -> RegistryRecord {
+    RegistryRecord::Catalog(
+        source_id,
+        relative_path.to_owned(),
+        classification.to_owned(),
+        claude_code,
+        codex,
+        opencode,
     )
 }
 
@@ -1330,6 +1338,17 @@ mod tests {
     use std::{ffi::OsString, os::unix::ffi::OsStringExt};
 
     use super::*;
+
+    #[test]
+    fn registry_fingerprints_distinguish_separators_inside_source_fields() {
+        let first = source_fingerprint_record(1, "library", "/one\u{1f}/two");
+        let second = source_fingerprint_record(1, "library\u{1f}/one", "/two");
+        assert_ne!(
+            RegistryFingerprint::of_records(std::iter::once(first)),
+            RegistryFingerprint::of_records(std::iter::once(second)),
+            "moving a separator between a label and a path must change the registry"
+        );
+    }
 
     #[test]
     fn an_ownership_receipt_requires_representable_paths_before_it_can_be_written() {
