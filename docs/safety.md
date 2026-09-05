@@ -183,8 +183,12 @@ or a URL naming a transport helper — blocks the check with
 `ls-remote --get-url` reports, because `insteadOf` rewrites the configured
 value on the way to the transport and a remote with several URLs is fetched
 from the first while `--get` answers with the last. A setting the checkout
-goes on to disable is not a refusal: an empty credential helper resets the
-list and a scalar's last value wins. Scope is the
+goes on to disable is not a refusal: an empty credential helper resets its
+exact key's list, ordinary scalars use their last value, and `uploadpack`
+keeps its first value. The parser conservatively refuses a surviving
+repository URL helper without reconstructing its credential context. Credential
+URL subsection case and disabling values are retained byte-for-byte while
+deciding this. Scope is the
 whole distinction, and `--show-scope` is what draws it: the same key in the
 user's own global or system configuration is theirs and keeps working, while
 the same key inside the checkout is refused. There is no documented way to
