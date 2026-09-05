@@ -1,0 +1,5 @@
+---
+source: tests/tui_shell.rs
+expression: "row_text(&screen, heading)"
+---
+▕ 1┌ Install result ─────────────────────────────────────────────────────────── nothing written ┐  ▏

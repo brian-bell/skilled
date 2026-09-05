@@ -995,6 +995,93 @@ fn a_repair_whose_source_is_forgotten_after_the_preview_writes_nothing() {
     );
 }
 
+/// The plan's own registration surviving is not the selection surviving. A
+/// competing agent-specific source registered after the preview makes the
+/// replacement variant one of two candidates, which a fresh selection reports
+/// as a spec 6.4 duplicate conflict rather than resolving — so the guard
+/// compares the whole registry the plan chose from (skilled-g64).
+#[test]
+fn a_repair_whose_selection_became_a_duplicate_after_the_preview_writes_nothing() {
+    let fixture = Fixture::new();
+    let common = fixture.source("common", "skills", "portable");
+    let mut app = fixture.registered(&common);
+    fixture.create_root_parents();
+    fixture.install(&mut app);
+    let specific = fixture.source("specific", ".agents/skills", "portable");
+    let preview = app
+        .preview_source(&specific)
+        .expect("preview specific source");
+    app.confirm_source(preview)
+        .expect("register specific source");
+    let link = fixture.root(AgentKind::Codex).join("portable");
+    let old_target = fs::read_link(&link).unwrap();
+
+    dispatch(&mut app, Action::OpenDoctor);
+    let finding = app
+        .doctor_findings()
+        .iter()
+        .position(|entry| {
+            entry.agent() == Some(AgentKind::Codex)
+                && entry.finding().code() == "install.wrong_managed_target"
+        })
+        .expect("Codex repairable finding");
+    dispatch(
+        &mut app,
+        Action::MoveDoctorSelection(i8::try_from(finding).unwrap()),
+    );
+    dispatch(&mut app, Action::BeginRepair);
+    assert!(matches!(
+        app.pending_repair(),
+        Some(RepairPrompt::Preview(plan)) if plan.is_executable()
+    ));
+
+    // A second process registers another Codex edition of the same name, so
+    // two agent-specific variants now answer to it.
+    let rival = fixture.source("rival", ".agents/skills", "portable");
+    let mut registering = fixture.app();
+    let preview = registering.preview_source(&rival).expect("preview rival");
+    registering
+        .confirm_source(preview)
+        .expect("register the competing source");
+    assert_eq!(registering.sources().len(), 3);
+
+    app.note_detail_max_scroll(Some(0));
+    dispatch(&mut app, Action::ConfirmRepair);
+
+    let Some(RepairPrompt::Report(outcome)) = app.pending_repair() else {
+        panic!("repair should report its guarded refusal");
+    };
+    assert_eq!(outcome.status(), RepairStatus::NotApplied);
+    assert!(
+        matches!(
+            outcome.applied().step().map(|step| step.outcome()),
+            Some(RepairStepOutcome::Failed(reason))
+                if reason.contains("registered sources changed")
+        ),
+        "{:?}",
+        outcome.applied().step().map(|step| step.outcome())
+    );
+    assert_eq!(fs::read_link(&link).unwrap(), old_target);
+    assert_no_repair_temporary(&fixture.root(AgentKind::Codex));
+    assert!(
+        app.receipts()
+            .unwrap()
+            .iter()
+            .all(|receipt| receipt.operation() != ReceiptOperation::Repair),
+        "no repair receipt may name a selection the registry no longer makes"
+    );
+    let rendered = render_text(&app, 100, 30);
+    assert!(rendered.contains("nothing written"), "{rendered}");
+    assert!(!rendered.contains("already applied"), "{rendered}");
+    insta::assert_snapshot!(
+        "refused_repair_heading",
+        rendered
+            .lines()
+            .find(|line| line.contains("Repair result"))
+            .unwrap()
+    );
+}
+
 #[test]
 fn a_root_that_becomes_unreadable_after_preview_is_refused_without_modifying_the_link() {
     let fixture = Fixture::new();

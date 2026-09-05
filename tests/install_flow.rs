@@ -725,6 +725,60 @@ fn a_stale_install_preview_cannot_write_a_link_the_live_registration_no_longer_o
     assert!(installing.receipts().expect("receipts").is_empty());
 }
 
+/// The plan's own registration surviving is not the selection surviving. A
+/// second source registered after the preview can answer to the same skill
+/// name, which makes the confirmed target a spec 6.4 duplicate conflict a
+/// fresh selection would refuse — so the guard compares the whole registry the
+/// plan chose from, not only the row it chose (skilled-g64).
+#[test]
+fn a_stale_install_preview_cannot_write_a_link_a_fresh_selection_would_call_duplicate() {
+    let fixture = Fixture::new();
+    let repository = fixture.source("library", &["portable"]);
+    let mut installing = fixture.registered(&repository);
+    fixture.create_root_parents();
+    focus_first_variant(&mut installing);
+    dispatch(&mut installing, Action::BeginInstall);
+    let Some(InstallPrompt::Preview(plan)) = installing.pending_install() else {
+        panic!("install preview expected");
+    };
+    assert!(plan.is_executable());
+
+    // A second process registers another source offering the same name. Both
+    // catalogs are common and compatible, so no agent-specific edition breaks
+    // the tie: the selection this plan rests on is now a duplicate conflict.
+    let rival = fixture.source("rival", &["portable"]);
+    let mut registering = fixture.app();
+    let preview = registering.preview_source(&rival).expect("preview rival");
+    registering
+        .confirm_source(preview)
+        .expect("register the competing source");
+    assert_eq!(registering.sources().len(), 2);
+
+    dispatch(&mut installing, Action::ConfirmOperation);
+
+    let Some(InstallPrompt::Report(outcome)) = installing.pending_install() else {
+        panic!("install report expected");
+    };
+    assert_eq!(outcome.status(), InstallStatus::NotApplied);
+    assert!(
+        matches!(
+            outcome.step(AgentKind::ClaudeCode).map(|step| step.outcome()),
+            Some(StepOutcome::Failed(reason)) if reason.contains("registered sources changed")
+        ),
+        "{:?}",
+        outcome
+            .step(AgentKind::ClaudeCode)
+            .map(|step| step.outcome())
+    );
+    for (agent, root) in ROOTS {
+        assert!(
+            !fixture.home().join(root).join("portable").exists(),
+            "{agent:?} was written from a selection the registry no longer makes"
+        );
+    }
+    assert!(installing.receipts().expect("receipts").is_empty());
+}
+
 /// A catalog that explicitly excludes OpenCode is still installable for the
 /// compatible agents. OpenCode discovers those links through its documented
 /// compatibility roots, and verification must compare that incompatible

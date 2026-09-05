@@ -5255,6 +5255,15 @@ fn render_install_prompt(
         InstallPrompt::Preview(_) | InstallPrompt::Failed(_) => {
             ("Install skill", "nothing written yet")
         }
+        // A completed attempt may have refused every write under its guard.
+        InstallPrompt::Report(outcome)
+            if matches!(
+                outcome.status(),
+                InstallStatus::NotApplied | InstallStatus::NothingToDo
+            ) =>
+        {
+            ("Install result", "nothing written")
+        }
         InstallPrompt::Report(_) => ("Install result", "already applied"),
     };
     let actions = install_prompt_actions(prompt, fully_seen);
@@ -5858,6 +5867,14 @@ fn render_repair_prompt(
     let (title, scope) = match prompt {
         RepairPrompt::Preview(_) | RepairPrompt::Failed(_) => {
             ("Repair skill", "nothing written yet")
+        }
+        RepairPrompt::Report(outcome)
+            if matches!(
+                outcome.status(),
+                RepairStatus::NotApplied | RepairStatus::NothingToRepair
+            ) =>
+        {
+            ("Repair result", "nothing written")
         }
         RepairPrompt::Report(_) => ("Repair result", "already applied"),
     };
