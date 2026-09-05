@@ -5501,7 +5501,12 @@ fn invalidating_an_installed_skill_document_is_disclosed_before_the_gate() {
         .app
         .perform_effects(&[Effect::ScanInstallations])
         .expect("scan after update");
-    let report = verify_repository_update(&plan, &before, fixture.app.inventory());
+    let report = verify_repository_update(
+        &plan,
+        &before,
+        fixture.app.inventory(),
+        &PostWriteRepositoryReads::Permitted,
+    );
     assert!(report.is_verified(), "{:?}", report.failures());
     assert!(report.is_complete(), "{:?}", report.withheld());
 }
@@ -5546,7 +5551,12 @@ fn a_disclosed_invalidation_that_does_not_happen_fails_verification() {
         .app
         .perform_effects(&[Effect::ScanInstallations])
         .expect("scan after update");
-    let report = verify_repository_update(&plan, &before, fixture.app.inventory());
+    let report = verify_repository_update(
+        &plan,
+        &before,
+        fixture.app.inventory(),
+        &PostWriteRepositoryReads::Permitted,
+    );
     assert!(!report.is_verified(), "{:?}", report.failures());
 }
 
@@ -5590,7 +5600,12 @@ fn another_failure_under_the_disclosed_code_fails_verification() {
         .app
         .perform_effects(&[Effect::ScanInstallations])
         .expect("scan after update");
-    let report = verify_repository_update(&plan, &before, fixture.app.inventory());
+    let report = verify_repository_update(
+        &plan,
+        &before,
+        fixture.app.inventory(),
+        &PostWriteRepositoryReads::Permitted,
+    );
     assert!(!report.is_verified(), "{:?}", report.failures());
 }
 
@@ -5634,7 +5649,12 @@ fn an_oversized_target_skill_document_is_disclosed_without_draining_it() {
         .app
         .perform_effects(&[Effect::ScanInstallations])
         .expect("scan after update");
-    let report = verify_repository_update(&plan, &before, fixture.app.inventory());
+    let report = verify_repository_update(
+        &plan,
+        &before,
+        fixture.app.inventory(),
+        &PostWriteRepositoryReads::Permitted,
+    );
     assert!(report.is_verified(), "{:?}", report.failures());
     assert!(report.is_complete(), "{:?}", report.withheld());
 }
