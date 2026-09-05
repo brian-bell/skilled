@@ -1,0 +1,5 @@
+---
+source: tests/repair_planning.rs
+expression: "rendered.lines().find(|line| line.contains(\"Repair result\")).unwrap()"
+---
+▕ 1┌ Repair result ──────────────────────────────────────────────────────────── nothing written ┐  ▏

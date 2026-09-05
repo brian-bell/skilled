@@ -881,6 +881,11 @@ fn write_repository_update_plan(
         )?;
         writeln!(output, "      reason · {}", safe(reason))?;
     }
+    // Distinct from a removal because the outcome is: the link keeps its
+    // target, and the target stops being a skill.
+    for name in &plan.affected().replaced {
+        writeln!(output, "    target stops being a skill · {}", safe(name))?;
+    }
     for name in &plan.affected().added {
         writeln!(output, "    added upstream, not installed · {}", safe(name))?;
     }

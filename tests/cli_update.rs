@@ -50,16 +50,23 @@ struct StaleConfirmation {
     database_to_break: Option<PathBuf>,
     cache_to_break: Option<PathBuf>,
     changed: bool,
+    revisions: Vec<String>,
 }
 
 impl StaleConfirmation {
     fn change_checkout(&mut self) {
         if !self.changed {
-            std::fs::write(
-                self.checkout.join("skills/demo/SKILL.md"),
-                "changed after preview\n",
-            )
-            .expect("change checkout after preview");
+            if self.revisions.is_empty() {
+                std::fs::write(
+                    self.checkout.join("skills/demo/SKILL.md"),
+                    "changed after preview\n",
+                )
+                .expect("change checkout after preview");
+            } else {
+                for revision in &self.revisions {
+                    git(&self.checkout, &["merge", "--ff-only", revision]);
+                }
+            }
             if let Some(database) = &self.database_to_break {
                 let connection = rusqlite::Connection::open(database).expect("open metadata");
                 connection
@@ -90,6 +97,43 @@ impl Read for StaleConfirmation {
 impl BufRead for StaleConfirmation {
     fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
         self.change_checkout();
+        self.input.fill_buf()
+    }
+
+    fn consume(&mut self, amount: usize) {
+        self.input.consume(amount);
+    }
+}
+
+/// A reader that installs a skill the moment the confirmation prompt is read,
+/// standing in for a link made while the user was deciding.
+struct InstallDuringConfirmation {
+    input: Cursor<Vec<u8>>,
+    link: PathBuf,
+    target: PathBuf,
+    installed: bool,
+}
+
+impl InstallDuringConfirmation {
+    fn install(&mut self) {
+        if !self.installed {
+            std::fs::create_dir_all(self.link.parent().expect("agent root")).expect("agent root");
+            std::os::unix::fs::symlink(&self.target, &self.link).expect("installed skill");
+            self.installed = true;
+        }
+    }
+}
+
+impl Read for InstallDuringConfirmation {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        self.install();
+        self.input.read(buffer)
+    }
+}
+
+impl BufRead for InstallDuringConfirmation {
+    fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
+        self.install();
         self.input.fill_buf()
     }
 
@@ -251,6 +295,7 @@ fn a_guard_refusal_after_confirmation_is_blocked_without_claiming_a_failed_write
         database_to_break: None,
         cache_to_break: None,
         changed: false,
+        revisions: Vec::new(),
     };
     let mut output = Vec::new();
 
@@ -274,6 +319,45 @@ fn a_guard_refusal_after_confirmation_is_blocked_without_claiming_a_failed_write
 }
 
 #[test]
+fn a_guard_refusal_at_the_target_does_not_attribute_an_external_fast_forward() {
+    let (_temporary, environment, seed, clone) = fixture();
+    let mut revisions = Vec::new();
+    for name in ["first.txt", "second.txt"] {
+        std::fs::write(seed.join(name), "incoming\n").expect("incoming file");
+        commit(&seed, name);
+        revisions.push(git(&seed, &["rev-parse", "HEAD"]));
+    }
+    git(&seed, &["push"]);
+    let mut input = StaleConfirmation {
+        input: Cursor::new(b"y\n".to_vec()),
+        checkout: clone.clone(),
+        database_to_break: None,
+        cache_to_break: None,
+        changed: false,
+        revisions,
+    };
+    let mut output = Vec::new();
+    let code = cli::run(
+        &[
+            "update".into(),
+            "--source".into(),
+            clone.display().to_string(),
+        ],
+        environment,
+        &mut input,
+        &mut output,
+    );
+    let output = String::from_utf8(output).expect("utf-8");
+    assert_eq!(code, ExitCodeKind::Blocked, "{output}");
+    assert!(output.contains("Blocked: nothing was written."), "{output}");
+    assert!(!output.contains("was fast-forwarded from"), "{output}");
+    assert!(
+        !output.contains("not the ones that were confirmed"),
+        "{output}"
+    );
+}
+
+#[test]
 fn a_guard_refusal_with_an_unavailable_refresh_is_not_reported_as_an_ordinary_block() {
     let (temporary, environment, seed, clone) = fixture();
     std::fs::write(seed.join("upstream.txt"), "incoming\n").expect("incoming file");
@@ -285,6 +369,7 @@ fn a_guard_refusal_with_an_unavailable_refresh_is_not_reported_as_an_ordinary_bl
         database_to_break: Some(temporary.path().join("data/skilled.sqlite3")),
         cache_to_break: None,
         changed: false,
+        revisions: Vec::new(),
     };
     let mut output = Vec::new();
 
@@ -317,6 +402,7 @@ fn a_guard_refusal_with_a_cache_failure_keeps_the_refreshed_state_distinct() {
         database_to_break: None,
         cache_to_break: Some(temporary.path().join("data/skilled.sqlite3")),
         changed: false,
+        revisions: Vec::new(),
     };
     let mut output = Vec::new();
 
@@ -578,6 +664,48 @@ fn re_registering_a_pre_identity_source_restores_updates() {
     assert!(clone.join("skills/demo/new.txt").is_file());
 }
 
+/// The typed command waits for a confirmation exactly as the dialog does, and
+/// the affected installations it printed were read before that wait. A link
+/// created while the answer was pending is an installation this fast-forward
+/// changes that nothing disclosed, so the command refuses rather than writing.
+#[test]
+fn an_installation_created_after_the_preview_blocks_the_typed_update() {
+    let (temporary, environment, seed, clone) = fixture();
+    std::fs::write(seed.join("skills/demo/new.txt"), "new\n").expect("incoming file");
+    commit(&seed, "upstream change");
+    git(&seed, &["push"]);
+    let before = git(&clone, &["rev-parse", "HEAD"]);
+    let root = temporary.path().join("home/.claude/skills");
+    let mut input = InstallDuringConfirmation {
+        input: Cursor::new(b"y\n".to_vec()),
+        link: root.join("demo"),
+        target: clone.join("skills/demo"),
+        installed: false,
+    };
+    let mut output = Vec::new();
+
+    let code = cli::run(
+        &[
+            "update".into(),
+            "--source".into(),
+            clone.display().to_string(),
+        ],
+        environment,
+        &mut input,
+        &mut output,
+    );
+
+    let output = String::from_utf8(output).expect("utf-8 output");
+    assert_eq!(code, ExitCodeKind::Blocked, "{output}");
+    assert_eq!(git(&clone, &["rev-parse", "HEAD"]), before);
+    assert!(output.contains("Blocked: nothing was written."), "{output}");
+    assert!(
+        output.contains("Guard refusal: the installations this update affects changed"),
+        "{output}"
+    );
+    assert!(!clone.join("skills/demo/new.txt").exists(), "{output}");
+}
+
 fn running_as_root() -> bool {
     // Reading a mode-0 directory succeeds only for the superuser.
     let probe = std::env::temp_dir().join(format!("skilled-root-probe-cli-{}", std::process::id()));
@@ -588,6 +716,47 @@ fn running_as_root() -> bool {
     std::fs::set_permissions(&probe, std::fs::Permissions::from_mode(0o755)).expect("unseal probe");
     std::fs::remove_dir_all(&probe).expect("remove probe");
     readable
+}
+
+/// The type change is disclosed on the confirmation the command prints, and
+/// what it discloses is what verification then holds the update to — so the
+/// run reports a verified success rather than a blocked plan (`skilled-ott`).
+#[test]
+fn replacing_a_skill_directory_with_a_file_is_disclosed_applied_and_verified() {
+    let (_temporary, environment, seed, clone) = fixture();
+    let root = _temporary.path().join("home/.claude/skills");
+    std::fs::create_dir_all(&root).expect("agent root");
+    std::os::unix::fs::symlink(clone.join("skills/demo"), root.join("demo"))
+        .expect("installed skill");
+
+    std::fs::remove_dir_all(seed.join("skills/demo")).expect("remove skill directory");
+    std::fs::write(seed.join("skills/demo"), "not a skill directory\n").expect("replacement file");
+    commit(&seed, "replace skill directory with file");
+    git(&seed, &["push"]);
+    let target = git(&seed, &["rev-parse", "HEAD"]);
+
+    let mut input = Cursor::new(Vec::<u8>::new());
+    let mut output = Vec::new();
+    let code = cli::run(
+        &[
+            "update".into(),
+            "--source".into(),
+            clone.display().to_string(),
+            "--yes".into(),
+        ],
+        environment.clone(),
+        &mut input,
+        &mut output,
+    );
+    let output = String::from_utf8(output).expect("utf-8 output");
+    assert_eq!(code, ExitCodeKind::Success, "{output}");
+    assert!(
+        output.contains("target stops being a skill \u{b7} demo"),
+        "{output}"
+    );
+    assert!(!output.contains("removed \u{b7} demo"), "{output}");
+    assert_eq!(git(&clone, &["rev-parse", "HEAD"]), target);
+    assert!(clone.join("skills/demo").is_file());
 }
 
 /// The cached check is what the Updates list advertises and what Doctor reads,

@@ -1711,6 +1711,14 @@ fn broken_object(
 /// safe side of that ambiguity.
 fn unloadable_content(error: &PortableValidationError) -> ContentLocation {
     match error {
+        // A file replacing a skill directory produces ENOTDIR. That is a
+        // proven absence of loadable content, not a failure to inspect an
+        // unknown directory. Keep permission and other I/O errors unknown.
+        PortableValidationError::ReadDirectory { source, .. }
+            if source.kind() == std::io::ErrorKind::NotADirectory =>
+        {
+            ContentLocation::Nowhere
+        }
         PortableValidationError::ReadDirectory { .. }
         | PortableValidationError::UnreadableSkillMd(_)
         | PortableValidationError::SkillMdTooLarge { .. }
@@ -1887,6 +1895,24 @@ impl ResolutionIndex {
 mod tests {
     use super::*;
     use crate::{AppEnvironment, agents::detect_agents};
+
+    #[test]
+    fn only_a_proven_non_directory_read_error_settles_content_as_unloadable() {
+        for (kind, expected) in [
+            (std::io::ErrorKind::NotADirectory, ContentLocation::Nowhere),
+            (
+                std::io::ErrorKind::PermissionDenied,
+                ContentLocation::Unknown,
+            ),
+            (std::io::ErrorKind::NotFound, ContentLocation::Unknown),
+        ] {
+            let error = PortableValidationError::ReadDirectory {
+                path: PathBuf::from("fixture/skill"),
+                source: std::io::Error::from(kind),
+            };
+            assert_eq!(unloadable_content(&error), expected);
+        }
+    }
 
     /// An identity-unproven source is a blocked repository update, and Doctor
     /// lists it in that group — not among the informational findings the

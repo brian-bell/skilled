@@ -3782,6 +3782,14 @@ fn update_plan_statement_lines(prompt: &RepositoryUpdatePrompt) -> Vec<Line<'sta
         )));
         lines.push(Line::raw(format!("    reason · {}", terminal_safe(reason))));
     }
+    // Distinct from a removal because the outcome is: the link keeps its
+    // target, and the target stops being a skill.
+    for name in &plan.affected().replaced {
+        lines.push(Line::raw(format!(
+            "  target stops being a skill · {}",
+            terminal_safe(name)
+        )));
+    }
     for name in &plan.affected().added {
         lines.push(Line::raw(format!(
             "  added upstream, not installed · {}",
@@ -5260,6 +5268,15 @@ fn render_install_prompt(
         InstallPrompt::Preview(_) | InstallPrompt::Failed(_) => {
             ("Install skill", "nothing written yet")
         }
+        // A completed attempt may have refused every write under its guard.
+        InstallPrompt::Report(outcome)
+            if matches!(
+                outcome.status(),
+                InstallStatus::NotApplied | InstallStatus::NothingToDo
+            ) =>
+        {
+            ("Install result", "nothing written")
+        }
         InstallPrompt::Report(_) => ("Install result", "already applied"),
     };
     let actions = install_prompt_actions(prompt, fully_seen);
@@ -5863,6 +5880,14 @@ fn render_repair_prompt(
     let (title, scope) = match prompt {
         RepairPrompt::Preview(_) | RepairPrompt::Failed(_) => {
             ("Repair skill", "nothing written yet")
+        }
+        RepairPrompt::Report(outcome)
+            if matches!(
+                outcome.status(),
+                RepairStatus::NotApplied | RepairStatus::NothingToRepair
+            ) =>
+        {
+            ("Repair result", "nothing written")
         }
         RepairPrompt::Report(_) => ("Repair result", "already applied"),
     };

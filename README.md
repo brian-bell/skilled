@@ -9,7 +9,8 @@ the setup, terminal, source-registration, and read-only inspection foundation,
 installs and safely uninstalls registered skills across the agents that can use
 them, repairs the incorrect and dangling links it owns, and can forget inactive
 source metadata. It also fast-forwards a registered repository after an
-explicit update check.
+explicit update check. Version 0.2.0 has a reproducible Cargo package
+and release smoke gate, but no external distribution has been published.
 
 ## Design references
 
@@ -195,6 +196,9 @@ explicit update check.
   screens run, with distinguishable exit statuses — `skilled update` keeps a
   verification it could not complete apart from a plain success. `--yes`
   removes the confirmation and nothing else.
+- A non-interactive `skilled --version` path and a Cargo release package that is
+  built and smoke-tested from a clean checkout on macOS 15 and Ubuntu 24.04
+  without touching real application or agent state.
 
 Adoption of unproven links and network operations beyond the explicit update
 check are still future work. Registration and inventory remain read-only, and
@@ -207,13 +211,15 @@ registered.
 ## Requirements
 
 - Stable Rust 1.97 or newer.
-- macOS is the current acceptance platform. The implementation avoids
-  unnecessary macOS coupling, but other platforms are not release gates yet.
+- Ubuntu 24.04 and macOS 15 are the current release gates. The implementation
+  avoids unnecessary coupling to either, but other platforms are not release
+  gates yet.
 
 ## Run
 
 ```bash
 cargo run
+cargo run -- --version
 ```
 
 On first launch, use Enter to move through all seven setup steps; Summary labels
@@ -326,12 +332,17 @@ cargo build --release
 cargo test --all-targets
 cargo fmt --check
 cargo clippy --all-targets --all-features -- -D warnings
+cargo package --locked
+cargo test --test release_package -- --ignored
 ```
 
 Tests use temporary homes and repositories; they do not inspect or mutate real
 agent skill directories. Ratatui behavior is covered two ways: text snapshots
 under `tests/snapshots/` and cell-level style assertions in
-`tests/tui_shell.rs`.
+`tests/tui_shell.rs`. The release-package gate requires a clean checkout,
+installs the exact package with a fresh Cargo home, starts the installed TUI in
+a pseudo-terminal, and verifies that a future SQLite schema is refused without
+modification.
 
 ## Architecture
 

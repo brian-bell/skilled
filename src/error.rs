@@ -44,6 +44,16 @@ pub enum Error {
         "the application metadata database opened read-only and cannot be written this session"
     )]
     ReadOnlyMetadata,
+    /// The database opened read-write inside a directory that refuses the
+    /// sidecar files SQLite creates to write anything.
+    ///
+    /// It is the same outcome as a write-protected database — nothing can be
+    /// recorded this session — reported as its own cause because the thing to
+    /// change is the directory rather than the file.
+    #[error(
+        "the application metadata directory denies the journal files SQLite must create, so metadata is read-only this session"
+    )]
+    UnwritableMetadataDirectory,
     #[error("stored setup metadata is invalid: {0}")]
     InvalidSetupMetadata(String),
     #[error("stored metadata field {field} holds {value} rather than 0 or 1")]
@@ -76,6 +86,18 @@ pub enum Error {
     SourceChangedAfterPreview,
     #[error("select at least one catalog root before registering the source")]
     NoCatalogsSelected,
+    /// The installations a confirmed update affects are not the ones its
+    /// preview disclosed.
+    ///
+    /// The preview reads the agent roots when it is built and the confirmation
+    /// then waits, so a link made in that window is an installation the
+    /// fast-forward changes that nobody agreed to. Said as its own refusal
+    /// rather than as a changed source: the checkout is exactly what the plan
+    /// described, and what moved is what is installed from it.
+    #[error(
+        "the installations this update affects changed after the preview; check the source again before updating"
+    )]
+    AffectedInstallationsChangedAfterPreview,
     #[error("source path {path} is outside its resolved Git top level {top_level}")]
     SourceOutsideGitTopLevel { path: PathBuf, top_level: PathBuf },
     #[error("the installed git executable could not be invoked: {0}")]
