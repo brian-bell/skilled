@@ -169,7 +169,18 @@ fn recorded_environment(fixture: &GitFixture, unset: Option<&str>) -> BTreeMap<S
     command
         .arg("-c")
         .arg(format!("core.unsetenvvars={}", unset.unwrap_or("")))
-        .args(["ls-remote", "ssh://example.invalid/repository.git"])
+        // Fetch reads Git's core configuration callback, which applies the
+        // Windows unset list. `ls-remote` does not initialize that callback
+        // and would test a different child environment from Skilled's fetch.
+        .args([
+            "fetch",
+            "--dry-run",
+            "--no-write-fetch-head",
+            "--no-auto-maintenance",
+            "--no-tags",
+            "--recurse-submodules=no",
+            "ssh://example.invalid/repository.git",
+        ])
         .env("GIT_SSH_COMMAND", script_command)
         .env("GIT_SSH_VARIANT", "ssh")
         .env("SKILLED_GUARD_MARKER", &marker);
