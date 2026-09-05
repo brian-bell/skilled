@@ -105,6 +105,43 @@ impl BufRead for StaleConfirmation {
     }
 }
 
+/// A reader that installs a skill the moment the confirmation prompt is read,
+/// standing in for a link made while the user was deciding.
+struct InstallDuringConfirmation {
+    input: Cursor<Vec<u8>>,
+    link: PathBuf,
+    target: PathBuf,
+    installed: bool,
+}
+
+impl InstallDuringConfirmation {
+    fn install(&mut self) {
+        if !self.installed {
+            std::fs::create_dir_all(self.link.parent().expect("agent root")).expect("agent root");
+            std::os::unix::fs::symlink(&self.target, &self.link).expect("installed skill");
+            self.installed = true;
+        }
+    }
+}
+
+impl Read for InstallDuringConfirmation {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        self.install();
+        self.input.read(buffer)
+    }
+}
+
+impl BufRead for InstallDuringConfirmation {
+    fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
+        self.install();
+        self.input.fill_buf()
+    }
+
+    fn consume(&mut self, amount: usize) {
+        self.input.consume(amount);
+    }
+}
+
 fn fixture() -> (
     tempfile::TempDir,
     AppEnvironment,
@@ -625,6 +662,48 @@ fn re_registering_a_pre_identity_source_restores_updates() {
     let output = String::from_utf8(output).expect("utf-8 output");
     assert_eq!(code, ExitCodeKind::Success, "{output}");
     assert!(clone.join("skills/demo/new.txt").is_file());
+}
+
+/// The typed command waits for a confirmation exactly as the dialog does, and
+/// the affected installations it printed were read before that wait. A link
+/// created while the answer was pending is an installation this fast-forward
+/// changes that nothing disclosed, so the command refuses rather than writing.
+#[test]
+fn an_installation_created_after_the_preview_blocks_the_typed_update() {
+    let (temporary, environment, seed, clone) = fixture();
+    std::fs::write(seed.join("skills/demo/new.txt"), "new\n").expect("incoming file");
+    commit(&seed, "upstream change");
+    git(&seed, &["push"]);
+    let before = git(&clone, &["rev-parse", "HEAD"]);
+    let root = temporary.path().join("home/.claude/skills");
+    let mut input = InstallDuringConfirmation {
+        input: Cursor::new(b"y\n".to_vec()),
+        link: root.join("demo"),
+        target: clone.join("skills/demo"),
+        installed: false,
+    };
+    let mut output = Vec::new();
+
+    let code = cli::run(
+        &[
+            "update".into(),
+            "--source".into(),
+            clone.display().to_string(),
+        ],
+        environment,
+        &mut input,
+        &mut output,
+    );
+
+    let output = String::from_utf8(output).expect("utf-8 output");
+    assert_eq!(code, ExitCodeKind::Blocked, "{output}");
+    assert_eq!(git(&clone, &["rev-parse", "HEAD"]), before);
+    assert!(output.contains("Blocked: nothing was written."), "{output}");
+    assert!(
+        output.contains("Guard refusal: the installations this update affects changed"),
+        "{output}"
+    );
+    assert!(!clone.join("skills/demo/new.txt").exists(), "{output}");
 }
 
 fn running_as_root() -> bool {
