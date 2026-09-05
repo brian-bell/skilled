@@ -944,11 +944,11 @@ impl Mutation<'_> {
     /// scan results rather than metadata — and the caller revalidates it against
     /// the filesystem immediately before this.
     ///
-    /// This compares the inputs the plan chose from, not the choice. A source
-    /// another process registers after the preview can offer a competing
-    /// variant of the same name, which these queries cannot see; closing that
-    /// needs a registry generation the guard can compare, tracked as
-    /// `skilled-g64`.
+    /// This compares the row the plan chose, not the rows it chose from. A
+    /// source another process registers after the preview can offer a competing
+    /// variant of the same name, which these queries cannot see;
+    /// [`Self::registry_fingerprint`] is what covers that, and both are asked
+    /// under this guard.
     pub(crate) fn variant_registration_matches(
         &self,
         variant: &VariantRef,
@@ -992,6 +992,13 @@ impl Mutation<'_> {
                 compatibility.codex(),
                 compatibility.opencode(),
             )))
+    }
+
+    /// The registry the guard is holding still, as one comparable value.
+    ///
+    /// See [`RegistryFingerprint`] for what it covers and why it is a digest.
+    pub(crate) fn registry_fingerprint(&self) -> Result<RegistryFingerprint> {
+        registry_fingerprint_on(&self.transaction)
     }
 
     /// Recheck the complete stored registration represented by a Forget plan.
@@ -1199,6 +1206,153 @@ fn path_text(path: &Path) -> Result<String> {
         .ok_or_else(|| Error::InvalidSourcePath(path.to_path_buf()))
 }
 
+/// One value standing for every registration fact a spec 6.4 selection is
+/// decided over.
+///
+/// A plan records the fingerprint of the registry it was planned against, and
+/// the mutation guard compares it with the registry as the store holds it at
+/// the moment of writing. [`Mutation::variant_registration_matches`] compares
+/// the row the plan *chose*; this compares the rows it chose *from*, which is
+/// what a competing variant of the same name arrives as. Without it a source or
+/// catalog another process registered after the preview could leave a confirmed
+/// plan writing a link a fresh selection would report as a duplicate conflict,
+/// or resolve to a different variant altogether (`skilled-g64`).
+///
+/// It is a digest of the registration rows rather than a counter writers bump.
+/// A counter would have to be advanced by every future write path, and one that
+/// forgot would fail open — the guard would pass while the registry had moved
+/// under it. A digest cannot be forgotten: it is derived from the same columns
+/// the selection reads, on both sides. It also does not refuse for changes that
+/// change nothing, so a re-registration that rewrites a row identically, and an
+/// in-memory registry a caller narrowed to match a commit that already
+/// happened, both still apply.
+///
+/// Scope is registration metadata only, and deliberately so. The scanned skill
+/// candidates a selection also narrows over are filesystem observations rather
+/// than stored rows: a skill directory added under an already-registered
+/// catalog after the preview changes the same selection without changing a
+/// single row here. The apply guard revalidates the chosen variant's own
+/// directory against the filesystem immediately before writing, but it does not
+/// re-scan the registry's other catalogs, and this fingerprint does not stand
+/// for what such a scan would find. Closing that would mean walking every
+/// registered catalog while the metadata mutation guard is held — unbounded
+/// filesystem work inside a transaction that exists to freeze metadata, which
+/// is the line `apply_repair_target` already draws — so it belongs to a
+/// separate decision rather than to this one.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) struct RegistryFingerprint(u64);
+
+impl RegistryFingerprint {
+    /// The fingerprint of the registry as a planner holds it in memory.
+    ///
+    /// Every field is the one the row it was loaded from carries, so this and
+    /// [`registry_fingerprint_on`] agree exactly while nothing has changed. The
+    /// volatile columns a scan refresh rewrites — head, dirtiness, last scan —
+    /// are deliberately absent: they move without changing what any agent
+    /// resolves, and including them would refuse ordinary installs.
+    pub(crate) fn of_registry(sources: &[RegisteredSource]) -> Self {
+        Self::of_records(sources.iter().flat_map(|source| {
+            std::iter::once(source_fingerprint_record(
+                source.id(),
+                source.label(),
+                &source.git_top_level().to_string_lossy(),
+            ))
+            .chain(source.catalogs().iter().map(|catalog| {
+                let compatibility = catalog.compatibility();
+                catalog_fingerprint_record(
+                    source.id(),
+                    &catalog.relative_path().to_string_lossy(),
+                    classification_text(catalog.classification()),
+                    compatibility.claude_code(),
+                    compatibility.codex(),
+                    compatibility.opencode(),
+                )
+            }))
+        }))
+    }
+
+    /// Order is not registry state, so the records are sorted before hashing:
+    /// two readings of the same rows fingerprint alike however each arrived.
+    fn of_records(records: impl Iterator<Item = RegistryRecord>) -> Self {
+        use std::hash::{Hash, Hasher};
+
+        let mut records: Vec<RegistryRecord> = records.collect();
+        records.sort_unstable();
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        records.hash(&mut hasher);
+        Self(hasher.finish())
+    }
+}
+
+/// Derived hashing preserves field boundaries even when a label or path
+/// contains control characters; concatenating with a separator would let two
+/// different registrations spell the same record before hashing.
+#[derive(Eq, Hash, Ord, PartialEq, PartialOrd)]
+enum RegistryRecord {
+    Source(i64, String, String),
+    Catalog(i64, String, String, bool, bool, bool),
+}
+
+fn source_fingerprint_record(id: i64, label: &str, canonical_path: &str) -> RegistryRecord {
+    RegistryRecord::Source(id, label.to_owned(), canonical_path.to_owned())
+}
+
+fn catalog_fingerprint_record(
+    source_id: i64,
+    relative_path: &str,
+    classification: &str,
+    claude_code: bool,
+    codex: bool,
+    opencode: bool,
+) -> RegistryRecord {
+    RegistryRecord::Catalog(
+        source_id,
+        relative_path.to_owned(),
+        classification.to_owned(),
+        claude_code,
+        codex,
+        opencode,
+    )
+}
+
+/// The fingerprint of the registry as the database holds it right now.
+///
+/// Takes a connection so the store and the mutation guard read it the same way:
+/// inside the guard's transaction it is the registry no other writer can change
+/// before the receipt commits.
+fn registry_fingerprint_on(connection: &Connection) -> Result<RegistryFingerprint> {
+    let mut source_statement =
+        connection.prepare("SELECT id, label, canonical_path FROM source_repositories")?;
+    let sources = source_statement
+        .query_map([], |row| {
+            Ok(source_fingerprint_record(
+                row.get::<_, i64>(0)?,
+                &row.get::<_, String>(1)?,
+                &row.get::<_, String>(2)?,
+            ))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let mut catalog_statement = connection.prepare(
+        "SELECT source_id, relative_path, classification, claude_code, codex, opencode
+         FROM catalog_roots",
+    )?;
+    let catalogs = catalog_statement
+        .query_map([], |row| {
+            Ok(catalog_fingerprint_record(
+                row.get::<_, i64>(0)?,
+                &row.get::<_, String>(1)?,
+                &row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)? != 0,
+                row.get::<_, i64>(4)? != 0,
+                row.get::<_, i64>(5)? != 0,
+            ))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(RegistryFingerprint::of_records(
+        sources.into_iter().chain(catalogs),
+    ))
+}
+
 /// The one spelling of a classification the `catalog_roots` CHECK constraint
 /// accepts, shared by everything that writes or compares that column.
 fn classification_text(classification: CatalogClassification) -> &'static str {
@@ -1250,6 +1404,17 @@ mod tests {
     use std::{ffi::OsString, os::unix::ffi::OsStringExt};
 
     use super::*;
+
+    #[test]
+    fn registry_fingerprints_distinguish_separators_inside_source_fields() {
+        let first = source_fingerprint_record(1, "library", "/one\u{1f}/two");
+        let second = source_fingerprint_record(1, "library\u{1f}/one", "/two");
+        assert_ne!(
+            RegistryFingerprint::of_records(std::iter::once(first)),
+            RegistryFingerprint::of_records(std::iter::once(second)),
+            "moving a separator between a label and a path must change the registry"
+        );
+    }
 
     #[test]
     fn an_ownership_receipt_requires_representable_paths_before_it_can_be_written() {
