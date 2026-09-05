@@ -5459,6 +5459,316 @@ fn a_mismatched_link_created_after_the_preview_refuses_the_update() {
     assert!(!fixture.clone.join("skills/added").exists());
 }
 
+/// A skill document the target revision keeps as a regular file but no longer
+/// validates leaves the link resolving to content no agent can load. The
+/// preview has to say so before the confirmation gate, and verification has to
+/// hold the update to exactly that outcome.
+#[test]
+fn invalidating_an_installed_skill_document_is_disclosed_before_the_gate() {
+    let mut fixture = fixture();
+    let root = fixture._temporary.path().join("home/.claude/skills");
+    std::fs::create_dir_all(&root).expect("agent root");
+    std::os::unix::fs::symlink(fixture.clone.join("skills/demo"), root.join("demo"))
+        .expect("installed skill");
+    fixture
+        .app
+        .perform_effects(&[Effect::ScanInstallations])
+        .expect("scan before update");
+    let before = fixture.app.inventory().clone();
+
+    std::fs::write(
+        fixture.seed.join("skills/demo/SKILL.md"),
+        "no frontmatter at all\n",
+    )
+    .expect("invalidate skill document");
+    commit(&fixture.seed, "invalidate installed skill");
+    git(&fixture.seed, &["push"]);
+
+    let source = fixture.app.sources()[0].clone();
+    let probe = probe_repository_update(&source, true);
+    let plan = plan_repository_update(&source, &probe, &before).expect("plan invalidation");
+
+    assert!(plan.affected().updated.is_empty(), "{:?}", plan.affected());
+    assert!(plan.affected().removed.is_empty(), "{:?}", plan.affected());
+    let unloadable = &plan.affected().unloadable;
+    assert_eq!(unloadable.len(), 1, "{:?}", plan.affected());
+    assert_eq!(unloadable[0].0, "demo");
+    assert_eq!(unloadable[0].1, "demo");
+    assert!(!unloadable[0].2.is_empty(), "{unloadable:?}");
+
+    apply_repository_update(&plan).expect("fast-forward");
+    fixture
+        .app
+        .perform_effects(&[Effect::ScanInstallations])
+        .expect("scan after update");
+    let report = verify_repository_update(
+        &plan,
+        &before,
+        fixture.app.inventory(),
+        &PostWriteRepositoryReads::Permitted,
+    );
+    assert!(report.is_verified(), "{:?}", report.failures());
+    assert!(report.is_complete(), "{:?}", report.withheld());
+}
+
+/// The disclosed outcome is what verification holds the update to. An update
+/// that said an installation would stop loading and left it loading is as much
+/// a disagreement with the plan as the reverse.
+#[test]
+fn a_disclosed_invalidation_that_does_not_happen_fails_verification() {
+    let mut fixture = fixture();
+    let root = fixture._temporary.path().join("home/.claude/skills");
+    std::fs::create_dir_all(&root).expect("agent root");
+    std::os::unix::fs::symlink(fixture.clone.join("skills/demo"), root.join("demo"))
+        .expect("installed skill");
+    fixture
+        .app
+        .perform_effects(&[Effect::ScanInstallations])
+        .expect("scan before update");
+    let before = fixture.app.inventory().clone();
+
+    std::fs::write(
+        fixture.seed.join("skills/demo/SKILL.md"),
+        "no frontmatter at all\n",
+    )
+    .expect("invalidate skill document");
+    commit(&fixture.seed, "invalidate installed skill");
+    git(&fixture.seed, &["push"]);
+
+    let source = fixture.app.sources()[0].clone();
+    let probe = probe_repository_update(&source, true);
+    let plan = plan_repository_update(&source, &probe, &before).expect("plan invalidation");
+    assert_eq!(plan.affected().unloadable.len(), 1, "{:?}", plan.affected());
+
+    apply_repository_update(&plan).expect("fast-forward");
+    // Something outside the plan put a loadable document back.
+    std::fs::write(
+        fixture.clone.join("skills/demo/SKILL.md"),
+        "---\nname: demo\ndescription: fixture\n---\n",
+    )
+    .expect("restore skill document");
+    fixture
+        .app
+        .perform_effects(&[Effect::ScanInstallations])
+        .expect("scan after update");
+    let report = verify_repository_update(
+        &plan,
+        &before,
+        fixture.app.inventory(),
+        &PostWriteRepositoryReads::Permitted,
+    );
+    assert!(!report.is_verified(), "{:?}", report.failures());
+}
+
+/// Missing, unterminated, and unparseable front matter are one finding code
+/// between them, and the preview names one of them. An update that left a
+/// different failure than the one on screen did not do what was agreed to.
+#[test]
+fn another_failure_under_the_disclosed_code_fails_verification() {
+    let mut fixture = fixture();
+    let root = fixture._temporary.path().join("home/.claude/skills");
+    std::fs::create_dir_all(&root).expect("agent root");
+    std::os::unix::fs::symlink(fixture.clone.join("skills/demo"), root.join("demo"))
+        .expect("installed skill");
+    fixture
+        .app
+        .perform_effects(&[Effect::ScanInstallations])
+        .expect("scan before update");
+    let before = fixture.app.inventory().clone();
+
+    std::fs::write(
+        fixture.seed.join("skills/demo/SKILL.md"),
+        "no frontmatter at all\n",
+    )
+    .expect("invalidate skill document");
+    commit(&fixture.seed, "invalidate installed skill");
+    git(&fixture.seed, &["push"]);
+
+    let source = fixture.app.sources()[0].clone();
+    let probe = probe_repository_update(&source, true);
+    let plan = plan_repository_update(&source, &probe, &before).expect("plan invalidation");
+    assert_eq!(plan.affected().unloadable.len(), 1, "{:?}", plan.affected());
+
+    apply_repository_update(&plan).expect("fast-forward");
+    // A different way of not being a skill, carrying the same finding code.
+    std::fs::write(
+        fixture.clone.join("skills/demo/SKILL.md"),
+        "---\nname: demo\n",
+    )
+    .expect("substitute another failure");
+    fixture
+        .app
+        .perform_effects(&[Effect::ScanInstallations])
+        .expect("scan after update");
+    let report = verify_repository_update(
+        &plan,
+        &before,
+        fixture.app.inventory(),
+        &PostWriteRepositoryReads::Permitted,
+    );
+    assert!(!report.is_verified(), "{:?}", report.failures());
+}
+
+/// A `SKILL.md` too large to inspect is not a skill either, and reading enough
+/// of it to say so must not depend on reading all of it.
+#[test]
+fn an_oversized_target_skill_document_is_disclosed_without_draining_it() {
+    let mut fixture = fixture();
+    let root = fixture._temporary.path().join("home/.claude/skills");
+    std::fs::create_dir_all(&root).expect("agent root");
+    std::os::unix::fs::symlink(fixture.clone.join("skills/demo"), root.join("demo"))
+        .expect("installed skill");
+    fixture
+        .app
+        .perform_effects(&[Effect::ScanInstallations])
+        .expect("scan before update");
+    let before = fixture.app.inventory().clone();
+
+    std::fs::write(
+        fixture.seed.join("skills/demo/SKILL.md"),
+        vec![b'a'; 1024 * 1024 + 10],
+    )
+    .expect("oversized skill document");
+    commit(&fixture.seed, "oversized skill document");
+    git(&fixture.seed, &["push"]);
+
+    let source = fixture.app.sources()[0].clone();
+    let probe = probe_repository_update(&source, true);
+    let plan = plan_repository_update(&source, &probe, &before).expect("plan oversized document");
+
+    assert!(plan.affected().updated.is_empty(), "{:?}", plan.affected());
+    assert_eq!(plan.affected().unloadable.len(), 1, "{:?}", plan.affected());
+    assert!(
+        plan.affected().unloadable[0].2.contains("inspection limit"),
+        "{:?}",
+        plan.affected().unloadable
+    );
+
+    apply_repository_update(&plan).expect("fast-forward");
+    fixture
+        .app
+        .perform_effects(&[Effect::ScanInstallations])
+        .expect("scan after update");
+    let report = verify_repository_update(
+        &plan,
+        &before,
+        fixture.app.inventory(),
+        &PostWriteRepositoryReads::Permitted,
+    );
+    assert!(report.is_verified(), "{:?}", report.failures());
+    assert!(report.is_complete(), "{:?}", report.withheld());
+}
+
+/// The disclosure reaches the screen the confirmation gate covers.
+#[test]
+fn the_update_preview_states_an_installation_that_stops_loading() {
+    let mut fixture = fixture();
+    let root = fixture._temporary.path().join("home/.claude/skills");
+    std::fs::create_dir_all(&root).expect("agent root");
+    std::os::unix::fs::symlink(fixture.clone.join("skills/demo"), root.join("demo"))
+        .expect("installed skill");
+    std::fs::write(
+        fixture.seed.join("skills/demo/SKILL.md"),
+        "no frontmatter at all\n",
+    )
+    .expect("invalidate skill document");
+    commit(&fixture.seed, "invalidate installed skill");
+    git(&fixture.seed, &["push"]);
+    fixture
+        .app
+        .perform_effects(&[Effect::CheckUpdates])
+        .expect("start check");
+    finish_update_check(&mut fixture.app);
+    fixture
+        .app
+        .perform_effects(&[Effect::PlanRepositoryUpdate])
+        .expect("plan update");
+
+    let backend = TestBackend::new(120, 40);
+    let mut terminal = Terminal::new(backend).expect("terminal");
+    terminal
+        .draw(|frame| {
+            tui::render(frame, &fixture.app);
+        })
+        .expect("render update preview");
+    let buffer = terminal.backend().buffer();
+    let screen = (buffer.area.y..buffer.area.y + buffer.area.height)
+        .map(|y| {
+            (buffer.area.x..buffer.area.x + buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        screen.contains("does not load at the target revision"),
+        "{screen}"
+    );
+}
+
+/// Exercise the production registry refresh, not a scan against stale variants.
+#[test]
+fn disclosed_invalidations_verify_after_refresh_for_existing_and_revived_links() {
+    for revived in [false, true] {
+        let mut fixture = fixture();
+        let name = if revived { "added" } else { "demo" };
+        let root = fixture._temporary.path().join("home/.claude/skills");
+        std::fs::create_dir_all(&root).unwrap();
+        std::os::unix::fs::symlink(fixture.clone.join("skills").join(name), root.join(name))
+            .unwrap();
+        std::fs::create_dir_all(fixture.seed.join("skills").join(name)).unwrap();
+        std::fs::write(
+            fixture.seed.join("skills").join(name).join("SKILL.md"),
+            "no frontmatter at all\n",
+        )
+        .unwrap();
+        commit(&fixture.seed, "invalid target document");
+        git(&fixture.seed, &["push"]);
+        fixture
+            .app
+            .perform_effects(&[Effect::CheckUpdates])
+            .unwrap();
+        finish_update_check(&mut fixture.app);
+        fixture
+            .app
+            .perform_effects(&[Effect::PlanRepositoryUpdate])
+            .unwrap();
+        let Some(RepositoryUpdatePrompt::Preview(plan)) = fixture.app.pending_update() else {
+            panic!("preview");
+        };
+        assert!(
+            plan.affected().restored.is_empty(),
+            "revived={revived}: {:?}",
+            plan.affected()
+        );
+        assert_eq!(
+            plan.affected().unloadable.len(),
+            1,
+            "revived={revived}: {:?}",
+            plan.affected()
+        );
+        fixture
+            .app
+            .perform_effects(&[Effect::ApplyRepositoryUpdate])
+            .unwrap();
+        let Some(RepositoryUpdatePrompt::Report {
+            verification,
+            apply_error,
+            ..
+        }) = fixture.app.pending_update()
+        else {
+            panic!("report");
+        };
+        assert!(apply_error.is_none(), "{apply_error:?}");
+        assert!(
+            verification.is_verified(),
+            "revived={revived}: {:?}",
+            verification.failures()
+        );
+        assert!(verification.is_complete(), "{:?}", verification.withheld());
+    }
+}
+
 #[test]
 fn a_replacement_directory_is_unavailable_when_post_attempt_reads_are_withheld() {
     let mut fixture = fixture();

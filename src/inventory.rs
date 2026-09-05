@@ -1735,7 +1735,13 @@ fn unloadable_content(error: &PortableValidationError) -> ContentLocation {
 }
 
 /// The stable code for a portable-validation failure.
-fn validation_finding_code(error: &PortableValidationError) -> &'static str {
+/// The finding code a failed portable validation is reported under.
+///
+/// Shared with the repository update preview, which decides the target
+/// revision's `SKILL.md` with the same validator and has to name the finding
+/// the scan will raise afterwards — verification holds the update to that exact
+/// code, so predicting it and reading it must come from one place.
+pub(crate) fn validation_finding_code(error: &PortableValidationError) -> &'static str {
     match error {
         PortableValidationError::ReadDirectory { .. }
         | PortableValidationError::UnreadableSkillMd(_) => "skill.unreadable",
