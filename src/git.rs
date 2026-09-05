@@ -592,6 +592,7 @@ pub struct OperationFixture {
 #[derive(Clone, Debug)]
 enum UpdateOp {
     RevParse(String),
+    PreviousRevision(String),
     AbsoluteGitDir,
     SymbolicHead,
     SymbolicRef(String),
@@ -634,7 +635,7 @@ enum UpdateOp {
 impl UpdateOp {
     fn subcommand(&self) -> &'static str {
         match self {
-            Self::RevParse(_) | Self::AbsoluteGitDir => "rev-parse",
+            Self::RevParse(_) | Self::PreviousRevision(_) | Self::AbsoluteGitDir => "rev-parse",
             Self::SymbolicHead | Self::SymbolicRef(_) => "symbolic-ref",
             Self::UpstreamRef(_) | Self::RefState(_) => "for-each-ref",
             Self::ConfigGet(_)
@@ -769,6 +770,19 @@ impl UpdateOp {
         }
         let strings: Vec<String> = match self {
             Self::RevParse(revision) => vec!["rev-parse".into(), revision.clone()],
+            // `<ref>@{1}` is the object the reference held before its most
+            // recent update, read out of the reference's own log. `--verify`
+            // keeps a value that is not a single object from being reported as
+            // one, and `--quiet` turns every way the log cannot answer — a
+            // repository logging no reference updates, a log too short to have
+            // a previous entry — into an unsuccessful exit with no output,
+            // which the caller reads as "not known" rather than as a value.
+            Self::PreviousRevision(reference) => vec![
+                "rev-parse".into(),
+                "--verify".into(),
+                "--quiet".into(),
+                format!("{reference}@{{1}}"),
+            ],
             Self::AbsoluteGitDir => vec!["rev-parse".into(), "--absolute-git-dir".into()],
             Self::SymbolicHead => vec!["symbolic-ref".into(), "--quiet".into(), "HEAD".into()],
             Self::SymbolicRef(reference) => {
@@ -1214,6 +1228,30 @@ pub fn head_state(repository: GitTarget<'_>) -> Result<HeadState> {
         },
         None => HeadState::Detached { revision },
     })
+}
+
+/// The object `reference` held immediately before its most recent update, or
+/// `None` when the reference log cannot say.
+///
+/// This is how the fast-forward is held to the revision its guard validated.
+/// `merge --ff-only` takes no expected-current-revision, so the write cannot be
+/// conditioned on one; what it does leave behind is a log entry, and the entry
+/// under the one it just wrote names the commit the merge started from. Read
+/// after the write, that answers the question the guard could only ask before
+/// it: whether the range Git applied is the range the preview disclosed.
+///
+/// `None` is a real answer and never a pass. A repository that logs no
+/// reference updates has nothing to read here, and the caller withholds the
+/// check rather than treating silence as agreement.
+pub(crate) fn previous_revision_of(
+    repository: GitTarget<'_>,
+    reference: &str,
+) -> Result<Option<String>> {
+    Ok(
+        optional(repository, UpdateOp::PreviousRevision(reference.into()))?
+            .map(text)
+            .filter(|value| !value.is_empty()),
+    )
 }
 
 pub(crate) fn head_state_cancellable(
@@ -3117,6 +3155,7 @@ pub fn fast_forward(repository: GitTarget<'_>, revision: &str) -> Result<()> {
 pub fn update_operation_fixtures() -> Vec<OperationFixture> {
     let ops = vec![
         UpdateOp::RevParse("HEAD".into()),
+        UpdateOp::PreviousRevision("refs/heads/main".into()),
         UpdateOp::AbsoluteGitDir,
         UpdateOp::SymbolicHead,
         UpdateOp::SymbolicRef("refs/remotes/origin/main".into()),

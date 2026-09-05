@@ -1,10 +1,25 @@
 [package]
 name = "skilled"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.97"
 description = "Inspect and safely manage global coding-agent skills"
 license = "MIT"
+repository = "https://github.com/brian-bell/skilled"
+homepage = "https://github.com/brian-bell/skilled"
+readme = "README.md"
+publish = false
+include = [
+    "/Cargo.toml",
+    "/Cargo.lock",
+    "/LICENSE",
+    "/README.md",
+    "/src/**",
+]
+
+[[bin]]
+name = "skilled"
+path = "src/main.rs"
 
 [dependencies]
 crossterm = "0.29.0"
@@ -39,4 +54,5 @@ windows-sys = { version = "0.60", features = [
 
 [dev-dependencies]
 insta = "1.48.0"
+serde_json = "1.0"
 tempfile = "3.27.0"
