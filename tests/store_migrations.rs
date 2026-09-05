@@ -47,7 +47,7 @@ fn the_schema_one_past_this_build_degrades_rather_than_writing_through() {
     let connection =
         rusqlite::Connection::open(data_dir.join("skilled.sqlite3")).expect("create database");
     connection
-        .execute_batch("PRAGMA user_version = 11;")
+        .execute_batch("PRAGMA user_version = 12;")
         .expect("set the next schema version");
     drop(connection);
     let database = data_dir.join("skilled.sqlite3");
@@ -85,6 +85,7 @@ fn version_nine_update_metadata_gains_the_source_id_sequence() {
     connection
         .execute_batch(
             "DROP TABLE source_id_sequence;
+             ALTER TABLE source_update_checks DROP COLUMN generation;
              PRAGMA user_version = 9;",
         )
         .expect("stage update-branch schema nine");
@@ -97,7 +98,7 @@ fn version_nine_update_metadata_gains_the_source_id_sequence() {
         connection
             .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
             .expect("schema version"),
-        10
+        11
     );
     assert_eq!(
         connection
@@ -207,7 +208,7 @@ fn version_five_receipts_gain_operations_and_keep_their_id_order() {
         connection
             .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
             .unwrap(),
-        10
+        11
     );
     assert_eq!(
         connection
@@ -387,7 +388,7 @@ fn version_four_metadata_gains_receipt_storage_that_outlives_its_source() {
         connection
             .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
             .unwrap(),
-        10
+        11
     );
     connection
         .execute_batch(
@@ -505,7 +506,7 @@ fn version_two_metadata_migrates_to_constrained_source_catalog_storage() {
         connection
             .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
             .unwrap(),
-        10
+        11
     );
     assert_eq!(
         connection

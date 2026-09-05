@@ -26,7 +26,7 @@ pub enum RepositoryUpdateVerdict {
 
 #[cfg(test)]
 mod tests {
-    use super::{gitlink_intersects_catalog, surviving_removal};
+    use super::{RemovalOutcome, gitlink_intersects_catalog, removal_outcome};
     use crate::git;
     use std::path::{Path, PathBuf};
     use std::process::Command;
@@ -90,7 +90,7 @@ mod tests {
         )
         .expect("write decoy skill document");
 
-        let occupant = surviving_removal(
+        let outcome = removal_outcome(
             (&handle).into(),
             &target,
             Path::new("skills/demo"),
@@ -98,7 +98,10 @@ mod tests {
         )
         .expect("walk the pinned checkout");
 
-        assert_eq!(occupant, Some(PathBuf::from("skills/demo/occupant.txt")));
+        assert_eq!(
+            outcome,
+            RemovalOutcome::Occupied(PathBuf::from("skills/demo/occupant.txt"))
+        );
     }
 
     /// The bound descent opens every component with `O_NOFOLLOW`, so a
@@ -138,7 +141,7 @@ mod tests {
         let deleted = std::collections::BTreeSet::from([PathBuf::from("skills/demo/SKILL.md")]);
         let handle = git::RepositoryHandle::open(&checkout).expect("pin the checkout");
 
-        let occupant = surviving_removal(
+        let outcome = removal_outcome(
             (&handle).into(),
             &target,
             Path::new("skills/demo"),
@@ -146,7 +149,10 @@ mod tests {
         )
         .expect("walk the pinned checkout");
 
-        assert_eq!(occupant, Some(PathBuf::from("skills/demo")));
+        assert_eq!(
+            outcome,
+            RemovalOutcome::Occupied(PathBuf::from("skills/demo"))
+        );
     }
 
     #[test]
@@ -192,10 +198,36 @@ impl RepositoryUpdateVerdict {
     }
 }
 
+/// When a recorded check ran, and where its record sits in the write order.
+///
+/// The two were one value, and the double duty cost the store a record it
+/// reported as stored. The conditional upserts keep an older result from
+/// displacing a newer one, so whatever they compare has to be allocated — one
+/// value per write, never reused, always ahead of what came before. A time is
+/// none of those things: the post-apply verification record follows the check
+/// it verifies without a check of its own having run, so dating it now would
+/// claim a check that never happened, and dating it with the check's own value
+/// puts it behind anything a second Skilled process recorded while the preview
+/// was open — where the upsert declines it, reports success, and takes an
+/// `update.verification_failed` down with it.
+///
+/// Split, each value answers only for itself. [`Self::checked_at`] is what
+/// Updates states and nothing orders by; [`Self::generation`] is what the store
+/// hands out and nothing displays.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CheckStamp {
+    /// The wall clock when the check that this record reports on ran.
+    pub checked_at: i64,
+    /// The store-allocated ordering value the conditional upserts compare.
+    pub generation: i64,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CachedUpdateCheck {
     pub source_id: i64,
     pub checked_at: i64,
+    /// The write-ordering generation; see [`CheckStamp`].
+    pub generation: i64,
     pub local_revision: String,
     pub local_reference: Option<String>,
     pub upstream_ref: Option<String>,
@@ -325,7 +357,7 @@ pub(crate) fn cached_update_check(
     source: &RegisteredSource,
     probe: &RepositoryUpdateProbe,
     inventory: &InventorySnapshot,
-    checked_at: i64,
+    stamp: CheckStamp,
     cancelled: &AtomicBool,
 ) -> Option<CachedUpdateCheck> {
     let (mut verdict, mut findings) = classify_repository_update(probe);
@@ -384,7 +416,8 @@ pub(crate) fn cached_update_check(
     let dirtiness_withheld = probe.worktree.is_some() && observed_dirty.is_none();
     Some(CachedUpdateCheck {
         source_id: source.id(),
-        checked_at,
+        checked_at: stamp.checked_at,
+        generation: stamp.generation,
         local_revision: probe
             .local
             .as_ref()
@@ -1286,9 +1319,39 @@ pub struct AffectedInstallations {
     /// surface states that consequence rather than only the name: it is what
     /// verification holds the update to, so it is what the confirmation covers.
     pub renamed: Vec<(String, String, Vec<String>)>,
+    /// Installations whose skill directory the update replaces with a regular
+    /// file, as the name each agent root holds.
+    ///
+    /// This is the one surviving object a disclosed removal can state the
+    /// outcome of, so it is stated rather than refused (`skilled-ott`). Every
+    /// other way a candidate keeps standing — a directory the target revision
+    /// retains, a symbolic link or submodule in its place, an ancestor turned
+    /// into a link, a local occupant in the worktree — leaves what the
+    /// installation would resolve to unknown, and blocks with
+    /// `source.removal_leaves_content` as before. A regular file does not: the
+    /// link keeps exactly the target it has, and that target stops being a
+    /// skill. Verification holds the update to that outcome, which is why this
+    /// is its own list instead of a line under `removed` — an installation
+    /// disclosed as losing its target must be observed dangling afterwards, and
+    /// this one will not be.
+    pub replaced: Vec<String>,
     pub complete: bool,
     pub incomplete_reason: Option<String>,
     expected_dangling: Vec<(String, usize)>,
+    /// The disclosed in-place updates as the row and agent each one is
+    /// installed at, beside the skill names `updated` states.
+    ///
+    /// `updated` is a deduplicated list of names, so two agents holding the
+    /// same name read as one entry there and a third holding it reads as one
+    /// too. That is the right disclosure — the user is told which skills change
+    /// under them — but it cannot answer whether the installations behind those
+    /// names are still the ones the preview saw, which is what
+    /// [`affected_installations_unchanged`] has to decide before the write.
+    updated_installations: Vec<(String, usize)>,
+    /// The installations the plan said this update leaves resolving to
+    /// something that is not a skill, as the row and agent whose link keeps its
+    /// target while the target stops loading.
+    expected_non_loadable: Vec<(String, usize)>,
     /// The installations the plan said this update gives a target to, as the
     /// row and agent that will start loading and the upstream skill it was
     /// disclosed as loading.
@@ -1311,6 +1374,14 @@ pub struct AffectedInstallations {
     /// dropped into one between the preview and the confirmation would leave
     /// the directory standing and the confirmed outcome unmet.
     vacating_candidates: Vec<PathBuf>,
+    /// Every candidate this update was disclosed as replacing with a regular
+    /// file, relative to the checkout.
+    ///
+    /// Read again by the same guard and for the same reason: the tree half of
+    /// that answer cannot change while the target revision is fixed, but the
+    /// worktree half can, and anything arriving under the directory both keeps
+    /// it standing and stops Git writing a file at that path at all.
+    replaced_candidates: Vec<PathBuf>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1696,6 +1767,7 @@ fn affected_catalog_skills(
         }
     }
     let mut updated = Vec::new();
+    let mut updated_installations = Vec::new();
     let mut removed_changes = Vec::new();
     let mut added_changes = Vec::new();
     let mut restored = Vec::new();
@@ -1778,6 +1850,12 @@ fn affected_catalog_skills(
                 installed_agents.cloned().unwrap_or_default(),
             ));
         } else {
+            updated_installations.extend(
+                installed_agents
+                    .into_iter()
+                    .flatten()
+                    .map(|(row, agent)| (row.clone(), *agent)),
+            );
             updated.extend(
                 installed_agents
                     .into_iter()
@@ -1788,25 +1866,41 @@ fn affected_catalog_skills(
     }
 
     let mut expected_dangling = Vec::new();
+    let mut expected_non_loadable = Vec::new();
     let mut surviving_removals = Vec::new();
     let mut vacating_candidates = Vec::new();
+    let mut replaced_candidates = Vec::new();
     let mut removed = Vec::new();
+    let mut replaced = Vec::new();
     let deleted = deleted_paths(files);
     for (name, change, entries) in removed_changes {
         if is_cancelled(cancelled) {
             return Ok(None);
         }
-        vacating_candidates.push(change.candidate_path.clone());
-        if let Some(occupant) = surviving_removal(
+        match removal_outcome(
             repository,
             target_revision,
             &change.candidate_path,
             &deleted,
         )? {
-            surviving_removals.push((name.clone(), occupant));
+            RemovalOutcome::Occupied(occupant) => {
+                vacating_candidates.push(change.candidate_path.clone());
+                surviving_removals.push((name.clone(), occupant));
+                expected_dangling.extend(entries.iter().map(|(row, agent)| (row.clone(), *agent)));
+                removed.extend(entries.into_iter().map(|(row, _)| row));
+            }
+            RemovalOutcome::ReplacedByFile => {
+                replaced_candidates.push(change.candidate_path.clone());
+                expected_non_loadable
+                    .extend(entries.iter().map(|(row, agent)| (row.clone(), *agent)));
+                replaced.extend(entries.into_iter().map(|(row, _)| row));
+            }
+            RemovalOutcome::Vacated => {
+                vacating_candidates.push(change.candidate_path.clone());
+                expected_dangling.extend(entries.iter().map(|(row, agent)| (row.clone(), *agent)));
+                removed.extend(entries.into_iter().map(|(row, _)| row));
+            }
         }
-        expected_dangling.extend(entries.iter().map(|(row, agent)| (row.clone(), *agent)));
-        removed.extend(entries.into_iter().map(|(row, _)| row));
     }
     let mut added = added_changes
         .into_iter()
@@ -1814,6 +1908,8 @@ fn affected_catalog_skills(
         .collect::<Vec<_>>();
     updated.sort();
     updated.dedup();
+    updated_installations.sort();
+    updated_installations.dedup();
     removed.sort();
     removed.dedup();
     added.sort();
@@ -1858,17 +1954,38 @@ fn affected_catalog_skills(
         // The old side of a rename empties its candidate exactly as a removal
         // does, and is disclosed as the same outcome — an installation left
         // without a target — so a local occupant that keeps the old directory
-        // standing breaks the same promise, and is refused the same way.
+        // standing breaks the same promise, and is refused the same way. The
+        // one object whose outcome can still be stated is the same one a
+        // removal can state: a regular file the target revision keeps there,
+        // which leaves those installations resolving to something that is not
+        // a skill. They are disclosed as that instead, and the rename below
+        // then names no alias, because none of them loses its target.
+        let mut old_replaced_by_file = false;
         if let Some(old_change) = changes.get(&(catalog_path, old.clone())) {
-            vacating_candidates.push(old_change.candidate_path.clone());
-            if let Some(occupant) = surviving_removal(
+            match removal_outcome(
                 repository,
                 target_revision,
                 &old_change.candidate_path,
                 &deleted,
             )? {
-                surviving_removals.push((old.clone(), occupant));
+                RemovalOutcome::Occupied(occupant) => {
+                    vacating_candidates.push(old_change.candidate_path.clone());
+                    surviving_removals.push((old.clone(), occupant));
+                }
+                RemovalOutcome::ReplacedByFile => {
+                    replaced_candidates.push(old_change.candidate_path.clone());
+                    old_replaced_by_file = true;
+                }
+                RemovalOutcome::Vacated => {
+                    vacating_candidates.push(old_change.candidate_path.clone());
+                }
             }
+        }
+        if old_replaced_by_file {
+            expected_non_loadable.extend(entries.iter().map(|(row, agent)| (row.clone(), *agent)));
+            replaced.extend(entries.iter().map(|(row, _)| row.clone()));
+            renamed.push((old, new, Vec::new()));
+            continue;
         }
         // Stated as the repository fact it is — one upstream skill moving to
         // another name — beside the installations it leaves without a target.
@@ -1889,8 +2006,12 @@ fn affected_catalog_skills(
     }
     renamed.sort();
     renamed.dedup();
+    replaced.sort();
+    replaced.dedup();
     expected_dangling.sort();
     expected_dangling.dedup();
+    expected_non_loadable.sort();
+    expected_non_loadable.dedup();
     restored.sort();
     restored.dedup();
     expected_revival.sort();
@@ -1942,9 +2063,13 @@ fn affected_catalog_skills(
             } else {
                 Some("one or more installation roots could not be fully read".into())
             },
+            replaced,
             expected_dangling,
+            updated_installations,
+            expected_non_loadable,
             expected_revival,
             vacating_candidates,
+            replaced_candidates,
         },
         findings,
     )))
@@ -1966,37 +2091,78 @@ fn candidate_skill_document(candidate: &Path) -> PathBuf {
     }
 }
 
-/// What would still be standing where a disclosed removal takes a skill away.
+/// What a disclosed removal leaves at the candidate path.
 ///
 /// `merge --ff-only` deletes the tracked files under a removed directory and
-/// removes the directory only once nothing is left in it. Three things leave it
-/// standing: a catalog whose skill is the repository root, which no update can
-/// remove; another tracked path the target revision still keeps under the
-/// candidate; and a local untracked or ignored file sitting in it, which Git
-/// leaves exactly where it is. In each case the installed link keeps resolving
-/// — to a directory that is no longer a skill — so the dangling link the
-/// preview would promise is not what the write produces. That is a plan that
-/// cannot state its own outcome, and it blocks rather than being applied and
-/// discovered afterwards.
+/// removes the directory only once nothing is left in it, so the outcome is not
+/// always the dangling link a removal suggests.
+#[derive(Debug, Eq, PartialEq)]
+enum RemovalOutcome {
+    /// Nothing is left there: the installed link loses its target.
+    Vacated,
+    /// The target revision keeps a regular file exactly where the skill
+    /// directory was, and nothing in the worktree stops Git putting it there.
+    /// The installed link keeps the target it has, and that target stops being
+    /// a skill.
+    ReplacedByFile,
+    /// Something else is standing there afterwards, named by the path it stands
+    /// at. What the installation would then resolve to cannot be stated.
+    Occupied(PathBuf),
+}
+
+/// What would be standing where a disclosed removal takes a skill away.
+///
+/// Four things leave the candidate standing: a catalog whose skill is the
+/// repository root, which no update can remove; an entry the target revision
+/// still keeps at or under the candidate; an ancestor the update turns into a
+/// symbolic link; and a local untracked or ignored file sitting in the
+/// directory, which Git leaves exactly where it is. In all but one of them the
+/// installed link keeps resolving to something whose nature the plan cannot
+/// state — a directory that is no longer a skill, or a link leading outside the
+/// registered checkout altogether — so the dangling link the preview would
+/// promise is not what the write produces, and the plan blocks rather than
+/// being applied and discovered afterwards.
+///
+/// The exception is a regular file the target revision keeps at the candidate
+/// itself, and it is an exception because the outcome is exact rather than
+/// unknown: the link keeps precisely the target it has, and that target becomes
+/// a file that is not a skill. `skilled-ott` asked for one of two resolutions
+/// for that case — accept the corresponding non-loadable postcondition for a
+/// disclosed removal, or describe the type change as its own outcome. This is
+/// the second, because "nothing is written until a plan the user has seen in
+/// full is confirmed" is the invariant at stake: widening what a *removal* may
+/// verify as would have the user confirm one outcome and verification accept
+/// another. So the plan names the type change on its own line, and verification
+/// holds the update to it. A symbolic link and a submodule stay refusals: Git
+/// records a link as a blob too, and where it leads is exactly what the plan
+/// cannot state.
+///
+/// The worktree is still asked in that case. Anything left under the directory
+/// both keeps it standing and stops Git writing a file at the path at all, so
+/// it is an occupant there for the same reason it is one for a removal.
 ///
 /// A directory the walk could not read cannot rule an occupant out, so it is
 /// treated as one. So is one too large to walk within [`OCCUPANT_BUDGET`]:
 /// understating what is standing there is the error that gets a write applied.
-fn surviving_removal(
+fn removal_outcome(
     repository: git::GitTarget<'_>,
     target_revision: &str,
     candidate: &Path,
     deleted: &std::collections::BTreeSet<PathBuf>,
-) -> Result<Option<PathBuf>> {
+) -> Result<RemovalOutcome> {
     if candidate == Path::new(".") {
-        return Ok(Some(repository.path().to_path_buf()));
+        return Ok(RemovalOutcome::Occupied(repository.path().to_path_buf()));
     }
-    // Any entry, not only a directory: an update that replaces the skill
-    // directory with a regular file or a symbolic link leaves the installed
-    // link resolving to that object rather than losing its target, which is the
-    // same promise broken in the same way.
     if git::tree_entry_exists(repository, target_revision, candidate)? {
-        return Ok(Some(candidate.to_path_buf()));
+        if !git::tree_regular_file_exists(repository, target_revision, candidate)? {
+            return Ok(RemovalOutcome::Occupied(candidate.to_path_buf()));
+        }
+        return Ok(
+            match surviving_worktree_occupant(repository, candidate, deleted)? {
+                Some(occupant) => RemovalOutcome::Occupied(occupant),
+                None => RemovalOutcome::ReplacedByFile,
+            },
+        );
     }
     // And an ancestor the update turns into a symbolic link redirects the path
     // without ever appearing at it: `ls-tree` does not walk through a link, so
@@ -2010,21 +2176,37 @@ fn surviving_removal(
             continue;
         }
         if git::tree_directory_entry(repository, target_revision, ancestor)? == Some(false) {
-            return Ok(Some(ancestor.to_path_buf()));
+            return Ok(RemovalOutcome::Occupied(ancestor.to_path_buf()));
         }
     }
-    // The worktree walk observes the same directory the tree queries above
-    // answered for. Handed the pinned handle, it descends with
-    // `openat(2)`-relative descriptors from the held directory — the
-    // skilled-lr8 window, where a checkout renamed aside and replaced around
-    // this walk could clear a vacating-candidate guard with a readable,
-    // vacant decoy, is closed on Linux and macOS — the Unix platforms
-    // Skilled supports — by never consulting the pathname; the listing
-    // leans on `d_type` and an errno accessor, so it is compiled for
-    // exactly the platforms whose C library layout it implements. Handed
-    // a pathname — every preview-time call, which promises nothing — or
-    // on any other platform, it re-resolves the pathname exactly as
-    // before.
+    Ok(
+        match surviving_worktree_occupant(repository, candidate, deleted)? {
+            Some(occupant) => RemovalOutcome::Occupied(occupant),
+            None => RemovalOutcome::Vacated,
+        },
+    )
+}
+
+/// The first live path the update leaves standing under `candidate` in the
+/// worktree, if there is one.
+///
+/// This walk observes the same directory the tree queries in
+/// [`removal_outcome`] answered for. Handed the pinned handle, it descends with
+/// `openat(2)`-relative descriptors from the held directory — the
+/// skilled-lr8 window, where a checkout renamed aside and replaced around
+/// this walk could clear a vacating-candidate guard with a readable,
+/// vacant decoy, is closed on Linux and macOS — the Unix platforms
+/// Skilled supports — by never consulting the pathname; the listing
+/// leans on `d_type` and an errno accessor, so it is compiled for
+/// exactly the platforms whose C library layout it implements. Handed
+/// a pathname — every preview-time call, which promises nothing — or
+/// on any other platform, it re-resolves the pathname exactly as
+/// before.
+fn surviving_worktree_occupant(
+    repository: git::GitTarget<'_>,
+    candidate: &Path,
+    deleted: &std::collections::BTreeSet<PathBuf>,
+) -> Result<Option<PathBuf>> {
     let mut budget = OCCUPANT_BUDGET;
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     if let git::GitTarget::Handle(handle) = repository {
@@ -2048,7 +2230,7 @@ fn surviving_removal(
     )
 }
 
-/// How many worktree entries [`surviving_removal`] reads before giving up and
+/// How many worktree entries [`removal_outcome`] reads before giving up and
 /// reporting that it could not establish the candidate would go away.
 const OCCUPANT_BUDGET: usize = 4096;
 
@@ -2474,9 +2656,17 @@ pub(crate) struct RepositoryApplyAttempt {
 /// takes no expected-current-revision to condition its write on, so another
 /// process that moves the branch in between can leave the fast-forward
 /// applying a different range than the one previewed while still landing on
-/// the previewed object. Verification re-reads the result, but the window is
-/// not closed; it is the update counterpart of `apply_install`'s pathname
-/// window and is tracked as `skilled-8tr`.
+/// the previewed object. Git offers no way to refuse that at the write — the
+/// merge reads HEAD itself, inside its own process, and no flag asserts what
+/// it must find there — so the outcome is held to the guard's revision
+/// afterwards instead: [`verify_repository_update`] reads the log entry the
+/// merge left on the branch, and a fast-forward that started anywhere but the
+/// previewed revision is a verification failure rather than a silent apply
+/// (`skilled-8tr`). Replacing the merge with plumbing that does take an
+/// expected old value was rejected: it would trade one disclosed write for
+/// several, and the plan states the hooks, monitor, filters, and signature
+/// program `merge` runs. The pre-write pathname window itself remains, as
+/// `apply_install`'s does.
 pub(crate) fn apply_repository_update_attempt(
     plan: &RepositoryUpdatePlan,
 ) -> RepositoryApplyAttempt {
@@ -2492,6 +2682,70 @@ pub(crate) fn apply_repository_update_attempt(
         write_attempted,
         reads: PostWriteRepositoryReads::decide(&plan.path, write_attempted),
     }
+}
+
+/// Re-derive the affected installations over a scan taken now, and refuse a
+/// plan they no longer match.
+///
+/// A preview reads the agent roots when it is built, and the confirmation then
+/// waits — in the dialog, or at the typed command's prompt. A link created in
+/// that window is missing from the affected set the user agreed to, so the
+/// fast-forward could remove its target and leave it dangling, and the
+/// post-write scan could only report that as a verification failure once the
+/// repository had already moved. Asked here instead, before the write, so the
+/// disagreement is a refusal rather than an outcome.
+///
+/// The comparison is the whole [`AffectedInstallations`] value, its
+/// verification expectations included, because those are what the confirmed
+/// statement will be held to. What it compares is which installations the
+/// update affects and what it does to each — not which object stands at every
+/// one of them: a link retargeted during the confirmation at different content
+/// that still resolves to the same changed skill keeps the disclosed outcome
+/// for that row and agent, and passes here. Verification's baseline is this
+/// same reading, so such a swap is neither disclosed nor reported; it is the
+/// unproven-link problem rather than this one, and is left where the rest of it
+/// lives.
+///
+/// The reads run against a checkout pinned and proven the same way
+/// [`validate_repository_update`] pins it, and the partial-clone refusal is
+/// re-asked before any object is read, because these are object reads and a
+/// promisor remote configured since the preview would let them fetch lazily.
+/// The apply guard runs afterwards on a handle of its own and re-asks
+/// everything it asks; nothing here is remembered on its behalf.
+pub(crate) fn affected_installations_unchanged(
+    plan: &RepositoryUpdatePlan,
+    source: &RegisteredSource,
+    inventory: &InventorySnapshot,
+) -> Result<bool> {
+    if source.id() != plan.source_id {
+        return Err(crate::Error::AffectedInstallationsChangedAfterPreview);
+    }
+    let checkout = git::RepositoryHandle::open(&plan.path)
+        .map_err(|_| crate::Error::SourceChangedAfterPreview)?;
+    checkout_is_the_planned_repository(plan, &checkout)?;
+    let target: git::GitTarget = (&checkout).into();
+    if git::repository_is_partial_clone(target)? {
+        return Err(crate::Error::SourceChangedAfterPreview);
+    }
+    // Uncancellable for the same reason planning is: this runs where the write
+    // is about to, and there is no answer other than the one it returns.
+    let (affected, findings) = affected_catalog_skills(
+        source,
+        inventory,
+        &plan.changed_files,
+        target,
+        &plan.current_revision,
+        &plan.target_revision,
+        &AtomicBool::new(false),
+    )?
+    .expect("a flag that is never set cannot cancel this analysis");
+    // Some installations this analysis finds are stated as a finding rather
+    // than counted in the set: a link aimed at an added skill under a name of
+    // its own, whose invalid state the update changes without making it load. A
+    // plan carrying any of these is blocked, and `validate_repository_update`
+    // refuses it, so a confirmed plan has none — which makes "the fresh reading
+    // states one" exactly as much a disagreement as a changed count.
+    Ok(findings.is_empty() && affected == plan.affected)
 }
 
 /// Prove the checkout is the one the plan was confirmed against, and return
@@ -2562,7 +2816,20 @@ fn validate_repository_update(plan: &RepositoryUpdatePlan) -> Result<git::Reposi
     // against the worktree as it stands now.
     let deleted = deleted_paths(&plan.changed_files);
     for candidate in &plan.affected.vacating_candidates {
-        if surviving_removal(target, &plan.target_revision, candidate, &deleted)?.is_some() {
+        if removal_outcome(target, &plan.target_revision, candidate, &deleted)?
+            != RemovalOutcome::Vacated
+        {
+            return Err(crate::Error::SourceChangedAfterPreview);
+        }
+    }
+    // The candidates disclosed as becoming a regular file are re-read the same
+    // way and against their own outcome: an occupant arriving under one since
+    // the preview would keep the directory standing and stop the fast-forward
+    // writing the file the plan named.
+    for candidate in &plan.affected.replaced_candidates {
+        if removal_outcome(target, &plan.target_revision, candidate, &deleted)?
+            != RemovalOutcome::ReplacedByFile
+        {
             return Err(crate::Error::SourceChangedAfterPreview);
         }
     }
@@ -2614,6 +2881,7 @@ fn checkout_is_the_planned_repository(
 fn verify_repository_state(
     plan: &RepositoryUpdatePlan,
     reads: &PostWriteRepositoryReads,
+    write_attempted: bool,
     failures: &mut Vec<String>,
     withheld: &mut Vec<String>,
 ) {
@@ -2634,7 +2902,41 @@ fn verify_repository_state(
             match git::head_state((&plan.path).into()) {
                 Ok(head)
                     if head.reference() == Some(plan.current_reference.as_str())
-                        && head.revision() == plan.target_revision => {}
+                        && head.revision() == plan.target_revision =>
+                {
+                    // Landing on the previewed object is not the same as
+                    // having come from the previewed one. The guard read HEAD
+                    // in a process of its own and `merge --ff-only` takes no
+                    // expected-current-revision, so a branch another process
+                    // moved in between leaves the fast-forward applying a
+                    // range the user never saw while still ending here. The
+                    // merge's own log entry names where it started, and that
+                    // is what the disclosure has to be held to.
+                    //
+                    // Asked only in this arm on purpose: a HEAD that is not at
+                    // the target has already failed for a reason that says
+                    // more. A refused guard must not attribute another
+                    // process's merge to this attempt, even at the target.
+                    if write_attempted {
+                        match git::previous_revision_of(
+                            (&plan.path).into(),
+                            &plan.current_reference,
+                        ) {
+                            Ok(Some(previous)) if previous == plan.current_revision => {}
+                            Ok(Some(previous)) => failures.push(format!(
+                                "{} was fast-forwarded from {previous}, not the {} the preview described, so the changes applied are not the ones that were confirmed",
+                                plan.current_reference, plan.current_revision
+                            )),
+                            Ok(None) => withheld.push(format!(
+                                "{} keeps no reference log, so the revision the fast-forward started from was not checked",
+                                plan.current_reference
+                            )),
+                            Err(error) => withheld.push(format!(
+                                "the revision the fast-forward started from could not be checked: {error}"
+                            )),
+                        }
+                    }
+                }
                 Ok(head) => failures.push(format!(
                     "HEAD is {} at {}, expected {} at {}",
                     head.revision(),
@@ -2683,9 +2985,19 @@ pub fn verify_repository_update(
     after: &InventorySnapshot,
     reads: &PostWriteRepositoryReads,
 ) -> RepositoryVerifyReport {
+    verify_repository_update_attempt(plan, before, after, true, reads)
+}
+
+pub(crate) fn verify_repository_update_attempt(
+    plan: &RepositoryUpdatePlan,
+    before: &InventorySnapshot,
+    after: &InventorySnapshot,
+    write_attempted: bool,
+    reads: &PostWriteRepositoryReads,
+) -> RepositoryVerifyReport {
     let mut failures = Vec::new();
     let mut withheld = Vec::new();
-    verify_repository_state(plan, reads, &mut failures, &mut withheld);
+    verify_repository_state(plan, reads, write_attempted, &mut failures, &mut withheld);
 
     let inventory_complete = |snapshot: &InventorySnapshot| {
         snapshot.counts_are_complete() && snapshot.registry_is_complete()
@@ -2697,6 +3009,12 @@ pub fn verify_repository_update(
         let expected_dangling = plan
             .affected
             .expected_dangling
+            .iter()
+            .map(|(name, agent)| (name.as_str(), *agent))
+            .collect::<std::collections::BTreeSet<_>>();
+        let expected_non_loadable = plan
+            .affected
+            .expected_non_loadable
             .iter()
             .map(|(name, agent)| (name.as_str(), *agent))
             .collect::<std::collections::BTreeSet<_>>();
@@ -2740,6 +3058,36 @@ pub fn verify_repository_update(
                     }) {
                         failures.push(format!(
                             "the disclosed removal of {} was not observed as the same installation left dangling for {}",
+                            row.name(),
+                            observation.agent().display_name()
+                        ));
+                    }
+                    continue;
+                }
+                // The type change the plan disclosed instead of a removal: the
+                // link keeps exactly the target it had — the same raw target,
+                // for the same reason the removal above compares one — and what
+                // it now resolves to is not a skill. Content an agent cannot
+                // load is what was agreed to, so that is what is required: a
+                // link still loading, or one that lost its target instead,
+                // disagrees with the plan either way.
+                if belongs_to_updated_source
+                    && expected_non_loadable.contains(&(row.name(), observation.agent().index()))
+                {
+                    if !after_observation.is_some_and(|after| {
+                        after.object() == observation.object()
+                            && matches!(
+                                after.health(),
+                                crate::inventory::InstallationHealth::Broken
+                                    | crate::inventory::InstallationHealth::NotASkill
+                            )
+                            && !after
+                                .findings()
+                                .iter()
+                                .any(|finding| finding.code() == "install.dangling_symlink")
+                    }) {
+                        failures.push(format!(
+                            "the disclosed replacement of {} was not observed as the same installation resolving to content that is not a skill for {}",
                             row.name(),
                             observation.agent().display_name()
                         ));
@@ -2869,7 +3217,16 @@ pub fn verify_repository_update(
             let expected_removal = expected_dangling
                 .contains(&(entry.skill_name(), entry.agent().index()))
                 && entry.finding().code() == "install.dangling_symlink";
-            if !expected_removal && !before_findings.contains(&key) {
+            // What a disclosed replacement produces is a validation failure,
+            // and which one depends on the file the update put there — the
+            // `skill.` family `inventory::doctor_order` groups together. The
+            // finding is the disclosed outcome being observed, so it is not an
+            // undisclosed gain; the branch above has already held the link
+            // itself to the plan.
+            let expected_replacement = expected_non_loadable
+                .contains(&(entry.skill_name(), entry.agent().index()))
+                && entry.finding().code().starts_with("skill.");
+            if !expected_removal && !expected_replacement && !before_findings.contains(&key) {
                 failures.push(format!(
                     "installation {} for {} gained undisclosed finding {}: {}",
                     entry.skill_name(),

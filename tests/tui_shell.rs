@@ -5565,6 +5565,14 @@ fn the_install_report_escapes_filesystem_text_in_a_failed_step() {
     let rendered = text(&buffer(&app, 100, 30));
 
     assert!(rendered.contains("not written"), "{rendered:?}");
+    assert!(rendered.contains("nothing written"), "{rendered}");
+    assert!(!rendered.contains("already applied"), "{rendered}");
+    let screen = buffer(&app, 100, 30);
+    let heading = row_containing(&screen, "Install result");
+    insta::assert_snapshot!("refused_install_heading", row_text(&screen, heading));
+    let scope_style = style_in_row(&screen, heading, "nothing written");
+    assert_eq!(scope_style.fg, Some(Color::Rgb(0x84, 0x91, 0xa1)));
+    assert_eq!(scope_style.bg, Some(Color::Rgb(0x0f, 0x15, 0x1d)));
     assert!(
         !rendered.contains('\u{1b}'),
         "an escape sequence reached the terminal: {rendered:?}"
