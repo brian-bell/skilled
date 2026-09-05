@@ -7,6 +7,13 @@ use skilled::{AppEnvironment, SessionIdentity, cli, run};
 
 fn main() -> ExitCode {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
+    // Version discovery is deliberately earlier than every process-dependent
+    // input. Package managers and scripts can identify this executable without
+    // a terminal, a home directory, application data, or an agent scan.
+    if arguments.as_slice() == ["--version"] {
+        println!("skilled {}", env!("CARGO_PKG_VERSION"));
+        return ExitCode::SUCCESS;
+    }
     let environment = match AppEnvironment::for_process() {
         Ok(environment) => environment,
         Err(error) => {

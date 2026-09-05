@@ -887,32 +887,6 @@ fn deleting_one_file_inside_an_installed_skill_is_an_update_not_a_removal() {
 }
 
 #[test]
-fn replacing_an_installed_skill_directory_with_a_file_is_disclosed_as_removal() {
-    let mut fixture = fixture();
-    let root = fixture._temporary.path().join("home/.claude/skills");
-    std::fs::create_dir_all(&root).expect("agent root");
-    std::os::unix::fs::symlink(fixture.clone.join("skills/demo"), root.join("demo"))
-        .expect("installed skill");
-    fixture
-        .app
-        .perform_effects(&[Effect::ScanInstallations])
-        .expect("scan before replacement");
-
-    std::fs::remove_dir_all(fixture.seed.join("skills/demo")).expect("remove skill directory");
-    std::fs::write(fixture.seed.join("skills/demo"), "not a skill directory\n")
-        .expect("replacement file");
-    commit(&fixture.seed, "replace skill directory with file");
-    git(&fixture.seed, &["push"]);
-    let source = fixture.app.sources()[0].clone();
-    let probe = probe_repository_update(&source, true);
-    let plan =
-        plan_repository_update(&source, &probe, fixture.app.inventory()).expect("plan replacement");
-
-    assert!(plan.affected().updated.is_empty());
-    assert_eq!(plan.affected().removed, ["demo"]);
-}
-
-#[test]
 fn deleting_an_uninstalled_sibling_edition_does_not_disclose_or_verify_a_removal() {
     let temporary = tempfile::tempdir().expect("temporary directory");
     let repository = temporary.path().join("library");
@@ -1420,6 +1394,94 @@ fn a_hook_created_broken_installation_fails_verification() {
     }));
 }
 
+/// The guard and the write are separate Git processes, and `merge --ff-only`
+/// takes no expected-current-revision, so a branch moved in between can leave
+/// the fast-forward landing on the previewed object from somewhere other than
+/// the previewed starting point — applying a range the user never saw. The
+/// merge is simulated here as the racing process would leave it: the branch is
+/// advanced to an intermediate commit first, and the fast-forward to the
+/// planned target then runs over that.
+#[test]
+fn verification_rejects_a_fast_forward_that_started_from_another_revision() {
+    let fixture = fixture();
+    let intermediate = push_update(&fixture, "skills/demo/first.txt");
+    push_update(&fixture, "skills/demo/second.txt");
+    let source = fixture.app.sources()[0].clone();
+    let probe = probe_repository_update(&source, true);
+    let plan =
+        plan_repository_update(&source, &probe, fixture.app.inventory()).expect("plan update");
+    assert_ne!(plan.current_revision(), intermediate);
+    assert_ne!(plan.target_revision(), intermediate);
+
+    git(&fixture.clone, &["merge", "--ff-only", &intermediate]);
+    git(
+        &fixture.clone,
+        &["merge", "--ff-only", plan.target_revision()],
+    );
+    let report = verify_repository_update(&plan, fixture.app.inventory(), fixture.app.inventory());
+
+    assert!(report.is_complete(), "{:?}", report.withheld());
+    assert!(!report.is_verified());
+    assert!(
+        report
+            .failures()
+            .iter()
+            .any(|failure| failure.contains(&intermediate)),
+        "{:?}",
+        report.failures()
+    );
+}
+
+/// A repository that logs no reference updates cannot say where the
+/// fast-forward started, and an unanswerable check is withheld rather than
+/// passed — the three-answer rule the rest of verification keeps.
+#[test]
+fn an_unlogged_fast_forward_withholds_its_starting_revision() {
+    let fixture = fixture();
+    push_update(&fixture, "skills/demo/new.txt");
+    let source = fixture.app.sources()[0].clone();
+    let probe = probe_repository_update(&source, true);
+    let plan =
+        plan_repository_update(&source, &probe, fixture.app.inventory()).expect("plan update");
+    git(
+        &fixture.clone,
+        &["config", "core.logAllRefUpdates", "false"],
+    );
+    std::fs::remove_dir_all(fixture.clone.join(".git/logs")).expect("discard reference logs");
+
+    apply_repository_update(&plan).expect("fast-forward");
+    let report = verify_repository_update(&plan, fixture.app.inventory(), fixture.app.inventory());
+
+    assert!(report.is_verified(), "{:?}", report.failures());
+    assert!(!report.is_complete());
+    assert!(
+        report
+            .withheld()
+            .iter()
+            .any(|withheld| withheld.contains("reference log")),
+        "{:?}",
+        report.withheld()
+    );
+}
+
+/// The ordinary applied update starts from the revision the preview stated,
+/// so the same check has to leave it verified and complete.
+#[test]
+fn verification_accepts_a_fast_forward_from_the_previewed_revision() {
+    let fixture = fixture();
+    push_update(&fixture, "skills/demo/new.txt");
+    let source = fixture.app.sources()[0].clone();
+    let probe = probe_repository_update(&source, true);
+    let plan =
+        plan_repository_update(&source, &probe, fixture.app.inventory()).expect("plan update");
+
+    apply_repository_update(&plan).expect("fast-forward");
+    let report = verify_repository_update(&plan, fixture.app.inventory(), fixture.app.inventory());
+
+    assert!(report.is_verified(), "{:?}", report.failures());
+    assert!(report.is_complete(), "{:?}", report.withheld());
+}
+
 #[test]
 fn verification_rejects_the_target_revision_on_another_branch() {
     let fixture = fixture();
@@ -1588,6 +1650,61 @@ fn a_failed_apply_refreshes_and_reports_the_post_attempt_state() {
         .join("\n");
     assert!(screen.contains("abandoned without writing"), "{screen}");
     assert!(!screen.contains("Fast-forward failed"), "{screen}");
+}
+
+#[test]
+fn a_guard_refusal_at_the_target_does_not_claim_another_processes_write() {
+    for unlogged in [false, true] {
+        let mut fixture = fixture();
+        let intermediate = push_update(&fixture, "skills/demo/first.txt");
+        push_update(&fixture, "skills/demo/second.txt");
+        fixture
+            .app
+            .perform_effects(&[Effect::CheckUpdates])
+            .expect("check");
+        finish_update_check(&mut fixture.app);
+        fixture
+            .app
+            .perform_effects(&[Effect::PlanRepositoryUpdate])
+            .expect("plan");
+        let plan = match fixture.app.pending_update().expect("preview") {
+            RepositoryUpdatePrompt::Preview(plan) => plan.clone(),
+            other => panic!("expected preview: {other:?}"),
+        };
+        git(&fixture.clone, &["merge", "--ff-only", &intermediate]);
+        git(
+            &fixture.clone,
+            &["merge", "--ff-only", plan.target_revision()],
+        );
+        if unlogged {
+            git(
+                &fixture.clone,
+                &["config", "core.logAllRefUpdates", "false"],
+            );
+            std::fs::remove_dir_all(fixture.clone.join(".git/logs")).expect("discard logs");
+        }
+        let report = {
+            fixture
+                .app
+                .perform_effects(&[Effect::ApplyRepositoryUpdate])
+                .expect("refuse");
+            match fixture.app.pending_update().expect("report") {
+                RepositoryUpdatePrompt::Report {
+                    verification,
+                    write_attempted,
+                    apply_error,
+                    ..
+                } => {
+                    assert!(!write_attempted);
+                    assert!(apply_error.is_some());
+                    verification.clone()
+                }
+                other => panic!("expected report: {other:?}"),
+            }
+        };
+        assert!(report.is_verified(), "{:?}", report.failures());
+        assert!(report.is_complete(), "{:?}", report.withheld());
+    }
 }
 
 #[test]
@@ -3923,12 +4040,12 @@ fn an_untracked_file_under_a_removed_skill_blocks_the_update() {
     assert!(plan.is_blocked());
 }
 
-/// A tree entry is a tree entry. Replacing an installed skill directory with a
-/// regular file leaves the link resolving to that file rather than dangling, so
-/// the removal the preview would promise is not what the write produces — the
-/// same reason a surviving directory blocks.
+/// A regular file arriving where the skill directory was is the one surviving
+/// object whose outcome the preview can state exactly: the link keeps its
+/// target and that target stops being a skill. It is disclosed as that outcome
+/// rather than as a removal, and verification holds the update to it.
 #[test]
-fn replacing_a_removed_skill_directory_with_a_file_blocks_the_update() {
+fn replacing_a_removed_skill_directory_with_a_file_verifies_as_disclosed() {
     let mut fixture = fixture();
     let root = fixture._temporary.path().join("home/.claude/skills");
     std::fs::create_dir_all(&root).expect("agent root");
@@ -3945,6 +4062,109 @@ fn replacing_a_removed_skill_directory_with_a_file_blocks_the_update() {
         .expect("replacement file");
     commit(&fixture.seed, "replace skill directory with file");
     git(&fixture.seed, &["push"]);
+    let source = fixture.app.sources()[0].clone();
+    let probe = probe_repository_update(&source, true);
+    let plan = plan_repository_update(&source, &probe, &before).expect("plan replacement");
+
+    let codes = plan
+        .findings()
+        .iter()
+        .map(skilled::inventory::Finding::code)
+        .collect::<Vec<_>>();
+    assert!(codes.is_empty(), "{codes:?}");
+    assert!(!plan.is_blocked());
+    // Disclosed as the type change it is, not as a link losing its target.
+    assert_eq!(plan.affected().replaced, ["demo"], "{:?}", plan.affected());
+    assert!(plan.affected().removed.is_empty(), "{:?}", plan.affected());
+    assert!(plan.affected().updated.is_empty(), "{:?}", plan.affected());
+
+    apply_repository_update(&plan).expect("fast-forward");
+    fixture
+        .app
+        .perform_effects(&[Effect::ScanInstallations])
+        .expect("scan after update");
+    assert!(
+        fixture.clone.join("skills/demo").is_file(),
+        "the fast-forward should have replaced the directory with a file"
+    );
+    // A proven non-directory is nothing OpenCode can load, not an unreadable
+    // root whose effective resolution is still unknown (PR #49 review).
+    assert_eq!(
+        fixture
+            .app
+            .inventory()
+            .row("demo")
+            .unwrap()
+            .opencode_resolution(),
+        Some(&skilled::resolution::OpenCodeResolution::NothingVisible)
+    );
+    let report = verify_repository_update(&plan, &before, fixture.app.inventory());
+
+    assert!(report.is_verified(), "{:?}", report.failures());
+    assert!(report.is_complete(), "{:?}", report.withheld());
+}
+
+/// A symbolic link is not the same disclosure. Git records one as a blob, and
+/// the installed link would follow it to wherever upstream aimed it — outside
+/// the registered checkout, for all the plan can tell — so what the update
+/// leaves the installation resolving to cannot be stated, and it blocks.
+#[test]
+fn replacing_a_removed_skill_directory_with_a_symlink_blocks_the_update() {
+    let mut fixture = fixture();
+    let root = fixture._temporary.path().join("home/.claude/skills");
+    std::fs::create_dir_all(&root).expect("agent root");
+    std::os::unix::fs::symlink(fixture.clone.join("skills/demo"), root.join("demo"))
+        .expect("installed skill");
+    fixture
+        .app
+        .perform_effects(&[Effect::ScanInstallations])
+        .expect("scan before update");
+    let before = fixture.app.inventory().clone();
+
+    std::fs::remove_dir_all(fixture.seed.join("skills/demo")).expect("remove skill directory");
+    std::os::unix::fs::symlink("other", fixture.seed.join("skills/demo"))
+        .expect("replacement link");
+    commit(&fixture.seed, "replace skill directory with a symlink");
+    git(&fixture.seed, &["push"]);
+    let source = fixture.app.sources()[0].clone();
+    let probe = probe_repository_update(&source, true);
+    let plan = plan_repository_update(&source, &probe, &before).expect("plan replacement");
+
+    let codes = plan
+        .findings()
+        .iter()
+        .map(skilled::inventory::Finding::code)
+        .collect::<Vec<_>>();
+    assert!(
+        codes.contains(&"source.removal_leaves_content"),
+        "{codes:?}"
+    );
+    assert!(plan.is_blocked());
+}
+
+/// The type change is only statable while the write can actually produce it. An
+/// untracked file under the directory keeps it standing — and stops Git putting
+/// a file at that path at all — so it blocks exactly as it does for a removal.
+#[test]
+fn an_untracked_file_under_a_skill_replaced_by_a_file_blocks_the_update() {
+    let mut fixture = fixture();
+    let root = fixture._temporary.path().join("home/.claude/skills");
+    std::fs::create_dir_all(&root).expect("agent root");
+    std::os::unix::fs::symlink(fixture.clone.join("skills/demo"), root.join("demo"))
+        .expect("installed skill");
+    fixture
+        .app
+        .perform_effects(&[Effect::ScanInstallations])
+        .expect("scan before update");
+    let before = fixture.app.inventory().clone();
+
+    std::fs::remove_dir_all(fixture.seed.join("skills/demo")).expect("remove skill directory");
+    std::fs::write(fixture.seed.join("skills/demo"), "not a skill directory\n")
+        .expect("replacement file");
+    commit(&fixture.seed, "replace skill directory with file");
+    git(&fixture.seed, &["push"]);
+    std::fs::write(fixture.clone.join("skills/demo/notes.txt"), "mine\n").expect("local occupant");
+
     let source = fixture.app.sources()[0].clone();
     let probe = probe_repository_update(&source, true);
     let plan = plan_repository_update(&source, &probe, &before).expect("plan replacement");
