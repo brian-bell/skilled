@@ -2768,6 +2768,35 @@ pub(crate) fn apply_install(plan: &InstallPlan, store: &mut Store, home: &Path) 
     ApplyReport { steps }
 }
 
+// A test seam standing in for the second process the apply guards exist for.
+//
+// `apply_target` reads the link target before its metadata work and again
+// after it, and only something running in the gap between those reads can show
+// that the second one is load-bearing. Nothing outside a test build can
+// register anything here — the hook does not exist there. It is thread-local
+// and consumed once, so one test's stand-in can never reach another's install.
+#[cfg(test)]
+thread_local! {
+    static CONCURRENT_TARGET_CHANGE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(all(test, unix))]
+fn set_concurrent_target_change(change: impl FnOnce() + 'static) {
+    CONCURRENT_TARGET_CHANGE.with(|slot| *slot.borrow_mut() = Some(Box::new(change)));
+}
+
+#[cfg(test)]
+fn concurrent_target_change() {
+    if let Some(change) = CONCURRENT_TARGET_CHANGE.with(|slot| slot.borrow_mut().take()) {
+        change();
+    }
+}
+
+#[cfg(not(test))]
+#[inline]
+fn concurrent_target_change() {}
+
 fn apply_target(
     plan: &InstallPlan,
     target: &InstallTarget,
@@ -2790,24 +2819,10 @@ fn apply_target(
     // the preview and the confirmation would otherwise leave Skilled owning a
     // link it created that resolves to nothing; install still refuses every
     // occupied slot, while repair is a separate explicitly confirmed action.
-    match plan.source_dir().canonicalize() {
-        Ok(resolved)
-            if resolved == plan.source_dir()
-                && fs::metadata(&resolved).is_ok_and(|metadata| metadata.is_dir()) => {}
-        _ => {
-            return StepOutcome::Failed(format!(
-                "{} is no longer the directory the plan resolved, so nothing was written",
-                plan.source_dir().display()
-            ));
-        }
+    if let Err(reason) = install_link_target_unchanged(plan) {
+        return StepOutcome::Failed(reason);
     }
-    let mut budget = InspectionBudget::source_scan();
-    if let Err(error) = validate_portable_skill_with_budget(plan.source_dir(), &mut budget) {
-        return StepOutcome::Failed(format!(
-            "{} no longer validates as a portable skill, so nothing was written: {error}",
-            plan.source_dir().display()
-        ));
-    }
+    concurrent_target_change();
     let receipt = Receipt {
         operation: ReceiptOperation::Install,
         agent: target.agent,
@@ -2891,6 +2906,21 @@ fn apply_target(
     if let Err(reason) = recheck_source_identity(plan) {
         return StepOutcome::Failed(format!("{reason}, so nothing was written"));
     }
+    // Read once more, because everything above it waited on something outside
+    // this process: the mutation guard waits on another Skilled's transaction,
+    // and the identity recheck spawns Git. A concurrent `skilled update`
+    // fast-forwarding this same checkout can delete the variant directory over
+    // either wait, and a `symlink` that then succeeded would leave a dangling
+    // link the preview never described — the exact outcome install refuses to
+    // create. The check sits here rather than after the root creation below on
+    // purpose: refusing costs the user nothing, while refusing one syscall
+    // later would leave behind an empty documented root nobody asked for. What
+    // is left between this read and the write is a `stat` and at most one
+    // `create_dir`, which is the same pathname window `apply_install` records
+    // as `skilled-cb2` rather than a wait on another process.
+    if let Err(reason) = install_link_target_unchanged(plan) {
+        return StepOutcome::Failed(reason);
+    }
     let root_now = probe_root(root, home);
     let root_created = match (&target.disposition, &root_now) {
         (TargetDisposition::CreateLink, RootProbe::Present) => false,
@@ -2939,6 +2969,35 @@ fn apply_target(
             MetadataFailure::new(database_path, error.to_string()),
         )),
     }
+}
+
+/// Re-establish that the directory every link would point at is still the one
+/// the plan resolved, and still a portable skill.
+///
+/// Cheap enough to repeat, which is what lets [`apply_target`] ask it on both
+/// sides of its metadata work; [`repair_source_unchanged`] repeats the same
+/// reading for the same reason.
+fn install_link_target_unchanged(plan: &InstallPlan) -> Result<(), String> {
+    match plan.source_dir().canonicalize() {
+        Ok(resolved)
+            if resolved == plan.source_dir()
+                && fs::metadata(&resolved).is_ok_and(|metadata| metadata.is_dir()) => {}
+        _ => {
+            return Err(format!(
+                "{} is no longer the directory the plan resolved, so nothing was written",
+                plan.source_dir().display()
+            ));
+        }
+    }
+    let mut budget = InspectionBudget::source_scan();
+    validate_portable_skill_with_budget(plan.source_dir(), &mut budget)
+        .map(|_| ())
+        .map_err(|error| {
+            format!(
+                "{} no longer validates as a portable skill, so nothing was written: {error}",
+                plan.source_dir().display()
+            )
+        })
 }
 
 /// Re-establish that the link target belongs to the checkout the plan named.
@@ -6040,6 +6099,130 @@ impl Receipt {
 mod tests {
     use super::*;
     use crate::store::Store;
+
+    /// Only the Unix install fixtures build a checkout, so the helper is theirs.
+    #[cfg(unix)]
+    fn git(repository: &Path, arguments: &[&str]) {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(repository)
+            .args(arguments)
+            .output()
+            .expect("run git fixture command");
+        assert!(output.status.success(), "git {arguments:?} failed");
+    }
+
+    /// One registered checkout holding one portable skill, and a store that
+    /// knows about it. Everything lives under a canonical temporary directory
+    /// so no test reads the real home or a real agent skill root.
+    #[cfg(unix)]
+    fn installable_fixture() -> (tempfile::TempDir, PathBuf, Store, InstallPlan) {
+        let fixture = tempfile::tempdir().expect("temporary fixture");
+        let base = fixture
+            .path()
+            .canonicalize()
+            .expect("canonical fixture path");
+        let checkout = base.join("library");
+        let variant_directory = checkout.join("skills/portable");
+        fs::create_dir_all(&variant_directory).expect("variant directory");
+        fs::write(
+            variant_directory.join("SKILL.md"),
+            "---\nname: portable\ndescription: portable fixture\n---\n",
+        )
+        .expect("write skill document");
+        git(&checkout, &["init", "--quiet"]);
+        git(&checkout, &["config", "user.name", "Test Author"]);
+        git(&checkout, &["config", "user.email", "test@example.com"]);
+        git(&checkout, &["add", "."]);
+        git(&checkout, &["commit", "--quiet", "-m", "fixture"]);
+
+        let home = base.join("home");
+        let root = home.join(".claude/skills");
+        fs::create_dir_all(&root).expect("agent skill root");
+
+        let mut store = Store::open(&base.join("data")).expect("metadata store");
+        let preview = crate::source::preview_local_source(&checkout).expect("preview the checkout");
+        store
+            .register_source(&preview)
+            .expect("register the source");
+        let sources = store.registered_sources().expect("registered sources");
+        let source = sources.first().expect("one registered source");
+        let variant = variants_by_name(&sources)
+            .remove("portable")
+            .and_then(|mut variants| variants.pop())
+            .expect("the registered variant");
+
+        let plan = InstallPlan {
+            variant,
+            registry: RegistryFingerprint::of_registry(&sources),
+            source_checkout: source.git_top_level().to_path_buf(),
+            source_revision: source.head().to_owned(),
+            source_dir: variant_directory,
+            targets: vec![InstallTarget {
+                agent: AgentKind::ClaudeCode,
+                link_path: root.join("portable"),
+                disposition: TargetDisposition::CreateLink,
+            }],
+            warnings: Vec::new(),
+            opencode_outlook: None,
+        };
+        (fixture, home, store, plan)
+    }
+
+    /// The same fixture with nothing happening in between writes the link the
+    /// plan described, so the refusal below is the concurrent deletion rather
+    /// than a fixture that could never install anything.
+    #[cfg(unix)]
+    #[test]
+    fn an_undisturbed_install_creates_the_link_the_plan_described() {
+        let (_fixture, home, mut store, plan) = installable_fixture();
+
+        let applied = apply_install(&plan, &mut store, &home);
+
+        let outcome = &applied.steps[0].outcome;
+        assert!(
+            matches!(outcome, StepOutcome::Created),
+            "the undisturbed install must create its link: {outcome:?}"
+        );
+        assert_eq!(
+            fs::read_link(plan.targets()[0].link_path()).expect("the created link"),
+            plan.source_dir()
+        );
+    }
+
+    /// A held preview is evidence about a moment that has passed. Another
+    /// Skilled process fast-forwarding the same checkout can delete the variant
+    /// directory while this install is still in the metadata work between its
+    /// first read of that directory and the `symlink` call — the store guard
+    /// waits on another process's transaction, and the identity recheck spawns
+    /// Git. A link created over that gap would be dangling, which is not what
+    /// the preview described, so the link target is read once more after every
+    /// wait and this target is refused instead.
+    #[cfg(unix)]
+    #[test]
+    fn a_variant_directory_removed_during_the_metadata_work_writes_no_link() {
+        let (_fixture, home, mut store, plan) = installable_fixture();
+        let variant_directory = plan.source_dir().to_path_buf();
+        let link_path = plan.targets()[0].link_path().to_path_buf();
+        // Stands in for the concurrent process: it runs after the plan's first
+        // read of the link target and before anything is written.
+        set_concurrent_target_change(move || {
+            fs::remove_dir_all(&variant_directory).expect("the concurrent update removes it");
+        });
+
+        let applied = apply_install(&plan, &mut store, &home);
+
+        let outcome = &applied.steps[0].outcome;
+        assert!(
+            matches!(outcome, StepOutcome::Failed(reason)
+                if reason.contains("no longer the directory the plan resolved")),
+            "the vanished link target must stop the write: {outcome:?}"
+        );
+        assert!(
+            fs::symlink_metadata(&link_path).is_err(),
+            "no link may be created over a variant directory that is gone"
+        );
+    }
 
     /// The Windows repair deletes only an object it has proven through the
     /// same handle, and the proof reads the reparse data itself. The parser
