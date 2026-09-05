@@ -20,32 +20,45 @@ use crate::{
     validation::InspectionBudget,
 };
 
-const SCHEMA_VERSION: i64 = 10;
+const SCHEMA_VERSION: i64 = 11;
 const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+/// Record one check, unless the stored row was written under a later
+/// generation.
+///
+/// Ordering is the `generation` column's job alone. `checked_at` states when
+/// the check ran and is carried across unchanged by a record that reports on
+/// an earlier check — a post-apply verification — so comparing it here would
+/// decline exactly the writes that matter most: the verification would lose to
+/// whatever a second Skilled process recorded while the preview was open, and
+/// the store would report that it had been saved.
 const UPDATE_CHECK_UPSERT: &str = "INSERT INTO source_update_checks
-        (source_id, checked_at, local_revision, local_reference, upstream_ref,
+        (source_id, checked_at, generation, local_revision, local_reference, upstream_ref,
          upstream_revision, merge_base, ahead, behind, dirty, dirty_known, verdict, detail)
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
      ON CONFLICT(source_id) DO UPDATE SET
-        checked_at=excluded.checked_at, local_revision=excluded.local_revision,
+        checked_at=excluded.checked_at, generation=excluded.generation,
+        local_revision=excluded.local_revision,
         local_reference=excluded.local_reference, upstream_ref=excluded.upstream_ref,
         upstream_revision=excluded.upstream_revision,
         merge_base=excluded.merge_base, ahead=excluded.ahead, behind=excluded.behind,
         dirty=excluded.dirty, dirty_known=excluded.dirty_known,
         verdict=excluded.verdict, detail=excluded.detail
-     WHERE excluded.checked_at >= source_update_checks.checked_at";
+     WHERE excluded.generation >= source_update_checks.generation";
+/// The same write for a batch, where a repeated generation is a stale worker's
+/// result rather than a restatement of the stored row.
 const UPDATE_CHECK_UPSERT_IF_NEWER: &str = "INSERT INTO source_update_checks
-        (source_id, checked_at, local_revision, local_reference, upstream_ref,
+        (source_id, checked_at, generation, local_revision, local_reference, upstream_ref,
          upstream_revision, merge_base, ahead, behind, dirty, dirty_known, verdict, detail)
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
      ON CONFLICT(source_id) DO UPDATE SET
-        checked_at=excluded.checked_at, local_revision=excluded.local_revision,
+        checked_at=excluded.checked_at, generation=excluded.generation,
+        local_revision=excluded.local_revision,
         local_reference=excluded.local_reference, upstream_ref=excluded.upstream_ref,
         upstream_revision=excluded.upstream_revision,
         merge_base=excluded.merge_base, ahead=excluded.ahead, behind=excluded.behind,
         dirty=excluded.dirty, dirty_known=excluded.dirty_known,
         verdict=excluded.verdict, detail=excluded.detail
-     WHERE excluded.checked_at > source_update_checks.checked_at";
+     WHERE excluded.generation > source_update_checks.generation";
 
 pub(crate) struct Store {
     connection: Connection,
@@ -454,36 +467,42 @@ impl Store {
     }
 
     pub(crate) fn update_checks(&self) -> Result<Vec<CachedUpdateCheck>> {
-        let mut statement = self.connection.prepare(
-            "SELECT source_id, checked_at, local_revision, local_reference, upstream_ref,
-                    upstream_revision, merge_base, ahead, behind, dirty, dirty_known, verdict, detail
+        Self::update_checks_on(&self.connection)
+    }
+
+    fn update_checks_on(connection: &Connection) -> Result<Vec<CachedUpdateCheck>> {
+        let mut statement = connection.prepare(
+            "SELECT source_id, checked_at, generation, local_revision, local_reference,
+                    upstream_ref, upstream_revision, merge_base, ahead, behind, dirty,
+                    dirty_known, verdict, detail
              FROM source_update_checks ORDER BY source_id",
         )?;
         let rows = statement.query_map([], |row| {
-            let verdict: String = row.get(11)?;
+            let verdict: String = row.get(12)?;
             let verdict = RepositoryUpdateVerdict::parse(&verdict).ok_or_else(|| {
                 rusqlite::Error::InvalidColumnType(
-                    11,
+                    12,
                     "verdict".into(),
                     rusqlite::types::Type::Text,
                 )
             })?;
-            let ahead: i64 = row.get(7)?;
-            let behind: i64 = row.get(8)?;
+            let ahead: i64 = row.get(8)?;
+            let behind: i64 = row.get(9)?;
             Ok(CachedUpdateCheck {
                 source_id: row.get(0)?,
                 checked_at: row.get(1)?,
-                local_revision: row.get(2)?,
-                local_reference: row.get(3)?,
-                upstream_ref: row.get(4)?,
-                upstream_revision: row.get(5)?,
-                merge_base: row.get(6)?,
+                generation: row.get(2)?,
+                local_revision: row.get(3)?,
+                local_reference: row.get(4)?,
+                upstream_ref: row.get(5)?,
+                upstream_revision: row.get(6)?,
+                merge_base: row.get(7)?,
                 ahead: ahead as usize,
                 behind: behind as usize,
-                dirty: row.get(9)?,
-                dirty_known: row.get(10)?,
+                dirty: row.get(10)?,
+                dirty_known: row.get(11)?,
                 verdict,
-                detail: row.get(12)?,
+                detail: row.get(13)?,
             })
         })?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
@@ -492,10 +511,11 @@ impl Store {
     /// Hand out `count` update-check generations no other allocation will
     /// reuse, and return the first of them.
     ///
-    /// The generation both dates a check and orders it: the conditional upsert
+    /// The generation orders a check's write, and only that — when the check
+    /// ran is `checked_at`, which nothing compares. The conditional upsert
     /// behind a recorded check keeps an older result from displacing a newer
-    /// one, so two checks that share a value make one of them disappear into a
-    /// store that reported success. A counter held in each process cannot
+    /// one, so two records that share a generation make one of them disappear
+    /// into a store that reported success. A counter held in each process cannot
     /// prevent that — two Skilled processes running checks after the clock has
     /// moved behind the last stored value will each hand out the same number —
     /// so the high-water mark lives beside the data it orders and is advanced
@@ -524,7 +544,7 @@ impl Store {
         // an earlier generation, and the conditional upsert would then decline
         // every new check while reporting that it succeeded.
         let recorded: Option<i64> = transaction.query_row(
-            "SELECT MAX(checked_at) FROM source_update_checks",
+            "SELECT MAX(generation) FROM source_update_checks",
             [],
             |row| row.get(0),
         )?;
@@ -541,11 +561,56 @@ impl Store {
     }
 
     pub(crate) fn record_update_check(&self, check: &CachedUpdateCheck) -> Result<()> {
-        self.connection.execute(
+        Self::record_update_check_on(&self.connection, check)
+    }
+
+    /// A successful verification has two ordering generations: its upstream reading belongs
+    /// to the plan, but its proof that the write succeeded is new. Clear an
+    /// earlier failed-write observation using the latter, while retaining the
+    /// former on the replacement so a concurrent explicit check can still win
+    /// even if it has reserved its generation but not yet saved its result.
+    /// The immediate transaction prevents another writer from changing the
+    /// inspected row between that decision and the conditional upsert.
+    pub(crate) fn record_verified_update_check(
+        &mut self,
+        check: &CachedUpdateCheck,
+        completion_generation: i64,
+    ) -> Result<()> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let earlier_failure = Self::update_checks_on(&transaction)?
+            .into_iter()
+            .any(|stored| {
+                stored.source_id == check.source_id
+                    && stored.generation < completion_generation
+                    && stored.findings().iter().any(|finding| {
+                        matches!(
+                            finding.code(),
+                            "update.apply_failed"
+                                | "update.verification_failed"
+                                | "update.verification_incomplete"
+                        )
+                    })
+            });
+        if earlier_failure {
+            transaction.execute(
+                "DELETE FROM source_update_checks WHERE source_id = ?1",
+                [check.source_id],
+            )?;
+        }
+        Self::record_update_check_on(&transaction, check)?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    fn record_update_check_on(connection: &Connection, check: &CachedUpdateCheck) -> Result<()> {
+        connection.execute(
             UPDATE_CHECK_UPSERT,
             params![
                 check.source_id,
                 check.checked_at,
+                check.generation,
                 check.local_revision,
                 check.local_reference,
                 check.upstream_ref,
@@ -572,6 +637,7 @@ impl Store {
                 params![
                     check.source_id,
                     check.checked_at,
+                    check.generation,
                     check.local_revision,
                     check.local_reference,
                     check.upstream_ref,
@@ -878,11 +944,11 @@ impl Mutation<'_> {
     /// scan results rather than metadata — and the caller revalidates it against
     /// the filesystem immediately before this.
     ///
-    /// This compares the inputs the plan chose from, not the choice. A source
-    /// another process registers after the preview can offer a competing
-    /// variant of the same name, which these queries cannot see; closing that
-    /// needs a registry generation the guard can compare, tracked as
-    /// `skilled-g64`.
+    /// This compares the row the plan chose, not the rows it chose from. A
+    /// source another process registers after the preview can offer a competing
+    /// variant of the same name, which these queries cannot see;
+    /// [`Self::registry_fingerprint`] is what covers that, and both are asked
+    /// under this guard.
     pub(crate) fn variant_registration_matches(
         &self,
         variant: &VariantRef,
@@ -926,6 +992,13 @@ impl Mutation<'_> {
                 compatibility.codex(),
                 compatibility.opencode(),
             )))
+    }
+
+    /// The registry the guard is holding still, as one comparable value.
+    ///
+    /// See [`RegistryFingerprint`] for what it covers and why it is a digest.
+    pub(crate) fn registry_fingerprint(&self) -> Result<RegistryFingerprint> {
+        registry_fingerprint_on(&self.transaction)
     }
 
     /// Recheck the complete stored registration represented by a Forget plan.
@@ -1133,6 +1206,153 @@ fn path_text(path: &Path) -> Result<String> {
         .ok_or_else(|| Error::InvalidSourcePath(path.to_path_buf()))
 }
 
+/// One value standing for every registration fact a spec 6.4 selection is
+/// decided over.
+///
+/// A plan records the fingerprint of the registry it was planned against, and
+/// the mutation guard compares it with the registry as the store holds it at
+/// the moment of writing. [`Mutation::variant_registration_matches`] compares
+/// the row the plan *chose*; this compares the rows it chose *from*, which is
+/// what a competing variant of the same name arrives as. Without it a source or
+/// catalog another process registered after the preview could leave a confirmed
+/// plan writing a link a fresh selection would report as a duplicate conflict,
+/// or resolve to a different variant altogether (`skilled-g64`).
+///
+/// It is a digest of the registration rows rather than a counter writers bump.
+/// A counter would have to be advanced by every future write path, and one that
+/// forgot would fail open — the guard would pass while the registry had moved
+/// under it. A digest cannot be forgotten: it is derived from the same columns
+/// the selection reads, on both sides. It also does not refuse for changes that
+/// change nothing, so a re-registration that rewrites a row identically, and an
+/// in-memory registry a caller narrowed to match a commit that already
+/// happened, both still apply.
+///
+/// Scope is registration metadata only, and deliberately so. The scanned skill
+/// candidates a selection also narrows over are filesystem observations rather
+/// than stored rows: a skill directory added under an already-registered
+/// catalog after the preview changes the same selection without changing a
+/// single row here. The apply guard revalidates the chosen variant's own
+/// directory against the filesystem immediately before writing, but it does not
+/// re-scan the registry's other catalogs, and this fingerprint does not stand
+/// for what such a scan would find. Closing that would mean walking every
+/// registered catalog while the metadata mutation guard is held — unbounded
+/// filesystem work inside a transaction that exists to freeze metadata, which
+/// is the line `apply_repair_target` already draws — so it belongs to a
+/// separate decision rather than to this one.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) struct RegistryFingerprint(u64);
+
+impl RegistryFingerprint {
+    /// The fingerprint of the registry as a planner holds it in memory.
+    ///
+    /// Every field is the one the row it was loaded from carries, so this and
+    /// [`registry_fingerprint_on`] agree exactly while nothing has changed. The
+    /// volatile columns a scan refresh rewrites — head, dirtiness, last scan —
+    /// are deliberately absent: they move without changing what any agent
+    /// resolves, and including them would refuse ordinary installs.
+    pub(crate) fn of_registry(sources: &[RegisteredSource]) -> Self {
+        Self::of_records(sources.iter().flat_map(|source| {
+            std::iter::once(source_fingerprint_record(
+                source.id(),
+                source.label(),
+                &source.git_top_level().to_string_lossy(),
+            ))
+            .chain(source.catalogs().iter().map(|catalog| {
+                let compatibility = catalog.compatibility();
+                catalog_fingerprint_record(
+                    source.id(),
+                    &catalog.relative_path().to_string_lossy(),
+                    classification_text(catalog.classification()),
+                    compatibility.claude_code(),
+                    compatibility.codex(),
+                    compatibility.opencode(),
+                )
+            }))
+        }))
+    }
+
+    /// Order is not registry state, so the records are sorted before hashing:
+    /// two readings of the same rows fingerprint alike however each arrived.
+    fn of_records(records: impl Iterator<Item = RegistryRecord>) -> Self {
+        use std::hash::{Hash, Hasher};
+
+        let mut records: Vec<RegistryRecord> = records.collect();
+        records.sort_unstable();
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        records.hash(&mut hasher);
+        Self(hasher.finish())
+    }
+}
+
+/// Derived hashing preserves field boundaries even when a label or path
+/// contains control characters; concatenating with a separator would let two
+/// different registrations spell the same record before hashing.
+#[derive(Eq, Hash, Ord, PartialEq, PartialOrd)]
+enum RegistryRecord {
+    Source(i64, String, String),
+    Catalog(i64, String, String, bool, bool, bool),
+}
+
+fn source_fingerprint_record(id: i64, label: &str, canonical_path: &str) -> RegistryRecord {
+    RegistryRecord::Source(id, label.to_owned(), canonical_path.to_owned())
+}
+
+fn catalog_fingerprint_record(
+    source_id: i64,
+    relative_path: &str,
+    classification: &str,
+    claude_code: bool,
+    codex: bool,
+    opencode: bool,
+) -> RegistryRecord {
+    RegistryRecord::Catalog(
+        source_id,
+        relative_path.to_owned(),
+        classification.to_owned(),
+        claude_code,
+        codex,
+        opencode,
+    )
+}
+
+/// The fingerprint of the registry as the database holds it right now.
+///
+/// Takes a connection so the store and the mutation guard read it the same way:
+/// inside the guard's transaction it is the registry no other writer can change
+/// before the receipt commits.
+fn registry_fingerprint_on(connection: &Connection) -> Result<RegistryFingerprint> {
+    let mut source_statement =
+        connection.prepare("SELECT id, label, canonical_path FROM source_repositories")?;
+    let sources = source_statement
+        .query_map([], |row| {
+            Ok(source_fingerprint_record(
+                row.get::<_, i64>(0)?,
+                &row.get::<_, String>(1)?,
+                &row.get::<_, String>(2)?,
+            ))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let mut catalog_statement = connection.prepare(
+        "SELECT source_id, relative_path, classification, claude_code, codex, opencode
+         FROM catalog_roots",
+    )?;
+    let catalogs = catalog_statement
+        .query_map([], |row| {
+            Ok(catalog_fingerprint_record(
+                row.get::<_, i64>(0)?,
+                &row.get::<_, String>(1)?,
+                &row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)? != 0,
+                row.get::<_, i64>(4)? != 0,
+                row.get::<_, i64>(5)? != 0,
+            ))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(RegistryFingerprint::of_records(
+        sources.into_iter().chain(catalogs),
+    ))
+}
+
 /// The one spelling of a classification the `catalog_roots` CHECK constraint
 /// accepts, shared by everything that writes or compares that column.
 fn classification_text(classification: CatalogClassification) -> &'static str {
@@ -1184,6 +1404,17 @@ mod tests {
     use std::{ffi::OsString, os::unix::ffi::OsStringExt};
 
     use super::*;
+
+    #[test]
+    fn registry_fingerprints_distinguish_separators_inside_source_fields() {
+        let first = source_fingerprint_record(1, "library", "/one\u{1f}/two");
+        let second = source_fingerprint_record(1, "library\u{1f}/one", "/two");
+        assert_ne!(
+            RegistryFingerprint::of_records(std::iter::once(first)),
+            RegistryFingerprint::of_records(std::iter::once(second)),
+            "moving a separator between a label and a path must change the registry"
+        );
+    }
 
     #[test]
     fn an_ownership_receipt_requires_representable_paths_before_it_can_be_written() {
@@ -1260,9 +1491,9 @@ mod tests {
             .connection
             .execute(
                 "INSERT INTO source_update_checks
-                    (source_id, checked_at, local_revision, ahead, behind, dirty, dirty_known,
-                     verdict, detail)
-                 VALUES (1, 9_000, 'head', 0, 0, 0, 1, 'up_to_date', '')",
+                    (source_id, checked_at, generation, local_revision, ahead, behind, dirty,
+                     dirty_known, verdict, detail)
+                 VALUES (1, 9_000, 9_000, 'head', 0, 0, 0, 1, 'up_to_date', '')",
                 [],
             )
             .expect("check recorded before the setting existed");
@@ -1288,9 +1519,13 @@ mod tests {
                 [],
             )
             .expect("source fixture");
-        let check = |checked_at, detail: &str| CachedUpdateCheck {
+        let check = |generation, detail: &str| CachedUpdateCheck {
             source_id: 1,
-            checked_at,
+            // Deliberately not the generation: what orders these writes is the
+            // generation alone, and a displayed time that runs the other way
+            // must not change the outcome.
+            checked_at: 1_000 - generation,
+            generation,
             local_revision: "head".into(),
             local_reference: Some("refs/heads/main".into()),
             upstream_ref: None,
@@ -1311,7 +1546,8 @@ mod tests {
             .expect("stale batch");
 
         let checks = store.update_checks().expect("stored checks");
-        assert_eq!(checks[0].checked_at, 20);
+        assert_eq!(checks[0].generation, 20);
+        assert_eq!(checks[0].checked_at, 980);
         assert_eq!(checks[0].detail, "newer");
         store
             .record_update_check(&check(10, "older single"))
@@ -1320,6 +1556,100 @@ mod tests {
             store.update_checks().expect("checks after stale single")[0].detail,
             "newer"
         );
+    }
+
+    #[test]
+    fn verified_results_clear_only_earlier_failures_and_keep_check_ordering() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let mut store = Store::open(&temporary.path().join("data")).expect("store");
+        store
+            .connection
+            .execute(
+                "INSERT INTO source_repositories
+             (id, label, canonical_path, head_revision, dirty, dirty_known, last_scan_at)
+             VALUES (1, 'source', '/source', 'head', 0, 1, 0)",
+                [],
+            )
+            .expect("source");
+        let mut check = CachedUpdateCheck {
+            source_id: 1,
+            checked_at: 1000,
+            generation: 10,
+            local_revision: "head".into(),
+            local_reference: Some("refs/heads/main".into()),
+            upstream_ref: None,
+            upstream_revision: None,
+            merge_base: None,
+            ahead: 0,
+            behind: 0,
+            dirty: false,
+            dirty_known: true,
+            verdict: RepositoryUpdateVerdict::UpToDate,
+            detail: String::new(),
+        };
+        for code in [
+            "update.apply_failed",
+            "update.verification_failed",
+            "update.verification_incomplete",
+        ] {
+            let mut failure = check.clone();
+            failure.generation = 20;
+            failure.verdict = RepositoryUpdateVerdict::Blocked;
+            failure.detail = crate::updates::encode_findings(&[crate::inventory::Finding::new(
+                code,
+                crate::inventory::FindingSeverity::Critical,
+                "earlier failure".into(),
+            )]);
+            store
+                .record_update_check(&failure)
+                .expect("earlier failure");
+            store
+                .record_verified_update_check(&check, 30)
+                .expect("later success");
+            let stored = &store.update_checks().unwrap()[0];
+            assert_eq!(stored.verdict, RepositoryUpdateVerdict::UpToDate);
+            assert_eq!(stored.generation, 10);
+        }
+        // A check reserved before verification finished can persist after it.
+        let mut available = check.clone();
+        available.generation = 20;
+        available.verdict = RepositoryUpdateVerdict::Available;
+        available.behind = 1;
+        store
+            .record_update_checks(&[available])
+            .expect("delayed explicit check");
+        store
+            .record_verified_update_check(&check, 30)
+            .expect("success after explicit check");
+        assert_eq!(
+            store.update_checks().unwrap()[0].verdict,
+            RepositoryUpdateVerdict::Available
+        );
+
+        // A failure observed after this verification must not be cleared.
+        let mut later = check.clone();
+        later.generation = 40;
+        later.verdict = RepositoryUpdateVerdict::Blocked;
+        later.detail = "update.verification_failed|later failure".into();
+        store.record_update_check(&later).expect("later failure");
+        store
+            .record_verified_update_check(&check, 30)
+            .expect("delayed success");
+        assert_eq!(store.update_checks().unwrap()[0].generation, 40);
+        // Unrelated blocked checks are still explicit observations, not an
+        // earlier failed write this success can answer for.
+        check.generation = 50;
+        check.verdict = RepositoryUpdateVerdict::Blocked;
+        check.detail = "source.fetch_failed|network failed".into();
+        store.record_update_check(&check).expect("blocked check");
+        let mut success = check.clone();
+        success.generation = 10;
+        success.verdict = RepositoryUpdateVerdict::UpToDate;
+        success.detail.clear();
+        store
+            .record_verified_update_check(&success, 60)
+            .expect("success");
+        assert_eq!(store.update_checks().unwrap()[0].detail, check.detail);
     }
 
     #[test]
@@ -1500,6 +1830,19 @@ const MIGRATIONS: &[Migration] = &[
               );
               INSERT OR IGNORE INTO source_id_sequence (singleton, next_id)
               SELECT 1, COALESCE(MAX(id), 0) + 1 FROM source_repositories;",
+    },
+    Migration {
+        version: 11,
+        destructive: false,
+        // `checked_at` used to order these writes as well as date them, which
+        // is why the seed is the value each row already holds: those are the
+        // generations its checks were recorded under, and
+        // `reserve_update_check_generations` reads them as its high-water
+        // mark. Seeding a constant instead would put every upgraded row at the
+        // same point in the order, where one of them displaces the rest.
+        sql: "ALTER TABLE source_update_checks
+                ADD COLUMN generation INTEGER NOT NULL DEFAULT 0;
+              UPDATE source_update_checks SET generation = checked_at;",
     },
 ];
 
@@ -1733,6 +2076,47 @@ mod migration_tests {
             2
         );
         assert!(connection.prepare("SELECT * FROM legacy").is_err());
+    }
+
+    /// A check recorded before the ordering generation had a column of its own
+    /// was ordered by the value it was dated with, so that value is the
+    /// generation it carries. Seeding the column with anything else — zero,
+    /// most obviously — would put every upgraded row behind the next check to
+    /// be reserved, which is harmless, or ahead of it, which silently drops
+    /// results.
+    #[test]
+    fn upgrading_seeds_each_checks_generation_from_the_value_that_ordered_it() {
+        let temporary = tempfile::tempdir().expect("temporary data directory");
+        let database = temporary.path().join("skilled.sqlite3");
+        let mut connection = Connection::open(&database).expect("create database");
+        let before: Vec<Migration> = MIGRATIONS
+            .iter()
+            .copied()
+            .filter(|migration| migration.version < 11)
+            .collect();
+        migrate_with(&mut connection, &database, &before).expect("migrate to schema 10");
+        connection
+            .execute_batch(
+                "INSERT INTO source_repositories
+                    (id, label, canonical_path, head_revision, dirty, dirty_known, last_scan_at)
+                 VALUES (1, 'source', '/source', 'head', 0, 1, 0);
+                 INSERT INTO source_update_checks
+                    (source_id, checked_at, local_revision, ahead, behind, dirty, dirty_known,
+                     verdict, detail)
+                 VALUES (1, 9000, 'head', 0, 0, 0, 1, 'up_to_date', '');",
+            )
+            .expect("check recorded before the generation column existed");
+
+        migrate_with(&mut connection, &database, MIGRATIONS)
+            .expect("migrate to the current schema");
+
+        assert_eq!(
+            connection
+                .query_row("SELECT generation FROM source_update_checks", [], |row| row
+                    .get::<_, i64>(0))
+                .expect("read seeded generation"),
+            9000
+        );
     }
 
     #[test]
