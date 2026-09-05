@@ -198,10 +198,36 @@ impl RepositoryUpdateVerdict {
     }
 }
 
+/// When a recorded check ran, and where its record sits in the write order.
+///
+/// The two were one value, and the double duty cost the store a record it
+/// reported as stored. The conditional upserts keep an older result from
+/// displacing a newer one, so whatever they compare has to be allocated — one
+/// value per write, never reused, always ahead of what came before. A time is
+/// none of those things: the post-apply verification record follows the check
+/// it verifies without a check of its own having run, so dating it now would
+/// claim a check that never happened, and dating it with the check's own value
+/// puts it behind anything a second Skilled process recorded while the preview
+/// was open — where the upsert declines it, reports success, and takes an
+/// `update.verification_failed` down with it.
+///
+/// Split, each value answers only for itself. [`Self::checked_at`] is what
+/// Updates states and nothing orders by; [`Self::generation`] is what the store
+/// hands out and nothing displays.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CheckStamp {
+    /// The wall clock when the check that this record reports on ran.
+    pub checked_at: i64,
+    /// The store-allocated ordering value the conditional upserts compare.
+    pub generation: i64,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CachedUpdateCheck {
     pub source_id: i64,
     pub checked_at: i64,
+    /// The write-ordering generation; see [`CheckStamp`].
+    pub generation: i64,
     pub local_revision: String,
     pub local_reference: Option<String>,
     pub upstream_ref: Option<String>,
@@ -331,7 +357,7 @@ pub(crate) fn cached_update_check(
     source: &RegisteredSource,
     probe: &RepositoryUpdateProbe,
     inventory: &InventorySnapshot,
-    checked_at: i64,
+    stamp: CheckStamp,
     cancelled: &AtomicBool,
 ) -> Option<CachedUpdateCheck> {
     let (mut verdict, mut findings) = classify_repository_update(probe);
@@ -390,7 +416,8 @@ pub(crate) fn cached_update_check(
     let dirtiness_withheld = probe.worktree.is_some() && observed_dirty.is_none();
     Some(CachedUpdateCheck {
         source_id: source.id(),
-        checked_at,
+        checked_at: stamp.checked_at,
+        generation: stamp.generation,
         local_revision: probe
             .local
             .as_ref()
