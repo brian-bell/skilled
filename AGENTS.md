@@ -14,7 +14,7 @@ view, degraded read-only startup when private metadata is unavailable,
 installation, receipt-backed repair of incorrect or dangling links,
 guarded uninstall, metadata-only Forget Source, and explicit repository update
 checks with guarded fast-forwards — each previewed, confirmed, rescanned, and
-verified — are implemented.
+verified — are implemented, as is the testable 0.2.0 Cargo release identity.
 
 Filesystem mutation stays narrow. Installation creates one directory symbolic
 link per agent and may create the documented skill root when its own parent
@@ -50,11 +50,14 @@ SSH remotes, OpenSSH 8.4 or newer.
 
 ```bash
 cargo run
+cargo run -- --version
 cargo run -- install --source <id-or-path> --skill <name> --agents claude-code
 cargo run -- uninstall --skill <name> --agent claude-code
 cargo run -- repair --skill <name> --agent claude-code
 cargo build --release
 cargo test --all-targets
+cargo package --locked
+cargo test --test release_package -- --ignored
 cargo fmt --check
 cargo clippy --all-targets --all-features -- -D warnings
 ```
@@ -114,8 +117,9 @@ signal needs both, because colour alone is not an acceptable cue.
   paths, plus the session identity (user, host, operating system) gathered
   once at startup — every segment optional, omitted rather than invented, and
   injected by tests so they never read the real environment.
-- `src/main.rs`: no arguments runs the interactive application; anything else is
-  a command, reported through an exit status.
+- `src/main.rs`: `--version` reports the package identity before process
+  environment discovery; no arguments runs the interactive application, and
+  anything else is a command reported through an exit status.
 
 ## Invariants
 
@@ -292,7 +296,14 @@ signal needs both, because colour alone is not an acceptable cue.
   verification. The confirmation gate covers the complete plan statement, the
   incoming commit summaries included, because those are what the fast-forward
   brings in; the untruncated changed-file listing is non-gating evidence below
-  it. A disclosed removal is verified as the same link, raw target included,
+  it. Where the fast-forward *started* is verified too, not only where it
+  landed: `merge --ff-only` takes no expected-current-revision, so a branch
+  another process moved between the guard and the write can land on the
+  previewed object having applied a range nobody was shown. The log entry the
+  merge left on the branch names its starting point, and a start other than
+  the previewed revision is a verification failure; a repository that logs no
+  reference updates leaves the check withheld rather than passed.
+  A disclosed removal is verified as the same link, raw target included,
   and not merely as some dangling entry under the same name. Every other
   installation is held to the same test: a fast-forward writes inside the
   repository and nowhere near an agent root, so a link whose raw target changed
@@ -322,7 +333,17 @@ signal needs both, because colour alone is not an acceptable cue.
   directory, which Git's untracked and ignored lists never name because they
   name files. The link would then resolve to something that is not a skill
   rather than losing its target, so the preview cannot state what the write
-  would do. The worktree half is a live read, so the apply guard asks it again
+  would do. One object is the exception, because there the outcome is exact
+  rather than unknown: a regular file the target revision keeps at the candidate
+  itself. The link keeps precisely the target it has and that target stops being
+  a skill, so the plan states the type change on its own line — `target stops
+  being a skill · <name>`, never as a removal — and verification holds the
+  update to the same link resolving to content no agent can load. A symbolic
+  link and a submodule stay refusals: Git records a link as a blob too, and
+  where it leads is exactly what the plan cannot state. The worktree is still
+  asked for a disclosed type change, because an occupant both keeps the
+  directory standing and stops Git writing a file at that path at all.
+  The worktree half is a live read, so the apply guard asks it again
   over the worktree as it then stands: an occupant that arrived after the
   preview refuses the write rather than being applied. Under the apply guard
   that walk is descriptor-bound on Linux and macOS — it descends from the pinned
@@ -339,7 +360,12 @@ signal needs both, because colour alone is not an acceptable cue.
   check. Both `Effect::CheckUpdates` and `Effect::PlanRepositoryUpdate` rescan
   the roots first, because a check and the preview that follows it decide the
   same installation-dependent findings and a link made while the application
-  stayed open would otherwise be in one and not the other. Whether the document
+  stayed open would otherwise be in one and not the other. The confirmed apply
+  rescans them a last time and refuses a plan whose affected installations no
+  longer match that reading — the dialog and the typed command alike — because
+  the preview's set was read before the confirmation waited, and a link created
+  in that window would otherwise be found only by the post-write scan, once the
+  repository had already moved. Whether the document
   the target keeps is a *valid* skill is not read — `skilled-3o5` has that. A
   rename names the installations it leaves without a target alongside the pair
   of skill names, because a link installed under a name of its own is not named
