@@ -155,9 +155,12 @@ narrowing is what remains.
 
 The explicit check suppresses hooks and monitors and refuses observed
 checkout-configured transport programs, within the concurrency boundaries below.
-Hooks are pointed at the null device, `core.fsmonitor` is turned off on every inspection — it is an
-executable Git runs for `status` and `fetch` alike, and `core.hooksPath` does
-not reach it — and the partial-clone refusal is re-asked before the preview's
+Traditional hooks are pointed at the null device and the
+`reference-transaction` event is disabled, so configured hooks cannot bypass
+the directory override. `core.fsmonitor` is turned off on every inspection —
+it is an executable Git runs for `status` and `fetch` alike, and
+`core.hooksPath` does not reach it — and the partial-clone refusal is re-asked
+before the preview's
 object reads and again in the apply guard, rather than remembered from the
 check, so neither can make Git fetch lazily. The reads that follow the write
 are covered by that refusal too, asked once more at the boundary between the

@@ -259,6 +259,7 @@ fn an_update_check_runs_no_reference_transaction_hook() {
     let fixture = fixture();
     let sentinel = fixture._temporary.path().join("hook-ran");
     let hook = fixture.clone.join(".git/hooks/reference-transaction");
+    std::fs::create_dir_all(hook.parent().expect("hook directory")).expect("hook directory");
     std::fs::write(
         &hook,
         format!("#!/bin/sh\ntouch '{}'\n", sentinel.display()),
@@ -287,13 +288,53 @@ fn an_update_check_runs_no_reference_transaction_hook() {
         .permissions();
     permissions.set_mode(0o755);
     std::fs::set_permissions(&planted, permissions).expect("executable planted hook");
+    // Git 2.55 introduced configured hooks, which do not use the hooks
+    // directory at all. The event-level override must suppress both kinds of
+    // reference-transaction hook while the check publishes its observation.
+    git(
+        &fixture.clone,
+        &[
+            "config",
+            "hook.audit.command",
+            &format!("echo invoked >> '{}'", sentinel.display()),
+        ],
+    );
+    git(
+        &fixture.clone,
+        &[
+            "config",
+            "--add",
+            "hook.audit.event",
+            "reference-transaction",
+        ],
+    );
+    // An empty event resets the configured list; a later local event restores
+    // this hook's reachability.
+    git(&fixture.clone, &["config", "--add", "hook.audit.event", ""]);
+    git(
+        &fixture.clone,
+        &[
+            "config",
+            "--add",
+            "hook.audit.event",
+            "reference-transaction",
+        ],
+    );
+    // A repository-level enable must not undo the command-line event disable.
+    git(
+        &fixture.clone,
+        &["config", "hook.reference-transaction.enabled", "true"],
+    );
     let target = push_update(&fixture, "skills/demo/new.txt");
 
     let probe = probe_repository_update(&fixture.app.sources()[0], true);
     let (verdict, _) = classify_repository_update(&probe);
 
     assert_eq!(verdict, RepositoryUpdateVerdict::Available);
-    assert!(!sentinel.exists(), "the check ran a repository hook");
+    assert!(
+        !sentinel.exists(),
+        "the check ran a reference-transaction hook"
+    );
     // The tracking ref still has to advance: suppressing hooks may not turn the
     // fetch into one that observes nothing.
     assert_eq!(
