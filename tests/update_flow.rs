@@ -1823,6 +1823,7 @@ fn a_guard_refusal_caches_the_current_blocker_not_a_failed_postcondition() {
         .perform_effects(&[Effect::PlanRepositoryUpdate])
         .expect("plan update");
     let checked_at = fixture.app.update_checks()[0].checked_at;
+    let generation = fixture.app.update_checks()[0].generation;
     std::fs::write(
         fixture.clone.join("skills/demo/old.txt"),
         "late local edit\n",
@@ -1839,12 +1840,15 @@ fn a_guard_refusal_caches_the_current_blocker_not_a_failed_postcondition() {
     // observation than the check it refused on behalf of. Recording it under
     // the earlier generation would leave it losing the conditional upsert to
     // anything another process wrote in between, and the blocker would be
-    // dropped by a store that reported success.
+    // dropped by a store that reported success. It is still the check that
+    // ran which the record is dated by: the guard read the checkout, it did
+    // not check for an update.
     assert!(
-        fixture.app.update_checks()[0].checked_at > checked_at,
-        "{} is not later than {checked_at}",
-        fixture.app.update_checks()[0].checked_at
+        fixture.app.update_checks()[0].generation > generation,
+        "{} is not later than {generation}",
+        fixture.app.update_checks()[0].generation
     );
+    assert_eq!(fixture.app.update_checks()[0].checked_at, checked_at);
     assert!(findings.iter().any(|finding| {
         finding.code() == "source.changed_after_preview"
             && finding.evidence().contains("check updates again")
@@ -2886,7 +2890,9 @@ fn an_update_check_writes_only_the_tracking_ref() {
 /// so it must outrank anything another Skilled process recorded while the
 /// preview was open. Reusing the earlier check's generation would have the
 /// conditional upsert decline it and report success, and the failure would
-/// exist nowhere once the report is dismissed.
+/// exist nowhere once the report is dismissed. Outranking is the ordering
+/// generation's job alone: the record still states when the check ran, because
+/// no check ran after the write.
 #[test]
 fn a_verification_failure_outranks_a_check_another_process_ran_meanwhile() {
     use std::os::unix::fs::PermissionsExt;
@@ -2936,8 +2942,9 @@ fn a_verification_failure_outranks_a_check_another_process_ran_meanwhile() {
         .perform_effects(&[Effect::CheckUpdates])
         .expect("second process check");
     finish_update_check(&mut other);
-    let meanwhile = other.update_checks()[0].checked_at;
+    let meanwhile = other.update_checks()[0].generation;
 
+    let checked_at = fixture.app.update_checks()[0].checked_at;
     fixture
         .app
         .perform_effects(&[Effect::ApplyRepositoryUpdate])
@@ -2946,9 +2953,13 @@ fn a_verification_failure_outranks_a_check_another_process_ran_meanwhile() {
     let reopened = SkilledApp::open(environment).expect("reopen app");
     let stored = &reopened.update_checks()[0];
     assert!(
-        stored.checked_at > meanwhile,
+        stored.generation > meanwhile,
         "{} did not outrank {meanwhile}",
-        stored.checked_at
+        stored.generation
+    );
+    assert_eq!(
+        stored.checked_at, checked_at,
+        "the record states a check time no check ran at"
     );
     assert_eq!(stored.verdict, RepositoryUpdateVerdict::Blocked);
     assert!(
@@ -2983,7 +2994,7 @@ fn a_later_verified_apply_clears_another_processes_earlier_apply_failure() {
         .app
         .perform_effects(&[Effect::PlanRepositoryUpdate])
         .expect("plan");
-    let planned_at = fixture.app.update_checks()[0].checked_at;
+    let planned_at = fixture.app.update_checks()[0].generation;
 
     // The second process reaches Git, but signature policy rejects the
     // unsigned fixture commit without advancing HEAD. Its failure is newer
@@ -3004,7 +3015,7 @@ fn a_later_verified_apply_clears_another_processes_earlier_apply_failure() {
         .perform_effects(&[Effect::ApplyRepositoryUpdate])
         .expect("failed apply");
     let failure = &other.update_checks()[0];
-    assert!(failure.checked_at > planned_at);
+    assert!(failure.generation > planned_at);
     assert!(
         failure
             .findings()
@@ -3096,7 +3107,7 @@ fn a_verified_apply_keeps_a_concurrent_availability(ordering: ConcurrentCheck) {
         .perform_effects(&[Effect::CheckUpdates])
         .expect("start check");
     finish_update_check(&mut fixture.app);
-    let planned_at = fixture.app.update_checks()[0].checked_at;
+    let planned_at = fixture.app.update_checks()[0].generation;
     fixture
         .app
         .perform_effects(&[Effect::PlanRepositoryUpdate])
@@ -3170,9 +3181,9 @@ fn a_verified_apply_keeps_a_concurrent_availability(ordering: ConcurrentCheck) {
     assert_eq!(meanwhile.local_revision, target);
     assert_eq!(meanwhile.upstream_revision.as_deref(), Some(later.as_str()));
     assert!(
-        meanwhile.checked_at > planned_at,
+        meanwhile.generation > planned_at,
         "{} is not later than {planned_at}",
-        meanwhile.checked_at
+        meanwhile.generation
     );
 
     let reopened = SkilledApp::open(environment).expect("reopen app");

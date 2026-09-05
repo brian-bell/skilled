@@ -112,10 +112,10 @@ fn the_exact_cargo_package_installs_and_honors_the_release_contract() {
 
 #[test]
 fn visible_text_joins_a_wrapped_schema_refusal() {
-    let recorded = "application metadata schema\r\n\u{1b}[0m99 is newer than supported schema 10.";
+    let recorded = "application metadata schema\r\n\u{1b}[0m99 is newer than supported schema 11.";
     let visible = visible_text(recorded);
     assert!(
-        visible.contains("application metadata schema 99 is newer than supported schema 10"),
+        visible.contains("application metadata schema 99 is newer than supported schema 11"),
         "{visible}"
     );
     assert!(future_schema_refusal_is_visible(&visible), "{visible}");
@@ -126,14 +126,14 @@ fn future_schema_gate_accepts_csi_glued_schema_version() {
     // macOS Application Support paths wrap so `schema` ends a row and `99`
     // starts the next, separated by CSI cursor addressing rather than
     // whitespace. After CSI strip the tokens glue to `schema99`.
-    let recorded = "application metadata schema\u{1b}[8;1H99 is newer than supported schema 10.";
+    let recorded = "application metadata schema\u{1b}[8;1H99 is newer than supported schema 11.";
     let visible = visible_text(recorded);
     assert!(
         visible.contains("schema99"),
         "CSI-stripped recording should glue the wrapped tokens: {visible}"
     );
     assert!(
-        !visible.contains("application metadata schema 99 is newer than supported schema 10"),
+        !visible.contains("application metadata schema 99 is newer than supported schema 11"),
         "the glued recording must not satisfy the old spanning phrase: {visible}"
     );
     assert!(
@@ -147,7 +147,7 @@ fn future_schema_gate_accepts_csi_glued_schema_version() {
 /// and `99` at the start of the next, with CSI cursor addressing and no
 /// whitespace between them; after CSI strip those tokens glue to `schema99`.
 fn future_schema_refusal_is_visible(visible: &str) -> bool {
-    visible.contains("99 is newer than supported schema 10")
+    visible.contains("99 is newer than supported schema 11")
         && visible.contains("application metadata schema")
 }
 
