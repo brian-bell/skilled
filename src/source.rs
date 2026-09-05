@@ -417,6 +417,13 @@ impl InspectedSource {
         self.repository_identity.as_ref()
     }
 
+    /// Attach an identity independently compared against the stored registration.
+    /// This does not refresh the stored object-dependent observations.
+    pub(crate) fn with_repository_identity(mut self, identity: RepositoryIdentity) -> Self {
+        self.repository_identity = Some(identity);
+        self
+    }
+
     /// The same inspection with its identity withheld: what was read at the
     /// path, minus the claim that it is the registered repository. The store
     /// hands this out for rows that recorded no identity, where that claim
