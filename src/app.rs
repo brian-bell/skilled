@@ -669,7 +669,21 @@ fn open_metadata(data_dir: &Path) -> MetadataStartup {
     }
 }
 
+/// Independently remembered list windows, measured in entries rather than terminal rows.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ListWindow {
+    Inventory,
+    Doctor,
+    Sources,
+    Updates,
+}
+
+impl ListWindow {
+    pub const ALL: [Self; 4] = [Self::Inventory, Self::Doctor, Self::Sources, Self::Updates];
+}
+
 pub struct SkilledApp {
+    list_window_starts: [usize; 4],
     view: View,
     metadata: Metadata,
     registry_availability: RegistryAvailability,
@@ -809,6 +823,7 @@ impl SkilledApp {
             source_error: None,
             focused_catalog: 0,
             sources_pane: SourcesPane::Repositories,
+            list_window_starts: [0; 4],
             focused_source: 0,
             focused_variant: 0,
             update_checks,
@@ -1348,6 +1363,17 @@ impl SkilledApp {
     /// How far the detail region's window has been scrolled, in lines.
     pub fn detail_scroll(&self) -> usize {
         self.detail_scroll
+    }
+
+    pub fn list_window_start(&self, list: ListWindow) -> usize {
+        self.list_window_starts[list as usize]
+    }
+
+    /// Keep the window actually drawn. An undrawn list has no new measurement.
+    pub fn note_list_window_start(&mut self, list: ListWindow, start: Option<usize>) {
+        if let Some(start) = start {
+            self.list_window_starts[list as usize] = start;
+        }
     }
 
     /// Record what the frame just drawn measured the detail region's scrollable

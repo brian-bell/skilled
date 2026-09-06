@@ -32,6 +32,9 @@ pub fn run(environment: AppEnvironment) -> Result<()> {
         // where the region is off screen. That the frame measured nothing is
         // itself reported, so a dialog the terminal was too small to draw
         // cannot be confirmed on the strength of an earlier frame's extent.
+        for list in crate::app::ListWindow::ALL {
+            app.note_list_window_start(list, feedback.list_window_start(list));
+        }
         app.note_detail_max_scroll(feedback.detail_max_scroll());
         app.note_update_preview_fully_seen(feedback.update_preview_fully_seen());
         let event = if app.update_check_in_flight() {

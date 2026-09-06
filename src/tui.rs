@@ -10,7 +10,7 @@ use ratatui::{
 use crate::{
     AgentKind, DoctorItem, DoctorPane, InventoryPane, RegistryAvailability, SessionIdentity,
     SetupStep, SkilledApp, SourcesPane, UpdatesPane, View,
-    app::{MAX_INVENTORY_FILTER, SourceRow, catalog_rows},
+    app::{ListWindow, MAX_INVENTORY_FILTER, SourceRow, catalog_rows},
     components::{self, KeyHint, terminal_safe},
     inventory::{
         Finding, FindingSeverity, InstallationHealth, InstallationObject,
@@ -45,11 +45,17 @@ pub const MINIMUM_HEIGHT: u16 = 24;
 /// filesystem work.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct RenderFeedback {
+    list_window_starts: [Option<usize>; 4],
     detail_max_scroll: Option<usize>,
     update_preview_fully_seen: Option<bool>,
 }
 
 impl RenderFeedback {
+    /// Entry offset used by a list this frame, or `None` when it was not drawn.
+    pub fn list_window_start(self, list: ListWindow) -> Option<usize> {
+        self.list_window_starts[list as usize]
+    }
+
     /// The furthest the Inventory detail region could be scrolled and still
     /// show rows that were not already visible: zero where it holds everything
     /// it has, and `None` where this frame did not draw it at all and so
@@ -122,14 +128,15 @@ pub fn render(frame: &mut Frame<'_>, app: &SkilledApp) -> RenderFeedback {
     // The grid's rules answer to the same height the chrome bars measure, so
     // the workspace and the bars agree about which terminal is tall.
     let airy = viewport::airy_rows(area.height);
+    let mut feedback = RenderFeedback::default();
     match app.view() {
         View::Setup(step) => render_setup(frame, body, app, step),
-        View::Inventory => render_inventory(frame, body, app, airy),
-        View::Sources => render_sources(frame, body, app),
-        View::Updates => render_updates(frame, body, app),
-        View::Doctor => render_doctor(frame, body, app, &findings),
+        View::Inventory => render_inventory(frame, body, app, airy, &mut feedback),
+        View::Sources => render_sources(frame, body, app, &mut feedback),
+        View::Updates => render_updates(frame, body, app, &mut feedback),
+        View::Doctor => render_doctor(frame, body, app, &findings, &mut feedback),
         View::Settings => {
-            render_inventory(frame, body, app, airy);
+            render_inventory(frame, body, app, airy, &mut feedback);
             render_settings(frame, body, app);
         }
     }
@@ -198,6 +205,7 @@ pub fn render(frame: &mut Frame<'_>, app: &SkilledApp) -> RenderFeedback {
     RenderFeedback {
         detail_max_scroll: detail_extent,
         update_preview_fully_seen: update_preview_seen,
+        ..feedback
     }
 }
 
@@ -1017,14 +1025,20 @@ fn setup_lines(app: &SkilledApp, step: SetupStep, width: u16) -> Vec<Line<'stati
 /// A wide terminal shows the table and the detail region together; a compact
 /// one shows whichever region has focus, so `Enter` is a drill-in and `Esc`
 /// comes back.
-fn render_inventory(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp, airy: bool) {
+fn render_inventory(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &SkilledApp,
+    airy: bool,
+    feedback: &mut RenderFeedback,
+) {
     match viewport::workspace_regions(area) {
         (primary, Some(detail)) => {
-            render_inventory_skills(frame, primary, app, airy);
+            render_inventory_skills(frame, primary, app, airy, feedback);
             render_inventory_detail(frame, detail, app, true);
         }
         (primary, None) => match app.inventory_pane() {
-            InventoryPane::Skills => render_inventory_skills(frame, primary, app, airy),
+            InventoryPane::Skills => render_inventory_skills(frame, primary, app, airy, feedback),
             InventoryPane::Details => render_inventory_detail(frame, primary, app, false),
         },
     }
@@ -1187,7 +1201,13 @@ fn inventory_columns(width: u16) -> InventoryColumns {
     }
 }
 
-fn render_inventory_skills(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp, airy: bool) {
+fn render_inventory_skills(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &SkilledApp,
+    airy: bool,
+    feedback: &mut RenderFeedback,
+) {
     let rows = app.filtered_rows();
     // The prototype's pane header keeps clearance above its content as well
     // as beneath it (`.pane-header`, spec/tui-prototype.html:167: `min-height:
@@ -1271,6 +1291,7 @@ fn render_inventory_skills(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp, 
             components::empty_state("⌕", &headline, &explanation, region),
             region,
         );
+        feedback.list_window_starts[ListWindow::Inventory as usize] = Some(0);
         return;
     }
 
@@ -1300,7 +1321,13 @@ fn render_inventory_skills(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp, 
     } else {
         available
     };
-    let start = visible_window_start(app.focused_installation(), capacity);
+    let start = visible_window_start(
+        app.list_window_start(ListWindow::Inventory),
+        app.focused_installation(),
+        capacity,
+        rows.len(),
+    );
+    feedback.list_window_starts[ListWindow::Inventory as usize] = Some(start);
     for (index, row) in rows.iter().enumerate().skip(start).take(capacity) {
         lines.push(inventory_row_line(
             row,
@@ -1701,14 +1728,20 @@ fn inventory_empty_state(app: &SkilledApp) -> (String, String) {
 }
 
 /// Doctor: every finding the last scan holds, and what one of them is about.
-fn render_doctor(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp, findings: &[DoctorItem<'_>]) {
+fn render_doctor(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &SkilledApp,
+    findings: &[DoctorItem<'_>],
+    feedback: &mut RenderFeedback,
+) {
     match viewport::workspace_regions(area) {
         (primary, Some(detail)) => {
-            render_doctor_findings(frame, primary, app, findings);
+            render_doctor_findings(frame, primary, app, findings, feedback);
             render_doctor_detail(frame, detail, app, findings, true);
         }
         (primary, None) => match app.doctor_pane() {
-            DoctorPane::Findings => render_doctor_findings(frame, primary, app, findings),
+            DoctorPane::Findings => render_doctor_findings(frame, primary, app, findings, feedback),
             DoctorPane::Details => render_doctor_detail(frame, primary, app, findings, false),
         },
     }
@@ -1754,6 +1787,7 @@ fn render_doctor_findings(
     area: Rect,
     app: &SkilledApp,
     findings: &[DoctorItem<'_>],
+    feedback: &mut RenderFeedback,
 ) {
     let body = if let Some(line) = metadata_failure_line(app, area.width) {
         render_pane_scaffold_with_status(
@@ -1785,13 +1819,20 @@ fn render_doctor_findings(
             components::empty_state(glyph, &headline, &explanation, region),
             region,
         );
+        feedback.list_window_starts[ListWindow::Doctor as usize] = Some(0);
         return;
     }
 
     let columns = doctor_columns(body.width);
     let mut lines = vec![doctor_column_headings(columns)];
     let capacity = usize::from(body.height.max(1)).saturating_sub(1);
-    let start = visible_window_start(app.focused_finding(), capacity);
+    let start = visible_window_start(
+        app.list_window_start(ListWindow::Doctor),
+        app.focused_finding(),
+        capacity,
+        findings.len(),
+    );
+    feedback.list_window_starts[ListWindow::Doctor as usize] = Some(start);
     lines.extend(
         findings
             .iter()
@@ -3438,20 +3479,30 @@ const VARIANTS_CONTENT_MAX_WIDTH: usize = 65;
 /// large registries retain the exact textual count instead.
 const UPDATE_PROGRESS_SEGMENT_BUDGET: usize = 12;
 
-fn render_updates(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
+fn render_updates(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &SkilledApp,
+    feedback: &mut RenderFeedback,
+) {
     match viewport::workspace_regions(area) {
         (primary, Some(detail)) => {
-            render_update_candidates(frame, primary, app);
+            render_update_candidates(frame, primary, app, feedback);
             render_update_details(frame, detail, app, true);
         }
         (primary, None) => match app.updates_pane() {
-            UpdatesPane::Candidates => render_update_candidates(frame, primary, app),
+            UpdatesPane::Candidates => render_update_candidates(frame, primary, app, feedback),
             UpdatesPane::Details => render_update_details(frame, primary, app, false),
         },
     }
 }
 
-fn render_update_candidates(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
+fn render_update_candidates(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &SkilledApp,
+    feedback: &mut RenderFeedback,
+) {
     let subtitle = app.stated_update_count().map_or_else(
         || "network access is explicit".to_owned(),
         |count| format!("{count} available · network access is explicit"),
@@ -3474,6 +3525,7 @@ fn render_update_candidates(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp)
             ),
             body,
         );
+        feedback.list_window_starts[ListWindow::Updates as usize] = Some(0);
         return;
     }
     let progress = app.update_check_progress();
@@ -3511,7 +3563,13 @@ fn render_update_candidates(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp)
         )));
     }
     let capacity = usize::from(body.height).saturating_sub(lines.len()).max(1);
-    let start = visible_window_start(app.focused_update(), capacity);
+    let start = visible_window_start(
+        app.list_window_start(ListWindow::Updates),
+        app.focused_update(),
+        capacity,
+        app.sources().len(),
+    );
+    feedback.list_window_starts[ListWindow::Updates as usize] = Some(start);
     for (index, source) in app.sources().iter().enumerate().skip(start).take(capacity) {
         let (status, tone, checked) = match app.update_check_for(source.id()) {
             None => ("not checked".to_owned(), Tone::Inactive, String::new()),
@@ -3943,7 +4001,12 @@ fn visual_rows(lines: Vec<Line<'static>>, width: u16) -> Vec<Line<'static>> {
     rows
 }
 
-fn render_sources(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
+fn render_sources(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &SkilledApp,
+    feedback: &mut RenderFeedback,
+) {
     match viewport::workspace_regions(area) {
         (primary, Some(details)) => {
             // A region that opens on a rule is set in from it, the way the
@@ -3957,19 +4020,24 @@ fn render_sources(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
             ])
             .areas(primary);
             render_region_separator(frame, separator);
-            render_source_repositories(frame, repositories, app);
+            render_source_repositories(frame, repositories, app, feedback);
             render_source_variants(frame, variants, app, true);
             render_source_details(frame, details, app, true);
         }
         (primary, None) => match app.sources_pane() {
-            SourcesPane::Repositories => render_source_repositories(frame, primary, app),
+            SourcesPane::Repositories => render_source_repositories(frame, primary, app, feedback),
             SourcesPane::Variants => render_source_variants(frame, primary, app, false),
             SourcesPane::Details => render_source_details(frame, primary, app, false),
         },
     }
 }
 
-fn render_source_repositories(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
+fn render_source_repositories(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &SkilledApp,
+    feedback: &mut RenderFeedback,
+) {
     let metadata_unavailable = app.registry_availability() == RegistryAvailability::Unavailable;
     let subtitle = if metadata_unavailable {
         "registry unavailable".to_owned()
@@ -4011,6 +4079,7 @@ fn render_source_repositories(frame: &mut Frame<'_>, area: Rect, app: &SkilledAp
             components::empty_state("·", headline, explanation, inner),
             inner,
         );
+        feedback.list_window_starts[ListWindow::Sources as usize] = Some(0);
         return;
     }
 
@@ -4018,7 +4087,13 @@ fn render_source_repositories(frame: &mut Frame<'_>, area: Rect, app: &SkilledAp
     // as it has rows. A pane too short for one still shows the top of the
     // focused entry rather than nothing.
     let capacity = (usize::from(inner.height) / REPOSITORY_ENTRY_LINES).max(1);
-    let start = visible_window_start(app.focused_source(), capacity);
+    let start = visible_window_start(
+        app.list_window_start(ListWindow::Sources),
+        app.focused_source(),
+        capacity,
+        app.sources().len(),
+    );
+    feedback.list_window_starts[ListWindow::Sources as usize] = Some(start);
     let lines = app
         .sources()
         .iter()
@@ -5144,8 +5219,21 @@ fn visible_grouped_lines(
     }
 }
 
-fn visible_window_start(focused: usize, capacity: usize) -> usize {
-    focused.saturating_add(1).saturating_sub(capacity)
+/// Shift only far enough to keep selection visible, filling the window after
+/// content shrinks or capacity grows. Offsets and capacity count list entries.
+fn visible_window_start(previous: usize, focused: usize, capacity: usize, len: usize) -> usize {
+    if len == 0 || capacity == 0 {
+        return 0;
+    }
+    let focused = focused.min(len - 1);
+    let start = previous.min(len.saturating_sub(capacity));
+    if focused < start {
+        focused
+    } else if focused - start >= capacity {
+        focused + 1 - capacity
+    } else {
+        start
+    }
 }
 
 fn render_source_path_entry(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
@@ -7738,6 +7826,34 @@ fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn list_window_clamps_resize_and_content_changes() {
+        // A growing viewport fills its newly available rows near the end.
+        assert_eq!(super::visible_window_start(20, 24, 15, 30), 15);
+        // A shrinking viewport keeps the selected entry visible.
+        assert_eq!(super::visible_window_start(10, 24, 5, 30), 20);
+        assert_eq!(super::visible_window_start(20, 7, 5, 8), 3);
+        assert_eq!(super::visible_window_start(20, 24, 5, 0), 0);
+        assert_eq!(super::visible_window_start(20, 24, 0, 30), 0);
+        for len in 1..35 {
+            for capacity in 1..40 {
+                for focused in 0..len {
+                    for previous in 0..40 {
+                        let start = super::visible_window_start(previous, focused, capacity, len);
+                        assert!(start <= focused && focused - start < capacity);
+                        assert!(start <= len.saturating_sub(capacity));
+                        if previous <= len.saturating_sub(capacity)
+                            && previous <= focused
+                            && focused - previous < capacity
+                        {
+                            assert_eq!(start, previous);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     use super::*;
 
     /// What the narrowest detail region leaves its text: the region less the
