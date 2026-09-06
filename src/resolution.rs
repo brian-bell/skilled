@@ -357,6 +357,10 @@ pub struct OpenCodeEntry {
 }
 
 impl OpenCodeEntry {
+    pub(crate) fn canonical(&self) -> &Path {
+        &self.canonical
+    }
+
     /// The agent whose native root OpenCode reached this through.
     pub fn root(&self) -> AgentKind {
         self.root

@@ -1,0 +1,8 @@
+---
+source: tests/repair_planning.rs
+expression: verdict_rows
+---
+▕──│  Result: Repaired                                                                          │──▏
+▕  │  link replaced and receipt recorded                                                        │  ▏
+▕  │  ! The existing OpenCode conflict remains, as previewed.                                   │  ▏
+▕  │  Repaired and verified                                                          Esc Close  │  ▏

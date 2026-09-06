@@ -1111,6 +1111,12 @@ fn write_repair_report(output: &mut dyn Write, outcome: &RepairOutcome) -> std::
             safe(&step.link_path().display())
         )?;
     }
+    if outcome.verified_standing_conflict() {
+        writeln!(
+            output,
+            "  warning: The existing OpenCode conflict remains, as previewed."
+        )?;
+    }
     if outcome.verification().is_complete() {
         writeln!(
             output,

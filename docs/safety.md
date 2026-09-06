@@ -112,6 +112,16 @@ that writes the checkout's worktree. Opening Updates never fetches.
   its link gone, or Forget Source has just established the described link
   inactive.
 
+- Native OpenCode repair may leave a proven standing conflict only when its
+  predicted canonical directories are a subset of those already visible. A
+  new directory is refused even if the number of directories stays the same.
+  The preview states the remaining conflict and the before/after slots and
+  targets. The supporting roots, entries, and usable content are rechecked
+  before replacement; the fresh scan must match the predicted root, slot, and
+  canonical-directory entries. A later external change can still race those
+  reads, so verification reports disagreement or unavailable evidence rather
+  than claiming a transaction across all agent roots.
+
 - Uninstall never removes an agent root or follows the link it removes. Object
   type, exact receipt, recorded target, and documented-root containment are
   rechecked immediately before unlinking; one failed target stops the run.
