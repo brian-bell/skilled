@@ -674,9 +674,10 @@ impl UpdateOp {
     /// changed, and it is not reached through `core.hooksPath`: pointing the
     /// hook search at the null device leaves it running. Observed on Git 2.50,
     /// it runs during `status` and during `fetch` alike, so a check described
-    /// as reading would execute a repository-supplied command on the way. Every
-    /// inspection therefore turns it off; Git falls back to reading the
-    /// worktree itself, which is what an inspection is entitled to do.
+    /// as reading would execute a repository-supplied command on the way. Git
+    /// 2.55 also permits configured hooks that do not use `core.hooksPath`.
+    /// Every inspection therefore turns the monitor off and disables the one
+    /// hook event an explicit check can cause by publishing a tracking ref.
     ///
     /// The fast-forward is deliberately absent. It hands Git the repository's
     /// own configuration — the same reason a smudge filter may run there — and
@@ -685,7 +686,12 @@ impl UpdateOp {
     fn suppressed_repository_code(&self) -> Vec<OsString> {
         match self {
             Self::Merge(_) => Vec::new(),
-            _ => vec!["-c".into(), "core.fsmonitor=false".into()],
+            _ => vec![
+                "-c".into(),
+                "core.fsmonitor=false".into(),
+                "-c".into(),
+                "hook.reference-transaction.enabled=false".into(),
+            ],
         }
     }
 
@@ -1913,6 +1919,8 @@ fn user_ssh_command_cancellable(
 /// is a scalar, so the last value Git read wins — with the checkout's own
 /// scopes struck out rather than allowed to be that last value. An empty value
 /// is the documented way to configure nothing, and reads as nothing here.
+/// Whitespace remains part of the command: Git does not trim it before
+/// handing it to its shell.
 fn parse_user_ssh_command(bytes: Vec<u8>) -> Option<String> {
     let mut records = bytes
         .split(|byte| *byte == 0)
@@ -1924,7 +1932,7 @@ fn parse_user_ssh_command(bytes: Vec<u8>) -> Option<String> {
             continue;
         }
         let value = entry.split_once('\n').map_or("", |(_, value)| value);
-        command = Some(value.trim().to_owned());
+        command = Some(value.to_owned());
     }
     command.filter(|command| !command.is_empty())
 }
@@ -1987,29 +1995,83 @@ fn parse_windows_unsetenvvars(bytes: Vec<u8>) -> Option<String> {
 /// and `core.gitProxy` spells its own disabling value `none`. Refusing those
 /// would block a repository that has explicitly turned the helper *off*.
 fn parse_transport_settings(bytes: Vec<u8>) -> Option<String> {
+    type TransportEntries = Vec<(Vec<u8>, Vec<u8>)>;
+    type TransportSettings = std::collections::BTreeMap<Vec<u8>, TransportEntries>;
+
     let mut records = bytes
         .split(|byte| *byte == 0)
         .filter(|record| !record.is_empty())
-        .map(String::from_utf8_lossy);
+        .map(|record| record.to_vec());
     // Grouped by key, in the order Git read them: system, then global, then
     // local, then worktree, and within each file the order the file gives.
     // That order is what decides which value survives, so the decision cannot
     // be made one record at a time.
-    let mut settings: std::collections::BTreeMap<String, Vec<(String, String)>> =
-        std::collections::BTreeMap::new();
+    let mut settings = TransportSettings::new();
     while let (Some(scope), Some(entry)) = (records.next(), records.next()) {
         let (name, value) = entry
-            .split_once('\n')
-            .map_or((entry.as_ref(), ""), |(name, value)| (name, value));
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map_or((entry.as_slice(), &[][..]), |separator| {
+                (&entry[..separator], &entry[separator + 1..])
+            });
         settings
-            .entry(name.to_ascii_lowercase())
+            .entry(canonical_transport_setting_key(name))
             .or_default()
-            .push((scope.into_owned(), value.trim().to_owned()));
+            .push((scope, value.to_vec()));
     }
     settings
         .into_iter()
         .find(|(name, entries)| effective_transport_entry(name, entries))
-        .map(|(name, _)| name)
+        .map(|(name, _)| String::from_utf8_lossy(&name).into_owned())
+}
+
+/// The names Git presents for credential helpers contain a URL subsection.
+/// Its scheme and host compare without case, while the rest of the URL — most
+/// notably the path — remains case-sensitive. Keep that distinction in the
+/// grouping key so a real reset is honoured without merging `Repo` and
+/// `repo`.
+fn canonical_transport_setting_key(name: &[u8]) -> Vec<u8> {
+    if !is_credential_helper(name)
+        || name.eq_ignore_ascii_case(b"credential.helper")
+        || name.len() <= b"credential..helper".len()
+    {
+        return name.to_vec();
+    }
+
+    let prefix = b"credential.".len();
+    let suffix = b".helper".len();
+    let url_end = name.len() - suffix;
+    let url = &name[prefix..url_end];
+    let Some(scheme_end) = url.windows(3).position(|bytes| bytes == b"://") else {
+        return name.to_vec();
+    };
+    let authority_start = scheme_end + 3;
+    let authority_end = url[authority_start..]
+        .iter()
+        .position(|byte| matches!(*byte, b'/' | b'?' | b'#'))
+        .map_or(url.len(), |offset| authority_start + offset);
+    let authority = &url[authority_start..authority_end];
+    let host_start = authority
+        .iter()
+        .rposition(|byte| *byte == b'@')
+        .map_or(0, |offset| offset + 1);
+    let host_end = if authority.get(host_start) == Some(&b'[') {
+        authority[host_start..]
+            .iter()
+            .position(|byte| *byte == b']')
+            .map_or(authority.len(), |offset| host_start + offset + 1)
+    } else {
+        authority[host_start..]
+            .iter()
+            .position(|byte| *byte == b':')
+            .map_or(authority.len(), |offset| host_start + offset)
+    };
+
+    let mut key = name.to_vec();
+    key[prefix..prefix + scheme_end].make_ascii_lowercase();
+    key[prefix + authority_start + host_start..prefix + authority_start + host_end]
+        .make_ascii_lowercase();
+    key
 }
 
 /// Whether the value that survives for `name` is a program the repository
@@ -2020,48 +2082,75 @@ fn parse_transport_settings(bytes: Vec<u8>) -> Option<String> {
 /// disable it. Git resolves these three ways, and all three are applied here.
 ///
 /// A credential helper is a *list* that an empty value resets, so only the
-/// entries after the last reset are live. `core.gitProxy` is neither a list
+/// entries after the last reset for that exact key are live. Git applies URL
+/// context matching after that; this parser conservatively refuses every
+/// surviving repository-scoped URL helper rather than trying to reconstruct
+/// the fetch's credential context. `core.gitProxy` is neither a list
 /// nor a scalar: it may appear many times, each optionally suffixed `for
 /// DOMAIN`, and Git uses the *first* entry whose domain matches — so a proxy
 /// command aimed at the upstream host followed by an unconditional `none`
 /// leaves the command in force for that host. Modelling that matching would
 /// mean deciding which host the fetch resolves to, so every applicable entry
 /// is treated as live instead and any repository-scoped proxy command refuses.
-/// Everything else is a scalar whose last value wins outright.
+/// `remote.<name>.uploadpack` is first-value-wins; the remaining executable
+/// scalar settings use their last value.
 ///
 /// Either way, a live entry is a refusal only when it is the repository's own.
-fn effective_transport_entry(name: &str, entries: &[(String, String)]) -> bool {
-    let live: &[(String, String)] = if is_credential_helper(name) {
+fn effective_transport_entry(name: &[u8], entries: &[(Vec<u8>, Vec<u8>)]) -> bool {
+    let live: &[(Vec<u8>, Vec<u8>)] = if is_credential_helper(name) {
         let reset = entries
             .iter()
             .rposition(|(_, value)| value.is_empty())
             .map_or(0, |index| index + 1);
         &entries[reset..]
-    } else if name.eq_ignore_ascii_case("core.gitproxy") {
+    } else if name.eq_ignore_ascii_case(b"core.gitproxy") {
         entries
+    } else if is_upload_pack(name) {
+        entries.first().map_or(&[][..], std::slice::from_ref)
     } else {
         entries.last().map_or(&[][..], std::slice::from_ref)
     };
     live.iter().any(|(scope, value)| {
-        matches!(scope.as_str(), "local" | "worktree")
+        matches!(scope.as_slice(), b"local" | b"worktree")
             && !transport_setting_is_disabled(name, value)
     })
 }
 
 /// Whether `name` is a credential helper, which Git accumulates as a list
 /// rather than overwriting.
-fn is_credential_helper(name: &str) -> bool {
-    name.starts_with("credential.") && name.ends_with(".helper") || name == "credential.helper"
+fn is_credential_helper(name: &[u8]) -> bool {
+    name.eq_ignore_ascii_case(b"credential.helper")
+        || (name.len() > b"credential..helper".len()
+            && name[..b"credential.".len()].eq_ignore_ascii_case(b"credential.")
+            && name[name.len() - b".helper".len()..].eq_ignore_ascii_case(b".helper"))
+}
+
+/// `remote.<name>.uploadpack` retains its first configuration value.  Remote
+/// subsections are deliberately not normalized: Git treats their identity as
+/// part of the key, including case.
+fn is_upload_pack(name: &[u8]) -> bool {
+    name.len() > b"remote..uploadpack".len()
+        && name[..b"remote.".len()].eq_ignore_ascii_case(b"remote.")
+        && name[name.len() - b".uploadpack".len()..].eq_ignore_ascii_case(b".uploadpack")
 }
 
 /// Whether a transport setting's value is the documented way to turn it off.
-fn transport_setting_is_disabled(name: &str, value: &str) -> bool {
-    if value.is_empty() {
+fn transport_setting_is_disabled(name: &[u8], value: &[u8]) -> bool {
+    // Only these documented settings treat an empty value as an absence of a
+    // command. Other executable settings can reject, or attempt to execute,
+    // an empty value, so they stay conservative refusals.
+    if value.is_empty()
+        && (is_credential_helper(name)
+            || name.eq_ignore_ascii_case(b"core.askpass")
+            || name.eq_ignore_ascii_case(b"core.sshcommand"))
+    {
         return true;
     }
-    // `core.gitProxy` reads `none` as "connect directly"; the other keys have
-    // no non-empty disabling spelling, so any value is a program.
-    name.eq_ignore_ascii_case("core.gitproxy") && value.eq_ignore_ascii_case("none")
+    // `core.gitProxy` reads the exact command `none` as "connect directly",
+    // including before an optional ` for DOMAIN` restriction. The comparison
+    // remains byte-sensitive: neither whitespace nor case is normalized.
+    name.eq_ignore_ascii_case(b"core.gitproxy")
+        && (value == b"none" || value.starts_with(b"none for "))
 }
 
 /// The URL a fetch of `remote` would actually use.
@@ -3707,6 +3796,12 @@ mod tests {
             parse_transport_settings(record(&[("local", "core.gitproxy", "/opt/proxy.sh")])),
             Some("core.gitproxy".to_owned())
         );
+        // Only settings with a documented empty disable form may use it. An
+        // empty VCS field still selects Git's remote helper path.
+        assert_eq!(
+            parse_transport_settings(record(&[("local", "remote.origin.vcs", "")])),
+            Some("remote.origin.vcs".to_owned())
+        );
     }
 
     /// A later record undoes an earlier one, so the decision is about the
@@ -3778,6 +3873,143 @@ mod tests {
             ])),
             None
         );
+        // Generic and URL-specific helpers are separate lists. A reset only
+        // affects the exact configuration key, in either ordering.
+        assert_eq!(
+            parse_transport_settings(record(&[
+                ("local", "credential.helper", ""),
+                (
+                    "local",
+                    "credential.https://example.test/Repo.helper",
+                    "/opt/helper.sh"
+                ),
+            ])),
+            Some("credential.https://example.test/Repo.helper".to_owned())
+        );
+        assert_eq!(
+            parse_transport_settings(record(&[
+                (
+                    "local",
+                    "credential.https://example.test/Repo.helper",
+                    "/opt/helper.sh"
+                ),
+                ("local", "credential.helper", ""),
+            ])),
+            Some("credential.https://example.test/Repo.helper".to_owned())
+        );
+        // Git compares URL schemes and hosts without case, unlike paths. The
+        // later reset therefore clears this helper list.
+        assert_eq!(
+            parse_transport_settings(record(&[
+                (
+                    "local",
+                    "credential.https://EXAMPLE.TEST/Repo.helper",
+                    "/opt/helper.sh"
+                ),
+                ("local", "credential.https://example.test/Repo.helper", ""),
+            ])),
+            None
+        );
+    }
+
+    /// The configuration parser must retain the bytes that distinguish Git's
+    /// credential URL subsections and its proxy disabling spelling.  A
+    /// lossy, lower-cased key or a trimmed value can turn a program Git would
+    /// execute into an apparent reset or `none`.
+    #[test]
+    fn transport_setting_decisions_preserve_key_and_value_bytes() {
+        let record = |pairs: &[(&str, &str, &str)]| {
+            let mut bytes = Vec::new();
+            for (scope, name, value) in pairs {
+                bytes.extend_from_slice(scope.as_bytes());
+                bytes.push(0);
+                bytes.extend_from_slice(name.as_bytes());
+                bytes.push(b'\n');
+                bytes.extend_from_slice(value.as_bytes());
+                bytes.push(0);
+            }
+            bytes
+        };
+
+        // URL paths are case-sensitive. The empty reset for `repo` cannot
+        // erase the helper for the distinct `Repo` credential context.
+        assert_eq!(
+            parse_transport_settings(record(&[
+                (
+                    "local",
+                    "credential.https://example.test/Repo.helper",
+                    "/opt/helper.sh"
+                ),
+                ("local", "credential.https://example.test/repo.helper", ""),
+            ])),
+            Some("credential.https://example.test/Repo.helper".to_owned())
+        );
+        // `none` is Git's exact, byte-sensitive proxy disabling spelling.
+        for value in ["none ", "NONE"] {
+            assert_eq!(
+                parse_transport_settings(record(&[("local", "core.gitproxy", value)])),
+                Some("core.gitproxy".to_owned()),
+                "{value:?} is an executable proxy command"
+            );
+        }
+    }
+
+    /// `remote.<name>.uploadpack` is the one executable scalar whose first
+    /// configuration value wins. Neither a later local reset nor a command
+    /// line value can displace the first value Git selected.
+    #[test]
+    fn upload_pack_uses_its_first_value() {
+        let record = |pairs: &[(&str, &str, &str)]| {
+            let mut bytes = Vec::new();
+            for (scope, name, value) in pairs {
+                bytes.extend_from_slice(scope.as_bytes());
+                bytes.push(0);
+                bytes.extend_from_slice(name.as_bytes());
+                bytes.push(b'\n');
+                bytes.extend_from_slice(value.as_bytes());
+                bytes.push(0);
+            }
+            bytes
+        };
+
+        // The user's first value remains in force; the later checkout value
+        // cannot make it repository-selected.
+        assert_eq!(
+            parse_transport_settings(record(&[
+                (
+                    "global",
+                    "remote.origin.uploadpack",
+                    "/home/user/upload-pack"
+                ),
+                (
+                    "local",
+                    "remote.origin.uploadpack",
+                    "/opt/checkout-upload-pack"
+                ),
+            ])),
+            None
+        );
+        // Conversely, a later command-scope reset cannot hide the checkout's
+        // first value.
+        assert_eq!(
+            parse_transport_settings(record(&[
+                (
+                    "local",
+                    "remote.origin.uploadpack",
+                    "/opt/checkout-upload-pack"
+                ),
+                ("command", "remote.origin.uploadpack", ""),
+            ])),
+            Some("remote.origin.uploadpack".to_owned())
+        );
+        // Remote names have distinct identities, including their case.
+        assert_eq!(
+            parse_transport_settings(record(&[
+                ("local", "remote.Origin.uploadpack", "/opt/first"),
+                ("local", "remote.origin.uploadpack", ""),
+            ])),
+            Some("remote.Origin.uploadpack".to_owned())
+        );
     }
 
     /// `core.gitProxy` is neither a list nor a scalar: Git takes the first
@@ -3809,6 +4041,14 @@ mod tests {
         // A repository that only ever disables it still checks.
         assert_eq!(
             parse_transport_settings(record(&[("local", "core.gitproxy", "none")])),
+            None
+        );
+        assert_eq!(
+            parse_transport_settings(record(&[(
+                "local",
+                "core.gitproxy",
+                "none for example.test"
+            )])),
             None
         );
         // The user's own proxy is theirs, however many entries it has.
@@ -4253,6 +4493,12 @@ mod tests {
             parse_user_ssh_command(record("global", "").into_bytes()),
             None
         );
+        // Whitespace is still part of an executable command, so it must not
+        // be normalized while selecting the trusted value.
+        assert_eq!(
+            parse_user_ssh_command(record("global", " ssh -i key ").into_bytes()),
+            Some(" ssh -i key ".to_owned())
+        );
         assert_eq!(parse_user_ssh_command(Vec::new()), None);
     }
 
@@ -4384,6 +4630,13 @@ mod tests {
                 "{:?}",
                 update.arguments
             );
+            assert!(
+                update.arguments.iter().any(|argument| {
+                    argument == OsStr::new("hook.reference-transaction.enabled=false")
+                }),
+                "{:?}",
+                update.arguments
+            );
         }
     }
 
@@ -4412,14 +4665,25 @@ mod tests {
     /// reach it. A check offered as reading may not execute one; the
     /// fast-forward keeps the repository's own configuration and discloses it.
     #[test]
-    fn inspections_suppress_the_filesystem_monitor_and_the_merge_does_not() {
+    fn inspections_suppress_repository_code_and_the_merge_does_not() {
         for fixture in update_operation_fixtures() {
-            let suppressed = fixture
+            let monitor_suppressed = fixture
                 .arguments
                 .iter()
                 .any(|argument| argument == OsStr::new("core.fsmonitor=false"));
+            let hook_suppressed = fixture
+                .arguments
+                .iter()
+                .any(|argument| argument == OsStr::new("hook.reference-transaction.enabled=false"));
             assert_eq!(
-                suppressed,
+                monitor_suppressed,
+                fixture.subcommand != "merge",
+                "{}: {:?}",
+                fixture.subcommand,
+                fixture.arguments
+            );
+            assert_eq!(
+                hook_suppressed,
                 fixture.subcommand != "merge",
                 "{}: {:?}",
                 fixture.subcommand,

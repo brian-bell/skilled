@@ -155,9 +155,12 @@ narrowing is what remains.
 
 The explicit check suppresses hooks and monitors and refuses observed
 checkout-configured transport programs, within the concurrency boundaries below.
-Hooks are pointed at the null device, `core.fsmonitor` is turned off on every inspection — it is an
-executable Git runs for `status` and `fetch` alike, and `core.hooksPath` does
-not reach it — and the partial-clone refusal is re-asked before the preview's
+Traditional hooks are pointed at the null device and the
+`reference-transaction` event is disabled, so configured hooks cannot bypass
+the directory override. `core.fsmonitor` is turned off on every inspection —
+it is an executable Git runs for `status` and `fetch` alike, and
+`core.hooksPath` does not reach it — and the partial-clone refusal is re-asked
+before the preview's
 object reads and again in the apply guard, rather than remembered from the
 check, so neither can make Git fetch lazily. The reads that follow the write
 are covered by that refusal too, asked once more at the boundary between the
@@ -183,8 +186,12 @@ or a URL naming a transport helper — blocks the check with
 `ls-remote --get-url` reports, because `insteadOf` rewrites the configured
 value on the way to the transport and a remote with several URLs is fetched
 from the first while `--get` answers with the last. A setting the checkout
-goes on to disable is not a refusal: an empty credential helper resets the
-list and a scalar's last value wins. Scope is the
+goes on to disable is not a refusal: an empty credential helper resets its
+exact key's list, ordinary scalars use their last value, and `uploadpack`
+keeps its first value. The parser conservatively refuses a surviving
+repository URL helper without reconstructing its credential context. Credential
+URL subsection case and disabling values are retained byte-for-byte while
+deciding this. Scope is the
 whole distinction, and `--show-scope` is what draws it: the same key in the
 user's own global or system configuration is theirs and keeps working, while
 the same key inside the checkout is refused. There is no documented way to

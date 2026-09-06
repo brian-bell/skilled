@@ -259,6 +259,7 @@ fn an_update_check_runs_no_reference_transaction_hook() {
     let fixture = fixture();
     let sentinel = fixture._temporary.path().join("hook-ran");
     let hook = fixture.clone.join(".git/hooks/reference-transaction");
+    std::fs::create_dir_all(hook.parent().expect("hook directory")).expect("hook directory");
     std::fs::write(
         &hook,
         format!("#!/bin/sh\ntouch '{}'\n", sentinel.display()),
@@ -287,13 +288,53 @@ fn an_update_check_runs_no_reference_transaction_hook() {
         .permissions();
     permissions.set_mode(0o755);
     std::fs::set_permissions(&planted, permissions).expect("executable planted hook");
+    // Git 2.55 introduced configured hooks, which do not use the hooks
+    // directory at all. The event-level override must suppress both kinds of
+    // reference-transaction hook while the check publishes its observation.
+    git(
+        &fixture.clone,
+        &[
+            "config",
+            "hook.audit.command",
+            &format!("echo invoked >> '{}'", sentinel.display()),
+        ],
+    );
+    git(
+        &fixture.clone,
+        &[
+            "config",
+            "--add",
+            "hook.audit.event",
+            "reference-transaction",
+        ],
+    );
+    // An empty event resets the configured list; a later local event restores
+    // this hook's reachability.
+    git(&fixture.clone, &["config", "--add", "hook.audit.event", ""]);
+    git(
+        &fixture.clone,
+        &[
+            "config",
+            "--add",
+            "hook.audit.event",
+            "reference-transaction",
+        ],
+    );
+    // A repository-level enable must not undo the command-line event disable.
+    git(
+        &fixture.clone,
+        &["config", "hook.reference-transaction.enabled", "true"],
+    );
     let target = push_update(&fixture, "skills/demo/new.txt");
 
     let probe = probe_repository_update(&fixture.app.sources()[0], true);
     let (verdict, _) = classify_repository_update(&probe);
 
     assert_eq!(verdict, RepositoryUpdateVerdict::Available);
-    assert!(!sentinel.exists(), "the check ran a repository hook");
+    assert!(
+        !sentinel.exists(),
+        "the check ran a reference-transaction hook"
+    );
     // The tracking ref still has to advance: suppressing hooks may not turn the
     // fetch into one that observes nothing.
     assert_eq!(
@@ -3340,6 +3381,12 @@ fn a_repository_configured_upload_pack_is_refused_without_running_it() {
             uploadpack.to_str().unwrap(),
         ],
     );
+    // Git keeps the first upload-pack value. A later empty value is only
+    // cosmetic configuration, not a reset, and must not let this wrapper run.
+    git(
+        &fixture.clone,
+        &["config", "--add", "remote.origin.uploadpack", ""],
+    );
 
     let probe = probe_repository_update(&fixture.app.sources()[0], true);
     let (verdict, findings) = classify_repository_update(&probe);
@@ -3724,6 +3771,203 @@ fn a_repository_configured_credential_helper_is_refused() {
             .iter()
             .any(|finding| finding.code() == "source.repository_transport_unsupported"),
         "{findings:?}"
+    );
+}
+
+/// Credential URL paths are case-sensitive. This fixture first proves Git
+/// would execute the `Repo` helper for the matching credential request, then
+/// proves the public check refuses that checkout before the helper can run.
+/// The empty helper on the distinct `repo` path is the bypass a lower-cased
+/// parser would incorrectly accept.
+#[test]
+fn a_case_distinct_credential_helper_is_refused_without_running_it() {
+    use std::{io::Write, os::unix::fs::PermissionsExt, process::Stdio};
+
+    let fixture = fixture();
+    let marker = fixture._temporary.path().join("CREDENTIAL_HELPER_RAN");
+    let helper = fixture._temporary.path().join("credential-helper.sh");
+    std::fs::write(
+        &helper,
+        format!("#!/bin/sh\ntouch '{}'\nexit 1\n", marker.display()),
+    )
+    .expect("credential helper");
+    let mut permissions = std::fs::metadata(&helper)
+        .expect("helper metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&helper, permissions).expect("executable helper");
+    git(
+        &fixture.clone,
+        &[
+            "config",
+            "credential.https://example.test/Repo.helper",
+            helper.to_str().unwrap(),
+        ],
+    );
+    git(
+        &fixture.clone,
+        &["config", "credential.https://example.test/repo.helper", ""],
+    );
+    git(
+        &fixture.clone,
+        &["config", "credential.useHttpPath", "true"],
+    );
+
+    // A local credential request is the positive control: it reaches the
+    // configured helper without a network server or remote transfer.
+    let mut credential = Command::new("git")
+        .arg("-C")
+        .arg(&fixture.clone)
+        .args(["credential", "fill"])
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("HOME", fixture._temporary.path().join("credential-home"))
+        .env(
+            "XDG_CONFIG_HOME",
+            fixture._temporary.path().join("credential-config"),
+        )
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_ASKPASS", "")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("credential fill");
+    credential
+        .stdin
+        .take()
+        .expect("credential input")
+        .write_all(b"protocol=https\nhost=example.test\npath=Repo\n\n")
+        .expect("credential request");
+    let _ = credential.wait().expect("credential result");
+    assert!(marker.is_file(), "the positive-control helper did not run");
+    std::fs::remove_file(&marker).expect("clear positive-control marker");
+
+    // In contrast, Git folds the URL host. This matching reset names the
+    // same helper list, so the marker must remain absent.
+    git(
+        &fixture.clone,
+        &[
+            "config",
+            "credential.https://EXAMPLE.TEST/Reset.helper",
+            helper.to_str().unwrap(),
+        ],
+    );
+    git(
+        &fixture.clone,
+        &["config", "credential.https://example.test/Reset.helper", ""],
+    );
+    let mut reset_credential = Command::new("git")
+        .arg("-C")
+        .arg(&fixture.clone)
+        .args(["credential", "fill"])
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env(
+            "HOME",
+            fixture._temporary.path().join("credential-reset-home"),
+        )
+        .env(
+            "XDG_CONFIG_HOME",
+            fixture._temporary.path().join("credential-reset-config"),
+        )
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_ASKPASS", "")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("credential host-case reset");
+    reset_credential
+        .stdin
+        .take()
+        .expect("credential reset input")
+        .write_all(b"protocol=https\nhost=example.test\npath=Reset\n\n")
+        .expect("credential reset request");
+    let _ = reset_credential.wait().expect("credential reset result");
+    assert!(
+        !marker.exists(),
+        "a host-case credential reset did not clear the helper"
+    );
+
+    let probe = probe_repository_update(&fixture.app.sources()[0], true);
+    let (verdict, findings) = classify_repository_update(&probe);
+
+    assert_eq!(verdict, RepositoryUpdateVerdict::Blocked, "{findings:?}");
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.code() == "source.repository_transport_unsupported"),
+        "{findings:?}"
+    );
+    assert!(
+        !marker.exists(),
+        "the repository's credential helper ran during the check"
+    );
+}
+
+/// Git treats an upper-case proxy command as an executable name, not as the
+/// disabling spelling `none`. The positive control has no reachable network:
+/// its proxy exits after writing the marker. The explicit check must refuse
+/// the same configuration without reaching that program.
+#[test]
+fn an_exact_proxy_disable_spelling_is_required_before_a_check_runs() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = fixture();
+    let marker = fixture._temporary.path().join("PROXY_RAN");
+    let bin = fixture._temporary.path().join("proxy-bin");
+    std::fs::create_dir_all(&bin).expect("proxy binary directory");
+    let proxy = bin.join("NONE");
+    std::fs::write(
+        &proxy,
+        format!("#!/bin/sh\ntouch '{}'\nexit 1\n", marker.display()),
+    )
+    .expect("proxy helper");
+    let mut permissions = std::fs::metadata(&proxy)
+        .expect("proxy metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&proxy, permissions).expect("executable proxy");
+    git(&fixture.clone, &["config", "core.gitProxy", "NONE"]);
+
+    let inherited_path = std::env::var("PATH").expect("UTF-8 PATH");
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(&fixture.clone)
+        .args(["ls-remote", "git://example.test/repository"])
+        .env("PATH", format!("{}:{inherited_path}", bin.display()))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("HOME", fixture._temporary.path().join("proxy-home"))
+        .env(
+            "XDG_CONFIG_HOME",
+            fixture._temporary.path().join("proxy-config"),
+        )
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_ASKPASS", "")
+        .output()
+        .expect("proxy positive control");
+    assert!(
+        !output.status.success(),
+        "proxy helper must stop the transport"
+    );
+    assert!(marker.is_file(), "the positive-control proxy did not run");
+    std::fs::remove_file(&marker).expect("clear positive-control marker");
+
+    let probe = probe_repository_update(&fixture.app.sources()[0], true);
+    let (verdict, findings) = classify_repository_update(&probe);
+
+    assert_eq!(verdict, RepositoryUpdateVerdict::Blocked, "{findings:?}");
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.code() == "source.repository_transport_unsupported"),
+        "{findings:?}"
+    );
+    assert!(
+        !marker.exists(),
+        "the repository's proxy command ran during the check"
     );
 }
 
