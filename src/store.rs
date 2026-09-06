@@ -410,79 +410,15 @@ impl Store {
         catalog: &Path,
         variant: &Path,
     ) -> Result<Option<OriginRecord>> {
-        let catalog = stored_path(catalog)?;
-        let variant = stored_path(variant)?;
-        let stored = self
-            .connection
-            .query_row(
-                "SELECT repository, subdirectory, update_ref, baseline_version, baseline_digest,
-                        proven_revision, association
-                 FROM origin_baselines
-                 WHERE source_id = ?1 AND catalog_relative_path = ?2
-                       AND variant_relative_path = ?3",
-                params![source_id, catalog, variant],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, u32>(3)?,
-                        row.get::<_, String>(4)?,
-                        row.get::<_, Option<String>>(5)?,
-                        row.get::<_, String>(6)?,
-                    ))
-                },
-            )
-            .optional()
-            .map_err(Error::from)?;
-        let Some((
-            repository,
-            subdirectory,
-            update_ref,
-            version,
-            digest,
-            proven_revision,
-            association,
-        )) = stored
-        else {
-            return Ok(None);
-        };
-        if proven_revision.is_some() {
-            return Err(invalid_origin_metadata(
-                "an explicit-current-content association must not name a historical revision",
-            ));
-        }
-        if association != "explicit-current-content" {
-            return Err(invalid_origin_metadata("unknown association method"));
-        }
-        if version != 1 {
-            return Err(invalid_origin_metadata(format!(
-                "unsupported baseline version {version}"
-            )));
-        }
-        if !is_sha256_digest(&digest) {
-            return Err(invalid_origin_metadata(
-                "baseline digest is not 64 lowercase hexadecimal SHA-256 characters",
-            ));
-        }
-        let origin = crate::provenance::Origin {
-            repository,
-            subdirectory,
-        };
-        crate::provenance::validate_origin(&origin).map_err(invalid_origin_metadata)?;
-        crate::provenance::validate_update_ref(&update_ref).map_err(invalid_origin_metadata)?;
-        Ok(Some(OriginRecord {
-            source_id,
-            catalog_relative_path: PathBuf::from(catalog),
-            variant_relative_path: PathBuf::from(variant),
-            origin,
-            update_ref,
-            baseline: crate::provenance::Baseline { version, digest },
-        }))
+        origin_record_on(&self.connection, source_id, catalog, variant)
     }
 
-    /// Required postconditions for forgetting: source, catalogs, and receipts absent.
-    pub(crate) fn verify_source_forgotten(&self, source_id: i64) -> Result<[bool; 3]> {
+    pub(crate) fn origin_records(&self, source_id: i64) -> Result<Vec<OriginRecord>> {
+        origin_records_on(&self.connection, source_id)
+    }
+
+    /// Required postconditions: source, catalogs, receipts, and baselines absent.
+    pub(crate) fn verify_source_forgotten(&self, source_id: i64) -> Result<[bool; 4]> {
         let source: i64 = self.connection.query_row(
             "SELECT COUNT(*) FROM source_repositories WHERE id = ?1",
             params![source_id],
@@ -498,7 +434,12 @@ impl Store {
             params![source_id],
             |row| row.get(0),
         )?;
-        Ok([source == 0, catalogs == 0, receipts == 0])
+        let origins: i64 = self.connection.query_row(
+            "SELECT COUNT(*) FROM origin_baselines WHERE source_id = ?1",
+            params![source_id],
+            |row| row.get(0),
+        )?;
+        Ok([source == 0, catalogs == 0, receipts == 0, origins == 0])
     }
 
     pub(crate) fn register_source(&mut self, preview: &SourcePreview) -> Result<()> {
@@ -1171,6 +1112,10 @@ impl Mutation<'_> {
         Err(Error::Database(rusqlite::Error::InvalidQuery))
     }
 
+    pub(crate) fn origin_records(&self, source_id: i64) -> Result<Vec<OriginRecord>> {
+        origin_records_on(&self.transaction, source_id)
+    }
+
     pub(crate) fn receipts(&self) -> Result<Vec<Receipt>> {
         receipts_on(&self.transaction)
     }
@@ -1650,6 +1595,97 @@ fn stored_path(path: &Path) -> Result<String> {
 /// An origin baseline states an intentional user association, so malformed
 /// persisted fields are metadata corruption rather than a second, silently
 /// different provenance answer.
+fn origin_record_on(
+    connection: &Connection,
+    source_id: i64,
+    catalog: &Path,
+    variant: &Path,
+) -> Result<Option<OriginRecord>> {
+    let catalog = stored_path(catalog)?;
+    let variant = stored_path(variant)?;
+    let stored = connection
+        .query_row(
+            "SELECT repository, subdirectory, update_ref, baseline_version, baseline_digest,
+                        proven_revision, association
+                 FROM origin_baselines
+                 WHERE source_id = ?1 AND catalog_relative_path = ?2
+                       AND variant_relative_path = ?3",
+            params![source_id, catalog, variant],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, u32>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, String>(6)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(Error::from)?;
+    let Some((repository, subdirectory, update_ref, version, digest, proven_revision, association)) =
+        stored
+    else {
+        return Ok(None);
+    };
+    if proven_revision.is_some() {
+        return Err(invalid_origin_metadata(
+            "an explicit-current-content association must not name a historical revision",
+        ));
+    }
+    if association != "explicit-current-content" {
+        return Err(invalid_origin_metadata("unknown association method"));
+    }
+    if version != 1 {
+        return Err(invalid_origin_metadata(format!(
+            "unsupported baseline version {version}"
+        )));
+    }
+    if !is_sha256_digest(&digest) {
+        return Err(invalid_origin_metadata(
+            "baseline digest is not 64 lowercase hexadecimal SHA-256 characters",
+        ));
+    }
+    let origin = crate::provenance::Origin {
+        repository,
+        subdirectory,
+    };
+    crate::provenance::validate_origin(&origin).map_err(invalid_origin_metadata)?;
+    crate::provenance::validate_update_ref(&update_ref).map_err(invalid_origin_metadata)?;
+    Ok(Some(OriginRecord {
+        source_id,
+        catalog_relative_path: PathBuf::from(catalog),
+        variant_relative_path: PathBuf::from(variant),
+        origin,
+        update_ref,
+        baseline: crate::provenance::Baseline { version, digest },
+    }))
+}
+
+fn origin_records_on(connection: &Connection, source_id: i64) -> Result<Vec<OriginRecord>> {
+    let mut statement = connection.prepare("SELECT catalog_relative_path, variant_relative_path FROM origin_baselines WHERE source_id = ?1 ORDER BY catalog_relative_path, variant_relative_path")?;
+    let keys = statement
+        .query_map([source_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    keys.into_iter()
+        .map(|(catalog, variant)| {
+            origin_record_on(
+                connection,
+                source_id,
+                Path::new(&catalog),
+                Path::new(&variant),
+            )?
+            .ok_or_else(|| {
+                invalid_origin_metadata("baseline disappeared while reading source metadata")
+            })
+        })
+        .collect()
+}
+
 fn invalid_origin_metadata(detail: impl std::fmt::Display) -> Error {
     Error::InvalidSetupMetadata(format!("stored origin baseline is invalid: {detail}"))
 }

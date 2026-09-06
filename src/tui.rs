@@ -5982,6 +5982,38 @@ fn forget_prompt_lines(prompt: &ForgetPrompt) -> Vec<Line<'static>> {
                     terminal_safe(&catalog.relative_path().display().to_string())
                 )));
             }
+            for record in plan.origins() {
+                lines.push(Line::styled(
+                    "Adopted origin and baseline to remove",
+                    theme::section_title(),
+                ));
+                for text in [
+                    format!(
+                        "Catalog: {}",
+                        source
+                            .git_top_level()
+                            .join(&record.catalog_relative_path)
+                            .display()
+                    ),
+                    format!(
+                        "Skill: {}",
+                        source
+                            .git_top_level()
+                            .join(&record.variant_relative_path)
+                            .display()
+                    ),
+                    format!("Origin: {}", record.origin.repository),
+                    format!("Subdirectory: {}", record.origin.subdirectory),
+                    format!("Tracking ref: {}", record.update_ref),
+                    format!(
+                        "Baseline v{}: {}",
+                        record.baseline.version, record.baseline.digest
+                    ),
+                    "Explicit current-content association; historical revision unknown.".to_owned(),
+                ] {
+                    lines.push(Line::from(terminal_safe(&text)));
+                }
+            }
             for item in plan.receipts() {
                 let receipt = item.receipt();
                 match item.state() {

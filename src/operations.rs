@@ -21,6 +21,7 @@ use std::{
 
 use crate::{
     AgentDetection, AgentKind, MetadataFailure,
+    adoption::OriginRecord,
     agents::{adapter, detection_at},
     inventory::{
         Finding, FindingSeverity, InstallationHealth, InstallationObject,
@@ -5464,10 +5465,14 @@ impl ForgetReceipt {
 pub struct ForgetPlan {
     source: RegisteredSource,
     receipts: Vec<ForgetReceipt>,
+    origins: Vec<OriginRecord>,
     blocking_findings: Vec<Finding>,
 }
 
 impl ForgetPlan {
+    pub fn origins(&self) -> &[OriginRecord] {
+        &self.origins
+    }
     pub fn source(&self) -> &RegisteredSource {
         &self.source
     }
@@ -5490,6 +5495,7 @@ pub fn plan_forget(
     source: &RegisteredSource,
     receipts: &[Receipt],
     probe: &ForgetProbe,
+    origins: &[OriginRecord],
 ) -> ForgetPlan {
     let source_receipts: Vec<Receipt> = receipts
         .iter()
@@ -5536,6 +5542,11 @@ pub fn plan_forget(
     ForgetPlan {
         source: source.clone(),
         receipts: classified,
+        origins: origins
+            .iter()
+            .filter(|origin| origin.source_id == source.id())
+            .cloned()
+            .collect(),
         blocking_findings,
     }
 }
@@ -5545,6 +5556,7 @@ pub fn plan_forget_unreadable_receipts(source: &RegisteredSource, reason: String
     ForgetPlan {
         source: source.clone(),
         receipts: Vec::new(),
+        origins: Vec::new(),
         blocking_findings: vec![Finding::new(
             "forget.unreadable_receipts",
             FindingSeverity::Critical,
@@ -5615,7 +5627,7 @@ impl ForgetOutcome {
     }
 }
 
-/// Recheck the exact receipt multiset and every link immediately before deletion.
+/// Recheck the exact receipt and baseline sets and every link before deletion.
 ///
 /// The mutation guard begins before both checks and stays held through the
 /// transaction commit. Install and repair — the two operations that make a link
@@ -5690,6 +5702,20 @@ pub(crate) fn apply_forget(plan: &ForgetPlan, store: &mut Store) -> ForgetApply 
             ));
         }
     }
+    match mutation.origin_records(plan.source.id()) {
+        Ok(origins) if origins == plan.origins => {}
+        Ok(_) => {
+            return ForgetApply::Failed(
+                "the source's origin associations or baselines changed after the preview was shown"
+                    .into(),
+            );
+        }
+        Err(error) => {
+            return ForgetApply::Failed(format!(
+                "the origin associations and baselines could not be re-read: {error}"
+            ));
+        }
+    }
     let reprobe = probe_forget(&plan.source, &current);
     if reprobe
         .observations
@@ -5734,11 +5760,11 @@ pub(crate) fn apply_forget(plan: &ForgetPlan, store: &mut Store) -> ForgetApply 
 /// the check withheld, which is the inventory's own rule applied here.
 pub(crate) fn verify_forget(plan: &ForgetPlan, store: &Store) -> ForgetVerification {
     match store.verify_source_forgotten(plan.source.id()) {
-        Ok([true, true, true]) => {}
+        Ok([true, true, true, true]) => {}
         Ok(checks) => {
             return ForgetVerification::Failed(format!(
-                "metadata remained after forgetting (source: {}, catalogs: {}, receipts: {})",
-                !checks[0], !checks[1], !checks[2],
+                "metadata remained after forgetting (source: {}, catalogs: {}, receipts: {}, baselines: {})",
+                !checks[0], !checks[1], !checks[2], !checks[3],
             ));
         }
         Err(error) => {
@@ -7642,7 +7668,7 @@ mod raw_ownership_tests {
             .is_some()
         );
         let probe = probe_forget(&source, std::slice::from_ref(&receipt));
-        assert!(plan_forget(&source, std::slice::from_ref(&receipt), &probe).is_blocked());
+        assert!(plan_forget(&source, std::slice::from_ref(&receipt), &probe, &[]).is_blocked());
         let slot = TargetProbe {
             agent: receipt.agent(),
             link_path: link.clone(),

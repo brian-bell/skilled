@@ -365,3 +365,155 @@ fn a_single_known_origin_path_cannot_be_overridden() {
     );
     assert_eq!(count(&temp), 0);
 }
+
+fn adopted_fixture() -> (tempfile::TempDir, SkilledApp) {
+    let (temp, mut app) = fixture();
+    fill(&mut app);
+    app.note_detail_max_scroll(Some(0));
+    dispatch(&mut app, Action::ConfirmAdoption);
+    dispatch(&mut app, Action::DismissAdoption);
+    dispatch(&mut app, Action::OpenInventory);
+    dispatch(&mut app, Action::OpenSources);
+    (temp, app)
+}
+
+#[test]
+fn forget_refuses_a_baseline_changed_after_preview() {
+    let (temp, mut app) = adopted_fixture();
+    dispatch(&mut app, Action::BeginForgetSource);
+    let db = rusqlite::Connection::open(temp.path().join("data/skilled.sqlite3")).unwrap();
+    db.execute(
+        "UPDATE origin_baselines SET baseline_digest = ?1",
+        ["a".repeat(64)],
+    )
+    .unwrap();
+    app.note_detail_max_scroll(Some(0));
+    dispatch(&mut app, Action::ConfirmOperation);
+    assert_eq!(count(&temp), 1, "undisclosed baseline must survive");
+    assert!(!app.sources().is_empty());
+}
+
+#[test]
+fn forget_discloses_adopted_baselines_before_confirmation() {
+    use ratatui::{Terminal, backend::TestBackend};
+    let (temp, mut app) = adopted_fixture();
+    dispatch(&mut app, Action::BeginForgetSource);
+    let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+    terminal
+        .draw(|frame| {
+            skilled::tui::render(frame, &app);
+        })
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    let text: String = buffer.content().iter().map(|cell| cell.symbol()).collect();
+    assert!(
+        text.contains("Adopted origin and baseline to remove"),
+        "{text}"
+    );
+    assert!(
+        text.contains("https://github.com/example/upstream"),
+        "{text}"
+    );
+    assert!(text.contains("refs/heads/main"), "{text}");
+    assert!(
+        text.contains(&temp.path().join("source/skills/demo").display().to_string()),
+        "{text}"
+    );
+    let heading = "Adopted origin and baseline to remove";
+    let row = buffer
+        .content()
+        .chunks(120)
+        .find(|row| {
+            row.iter()
+                .map(|cell| cell.symbol())
+                .collect::<String>()
+                .contains(heading)
+        })
+        .unwrap();
+    let heading_cell = row.iter().find(|cell| cell.symbol() == "A").unwrap();
+    assert!(
+        heading_cell
+            .modifier
+            .contains(ratatui::style::Modifier::BOLD)
+    );
+    let screen = buffer
+        .content()
+        .chunks(120)
+        .map(|row| {
+            row.iter()
+                .map(|cell| cell.symbol())
+                .collect::<String>()
+                .trim_end()
+                .to_owned()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let canonical = temp.path().canonicalize().unwrap();
+    let screen = screen
+        .replace(&canonical.display().to_string(), "<TEMP>")
+        .replace(&temp.path().display().to_string(), "<TEMP>");
+    let digest: String = rusqlite::Connection::open(temp.path().join("data/skilled.sqlite3"))
+        .unwrap()
+        .query_row("SELECT baseline_digest FROM origin_baselines", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert!(screen.contains(&digest));
+    let screen = screen
+        .replace(&digest, "<BASELINE>")
+        .lines()
+        .filter_map(|line| line.split('│').nth(1))
+        .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    insta::assert_snapshot!("forget_adopted_baseline", screen);
+    assert!(app.update(Action::ConfirmOperation).effects().is_empty());
+    let mut small = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    let mut extent = 0;
+    small
+        .draw(|frame| {
+            extent = skilled::tui::render(frame, &app)
+                .detail_max_scroll()
+                .unwrap();
+        })
+        .unwrap();
+    assert!(extent > 0);
+    app.note_detail_max_scroll(Some(extent));
+    assert!(app.update(Action::ConfirmOperation).effects().is_empty());
+    for _ in 0..extent {
+        app.update(Action::ScrollDetail(1));
+    }
+    app.note_detail_max_scroll(Some(extent));
+    dispatch(&mut app, Action::ConfirmOperation);
+    assert_eq!(count(&temp), 0);
+    assert!(temp.path().join("source/skills/demo/SKILL.md").is_file());
+}
+
+#[test]
+fn forget_refuses_unreadable_origin_metadata() {
+    let (temp, mut app) = adopted_fixture();
+    let db = rusqlite::Connection::open(temp.path().join("data/skilled.sqlite3")).unwrap();
+    db.execute_batch("DROP TABLE origin_baselines").unwrap();
+    dispatch(&mut app, Action::BeginForgetSource);
+    app.note_detail_max_scroll(Some(0));
+    assert!(app.update(Action::ConfirmOperation).effects().is_empty());
+    assert!(!app.sources().is_empty());
+}
+
+#[test]
+fn forget_refuses_an_origin_added_after_an_empty_preview() {
+    let (temp, mut app) = adopted_fixture();
+    let db = rusqlite::Connection::open(temp.path().join("data/skilled.sqlite3")).unwrap();
+    db.execute_batch(
+        "CREATE TEMP TABLE saved AS SELECT * FROM origin_baselines; DELETE FROM origin_baselines;",
+    )
+    .unwrap();
+    dispatch(&mut app, Action::BeginForgetSource);
+    db.execute_batch("INSERT INTO origin_baselines SELECT * FROM saved;")
+        .unwrap();
+    app.note_detail_max_scroll(Some(0));
+    dispatch(&mut app, Action::ConfirmOperation);
+    assert_eq!(count(&temp), 1);
+    assert!(!app.sources().is_empty());
+}

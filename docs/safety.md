@@ -127,7 +127,7 @@ that writes the checkout's worktree. Opening Updates never fetches.
   rechecked immediately before unlinking; one failed target stops the run.
 
 - Forget Source removes private metadata only. Any active or unreadable
-  receipted link, or any receipt-set change between preview and confirmation,
+  receipted link, or any receipt or baseline change between preview and confirmation,
   blocks the transaction; checkout and skill directories are never deleted.
 
 ## Origin adoption
@@ -146,7 +146,10 @@ of the association. The record has a null proven revision and the association
 method `explicit-current-content`. Adoption cannot overwrite an existing record. Re-registering a replacement
 checkout at the same path is refused while the old source has baselines; they
 cannot be transferred by changing the source identity. Forget Source retains its
-existing inactive-link gates and cascades deletion of the source's baseline metadata.
+existing inactive-link gates and lists each origin association and baseline in its
+confirmation preview before cascading their deletion. The exact baseline set is
+rechecked under the metadata mutation guard; unreadable or changed records refuse
+the operation. Verification also checks that the baseline metadata is gone.
 
 Before saving, the executor rechecks registered repository identity, physical
 skill ancestors, portable skill validation, evidence, full content hash, and the

@@ -3250,8 +3250,19 @@ impl SkilledApp {
                 ));
             }
         };
+        let origins = match self
+            .store()
+            .and_then(|store| store.origin_records(source.id()))
+        {
+            Ok(origins) => origins,
+            Err(error) => {
+                return ForgetPrompt::Failed(format!(
+                    "Origin associations and baselines could not be read; no metadata can be removed: {error}"
+                ));
+            }
+        };
         let probe = probe_forget(source, &receipts);
-        ForgetPrompt::Preview(plan_forget(source, &receipts, &probe))
+        ForgetPrompt::Preview(plan_forget(source, &receipts, &probe, &origins))
     }
 
     /// The one planning path shared by the screen and `skilled uninstall`.
