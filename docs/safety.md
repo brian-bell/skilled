@@ -130,6 +130,48 @@ that writes the checkout's worktree. Opening Updates never fetches.
   receipted link, or any receipt-set change between preview and confirmation,
   blocks the transaction; checkout and skill directories are never deleted.
 
+## Origin adoption
+
+Adoption is an explicit metadata operation for one registered variant. Supported
+root attribution tables, per-skill bullets, pinned GitHub tree URLs, and compatible
+version-1 lock records supply hints. Bare repository attribution leaves the
+subdirectory unknown; moving refs and unspecified lock hashes prove no historical
+baseline. Lock metadata is never rewritten. Conflicting hints require an explicit
+exact origin choice, and incomplete evidence blocks adoption.
+
+The user supplies a repository, subdirectory, and fully qualified tracking branch.
+The separately confirmed preview names the absolute source, catalog, skill, and
+SQLite database paths, the baseline version and digest, and the limited meaning
+of the association. The record has a null proven revision and the association
+method `explicit-current-content`. Adoption cannot overwrite an existing record. Re-registering a replacement
+checkout at the same path is refused while the old source has baselines; they
+cannot be transferred by changing the source identity. Forget Source retains its
+existing inactive-link gates and cascades deletion of the source's baseline metadata.
+
+Before saving, the executor rechecks registered repository identity, physical
+skill ancestors, portable skill validation, evidence, full content hash, and the
+exact catalog registration. The registration check and insert share an immediate
+SQLite transaction. A second content check before commit rolls the metadata back
+if the observed content changed; post-commit checks report a saved-but-unverified
+baseline distinctly from success. Filesystem reads and SQLite are not one atomic
+snapshot: an external writer can still change a file after the last reading.
+Adoption does not lock another editor's files or claim to prevent later changes.
+Metadata failures degrade the session to read-only operation.
+
+The adopted baseline is SHA-256 over a versioned, platform-scoped stream of
+sorted raw relative paths, entry type, executable bit, and entry bytes; it
+records raw symbolic-link targets without following them. It includes ordinary
+untracked and Git-ignored skill content, while excluding only `.git` metadata.
+Version 1 bounds the walk to 16,384 entries, 32 MiB of entry content, 32
+directory levels, 16 KiB paths and link targets, 1 MiB evidence files, and 128
+distinct origin candidates. A bound is a refusal, never a truncated result.
+Linux and macOS list held directories through descriptors and use no-follow,
+nonblocking opens; the portable fallback rechecks metadata but cannot promise
+the same descriptor-pinned traversal. The platform tag makes a v1 digest
+comparable only on the same supported platform family. Concurrent filesystem
+changes observed during the walk refuse the baseline; unchanged observations
+remain a best-effort read rather than a lock on another editor.
+
 ## Repository updates
 
 ### Checkout identity and process binding

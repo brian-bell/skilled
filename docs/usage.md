@@ -56,6 +56,24 @@ screen. In a selectable list, `j` / `k` or arrow keys move the selection. Press
 In the Repositories pane, press `x` to preview forgetting the selected source's
 private metadata. Active or unreadable managed links block confirmation.
 
+In Sources, press `p` on a valid skill variant to confirm its origin. The
+form shows supported local attribution and lock hints. Tab moves between the
+GitHub repository URL, origin subdirectory (`.` means the repository root), and
+explicit tracking branch, such as `refs/heads/main`. A bare repository hint does
+not establish the skill's subdirectory. Conflicting repository hints require choosing one shown repository; a hint with
+a known subdirectory must match, while an unknown subdirectory must be entered
+explicitly. The complete association still requires confirmation;
+unreadable or unsupported evidence blocks adoption.
+
+Enter builds a separate preview. Read the complete preview, scrolling as needed,
+then press Enter to save the association and baseline in Skilled's private
+metadata. Esc cancels. This records current content for **future comparisons**;
+it proves no historical upstream revision. A pinned attribution commit does not
+supply a tracking branch. The operation neither fetches nor changes skill files,
+lockfiles, notices, or Git state. Changed content, paths, evidence, or registration
+invalidate confirmation. An existing baseline cannot be replaced through adoption.
+Fetching and replacing vendored skill content are not part of this flow yet.
+
 In Sources, press `i` on a skill variant to preview installing it. The dialog
 names every agent, what would happen to it, and the exact absolute path
 involved; `j` / `k` scroll it when it holds more than the terminal can show,

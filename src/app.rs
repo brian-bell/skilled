@@ -203,6 +203,13 @@ pub enum Action {
     ///
     /// Nothing is written by this, and nothing is written by anything until
     /// [`Action::ConfirmOperation`] is applied to the preview it produces.
+    BeginAdoption,
+    AppendAdoptionCharacter(char),
+    DeleteAdoptionCharacter,
+    NextAdoptionField,
+    PreviewAdoption,
+    ConfirmAdoption,
+    DismissAdoption,
     BeginInstall,
     /// Plan removal of the focused skill's owned links.
     BeginUninstall,
@@ -245,6 +252,9 @@ pub enum Effect {
     /// is what the user is standing on, and the runner reads it back from the
     /// same state the reducer read, exactly as [`Effect::ScanInstallations`]
     /// carries no roots.
+    BeginAdoption,
+    PreviewAdoption,
+    ApplyAdoption,
     PlanInstall,
     /// Create the links the shown preview calls work, then rescan and verify.
     ApplyInstall,
@@ -588,7 +598,10 @@ enum RegistrationFailure {
 /// the path: it is refused before anything is written, and refusing it says
 /// nothing about whether the next path could be registered.
 fn is_source_request_error(error: &Error) -> bool {
-    matches!(error, Error::InvalidSourcePath(_))
+    matches!(
+        error,
+        Error::InvalidSourcePath(_) | Error::SourceHasOriginBaselines
+    )
 }
 
 struct MetadataStartup {
@@ -703,6 +716,7 @@ pub struct SkilledApp {
     update_checks: Vec<CachedUpdateCheck>,
     updates_pane: UpdatesPane,
     focused_update: usize,
+    pending_adoption: Option<crate::adoption::AdoptionPrompt>,
     pending_update: Option<RepositoryUpdatePrompt>,
     update_preview_fully_seen: bool,
     update_check_run: Option<UpdateCheckRun>,
@@ -829,6 +843,7 @@ impl SkilledApp {
             update_checks,
             updates_pane: UpdatesPane::Candidates,
             focused_update: 0,
+            pending_adoption: None,
             pending_update: None,
             update_preview_fully_seen: false,
             update_check_run: None,
@@ -1216,6 +1231,98 @@ impl SkilledApp {
             )
     }
 
+    pub fn can_adopt_selection(&self) -> bool {
+        self.can_install_selection()
+    }
+
+    pub fn pending_adoption(&self) -> Option<&crate::adoption::AdoptionPrompt> {
+        self.pending_adoption.as_ref()
+    }
+
+    pub fn adoption_preview_fully_seen(&self) -> bool {
+        matches!(
+            self.pending_adoption,
+            Some(crate::adoption::AdoptionPrompt::Preview(_))
+        ) && self.detail_measured
+            && self.detail_scroll >= self.detail_max_scroll
+    }
+
+    fn adoption_failure(
+        &mut self,
+        failure: crate::adoption::AdoptionFailure,
+    ) -> crate::adoption::AdoptionPrompt {
+        if failure.metadata {
+            self.degrade(MetadataFailure::new(
+                self.environment.data_dir.join("skilled.sqlite3"),
+                failure.message.clone(),
+            ));
+        }
+        crate::adoption::AdoptionPrompt::Failed(failure.message)
+    }
+
+    fn begin_adoption(&mut self) {
+        let result = (|| {
+            let source = self.selected_source().ok_or("No source selected")?;
+            let Some(SourceRow::Variant { catalog, candidate }) = self.selected_variant_row()
+            else {
+                return Err(crate::adoption::AdoptionFailure::from(
+                    "No variant selected",
+                ));
+            };
+            crate::adoption::begin(
+                source,
+                VariantRef::of(source, catalog, candidate),
+                self.store().map_err(|e| e.to_string())?,
+            )
+        })();
+        self.pending_adoption = Some(match result {
+            Ok(draft) => crate::adoption::AdoptionPrompt::Editing(draft),
+            Err(error) => self.adoption_failure(error),
+        });
+        self.reset_detail_scroll();
+    }
+
+    fn preview_adoption(&mut self) {
+        let Some(crate::adoption::AdoptionPrompt::Editing(mut draft)) =
+            self.pending_adoption.clone()
+        else {
+            return;
+        };
+        let result = self
+            .store()
+            .map_err(crate::adoption::AdoptionFailure::metadata)
+            .and_then(|store| crate::adoption::plan(&draft, store));
+        self.pending_adoption = Some(match result {
+            Ok(plan) => crate::adoption::AdoptionPrompt::Preview(plan),
+            Err(error) if error.metadata => self.adoption_failure(error),
+            Err(error) => {
+                draft.error = Some(error.message);
+                crate::adoption::AdoptionPrompt::Editing(draft)
+            }
+        });
+        self.reset_detail_scroll();
+    }
+
+    fn apply_adoption(&mut self) {
+        if !self.adoption_preview_fully_seen() {
+            return;
+        }
+        let Some(crate::adoption::AdoptionPrompt::Preview(plan)) = self.pending_adoption.clone()
+        else {
+            return;
+        };
+        let result = self
+            .store_mut()
+            .map_err(crate::adoption::AdoptionFailure::metadata)
+            .and_then(|store| crate::adoption::apply(&plan, store));
+        self.rescan_installations();
+        self.pending_adoption = Some(match result {
+            Ok(()) => crate::adoption::AdoptionPrompt::Report("Origin and current-content baseline saved and verified. Future comparisons start here; no historical revision was proven.".into()),
+            Err(error) => self.adoption_failure(error),
+        });
+        self.reset_detail_scroll();
+    }
+
     pub fn can_add_source(&self) -> bool {
         self.metadata_failure().is_none()
     }
@@ -1523,6 +1630,7 @@ impl SkilledApp {
         self.pending_operation = None;
         self.pending_repair = None;
         self.pending_update = None;
+        self.pending_adoption = None;
     }
 
     pub fn update(&mut self, action: Action) -> UpdateResult {
@@ -1535,6 +1643,55 @@ impl SkilledApp {
                 Action::Quit => self.quit_result(),
                 _ => UpdateResult::continuing(Vec::new()),
             };
+        }
+
+        if self.pending_adoption.is_some() {
+            use crate::adoption::AdoptionPrompt;
+            let effects = match action {
+                Action::Quit => return self.quit_result(),
+                Action::DismissAdoption => {
+                    self.pending_adoption = None;
+                    self.reset_detail_scroll();
+                    Vec::new()
+                }
+                Action::ScrollDetail(delta) => {
+                    self.scroll_detail(delta);
+                    Vec::new()
+                }
+                Action::ConfirmAdoption if self.adoption_preview_fully_seen() => {
+                    vec![Effect::ApplyAdoption]
+                }
+                Action::PreviewAdoption
+                    if matches!(self.pending_adoption, Some(AdoptionPrompt::Editing(_))) =>
+                {
+                    vec![Effect::PreviewAdoption]
+                }
+                Action::AppendAdoptionCharacter(character) => {
+                    if let Some(AdoptionPrompt::Editing(draft)) = &mut self.pending_adoption
+                        && !character.is_control()
+                        && draft.fields[draft.focused].len() < 2048
+                    {
+                        draft.fields[draft.focused].push(character);
+                        draft.error = None;
+                    }
+                    Vec::new()
+                }
+                Action::DeleteAdoptionCharacter => {
+                    if let Some(AdoptionPrompt::Editing(draft)) = &mut self.pending_adoption {
+                        draft.fields[draft.focused].pop();
+                        draft.error = None;
+                    }
+                    Vec::new()
+                }
+                Action::NextAdoptionField => {
+                    if let Some(AdoptionPrompt::Editing(draft)) = &mut self.pending_adoption {
+                        draft.focused = (draft.focused + 1) % 3;
+                    }
+                    Vec::new()
+                }
+                _ => Vec::new(),
+            };
+            return UpdateResult::continuing(effects);
         }
 
         // A preview is a question about writes that have not happened yet, so
@@ -1907,6 +2064,19 @@ impl SkilledApp {
             Action::AppendInventoryFilter(_)
             | Action::DeleteInventoryFilterCharacter
             | Action::SubmitInventoryFilter => Vec::new(),
+            Action::BeginAdoption => {
+                if self.can_adopt_selection() {
+                    vec![Effect::BeginAdoption]
+                } else {
+                    Vec::new()
+                }
+            }
+            Action::AppendAdoptionCharacter(_)
+            | Action::DeleteAdoptionCharacter
+            | Action::NextAdoptionField
+            | Action::PreviewAdoption
+            | Action::ConfirmAdoption
+            | Action::DismissAdoption => Vec::new(),
             Action::BeginInstall => {
                 if self.pending_repair.is_none() && self.can_install_selection() {
                     vec![Effect::PlanInstall]
@@ -2050,6 +2220,9 @@ impl SkilledApp {
                     self.rescan_installations();
                 }
                 Effect::ScanInstallations => self.rescan_installations(),
+                Effect::BeginAdoption => self.begin_adoption(),
+                Effect::PreviewAdoption => self.preview_adoption(),
+                Effect::ApplyAdoption => self.apply_adoption(),
                 Effect::PlanInstall => {
                     match self.build_install_preview() {
                         Ok(prompt) => {

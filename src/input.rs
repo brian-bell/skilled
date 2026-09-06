@@ -47,6 +47,47 @@ pub fn action_for_app_key(app: &SkilledApp, key: KeyEvent) -> Option<Action> {
             _ => action,
         };
     }
+    // Origin adoption is a staged declaration: its editable evidence, the
+    // resulting baseline preview, and its outcome own the keyboard until the
+    // user dismisses them. In particular, a held Enter must never establish a
+    // second baseline.
+    if let Some(prompt) = app.pending_adoption() {
+        let action = match prompt {
+            crate::adoption::AdoptionPrompt::Editing(_) => match key.code {
+                KeyCode::Enter => Some(Action::PreviewAdoption),
+                KeyCode::Esc => Some(Action::DismissAdoption),
+                KeyCode::Tab => Some(Action::NextAdoptionField),
+                KeyCode::Backspace => Some(Action::DeleteAdoptionCharacter),
+                KeyCode::Up => Some(Action::ScrollDetail(-1)),
+                KeyCode::Down => Some(Action::ScrollDetail(1)),
+                KeyCode::Char(character) => Some(Action::AppendAdoptionCharacter(character)),
+                _ => None,
+            },
+            crate::adoption::AdoptionPrompt::Preview(_) => match key.code {
+                KeyCode::Enter if app.adoption_preview_fully_seen() => {
+                    Some(Action::ConfirmAdoption)
+                }
+                KeyCode::Esc => Some(Action::DismissAdoption),
+                KeyCode::Up | KeyCode::Char('k') => Some(Action::ScrollDetail(-1)),
+                KeyCode::Down | KeyCode::Char('j') => Some(Action::ScrollDetail(1)),
+                _ => None,
+            },
+            crate::adoption::AdoptionPrompt::Report(_)
+            | crate::adoption::AdoptionPrompt::Failed(_) => match key.code {
+                KeyCode::Esc => Some(Action::DismissAdoption),
+                KeyCode::Up | KeyCode::Char('k') => Some(Action::ScrollDetail(-1)),
+                KeyCode::Down | KeyCode::Char('j') => Some(Action::ScrollDetail(1)),
+                _ => None,
+            },
+        };
+        return match (key.kind, action) {
+            (KeyEventKind::Repeat, Some(Action::AppendAdoptionCharacter(_))) => action,
+            (KeyEventKind::Repeat, Some(Action::DeleteAdoptionCharacter)) => action,
+            (KeyEventKind::Repeat, Some(Action::ScrollDetail(_))) => action,
+            (KeyEventKind::Repeat, _) => None,
+            _ => action,
+        };
+    }
     // The install dialog is answered before anything else can be reached: a
     // preview is a question about writes that have not happened, and a report
     // is the only account of writes that have.
@@ -124,6 +165,12 @@ pub fn action_for_app_key(app: &SkilledApp, key: KeyEvent) -> Option<Action> {
         && key.code == KeyCode::Char('i')
     {
         return Some(Action::BeginInstall);
+    }
+    if app.can_adopt_selection()
+        && key.kind == KeyEventKind::Press
+        && key.code == KeyCode::Char('p')
+    {
+        return Some(Action::BeginAdoption);
     }
     if app.can_uninstall_selection()
         && key.kind == KeyEventKind::Press

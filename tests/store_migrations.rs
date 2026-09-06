@@ -47,7 +47,7 @@ fn the_schema_one_past_this_build_degrades_rather_than_writing_through() {
     let connection =
         rusqlite::Connection::open(data_dir.join("skilled.sqlite3")).expect("create database");
     connection
-        .execute_batch("PRAGMA user_version = 12;")
+        .execute_batch("PRAGMA user_version = 13;")
         .expect("set the next schema version");
     drop(connection);
     let database = data_dir.join("skilled.sqlite3");
@@ -65,7 +65,7 @@ fn the_schema_one_past_this_build_degrades_rather_than_writing_through() {
         app.metadata_failure()
             .expect("metadata failure")
             .cause()
-            .contains("schema 11")
+            .contains("schema 12")
     );
     assert_eq!(fs::read(database).expect("reread future database"), before);
 }
@@ -84,7 +84,8 @@ fn version_nine_update_metadata_gains_the_source_id_sequence() {
     let connection = rusqlite::Connection::open(&database).expect("open current database");
     connection
         .execute_batch(
-            "DROP TABLE source_id_sequence;
+            "DROP TABLE origin_baselines;
+             DROP TABLE source_id_sequence;
              ALTER TABLE source_update_checks DROP COLUMN generation;
              PRAGMA user_version = 9;",
         )
@@ -98,7 +99,7 @@ fn version_nine_update_metadata_gains_the_source_id_sequence() {
         connection
             .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
             .expect("schema version"),
-        11
+        12
     );
     assert_eq!(
         connection
@@ -208,7 +209,7 @@ fn version_five_receipts_gain_operations_and_keep_their_id_order() {
         connection
             .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
             .unwrap(),
-        11
+        12
     );
     assert_eq!(
         connection
@@ -388,7 +389,7 @@ fn version_four_metadata_gains_receipt_storage_that_outlives_its_source() {
         connection
             .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
             .unwrap(),
-        11
+        12
     );
     connection
         .execute_batch(
@@ -506,7 +507,7 @@ fn version_two_metadata_migrates_to_constrained_source_catalog_storage() {
         connection
             .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
             .unwrap(),
-        11
+        12
     );
     assert_eq!(
         connection

@@ -10,6 +10,7 @@ use ratatui::{
 use crate::{
     AgentKind, DoctorItem, DoctorPane, InventoryPane, RegistryAvailability, SessionIdentity,
     SetupStep, SkilledApp, SourcesPane, UpdatesPane, View,
+    adoption::AdoptionPrompt,
     app::{ListWindow, MAX_INVENTORY_FILTER, SourceRow, catalog_rows},
     components::{self, KeyHint, terminal_safe},
     inventory::{
@@ -186,6 +187,16 @@ pub fn render(frame: &mut Frame<'_>, app: &SkilledApp) -> RenderFeedback {
             detail_extent,
             app.update_preview_fully_seen() || update_preview_seen == Some(true),
         );
+    } else if let Some(prompt) = app.pending_adoption() {
+        render_adoption_prompt(
+            frame,
+            area,
+            prompt,
+            app.detail_scroll(),
+            detail_extent,
+            app.adoption_preview_fully_seen()
+                || detail_extent.is_some_and(|extent| app.detail_scroll() >= extent),
+        );
     } else if app.source_path_input_active() {
         render_source_path_entry(frame, area, app);
     } else if app.pending_source().is_some() && app.view() == View::Sources {
@@ -333,6 +344,7 @@ fn session_status_on_nav_row(app: &SkilledApp, area: Rect) -> bool {
 fn overlay_open(app: &SkilledApp) -> bool {
     app.pending_operation().is_some()
         || app.pending_repair().is_some()
+        || app.pending_adoption().is_some()
         || app.source_path_input_active()
         || (app.pending_source().is_some() && app.view() == View::Sources)
         || app.help_context().is_some()
@@ -674,6 +686,9 @@ fn keyboard_owner(app: &SkilledApp) -> Option<(String, &'static str)> {
 
     if app.help_context().is_some() {
         return Some(("Keyboard reference".to_owned(), DIALOG_NOTE));
+    }
+    if app.pending_adoption().is_some() {
+        return Some(("Confirm origin".to_owned(), DIALOG_NOTE));
     }
     if app.pending_update().is_some() {
         return Some(("Repository update".to_owned(), DIALOG_NOTE));
@@ -2868,6 +2883,14 @@ fn detail_scroll_extent(
         let rows = update_prompt_rows(prompt, body.width).len();
         return Some(rows.saturating_sub(usize::from(body.height)));
     }
+    if let Some(prompt) = app.pending_adoption() {
+        let body = install_prompt_regions(area, 0).body;
+        if body.width == 0 {
+            return None;
+        }
+        let rows = adoption_prompt_rows(prompt, body.width).len();
+        return Some(rows.saturating_sub(usize::from(body.height)));
+    }
     let (primary, detail) = viewport::workspace_regions(workspace);
     // `padded` mirrors what each view's scaffold draws: the Inventory's
     // panes carry the header clearance, the Doctor's do not.
@@ -3960,6 +3983,199 @@ fn render_update_prompt(
     };
     frame.render_widget(Paragraph::new(status), regions.status);
     frame.render_widget(Paragraph::new(hint).right_aligned(), regions.actions);
+}
+
+/// Draw the declaration a user makes before Skilled can claim an existing
+/// installation as its own. The draft and plan are both read-only; only the
+/// explicit confirmation records the reviewed baseline.
+fn render_adoption_prompt(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    prompt: &AdoptionPrompt,
+    scroll: usize,
+    extent: Option<usize>,
+    fully_seen: bool,
+) {
+    let popup = install_prompt_popup(area);
+    frame.render_widget(Clear, popup);
+    let (title, scope) = adoption_prompt_heading(prompt);
+    let actions = adoption_prompt_actions(prompt, fully_seen, extent.is_some_and(|max| max > 0));
+    let regions = install_prompt_regions(area, u16::try_from(actions.width()).unwrap_or(u16::MAX));
+    frame.render_widget(components::dialog_frame(title, scope), popup);
+    let rows = adoption_prompt_rows(prompt, regions.body.width);
+    let end = scroll
+        .saturating_add(usize::from(regions.body.height))
+        .min(rows.len());
+    let visible = rows.get(scroll.min(rows.len())..end).unwrap_or_default();
+    frame.render_widget(Paragraph::new(visible.to_vec()), regions.body);
+    frame.render_widget(
+        Paragraph::new(components::rule(regions.divider.width)),
+        regions.divider,
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            adoption_prompt_status(prompt, scroll, extent, fully_seen),
+            theme::key_label(),
+        ))),
+        regions.status,
+    );
+    frame.render_widget(Paragraph::new(actions.right_aligned()), regions.actions);
+}
+
+fn adoption_prompt_heading(prompt: &AdoptionPrompt) -> (&'static str, &'static str) {
+    match prompt {
+        AdoptionPrompt::Editing(_) | AdoptionPrompt::Preview(_) => {
+            ("Confirm origin", "nothing written yet")
+        }
+        AdoptionPrompt::Report(_) => ("Origin established", "baseline recorded"),
+        // Applying adoption rechecks content after committing metadata. A
+        // post-commit verification failure therefore cannot honestly claim
+        // that nothing was recorded.
+        AdoptionPrompt::Failed(_) => ("Adoption needs attention", "see result below"),
+    }
+}
+
+fn adoption_prompt_actions(
+    prompt: &AdoptionPrompt,
+    fully_seen: bool,
+    scrollable: bool,
+) -> Line<'static> {
+    let mut spans = match prompt {
+        AdoptionPrompt::Editing(_) => vec![
+            Span::styled("Tab", theme::key_cap()),
+            Span::raw(" Next field   "),
+            Span::styled("Enter", theme::key_cap()),
+            Span::raw(" Review   "),
+            Span::styled("Esc", theme::key_cap()),
+            Span::raw(" Cancel"),
+        ],
+        AdoptionPrompt::Preview(_) if fully_seen => vec![
+            Span::styled("Enter", theme::key_cap()),
+            Span::raw(" Confirm   "),
+            Span::styled("Esc", theme::key_cap()),
+            Span::raw(" Cancel"),
+        ],
+        AdoptionPrompt::Preview(_) => vec![
+            Span::styled("j/k", theme::key_cap()),
+            Span::raw(" Read plan   "),
+            Span::styled("Esc", theme::key_cap()),
+            Span::raw(" Cancel"),
+        ],
+        AdoptionPrompt::Report(_) | AdoptionPrompt::Failed(_) => {
+            vec![Span::styled("Esc", theme::key_cap()), Span::raw(" Close")]
+        }
+    };
+    if scrollable && !matches!(prompt, AdoptionPrompt::Preview(_)) {
+        let key = if matches!(prompt, AdoptionPrompt::Editing(_)) {
+            "Up/Down"
+        } else {
+            "j/k"
+        };
+        spans.splice(
+            0..0,
+            [Span::styled(key, theme::key_cap()), Span::raw(" Scroll   ")],
+        );
+    }
+    Line::from(spans)
+}
+
+fn adoption_prompt_status(
+    prompt: &AdoptionPrompt,
+    scroll: usize,
+    extent: Option<usize>,
+    fully_seen: bool,
+) -> String {
+    match prompt {
+        AdoptionPrompt::Editing(_) => match extent {
+            Some(max) if scroll > 0 && scroll < max => {
+                "Origin evidence continues above and below".to_owned()
+            }
+            Some(max) if scroll < max => "Origin evidence continues below".to_owned(),
+            _ => "Enter origin evidence before reviewing it".to_owned(),
+        },
+        AdoptionPrompt::Preview(_) if !fully_seen => match extent {
+            Some(max) if scroll > 0 && scroll < max => "Plan continues above and below".to_owned(),
+            Some(max) if scroll < max => "Plan continues below".to_owned(),
+            _ => "Plan must be shown before confirmation".to_owned(),
+        },
+        AdoptionPrompt::Preview(_) => "Complete origin and baseline plan shown".to_owned(),
+        AdoptionPrompt::Report(_) => match extent {
+            Some(max) if scroll > 0 && scroll < max => {
+                "Result continues above and below".to_owned()
+            }
+            Some(max) if scroll < max => "Result continues below".to_owned(),
+            _ => "Origin and baseline recorded".to_owned(),
+        },
+        AdoptionPrompt::Failed(_) => match extent {
+            Some(max) if scroll > 0 && scroll < max => {
+                "Result continues above and below".to_owned()
+            }
+            Some(max) if scroll < max => "Result continues below".to_owned(),
+            _ => "Review the result below".to_owned(),
+        },
+    }
+}
+
+fn adoption_prompt_lines(prompt: &AdoptionPrompt) -> Vec<Line<'static>> {
+    if let AdoptionPrompt::Editing(draft) = prompt {
+        return draft
+            .lines()
+            .into_iter()
+            .map(|line| {
+                if let Some(field) = line.strip_prefix("> ") {
+                    Line::from(vec![
+                        Span::styled(">", theme::focus_marker()),
+                        Span::raw(format!(" {}", terminal_safe(field))),
+                    ])
+                } else {
+                    Line::raw(terminal_safe(&line))
+                }
+            })
+            .collect();
+    }
+    let lines = match prompt {
+        AdoptionPrompt::Preview(plan) => plan.lines(),
+        AdoptionPrompt::Report(report) | AdoptionPrompt::Failed(report) => {
+            report.lines().map(str::to_owned).collect()
+        }
+        AdoptionPrompt::Editing(_) => unreachable!("handled above"),
+    };
+    lines
+        .into_iter()
+        .map(|line| Line::raw(terminal_safe(&line)))
+        .collect()
+}
+
+/// Materialize adoption text as rows rather than passing an offset through
+/// `Paragraph::scroll`, whose `u16` row count would strand content after row
+/// 65,535. The focus marker keeps its style while field text wraps.
+fn adoption_prompt_rows(prompt: &AdoptionPrompt, width: u16) -> Vec<Line<'static>> {
+    if width == 0 {
+        return Vec::new();
+    }
+    let width = usize::from(width);
+    let mut rows = Vec::new();
+    for line in adoption_prompt_lines(prompt) {
+        if line.spans.is_empty() {
+            rows.push(Line::default());
+            continue;
+        }
+        let mut row = Vec::new();
+        let mut row_width = 0_usize;
+        for span in line.spans {
+            for character in span.content.chars() {
+                let character_width = Span::raw(character.to_string()).width();
+                if !row.is_empty() && row_width.saturating_add(character_width) > width {
+                    rows.push(Line::from(std::mem::take(&mut row)));
+                    row_width = 0;
+                }
+                row.push(Span::styled(character.to_string(), span.style));
+                row_width = row_width.saturating_add(character_width);
+            }
+        }
+        rows.push(Line::from(row));
+    }
+    rows
 }
 
 fn update_prompt_rows(prompt: &RepositoryUpdatePrompt, width: u16) -> Vec<Line<'static>> {
@@ -7209,6 +7425,13 @@ fn help_commands(
                     description: "preview installing the focused variant",
                 });
             }
+            if app.can_adopt_selection() {
+                commands.push(HelpCommand {
+                    key: "p",
+                    label: "Confirm origin",
+                    description: "review and record a baseline for the focused variant",
+                });
+            }
             if app.can_add_source() {
                 commands.push(HelpCommand {
                     key: "a",
@@ -7530,6 +7753,41 @@ fn context_key_hints(
         hints.push(KeyHint::new("Ctrl-C", "Quit"));
         return hints;
     }
+    if let Some(prompt) = app.pending_adoption() {
+        let mut hints = Vec::new();
+        if detail_extent.is_some_and(|extent| extent > 0) {
+            hints.push(KeyHint::essential(
+                if matches!(prompt, AdoptionPrompt::Editing(_)) {
+                    "Up/Down"
+                } else {
+                    "j/k"
+                },
+                "Scroll",
+            ));
+        }
+        match prompt {
+            AdoptionPrompt::Editing(_) => hints.extend([
+                KeyHint::new("Tab", "Next field"),
+                KeyHint::essential("Enter", "Review"),
+                KeyHint::essential("Esc", "Cancel"),
+            ]),
+            AdoptionPrompt::Preview(_) => {
+                if app.adoption_preview_fully_seen()
+                    || detail_extent.is_some_and(|extent| app.detail_scroll() >= extent)
+                {
+                    hints.push(KeyHint::essential("Enter", "Confirm"));
+                    hints.push(KeyHint::essential("Esc", "Cancel"));
+                } else {
+                    hints.push(KeyHint::essential("Esc", "Close"));
+                }
+            }
+            AdoptionPrompt::Report(_) | AdoptionPrompt::Failed(_) => {
+                hints.push(KeyHint::essential("Esc", "Close"));
+            }
+        }
+        hints.push(KeyHint::new("Ctrl-C", "Quit"));
+        return hints;
+    }
     if app.source_path_input_active() {
         return vec![
             KeyHint::essential("Enter", "Inspect"),
@@ -7625,6 +7883,9 @@ fn context_key_hints(
             }
             if app.can_install_selection() {
                 hints.push(KeyHint::new("i", "Install"));
+            }
+            if app.can_adopt_selection() {
+                hints.push(KeyHint::new("p", "Confirm origin"));
             }
             if app.can_add_source() {
                 hints.push(KeyHint::new("a", "Add source"));
@@ -7878,6 +8139,32 @@ mod tests {
     #[test]
     fn update_dialog_rows_keep_offsets_beyond_the_paragraph_scroll_limit() {
         let rows = visual_rows(vec![Line::raw("x".repeat(65_540))], 1);
+
+        assert_eq!(rows.len(), 65_540);
+        assert_eq!(label_text(&rows[65_536]), "x");
+        assert_eq!(label_text(&rows[65_539]), "x");
+    }
+
+    #[test]
+    fn adoption_result_failure_does_not_claim_that_nothing_was_recorded() {
+        let prompt = AdoptionPrompt::Failed(
+            "Baseline saved, but post-save verification could not finish".to_owned(),
+        );
+
+        assert_eq!(
+            adoption_prompt_heading(&prompt),
+            ("Adoption needs attention", "see result below")
+        );
+        assert_eq!(
+            adoption_prompt_status(&prompt, 0, Some(0), true),
+            "Review the result below"
+        );
+    }
+
+    #[test]
+    fn adoption_rows_keep_offsets_beyond_the_paragraph_scroll_limit() {
+        let prompt = AdoptionPrompt::Failed("x".repeat(65_540));
+        let rows = adoption_prompt_rows(&prompt, 1);
 
         assert_eq!(rows.len(), 65_540);
         assert_eq!(label_text(&rows[65_536]), "x");

@@ -5525,6 +5525,35 @@ fn the_install_hint_appears_only_where_a_variant_is_focused() {
     assert!(!footer(&app).contains("i Install"), "{}", footer(&app));
 }
 
+/// Origin adoption starts as an editable declaration. Its focused field and
+/// the modal's explicit review/cancel controls must remain visible in text as
+/// well as in the focus colour.
+#[cfg(unix)]
+#[test]
+fn adoption_draft_names_the_focused_origin_field_and_its_controls() {
+    let harness = Harness::new();
+    let mut app = harness.installable_source();
+    let update = app.update(Action::BeginAdoption);
+    app.perform_effects(update.effects())
+        .expect("build adoption draft");
+
+    let screen = buffer(&app, 102, 32);
+    let rendered = inner_text(&screen);
+    assert!(rendered.contains("┌ Confirm origin"), "{rendered}");
+    assert!(rendered.contains("nothing written yet"), "{rendered}");
+    let field = row_containing(&screen, "> Repository URL:");
+    let row = row_text(&screen, field);
+    assert!(row.contains("> Repository URL:"), "{row}\n{rendered}");
+    assert_eq!(
+        style_in_row(&screen, field, ">").fg,
+        Some(Color::Rgb(0x73, 0xd7, 0xee))
+    );
+    let footer = inner_row_text(&screen, screen.area.height - 2);
+    assert!(footer.contains("Tab Next field"), "{footer}");
+    assert!(footer.contains("Enter Review"), "{footer}");
+    assert!(footer.contains("Esc Cancel"), "{footer}");
+}
+
 /// The report escapes what it prints, as every other surface does.
 ///
 /// A step's failure reason carries paths and operating-system error text, both
