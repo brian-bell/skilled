@@ -6185,6 +6185,12 @@ fn repair_report_lines(outcome: &RepairOutcome) -> Vec<Line<'static>> {
             &step.link_path().display().to_string(),
         )));
     }
+    if outcome.verified_standing_conflict() {
+        lines.push(Line::from(components::badge(
+            Tone::Warning,
+            "The existing OpenCode conflict remains, as previewed.",
+        )));
+    }
     for withheld in outcome.verification().withheld() {
         lines.push(Line::from(format!(
             "Not established: {} — {}",
