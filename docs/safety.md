@@ -237,7 +237,10 @@ settles which object is merged, not who vouches for it.
 Git for Windows alone also accepts `core.unsetenvvars`, a last-value-wins
 comma-separated list it applies immediately before starting a child process.
 An effective local or worktree value that names one of Skilled's transport,
-prompting, routing, locking, or lazy-fetch guards refuses the explicit check;
+prompting, routing, locking, or lazy-fetch guards refuses the explicit check.
+The same protection covers `GIT_CONFIG_NOSYSTEM`, `GIT_CONFIG_SYSTEM`, and
+`GIT_CONFIG_GLOBAL`, so child helpers retain the caller's configuration-file
+selection rather than loading excluded defaults;
 the same setting in global or system configuration remains the user's own
 choice. This guard is re-asked immediately before fetch with the other
 checkout-configured transport refusals. It prevents a checkout from removing

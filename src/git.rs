@@ -1948,6 +1948,10 @@ fn parse_windows_unsetenvvars(bytes: Vec<u8>) -> Option<String> {
     const PROTECTED: &[&str] = &[
         "GIT_ALLOW_PROTOCOL",
         "GIT_ASKPASS",
+        // Child helpers must retain the caller's selected configuration files.
+        "GIT_CONFIG_NOSYSTEM",
+        "GIT_CONFIG_SYSTEM",
+        "GIT_CONFIG_GLOBAL",
         "GIT_DIR",
         "GIT_LITERAL_PATHSPECS",
         "GIT_NO_LAZY_FETCH",
@@ -3640,6 +3644,34 @@ mod tests {
             }
             bytes
         };
+
+        // A helper must retain the caller's configuration boundary instead
+        // of rereading default system/global files the caller excluded.
+        for selector in [
+            "GIT_CONFIG_NOSYSTEM",
+            "GIT_CONFIG_SYSTEM",
+            "GIT_CONFIG_GLOBAL",
+        ] {
+            for scope in ["local", "worktree"] {
+                assert_eq!(
+                    parse_windows_unsetenvvars(records(&[(scope, selector)])),
+                    Some(selector.to_owned()),
+                    "{scope}: {selector}"
+                );
+                let lowercase = selector.to_ascii_lowercase();
+                assert_eq!(
+                    parse_windows_unsetenvvars(records(&[(scope, &lowercase)])),
+                    Some(lowercase.clone()),
+                    "{scope}: {lowercase}"
+                );
+            }
+            for scope in ["global", "system", "command"] {
+                assert_eq!(
+                    parse_windows_unsetenvvars(records(&[(scope, selector)])),
+                    None
+                );
+            }
+        }
 
         assert_eq!(
             parse_windows_unsetenvvars(records(&[("local", "GIT_ALLOW_PROTOCOL")])),

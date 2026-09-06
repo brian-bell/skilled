@@ -10,6 +10,9 @@ use skilled::{
 const GUARDS: &[(&str, &str)] = &[
     ("GIT_ALLOW_PROTOCOL", "ssh"),
     ("GIT_ASKPASS", "ignored-askpass"),
+    ("GIT_CONFIG_NOSYSTEM", "1"),
+    ("GIT_CONFIG_SYSTEM", "NUL"),
+    ("GIT_CONFIG_GLOBAL", "NUL"),
     ("GIT_NO_LAZY_FETCH", "1"),
     ("GIT_OPTIONAL_LOCKS", "0"),
     ("GIT_SSH_COMMAND", "selected-before-child-spawn"),
@@ -20,6 +23,9 @@ const GUARDS: &[(&str, &str)] = &[
 const PROTECTED_GUARDS: &[&str] = &[
     "GIT_ALLOW_PROTOCOL",
     "GIT_ASKPASS",
+    "GIT_CONFIG_NOSYSTEM",
+    "GIT_CONFIG_SYSTEM",
+    "GIT_CONFIG_GLOBAL",
     "GIT_DIR",
     "GIT_LITERAL_PATHSPECS",
     "GIT_NO_LAZY_FETCH",
