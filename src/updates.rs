@@ -651,6 +651,15 @@ fn probe_existing_cancellable(
     if partial_clone {
         return Ok(Some(partial_clone_probe(path)));
     }
+    let Some(unsetenvvars) =
+        git::repository_windows_unsetenvvars_code_cancellable(target, cancelled, child_slot)
+            .map_err(ProbeFailure::Inspect)?
+    else {
+        return Ok(None);
+    };
+    if let Some(variable) = unsetenvvars {
+        return Ok(Some(windows_unsetenvvars_probe(path, &variable)));
+    }
     let Some(transport_code) =
         git::repository_transport_code_cancellable(target, cancelled, child_slot)
             .map_err(ProbeFailure::Inspect)?
@@ -699,6 +708,15 @@ fn probe_existing_cancellable(
         };
         if url.as_deref().is_some_and(git::remote_url_runs_a_helper) {
             return Ok(Some(transport_code_probe(path, &key)));
+        }
+        let Some(unsetenvvars) =
+            git::repository_windows_unsetenvvars_code_cancellable(target, cancelled, child_slot)
+                .map_err(ProbeFailure::Inspect)?
+        else {
+            return Ok(None);
+        };
+        if let Some(variable) = unsetenvvars {
+            return Ok(Some(windows_unsetenvvars_probe(path, &variable)));
         }
         // Re-asked immediately before the fetch, for the reason given on the
         // same guard in `probe_existing`.
@@ -956,6 +974,24 @@ fn transport_code_probe(path: &Path, setting: &str) -> RepositoryUpdateProbe {
     }
 }
 
+/// The refusal for a checkout-controlled Windows Git setting that would strip
+/// an environment guard before Git starts its transport child.
+fn windows_unsetenvvars_probe(path: &Path, variable: &str) -> RepositoryUpdateProbe {
+    RepositoryUpdateProbe {
+        path: path.into(),
+        local: None,
+        upstream: None,
+        merge_base: None,
+        ahead: 0,
+        behind: 0,
+        worktree: None,
+        changed_files: Vec::new(),
+        error: Some(format!(
+            "source.repository_transport_unsupported|the registered checkout configures core.unsetenvvars to remove {variable}, which would weaken Git's child-process guards during the check"
+        )),
+    }
+}
+
 /// Whether the registered pathname still names the registered repository —
 /// asked through `handle`, so the identity answered for is the pinned
 /// directory the rest of the probe will act on, not whatever the pathname
@@ -1056,6 +1092,11 @@ fn probe_existing(
     if git::repository_is_partial_clone(target).map_err(ProbeFailure::Inspect)? {
         return Ok(partial_clone_probe(path));
     }
+    if let Some(variable) =
+        git::repository_windows_unsetenvvars_code(target).map_err(ProbeFailure::Inspect)?
+    {
+        return Ok(windows_unsetenvvars_probe(path, &variable));
+    }
     // Asked before anything else the check does, because the answer decides
     // whether the check may run at all rather than how one of its steps
     // behaves.
@@ -1082,6 +1123,11 @@ fn probe_existing(
                 path,
                 &format!("remote.{}.url", value.remote()),
             ));
+        }
+        if let Some(variable) =
+            git::repository_windows_unsetenvvars_code(target).map_err(ProbeFailure::Inspect)?
+        {
+            return Ok(windows_unsetenvvars_probe(path, &variable));
         }
         // Re-asked immediately before the fetch, not remembered from the top of
         // this function. Two of the keys are now settled at the moment they are

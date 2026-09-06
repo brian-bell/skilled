@@ -1,6 +1,6 @@
 use std::{
     collections::HashSet,
-    ffi::{OsStr, OsString},
+    ffi::OsStr,
     fs,
     io::{self, BufRead, BufReader, Read, Write},
     path::{Component, Path, PathBuf},
@@ -659,10 +659,10 @@ pub(crate) fn repository_identity(repository: &Path) -> Result<RepositoryIdentit
 
 pub(crate) fn repository_identity_from_git_dir(git_dir: PathBuf) -> Result<RepositoryIdentity> {
     let git_dir = git_dir.canonicalize()?;
-    let metadata = fs::symlink_metadata(&git_dir)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
+        let metadata = fs::symlink_metadata(&git_dir)?;
         Ok(RepositoryIdentity {
             git_dir,
             device: metadata.dev(),
@@ -671,11 +671,32 @@ pub(crate) fn repository_identity_from_git_dir(git_dir: PathBuf) -> Result<Repos
     }
     #[cfg(windows)]
     {
-        use std::os::windows::fs::MetadataExt;
+        use std::os::windows::fs::OpenOptionsExt;
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Storage::FileSystem::{
+            BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+            GetFileInformationByHandle,
+        };
+        // Rust's Windows `MetadataExt` identity methods are unstable on the
+        // supported compiler. Open the directory itself and ask the stable
+        // Win32 API for the same volume/file-index pair instead. Reparse
+        // points are not followed: an identity must describe the Git
+        // directory the canonical path named, never a replacement target.
+        let directory = fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(&git_dir)?;
+        let mut information: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+        if unsafe { GetFileInformationByHandle(directory.as_raw_handle(), &mut information) } == 0 {
+            return Err(io::Error::last_os_error().into());
+        }
         Ok(RepositoryIdentity {
             git_dir,
-            volume: metadata.volume_serial_number(),
-            file_index: metadata.file_index(),
+            volume: Some(information.dwVolumeSerialNumber),
+            file_index: Some(
+                (u64::from(information.nFileIndexHigh) << 32)
+                    | u64::from(information.nFileIndexLow),
+            ),
         })
     }
     #[cfg(not(any(unix, windows)))]
@@ -1264,6 +1285,7 @@ fn strip_record_terminator(value: &str) -> &str {
 
 #[cfg(unix)]
 fn git_path_from_output(mut value: Vec<u8>) -> Result<PathBuf> {
+    use std::ffi::OsString;
     use std::os::unix::ffi::OsStringExt;
 
     if value.ends_with(b"\r\n") {
