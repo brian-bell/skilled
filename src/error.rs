@@ -84,6 +84,10 @@ pub enum Error {
     CatalogOutsideSource(PathBuf),
     #[error("source changed after it was previewed; inspect it again before registering")]
     SourceChangedAfterPreview,
+    #[error(
+        "this source path now names a different repository with adopted origin baselines; forget the old source only after every recorded link is inactive before registering this checkout"
+    )]
+    SourceHasOriginBaselines,
     #[error("select at least one catalog root before registering the source")]
     NoCatalogsSelected,
     /// The installations a confirmed update affects are not the ones its

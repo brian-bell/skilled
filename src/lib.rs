@@ -1,3 +1,4 @@
+pub mod adoption;
 pub mod agents;
 pub mod app;
 pub mod cli;
@@ -8,6 +9,7 @@ pub mod input;
 pub mod inventory;
 pub mod operations;
 pub mod paths;
+pub mod provenance;
 pub mod resolution;
 pub mod runner;
 pub mod source;

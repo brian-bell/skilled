@@ -1,0 +1,20 @@
+---
+source: tests/adoption_flow.rs
+expression: screen
+---
+Source: source
+Checkout left untouched: <TEMP>/source
+Metadata to remove
+source registration and cached scan state
+catalog: skills
+Adopted origin and baseline to remove
+Catalog: <TEMP>/source/skills
+Skill: <TEMP>/source/skills/demo
+Origin: https://github.com/example/upstream
+Subdirectory: skills/demo
+Tracking ref: refs/heads/main
+Baseline v1: <BASELINE>
+Explicit current-content association; historical revision unknown.
+Skilled writes nothing to the checkout or any skill directory.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────
+Ready to forget source metadata Enter Forget Esc Cancel

@@ -1,0 +1,44 @@
+---
+source: tests/tui_snapshots.rs
+expression: "normalize_install_screen(&temporary, render(&app, 120, 40))"
+---
+ ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁
+▕                                                                                                                      ▏
+▕ ◆┌ Confirm origin ─────────────────────────────────────────────────────────────────────────── nothing written yet ┐d ▏
+▕▁▁│                                                                                                                │▁▁▏
+▕  │  Skill: [CANONICAL]                 /src/skills/portable                                                       │  ▏
+▕ C│  Confirm an exact origin and tracking branch. Use . for the repository root.                                   │  ▏
+▕▁▁│  Attribution and lock entries are hints, not proof of a historical revision.                                   │▁▁▏
+▕  │    Repository URL: https://github.com/fixture-org/skills                                                       │  ▏
+▕──│    Subdirectory: .                                                                                             │─ ▏
+▕▌ │  > Tracking branch (refs/heads/…): refs/heads/main                                                             │  ▏
+▕▌ │                                                                                                                │─ ▏
+▕▌ │                                                                                                                │  ▏
+▕  │                                                                                                                │c ▏
+▕  │                                                                                                                │  ▏
+▕  │                                                                                                                │  ▏
+▕  │                                                                                                                │  ▏
+▕  │                                                                                                                │  ▏
+▕  │                                                                                                                │  ▏
+▕  │                                                                                                                │─ ▏
+▕  │                                                                                                                │n ▏
+▕  │                                                                                                                │  ▏
+▕  │                                                                                                                │  ▏
+▕  │                                                                                                                │─ ▏
+▕  │                                                                                                                │  ▏
+▕  │                                                                                                                │  ▏
+▕  │                                                                                                                │  ▏
+▕  │                                                                                                                │  ▏
+▕  │                                                                                                                │  ▏
+▕  │                                                                                                                │  ▏
+▕  │                                                                                                                │  ▏
+▕  │                                                                                                                │  ▏
+▕  │                                                                                                                │  ▏
+▕  │                                                                                                                │  ▏
+▕  │                                                                                                                │  ▏
+▕  │  ────────────────────────────────────────────────────────────────────────────────────────────────────────────  │  ▏
+▕  │  Enter origin evidence before reviewing it                         Tab Next field   Enter Review   Esc Cancel  │  ▏
+▕  │                                                                                                                │  ▏
+▕  └────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘  ▏
+▕ Tab Next field   Enter Review   Esc Cancel   Ctrl-C Quit                                                             ▏
+ ▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔

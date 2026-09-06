@@ -1,0 +1,44 @@
+---
+source: tests/tui_snapshots.rs
+expression: preview
+---
+ ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁
+▕                                                                                                                      ▏
+▕ ◆┌ Confirm origin ─────────────────────────────────────────────────────────────────────────── nothing written yet ┐d ▏
+▕▁▁│                                                                                                                │▁▁▏
+▕  │  Adopt current content for future comparisons only.                                                            │  ▏
+▕ C│  No historical origin revision is proven or recorded.                                                          │  ▏
+▕▁▁│  Source: [CANONICAL]                 /src                                                                      │▁▁▏
+▕  │  Catalog: [CANONICAL]                 /src/skills                                                              │  ▏
+▕──│  Skill: [CANONICAL]                 /src/skills/portable                                                       │─ ▏
+▕▌ │  Origin: https://github.com/fixture-org/skills                                                                 │  ▏
+▕▌ │  Origin subdirectory: .                                                                                        │─ ▏
+▕▌ │  Tracking branch: refs/heads/main                                                                              │  ▏
+▕  │  Baseline v1: [SHA256]                                                                                         │c ▏
+▕  │  Write origin association and baseline to: [TEMP]                      /data/skilled.sqlite3                   │  ▏
+▕  │  Skill files, attribution, lockfiles, and Git state remain unchanged.                                          │  ▏
+▕  │  Content, evidence, paths, and registration are rechecked before saving.                                       │  ▏
+▕  │                                                                                                                │  ▏
+▕  │                                                                                                                │  ▏
+▕  │                                                                                                                │─ ▏
+▕  │                                                                                                                │n ▏
+▕  │                                                                                                                │  ▏
+▕  │                                                                                                                │  ▏
+▕  │                                                                                                                │─ ▏
+▕  │                                                                                                                │  ▏
+▕  │                                                                                                                │  ▏
+▕  │                                                                                                                │  ▏
+▕  │                                                                                                                │  ▏
+▕  │                                                                                                                │  ▏
+▕  │                                                                                                                │  ▏
+▕  │                                                                                                                │  ▏
+▕  │                                                                                                                │  ▏
+▕  │                                                                                                                │  ▏
+▕  │                                                                                                                │  ▏
+▕  │                                                                                                                │  ▏
+▕  │  ────────────────────────────────────────────────────────────────────────────────────────────────────────────  │  ▏
+▕  │  Complete origin and baseline plan shown                                           Enter Confirm   Esc Cancel  │  ▏
+▕  │                                                                                                                │  ▏
+▕  └────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘  ▏
+▕ Enter Confirm   Esc Cancel   Ctrl-C Quit                                                                             ▏
+ ▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔

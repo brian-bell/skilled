@@ -15,6 +15,13 @@ current behavior; [AGENTS.md](../AGENTS.md) is the entry point for agent workflo
   and the sole fast-forward write.
 - `src/updates.rs`: repository update probing, classification, planning,
   guarded apply, and three-answer verification.
+- `src/provenance.rs`: bounded local attribution/lock evidence parsing and
+  versioned SHA-256 directory baselines; evidence never proves a historical
+  revision or performs network access.
+- `src/adoption.rs`: exact-variant, metadata-only origin adoption with a
+  separately confirmed preview, content/path/evidence rechecks, and immutable
+  baseline persistence. Schema v12 adds `origin_baselines`, keyed by source ID,
+  catalog path, and variant path; manifests are not persisted.
 - `src/inventory.rs`: read-only scan of the native agent skill roots; owns the
   finding codes, the state vocabulary, and the count-or-phrase verdict.
 - `src/operations.rs`: sibling install, repair, uninstall, and Forget Source

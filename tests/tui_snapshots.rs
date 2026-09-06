@@ -1711,6 +1711,52 @@ fn install_preview_at_minimum_supported_size() {
     );
 }
 
+/// Adoption remains a declaration until the reviewed baseline is confirmed.
+/// These snapshots pin the full draft, preview, and result conversation rather
+/// than only its key hints: every path is normalized by the same helper that
+/// verifies install previews state absolute paths faithfully.
+#[cfg(unix)]
+#[test]
+fn adoption_draft_preview_and_report_at_wide_size() {
+    let (temporary, mut app) = install_fixture();
+    dispatch(&mut app, Action::BeginAdoption);
+    for character in "https://github.com/fixture-org/skills".chars() {
+        app.update(Action::AppendAdoptionCharacter(character));
+    }
+    app.update(Action::NextAdoptionField);
+    app.update(Action::AppendAdoptionCharacter('.'));
+    app.update(Action::NextAdoptionField);
+    for character in "refs/heads/main".chars() {
+        app.update(Action::AppendAdoptionCharacter(character));
+    }
+    insta::assert_snapshot!(
+        "adoption_draft_at_wide_size",
+        normalize_install_screen(&temporary, render(&app, 120, 40))
+    );
+
+    dispatch(&mut app, Action::PreviewAdoption);
+    let Some(skilled::adoption::AdoptionPrompt::Preview(plan)) = app.pending_adoption() else {
+        panic!("expected an adoption preview");
+    };
+    let lines = plan.lines();
+    let digest = lines
+        .iter()
+        .find_map(|line| line.strip_prefix("Baseline v1: "))
+        .unwrap();
+    // Baseline framing is platform-scoped; this snapshot checks disclosure and
+    // geometry while the hash tests check the digest's content sensitivity.
+    let preview = normalize_install_screen(&temporary, render(&app, 120, 40))
+        .replace(digest, &padded_placeholder(digest, "[SHA256]"));
+    insta::assert_snapshot!("adoption_preview_at_wide_size", preview);
+
+    app.note_detail_max_scroll(drawn(&app, 120, 40).1.detail_max_scroll());
+    dispatch(&mut app, Action::ConfirmAdoption);
+    insta::assert_snapshot!(
+        "adoption_report_at_wide_size",
+        normalize_install_screen(&temporary, render(&app, 120, 40))
+    );
+}
+
 /// A blocked plan states the finding that blocks it and offers no way to
 /// confirm: the footer must not hint a key the reducer would refuse.
 #[cfg(unix)]

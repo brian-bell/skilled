@@ -522,6 +522,78 @@ fn install_is_offered_only_where_a_variant_is_focused() {
 
 #[cfg(unix)]
 #[test]
+fn adoption_owns_keys_and_does_not_repeat_confirmation() {
+    use skilled::input::action_for_app_key;
+
+    let temporary = tempfile::tempdir().expect("temporary application directory");
+    let repository = temporary.path().join("library");
+    create_source_fixture(&repository);
+    let home = temporary.path().join("home");
+    let mut app = SkilledApp::open(AppEnvironment::new(
+        &home,
+        temporary.path().join("data"),
+        "",
+    ))
+    .expect("open application");
+    let preview = app.preview_source(&repository).expect("preview source");
+    app.confirm_source(preview).expect("register source");
+    for _ in 0..7 {
+        let update = app.update(Action::Continue);
+        app.perform_effects(update.effects())
+            .expect("setup effects");
+    }
+    app.update(Action::OpenSources);
+    app.update(Action::AdvanceSourcesPane);
+
+    assert_eq!(
+        action_for_app_key(&app, key(KeyCode::Char('p'))),
+        Some(Action::BeginAdoption)
+    );
+    assert_eq!(action_for_app_key(&app, repeat(KeyCode::Char('p'))), None);
+    let update = app.update(Action::BeginAdoption);
+    app.perform_effects(update.effects())
+        .expect("build adoption draft");
+
+    assert_eq!(
+        action_for_app_key(&app, key(KeyCode::Char('o'))),
+        Some(Action::AppendAdoptionCharacter('o'))
+    );
+    assert_eq!(
+        action_for_app_key(&app, repeat(KeyCode::Char('o'))),
+        Some(Action::AppendAdoptionCharacter('o'))
+    );
+    for character in "https://github.com/jack/skills".chars() {
+        assert_eq!(
+            action_for_app_key(&app, key(KeyCode::Char(character))),
+            Some(Action::AppendAdoptionCharacter(character)),
+            "origin character {character:?}"
+        );
+    }
+    assert_eq!(
+        action_for_app_key(&app, key(KeyCode::Up)),
+        Some(Action::ScrollDetail(-1))
+    );
+    assert_eq!(
+        action_for_app_key(&app, key(KeyCode::Down)),
+        Some(Action::ScrollDetail(1))
+    );
+    assert_eq!(
+        action_for_app_key(&app, key(KeyCode::Tab)),
+        Some(Action::NextAdoptionField)
+    );
+    assert_eq!(
+        action_for_app_key(&app, key(KeyCode::Enter)),
+        Some(Action::PreviewAdoption)
+    );
+    assert_eq!(action_for_app_key(&app, repeat(KeyCode::Enter)), None);
+    assert_eq!(
+        action_for_app_key(&app, key(KeyCode::Char('1'))),
+        Some(Action::AppendAdoptionCharacter('1'))
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn x_maps_only_to_the_owned_object_in_the_active_region() {
     use skilled::input::action_for_app_key;
 
