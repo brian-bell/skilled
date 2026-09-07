@@ -19,6 +19,7 @@ mod theme;
 pub mod tui;
 pub mod updates;
 pub mod validation;
+pub mod vendored;
 mod viewport;
 
 pub use agents::{AgentDetection, AgentKind};

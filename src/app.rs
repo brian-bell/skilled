@@ -43,6 +43,24 @@ use crate::{
     validation::valid_skill_name,
 };
 
+/// An explicit origin check never writes the selected skill. Its completed
+/// preview is informational until a separate apply workflow is implemented.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum VendoredPrompt {
+    Checking,
+    Preview(Box<crate::vendored::Preview>),
+    Failed(crate::adoption::AdoptionFailure),
+}
+
+struct VendoredCheckRun {
+    receiver: Receiver<
+        std::result::Result<Option<crate::vendored::Preview>, crate::adoption::AdoptionFailure>,
+    >,
+    handle: JoinHandle<()>,
+    cancelled: Arc<AtomicBool>,
+    child: Arc<Mutex<Option<Child>>>,
+}
+
 /// The editable origin declaration; focus and errors belong to the UI session.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AdoptionForm {
@@ -248,6 +266,8 @@ pub enum Action {
     ///
     /// Nothing is written by this, and nothing is written by anything until
     /// [`Action::ConfirmOperation`] is applied to the preview it produces.
+    BeginVendoredCheck,
+    DismissVendoredCheck,
     BeginAdoption,
     AppendAdoptionCharacter(char),
     DeleteAdoptionCharacter,
@@ -297,6 +317,8 @@ pub enum Effect {
     /// is what the user is standing on, and the runner reads it back from the
     /// same state the reducer read, exactly as [`Effect::ScanInstallations`]
     /// carries no roots.
+    CheckVendoredOrigin,
+    CancelVendoredCheck,
     BeginAdoption,
     PreviewAdoption,
     ApplyAdoption,
@@ -761,6 +783,8 @@ pub struct SkilledApp {
     update_checks: Vec<CachedUpdateCheck>,
     updates_pane: UpdatesPane,
     focused_update: usize,
+    pending_vendored: Option<VendoredPrompt>,
+    vendored_check_run: Option<VendoredCheckRun>,
     pending_adoption: Option<crate::adoption::AdoptionPrompt>,
     pending_update: Option<RepositoryUpdatePrompt>,
     update_preview_fully_seen: bool,
@@ -888,6 +912,8 @@ impl SkilledApp {
             update_checks,
             updates_pane: UpdatesPane::Candidates,
             focused_update: 0,
+            pending_vendored: None,
+            vendored_check_run: None,
             pending_adoption: None,
             pending_update: None,
             update_preview_fully_seen: false,
@@ -1274,6 +1300,123 @@ impl SkilledApp {
                 self.selected_variant_row(),
                 Some(SourceRow::Variant { candidate, .. }) if candidate.validation().is_valid()
             )
+    }
+
+    pub fn can_check_vendored_selection(&self) -> bool {
+        self.can_install_selection()
+            && self.vendored_check_run.is_none()
+            && !self.update_check_in_flight()
+    }
+
+    pub fn pending_vendored(&self) -> Option<&VendoredPrompt> {
+        self.pending_vendored.as_ref()
+    }
+
+    pub fn vendored_check_in_flight(&self) -> bool {
+        self.vendored_check_run.is_some()
+    }
+
+    fn vendored_failure(&mut self, failure: crate::adoption::AdoptionFailure) {
+        if failure.metadata == crate::adoption::MetadataAvailability::Unavailable {
+            self.degrade(MetadataFailure::new(
+                self.environment.data_dir.join("skilled.sqlite3"),
+                failure.message.clone(),
+            ));
+        }
+        self.pending_vendored = Some(VendoredPrompt::Failed(failure));
+        self.reset_detail_scroll();
+    }
+
+    fn start_vendored_check(&mut self) {
+        if self.vendored_check_run.is_some() {
+            return;
+        }
+        self.rescan_installations();
+        let request = (|| {
+            let source = self.selected_source().ok_or("No source selected")?;
+            let Some(SourceRow::Variant { catalog, candidate }) = self.selected_variant_row()
+            else {
+                return Err(crate::adoption::AdoptionFailure::from(
+                    "No variant selected",
+                ));
+            };
+            crate::vendored::prepare(
+                source,
+                VariantRef::of(source, catalog, candidate),
+                self.store()
+                    .map_err(crate::adoption::AdoptionFailure::metadata)?,
+                &self.inventory,
+                &self.environment,
+            )
+        })();
+        let request = match request {
+            Ok(request) => request,
+            Err(failure) => {
+                self.vendored_failure(failure);
+                return;
+            }
+        };
+        let (sender, receiver) = mpsc::channel();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let child = Arc::new(Mutex::new(None));
+        let worker_cancelled = cancelled.clone();
+        let worker_child = child.clone();
+        let data_dir = self.environment.data_dir.clone();
+        let handle = std::thread::spawn(move || {
+            let result =
+                crate::vendored::check(request, &data_dir, &worker_cancelled, &worker_child);
+            let _ = sender.send(result);
+        });
+        self.vendored_check_run = Some(VendoredCheckRun {
+            receiver,
+            handle,
+            cancelled,
+            child,
+        });
+        self.pending_vendored = Some(VendoredPrompt::Checking);
+        self.reset_detail_scroll();
+    }
+
+    /// Called at the event-loop boundary, never by the reducer or renderer.
+    /// Dropping a cancelled run's receiver prevents a late result replacing a
+    /// newer dialog; there is at most one live receiver for the current check.
+    pub fn drain_vendored_check(&mut self) {
+        let Some(run) = self.vendored_check_run.as_ref() else {
+            return;
+        };
+        let result = match run.receiver.try_recv() {
+            Ok(result) => result,
+            Err(TryRecvError::Empty) => return,
+            Err(TryRecvError::Disconnected) => Err("Origin check ended before completing".into()),
+        };
+        if let Some(run) = self.vendored_check_run.take() {
+            self.retire_update_worker(run.handle);
+        }
+        match result {
+            Ok(Some(preview)) => {
+                self.pending_vendored = Some(VendoredPrompt::Preview(Box::new(preview)))
+            }
+            Ok(None) => self.pending_vendored = None,
+            Err(failure) => self.vendored_failure(failure),
+        }
+        self.reset_detail_scroll();
+    }
+
+    fn cancel_vendored_check(&mut self) {
+        if let Some(run) = self.vendored_check_run.take() {
+            run.cancelled.store(true, Ordering::Release);
+            if let Some(mut child) = run
+                .child
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .take()
+            {
+                crate::git::terminate_child(&mut child);
+            }
+            self.retire_update_worker(run.handle);
+        }
+        self.pending_vendored = None;
+        self.reset_detail_scroll();
     }
 
     pub fn can_adopt_selection(&self) -> bool {
@@ -1692,6 +1835,7 @@ impl SkilledApp {
         self.pending_repair = None;
         self.pending_update = None;
         self.pending_adoption = None;
+        self.pending_vendored = None;
     }
 
     pub fn update(&mut self, action: Action) -> UpdateResult {
@@ -1704,6 +1848,19 @@ impl SkilledApp {
                 Action::Quit => self.quit_result(),
                 _ => UpdateResult::continuing(Vec::new()),
             };
+        }
+
+        if self.pending_vendored.is_some() {
+            let effects = match action {
+                Action::Quit => return self.quit_result(),
+                Action::DismissVendoredCheck => vec![Effect::CancelVendoredCheck],
+                Action::ScrollDetail(delta) => {
+                    self.scroll_detail(delta);
+                    Vec::new()
+                }
+                _ => Vec::new(),
+            };
+            return UpdateResult::continuing(effects);
         }
 
         if self.pending_adoption.is_some() {
@@ -2125,6 +2282,9 @@ impl SkilledApp {
             Action::AppendInventoryFilter(_)
             | Action::DeleteInventoryFilterCharacter
             | Action::SubmitInventoryFilter => Vec::new(),
+            Action::BeginVendoredCheck if self.can_check_vendored_selection() => {
+                vec![Effect::CheckVendoredOrigin]
+            }
             Action::BeginAdoption => {
                 if self.can_adopt_selection() {
                     vec![Effect::BeginAdoption]
@@ -2137,7 +2297,9 @@ impl SkilledApp {
             | Action::NextAdoptionField
             | Action::PreviewAdoption
             | Action::ConfirmAdoption
-            | Action::DismissAdoption => Vec::new(),
+            | Action::DismissAdoption
+            | Action::DismissVendoredCheck
+            | Action::BeginVendoredCheck => Vec::new(),
             Action::BeginInstall => {
                 if self.pending_repair.is_none() && self.can_install_selection() {
                     vec![Effect::PlanInstall]
@@ -2281,6 +2443,8 @@ impl SkilledApp {
                     self.rescan_installations();
                 }
                 Effect::ScanInstallations => self.rescan_installations(),
+                Effect::CheckVendoredOrigin => self.start_vendored_check(),
+                Effect::CancelVendoredCheck => self.cancel_vendored_check(),
                 Effect::BeginAdoption => self.begin_adoption(),
                 Effect::PreviewAdoption => self.preview_adoption(),
                 Effect::ApplyAdoption => self.apply_adoption(),
@@ -2610,6 +2774,10 @@ impl SkilledApp {
             self.update_check_in_flight()
                 .then_some(Effect::CancelUpdateCheck)
                 .into_iter()
+                .chain(
+                    self.vendored_check_in_flight()
+                        .then_some(Effect::CancelVendoredCheck),
+                )
                 .collect(),
         )
     }
@@ -3793,6 +3961,7 @@ impl SkilledApp {
             || self.pending_repair.is_some()
             || self.pending_update.is_some()
             || self.pending_adoption.is_some()
+            || self.pending_vendored.is_some()
         {
             return true;
         }
@@ -4011,6 +4180,12 @@ fn publish_update_worker_failure(
 /// asked for it.
 impl Drop for SkilledApp {
     fn drop(&mut self) {
+        self.cancel_vendored_check();
+        // Cancelled workers have already received their cancellation signal.
+        // Join them here so no origin fetch outlives the application.
+        for handle in self.retired_update_workers.drain(..) {
+            let _ = handle.join();
+        }
         let Some(run) = self.update_check_run.take() else {
             return;
         };
@@ -4202,6 +4377,76 @@ mod tests {
         note_generation(second + 5);
 
         assert!(now() > second + 5);
+    }
+
+    #[test]
+    fn vendored_preview_owns_scrolling_and_cannot_apply_or_navigate() {
+        let (_temporary, mut app) = test_app();
+        app.pending_vendored = Some(VendoredPrompt::Checking);
+        app.detail_max_scroll = 4;
+        app.update(Action::ScrollDetail(1));
+        assert_eq!(app.detail_scroll(), 1);
+        for action in [
+            Action::ConfirmAdoption,
+            Action::ConfirmRepositoryUpdate,
+            Action::OpenSources,
+            Action::BeginInstall,
+        ] {
+            assert!(app.update(action).effects().is_empty());
+            assert_eq!(app.pending_vendored, Some(VendoredPrompt::Checking));
+        }
+        let update = app.update(Action::DismissVendoredCheck);
+        app.perform_effects(update.effects()).unwrap();
+        assert!(app.pending_vendored().is_none());
+    }
+
+    #[test]
+    fn cancelled_origin_worker_cannot_replace_a_later_dialog() {
+        let (_temporary, mut app) = test_app();
+        let (sender, receiver) = mpsc::channel();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let worker_cancelled = cancelled.clone();
+        let handle = std::thread::spawn(move || {
+            while !worker_cancelled.load(Ordering::Acquire) {
+                std::thread::yield_now();
+            }
+            let _ = sender.send(Err("late origin failure".into()));
+        });
+        app.vendored_check_run = Some(VendoredCheckRun {
+            receiver,
+            handle,
+            cancelled: cancelled.clone(),
+            child: Arc::new(Mutex::new(None)),
+        });
+        app.pending_vendored = Some(VendoredPrompt::Checking);
+        let update = app.update(Action::DismissVendoredCheck);
+        app.perform_effects(update.effects()).unwrap();
+        assert!(cancelled.load(Ordering::Acquire));
+        app.pending_vendored = Some(VendoredPrompt::Failed("new dialog".into()));
+        app.drain_vendored_check();
+        assert_eq!(
+            app.pending_vendored,
+            Some(VendoredPrompt::Failed("new dialog".into()))
+        );
+    }
+
+    #[test]
+    fn disconnected_origin_worker_reports_incomplete_check() {
+        let (_temporary, mut app) = test_app();
+        let (sender, receiver) = mpsc::channel();
+        drop(sender);
+        app.vendored_check_run = Some(VendoredCheckRun {
+            receiver,
+            handle: std::thread::spawn(|| {}),
+            cancelled: Arc::new(AtomicBool::new(false)),
+            child: Arc::new(Mutex::new(None)),
+        });
+        app.pending_vendored = Some(VendoredPrompt::Checking);
+        app.drain_vendored_check();
+        assert!(
+            matches!(app.pending_vendored(), Some(VendoredPrompt::Failed(failure)) if failure.message.contains("before completing"))
+        );
+        assert!(!app.vendored_check_in_flight());
     }
 
     #[test]

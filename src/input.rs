@@ -47,6 +47,19 @@ pub fn action_for_app_key(app: &SkilledApp, key: KeyEvent) -> Option<Action> {
             _ => action,
         };
     }
+    if app.pending_vendored().is_some() {
+        let action = match key.code {
+            KeyCode::Esc => Some(Action::DismissVendoredCheck),
+            KeyCode::Up | KeyCode::Char('k') => Some(Action::ScrollDetail(-1)),
+            KeyCode::Down | KeyCode::Char('j') => Some(Action::ScrollDetail(1)),
+            _ => None,
+        };
+        return match (key.kind, action) {
+            (KeyEventKind::Repeat, Some(Action::ScrollDetail(_))) => action,
+            (KeyEventKind::Repeat, _) => None,
+            _ => action,
+        };
+    }
     // Origin adoption is a staged declaration: its editable evidence, the
     // resulting baseline preview, and its outcome own the keyboard until the
     // user dismisses them. In particular, a held Enter must never establish a
@@ -165,6 +178,12 @@ pub fn action_for_app_key(app: &SkilledApp, key: KeyEvent) -> Option<Action> {
         && key.code == KeyCode::Char('i')
     {
         return Some(Action::BeginInstall);
+    }
+    if app.can_check_vendored_selection()
+        && key.kind == KeyEventKind::Press
+        && key.code == KeyCode::Char('u')
+    {
+        return Some(Action::BeginVendoredCheck);
     }
     if app.can_adopt_selection()
         && key.kind == KeyEventKind::Press

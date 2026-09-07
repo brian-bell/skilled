@@ -14,6 +14,10 @@ current behavior; [AGENTS.md](../AGENTS.md) is the entry point for agent workflo
   candidate validation.
 - `src/git.rs`: typed no-shell Git boundary for repository inspection, fetch,
   and the sole fast-forward write.
+- `src/git/origin.rs`: explicit cancellable origin fetch into a fresh private
+  cache, with bounded object-database subtree reads and no checkout.
+- `src/vendored.rs`: adopted-baseline checks and immutable read-only previews
+  for one selected skill, including proposed content, notices, and installations.
 - `src/updates.rs`: repository update probing, classification, planning,
   guarded apply, and three-answer verification.
 - `src/provenance.rs`: bounded local attribution/lock evidence parsing and

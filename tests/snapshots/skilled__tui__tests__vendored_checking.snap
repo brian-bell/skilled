@@ -1,0 +1,27 @@
+---
+source: src/tui.rs
+expression: screen
+---
+
+  ┌ Checking skill origin ──────────────────────────────── read-only preview ┐
+  │                                                                          │
+  │  Checking the confirmed origin and reading its selected subtree.         │
+  │  Only the application cache is written. Skill content and provenance re  │
+  │  main unchanged.                                                         │
+  │  Esc cancels this check.                                                 │
+  │                                                                          │
+  │                                                                          │
+  │                                                                          │
+  │                                                                          │
+  │                                                                          │
+  │                                                                          │
+  │                                                                          │
+  │                                                                          │
+  │                                                                          │
+  │                                                                          │
+  │                                                                          │
+  │                                                                          │
+  │  ──────────────────────────────────────────────────────────────────────  │
+  │  Checking — no skill files are written                       Esc Cancel  │
+  │                                                                          │
+  └──────────────────────────────────────────────────────────────────────────┘

@@ -10,7 +10,8 @@ use std::{
 
 use crate::{
     provenance::{
-        Baseline, Evidence, ObservationFailure, Origin, observe_directory_hash, read_evidence,
+        Baseline, DirectoryManifest, Evidence, ObservationFailure, Origin, observe_directory_hash,
+        read_evidence,
     },
     resolution::VariantRef,
     source::{RegisteredSource, RepositoryIdentity, repository_identity},
@@ -168,7 +169,7 @@ pub(crate) struct DirectoryIdentity {
     inode: u64,
 }
 
-fn directories(
+pub(crate) fn directories(
     checkout: &Path,
     relative: &Path,
 ) -> Result<Vec<DirectoryIdentity>, ObservationFailure> {
@@ -366,7 +367,7 @@ fn observe(
     })
 }
 
-fn validation_failure(
+pub(crate) fn validation_failure(
     skill: &Path,
     error: crate::validation::PortableValidationError,
 ) -> ObservationFailure {
@@ -394,6 +395,28 @@ fn validation_failure(
         // with the valid skill captured in the preview.
         _ => Changed(message),
     }
+}
+
+/// The local portion of a vendored update check. It holds the same source
+/// identity, physical-ancestor, portable-skill, and no-follow traversal guards
+/// adoption uses, while returning the entries already read for a preview.
+pub(crate) fn observe_variant_manifest(
+    checkout: &Path,
+    variant: &VariantRef,
+    identity: &RepositoryIdentity,
+) -> Result<DirectoryManifest, ObservationFailure> {
+    use ObservationFailure::{Changed, Unavailable};
+    if repository_identity(checkout).map_err(|error| Unavailable(error.to_string()))? != *identity {
+        return Err(Changed("Paths changed after the update check began".into()));
+    }
+    directories(checkout, variant.variant_relative_path())?;
+    let skill = checkout.join(variant.variant_relative_path());
+    let validated = crate::validation::validate_portable_skill(&skill)
+        .map_err(|error| validation_failure(&skill, error))?;
+    if validated.name() != variant.skill_name() {
+        return Err(Changed("The selected skill identity changed".into()));
+    }
+    crate::provenance::observe_directory_manifest(&skill)
 }
 
 fn recheck(plan: &AdoptionPlan) -> Result<(), ObservationFailure> {

@@ -14,13 +14,26 @@ use std::{
     path::{Path, PathBuf},
     process::{Child, Command, Output, Stdio},
     sync::{
-        Mutex,
+        Arc, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+#[cfg(test)]
+use std::cell::RefCell;
+
 use crate::{Error, Result};
+
+pub(crate) mod origin;
+
+// A test-only scoped user configuration inherited by every Git child on the
+// current test thread. It avoids mutating the process environment while
+// exercising Git's ordinary user-configuration semantics.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static TEST_GIT_CONFIG_GLOBAL: RefCell<Option<OsString>> = const { RefCell::new(None) };
+}
 
 const UPDATE_SUBCOMMANDS: &[&str] = &[
     "fetch",
@@ -234,6 +247,9 @@ impl RepositoryHandle {
 pub enum GitTarget<'a> {
     Path(&'a Path),
     Handle(&'a RepositoryHandle),
+    /// A descriptor-bound bare repository. Unlike `Handle`, it must not name
+    /// a worktree or append `.git` to the held directory.
+    BareHandle(&'a RepositoryHandle),
 }
 
 impl GitTarget<'_> {
@@ -241,7 +257,7 @@ impl GitTarget<'_> {
     pub fn path(&self) -> &Path {
         match self {
             Self::Path(path) => path,
-            Self::Handle(handle) => handle.path(),
+            Self::Handle(handle) | Self::BareHandle(handle) => handle.path(),
         }
     }
 }
@@ -261,6 +277,12 @@ impl<'a> From<&'a PathBuf> for GitTarget<'a> {
 impl<'a> From<&'a RepositoryHandle> for GitTarget<'a> {
     fn from(handle: &'a RepositoryHandle) -> Self {
         Self::Handle(handle)
+    }
+}
+
+impl<'a> GitTarget<'a> {
+    pub(crate) fn bare(handle: &'a RepositoryHandle) -> Self {
+        Self::BareHandle(handle)
     }
 }
 
@@ -995,15 +1017,7 @@ impl UpdateOp {
                 ssh_command,
                 allowed_protocols,
                 ..
-            } => vec![
-                ("GIT_TERMINAL_PROMPT".into(), "0".into()),
-                ("GIT_ASKPASS".into(), "".into()),
-                ("SSH_ASKPASS_REQUIRE".into(), "never".into()),
-                ("GIT_SSH_COMMAND".into(), ssh_command.into()),
-                ("GIT_ALLOW_PROTOCOL".into(), allowed_protocols.into()),
-                ("GIT_OPTIONAL_LOCKS".into(), "0".into()),
-                ("GIT_NO_LAZY_FETCH".into(), "1".into()),
-            ],
+            } => fetch_environment(ssh_command, allowed_protocols),
             Self::TreeEntryMode { .. } => vec![
                 ("GIT_OPTIONAL_LOCKS".into(), "0".into()),
                 ("GIT_LITERAL_PATHSPECS".into(), "1".into()),
@@ -1015,6 +1029,19 @@ impl UpdateOp {
             ],
         }
     }
+}
+
+/// Shared noninteractive fetch guards for checkout updates and origin caches.
+fn fetch_environment(ssh_command: &str, allowed_protocols: &str) -> Vec<(OsString, OsString)> {
+    vec![
+        ("GIT_TERMINAL_PROMPT".into(), "0".into()),
+        ("GIT_ASKPASS".into(), "".into()),
+        ("SSH_ASKPASS_REQUIRE".into(), "never".into()),
+        ("GIT_SSH_COMMAND".into(), ssh_command.into()),
+        ("GIT_ALLOW_PROTOCOL".into(), allowed_protocols.into()),
+        ("GIT_OPTIONAL_LOCKS".into(), "0".into()),
+        ("GIT_NO_LAZY_FETCH".into(), "1".into()),
+    ]
 }
 
 /// OpenSSH keeps the first value it obtains for most options. Insert the
@@ -1060,6 +1087,10 @@ fn command(repository: GitTarget<'_>, op: &UpdateOp) -> Command {
     for key in REPOSITORY_ROUTING_ENVIRONMENT {
         command.env_remove(key);
     }
+    #[cfg(test)]
+    if let Some(config) = TEST_GIT_CONFIG_GLOBAL.with(|value| value.borrow().clone()) {
+        command.env("GIT_CONFIG_GLOBAL", config);
+    }
     if !matches!(op, UpdateOp::Merge(_)) {
         command.args([
             "-c",
@@ -1091,6 +1122,10 @@ fn command(repository: GitTarget<'_>, op: &UpdateOp) -> Command {
             // documentation for why that boundary is accepted.
             command.env("GIT_DIR", ".git").env("GIT_WORK_TREE", ".");
         }
+        GitTarget::BareHandle(handle) => {
+            bind_to_handle(&mut command, handle);
+            command.env("GIT_DIR", ".");
+        }
     }
     command.args(op.arguments());
     for (key, value) in op.environment() {
@@ -1121,14 +1156,37 @@ fn run_cancellable(
 }
 
 fn collect_cancellable_child(
-    mut child: Child,
+    child: Child,
     cancelled: &AtomicBool,
     child_slot: &Mutex<Option<Child>>,
     output_limit: Option<usize>,
 ) -> Result<Option<Output>> {
+    collect_child_output(child, cancelled, child_slot, output_limit, false)
+}
+
+fn collect_cancellable_child_strict(
+    child: Child,
+    cancelled: &AtomicBool,
+    child_slot: &Mutex<Option<Child>>,
+    output_limit: usize,
+) -> Result<Option<Output>> {
+    collect_child_output(child, cancelled, child_slot, Some(output_limit), true)
+}
+
+fn collect_child_output(
+    mut child: Child,
+    cancelled: &AtomicBool,
+    child_slot: &Mutex<Option<Child>>,
+    output_limit: Option<usize>,
+    strict: bool,
+) -> Result<Option<Output>> {
+    let overflow = Arc::new(AtomicBool::new(false));
+    let stdout_overflow = overflow.clone();
+    let stderr_overflow = overflow.clone();
     let mut stdout = child.stdout.take().ok_or(Error::InvalidGitOutput)?;
     let mut stderr = child.stderr.take().ok_or(Error::InvalidGitOutput)?;
     let stdout_reader = std::thread::spawn(move || match output_limit {
+        Some(limit) if strict => read_strictly_bounded(&mut stdout, limit, &stdout_overflow),
         Some(limit) => read_bounded(&mut stdout, limit),
         None => {
             let mut bytes = Vec::new();
@@ -1136,6 +1194,7 @@ fn collect_cancellable_child(
         }
     });
     let stderr_reader = std::thread::spawn(move || match output_limit {
+        Some(limit) if strict => read_strictly_bounded(&mut stderr, limit, &stderr_overflow),
         Some(limit) => read_bounded(&mut stderr, limit),
         None => {
             let mut bytes = Vec::new();
@@ -1146,6 +1205,16 @@ fn collect_cancellable_child(
         .lock()
         .unwrap_or_else(|poison| poison.into_inner()) = Some(child);
     let status = loop {
+        if overflow.load(Ordering::Acquire) {
+            if let Some(mut child) = child_slot
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .take()
+            {
+                terminate_child(&mut child);
+            }
+            return Err(io::Error::other("Git output exceeds its read budget").into());
+        }
         if cancelled.load(Ordering::Acquire) {
             if let Some(mut child) = child_slot
                 .lock()
@@ -1182,6 +1251,9 @@ fn collect_cancellable_child(
         .unwrap_or_else(|poison| poison.into_inner())
         .take();
     while !stdout_reader.is_finished() || !stderr_reader.is_finished() {
+        if overflow.load(Ordering::Acquire) {
+            return Err(io::Error::other("Git output exceeds its read budget").into());
+        }
         if cancelled.load(Ordering::Acquire) {
             drop(stdout_reader);
             drop(stderr_reader);
@@ -2819,6 +2891,30 @@ fn run_bounded(repository: GitTarget<'_>, op: &UpdateOp, limit: usize) -> Result
     })
 }
 
+/// Stop at the first overflow byte instead of allowing compressed remote
+/// objects to generate unlimited discarded output. The owning collector kills
+/// the child when this flag is set; dropping this pipe also stops its writer.
+fn read_strictly_bounded(
+    reader: &mut impl Read,
+    limit: usize,
+    overflow: &AtomicBool,
+) -> io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    let mut chunk = [0u8; 8192];
+    loop {
+        let remaining = (limit - bytes.len()).saturating_add(1).min(chunk.len());
+        let count = reader.read(&mut chunk[..remaining])?;
+        if count == 0 {
+            return Ok(bytes);
+        }
+        if count > limit - bytes.len() {
+            overflow.store(true, Ordering::Release);
+            return Err(io::Error::other("Git output exceeds its read budget"));
+        }
+        bytes.extend_from_slice(&chunk[..count]);
+    }
+}
+
 fn read_bounded(reader: &mut impl Read, limit: usize) -> io::Result<Vec<u8>> {
     let mut retained = Vec::new();
     let mut chunk = [0_u8; 8 * 1024];
@@ -3630,6 +3726,38 @@ fn path_from_bytes(bytes: Vec<u8>) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn strict_output_reader_stops_at_the_first_overflow_byte() {
+        let mut input = io::Cursor::new(vec![b'x'; 65536]);
+        let overflow = AtomicBool::new(false);
+        assert!(read_strictly_bounded(&mut input, 1024, &overflow).is_err());
+        assert_eq!(input.position(), 1025);
+        assert!(overflow.load(Ordering::Acquire));
+        let mut exact = io::Cursor::new(vec![b'x'; 1024]);
+        assert_eq!(
+            read_strictly_bounded(&mut exact, 1024, &AtomicBool::new(false))
+                .unwrap()
+                .len(),
+            1024
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn strict_output_collector_terminates_an_unending_writer() {
+        let child = Command::new("yes")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let slot = Mutex::new(None);
+        let started = std::time::Instant::now();
+        let result = collect_cancellable_child_strict(child, &AtomicBool::new(false), &slot, 1024);
+        assert!(result.unwrap_err().to_string().contains("read budget"));
+        assert!(slot.lock().unwrap().is_none());
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
 
     #[test]
     fn windows_unsetenvvars_only_refuses_the_effective_repository_guard_removal() {

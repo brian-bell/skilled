@@ -72,7 +72,22 @@ it proves no historical upstream revision. A pinned attribution commit does not
 supply a tracking branch. The operation neither fetches nor changes skill files,
 lockfiles, notices, or Git state. Changed content, paths, evidence, or registration
 invalidate confirmation. An existing baseline cannot be replaced through adoption.
-Fetching and replacing vendored skill content are not part of this flow yet.
+After adopting an origin, press `u` on the selected Sources variant to check it.
+Skilled first compares the current skill with its saved baseline. Modified or
+unreadable content blocks the check. An explicit check fetches the confirmed
+tracking branch into a private application cache, pins the fetched revision,
+and shows the selected subtree's file changes and proposed baseline.
+`j` / `k` scroll the complete read-only preview; Esc cancels a running check or
+closes its result. Nothing fetches merely because Sources is opened.
+
+The preview names absolute destinations, affected installations, and preserved
+notice material. Recognized notice names are `LICENSE`, `LICENCE`, `COPYING`,
+`NOTICE`, and `ATTRIBUTION`, case-insensitively, with optional extensions or
+hyphen suffixes. Applicable notices from upstream parent directories are carried
+into the skill; existing skill notices are retained. Conflicting notices and unsupported paths or entry types block
+the preview. Checks leave skill content, provenance metadata, installation links,
+HEAD, and the index unchanged. Replacing skill content and `update --skill`
+remain future work; this preview has no Apply action.
 
 In Sources, press `i` on a skill variant to preview installing it. The dialog
 names every agent, what would happen to it, and the exact absolute path

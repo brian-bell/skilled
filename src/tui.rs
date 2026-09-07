@@ -187,6 +187,8 @@ pub fn render(frame: &mut Frame<'_>, app: &SkilledApp) -> RenderFeedback {
             detail_extent,
             app.update_preview_fully_seen() || update_preview_seen == Some(true),
         );
+    } else if let Some(prompt) = app.pending_vendored() {
+        render_vendored_prompt(frame, area, prompt, app.detail_scroll(), detail_extent);
     } else if let Some(prompt) = app.pending_adoption() {
         render_adoption_prompt(
             frame,
@@ -345,6 +347,7 @@ fn overlay_open(app: &SkilledApp) -> bool {
     app.pending_operation().is_some()
         || app.pending_repair().is_some()
         || app.pending_adoption().is_some()
+        || app.pending_vendored().is_some()
         || app.source_path_input_active()
         || (app.pending_source().is_some() && app.view() == View::Sources)
         || app.help_context().is_some()
@@ -686,6 +689,9 @@ fn keyboard_owner(app: &SkilledApp) -> Option<(String, &'static str)> {
 
     if app.help_context().is_some() {
         return Some(("Keyboard reference".to_owned(), DIALOG_NOTE));
+    }
+    if app.pending_vendored().is_some() {
+        return Some(("Skill update preview".to_owned(), DIALOG_NOTE));
     }
     if app.pending_adoption().is_some() {
         return Some(("Confirm origin".to_owned(), DIALOG_NOTE));
@@ -2883,6 +2889,14 @@ fn detail_scroll_extent(
         let rows = update_prompt_rows(prompt, body.width).len();
         return Some(rows.saturating_sub(usize::from(body.height)));
     }
+    if let Some(prompt) = app.pending_vendored() {
+        let body = install_prompt_regions(area, 0).body;
+        if body.width == 0 {
+            return None;
+        }
+        let rows = visual_rows(vendored_prompt_lines(prompt), body.width).len();
+        return Some(rows.saturating_sub(usize::from(body.height)));
+    }
     if let Some(prompt) = app.pending_adoption() {
         let body = install_prompt_regions(area, 0).body;
         if body.width == 0 {
@@ -3983,6 +3997,74 @@ fn render_update_prompt(
     };
     frame.render_widget(Paragraph::new(status), regions.status);
     frame.render_widget(Paragraph::new(hint).right_aligned(), regions.actions);
+}
+
+fn vendored_prompt_lines(prompt: &crate::app::VendoredPrompt) -> Vec<Line<'static>> {
+    use crate::app::VendoredPrompt;
+    let lines = match prompt {
+        VendoredPrompt::Checking => vec![
+            "Checking the confirmed origin and reading its selected subtree.".to_owned(),
+            "Only the application cache is written. Skill content and provenance remain unchanged."
+                .to_owned(),
+            "Esc cancels this check.".to_owned(),
+        ],
+        VendoredPrompt::Preview(preview) => preview.lines(),
+        VendoredPrompt::Failed(failure) => vec![
+            format!("Check blocked: {}", failure.message),
+            "No skill content or provenance was changed.".to_owned(),
+        ],
+    };
+    lines
+        .into_iter()
+        .map(|line| Line::raw(terminal_safe(&line)))
+        .collect()
+}
+
+fn render_vendored_prompt(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    prompt: &crate::app::VendoredPrompt,
+    scroll: usize,
+    extent: Option<usize>,
+) {
+    use crate::app::VendoredPrompt;
+    let checking = matches!(prompt, VendoredPrompt::Checking);
+    let title = match prompt {
+        VendoredPrompt::Checking => "Checking skill origin",
+        VendoredPrompt::Preview(preview) if preview.is_noop() => "Skill is up to date",
+        VendoredPrompt::Preview(_) => "Skill update preview",
+        VendoredPrompt::Failed(_) => "Skill check needs attention",
+    };
+    let popup = install_prompt_popup(area);
+    frame.render_widget(Clear, popup);
+    frame.render_widget(components::dialog_frame(title, "read-only preview"), popup);
+    let actions = Line::from(vec![
+        Span::styled("Esc", theme::key_cap()),
+        Span::raw(if checking { " Cancel" } else { " Close" }),
+    ]);
+    let regions = install_prompt_regions(area, actions.width() as u16);
+    let rows = visual_rows(vendored_prompt_lines(prompt), regions.body.width);
+    let end = scroll
+        .saturating_add(usize::from(regions.body.height))
+        .min(rows.len());
+    let visible = rows.get(scroll.min(rows.len())..end).unwrap_or_default();
+    frame.render_widget(Paragraph::new(visible.to_vec()), regions.body);
+    frame.render_widget(
+        Paragraph::new(components::rule(regions.divider.width)),
+        regions.divider,
+    );
+    let status = if extent.is_some_and(|max| scroll < max) {
+        "Preview continues below — j/k to scroll"
+    } else if checking {
+        "Checking — no skill files are written"
+    } else {
+        "Read-only result — no changes applied"
+    };
+    frame.render_widget(
+        Paragraph::new(Span::styled(status, theme::key_label())),
+        regions.status,
+    );
+    frame.render_widget(Paragraph::new(actions.right_aligned()), regions.actions);
 }
 
 /// Draw the declaration a user makes before Skilled can claim an existing
@@ -7487,6 +7569,13 @@ fn help_commands(
                     description: "preview installing the focused variant",
                 });
             }
+            if app.can_check_vendored_selection() {
+                commands.push(HelpCommand {
+                    key: "u",
+                    label: "Check skill origin",
+                    description: "fetch the confirmed origin and preview skill changes",
+                });
+            }
             if app.can_adopt_selection() {
                 commands.push(HelpCommand {
                     key: "p",
@@ -7815,6 +7904,22 @@ fn context_key_hints(
         hints.push(KeyHint::new("Ctrl-C", "Quit"));
         return hints;
     }
+    if let Some(prompt) = app.pending_vendored() {
+        let mut hints = Vec::new();
+        if detail_extent.is_some_and(|extent| extent > 0) {
+            hints.push(KeyHint::essential("j/k", "Scroll"));
+        }
+        hints.push(KeyHint::essential(
+            "Esc",
+            if matches!(prompt, crate::app::VendoredPrompt::Checking) {
+                "Cancel"
+            } else {
+                "Close"
+            },
+        ));
+        hints.push(KeyHint::new("Ctrl-C", "Quit"));
+        return hints;
+    }
     if let Some(prompt) = app.pending_adoption() {
         let mut hints = Vec::new();
         if detail_extent.is_some_and(|extent| extent > 0) {
@@ -7948,6 +8053,9 @@ fn context_key_hints(
             }
             if app.can_adopt_selection() {
                 hints.push(KeyHint::new("p", "Confirm origin"));
+            }
+            if app.can_check_vendored_selection() {
+                hints.push(KeyHint::new("u", "Check"));
             }
             if app.can_add_source() {
                 hints.push(KeyHint::new("a", "Add source"));
@@ -8196,6 +8304,83 @@ mod tests {
             .collect::<String>()
             .trim_end()
             .to_owned()
+    }
+
+    #[test]
+    fn vendored_check_dialogs_are_read_only_in_text_and_cell_styles() {
+        use crate::app::VendoredPrompt;
+        use ratatui::{Terminal, backend::TestBackend};
+        for (name, prompt, heading, action) in [
+            (
+                "preview",
+                VendoredPrompt::Preview(Box::new(crate::vendored::Preview::fixture())),
+                "Skill update preview",
+                "Close",
+            ),
+            (
+                "checking",
+                VendoredPrompt::Checking,
+                "Checking skill origin",
+                "Cancel",
+            ),
+            (
+                "blocked",
+                VendoredPrompt::Failed(
+                    "Modified skill: content differs from the adopted baseline".into(),
+                ),
+                "Skill check needs attention",
+                "Close",
+            ),
+        ] {
+            for (width, height) in [(80, 24), (120, 40)] {
+                let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+                terminal
+                    .draw(|frame| render_vendored_prompt(frame, frame.area(), &prompt, 0, Some(0)))
+                    .unwrap();
+                let buffer = terminal.backend().buffer();
+                let rows = (0..height)
+                    .map(|y| {
+                        (0..width)
+                            .map(|x| buffer[(x, y)].symbol())
+                            .collect::<String>()
+                    })
+                    .collect::<Vec<_>>();
+                let screen = rows
+                    .iter()
+                    .map(|row| row.trim_end())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                assert!(screen.contains(heading));
+                assert!(screen.contains("read-only preview"));
+                assert!(screen.contains(action));
+                assert!(!screen.contains("Enter"));
+                assert!(!screen.contains("Apply"));
+                let status = if name == "checking" {
+                    "Checking — no skill files"
+                } else {
+                    "Read-only result"
+                };
+                let status_row = rows.iter().position(|row| row.contains(status)).unwrap();
+                let status_byte = rows[status_row].find(status).unwrap();
+                let status_column = rows[status_row][..status_byte].chars().count();
+                assert_eq!(
+                    buffer[(status_column as u16, status_row as u16)].style().fg,
+                    theme::key_label().fg
+                );
+                let row = rows.iter().rposition(|row| row.contains("Esc")).unwrap();
+                let byte = rows[row].find("Esc").unwrap();
+                let column = rows[row][..byte].chars().count();
+                assert_eq!(
+                    buffer[(column as u16, row as u16)].style().fg,
+                    theme::key_cap().fg
+                );
+                if width == 80 {
+                    insta::with_settings!({snapshot_path => "../tests/snapshots"}, {
+                        insta::assert_snapshot!(format!("vendored_{name}"), screen);
+                    });
+                }
+            }
+        }
     }
 
     #[test]

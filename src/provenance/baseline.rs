@@ -11,6 +11,7 @@
 use super::ObservationFailure;
 use sha2::{Digest, Sha256};
 use std::{
+    collections::{BTreeMap, BTreeSet},
     ffi::OsStr,
     fs,
     io::{self, Read},
@@ -30,6 +31,30 @@ pub struct Baseline {
     pub digest: String,
 }
 
+/// One physical entry captured while calculating a baseline.  The manifest is
+/// intentionally ephemeral: update previews need the bytes they already read
+/// to describe their writes, but provenance stores only the digest.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ManifestEntry {
+    pub(crate) relative_path: std::path::PathBuf,
+    pub(crate) kind: ManifestEntryKind,
+    pub(crate) executable: bool,
+    pub(crate) bytes: Vec<u8>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ManifestEntryKind {
+    Directory,
+    File,
+    Symlink,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct DirectoryManifest {
+    pub(crate) baseline: Baseline,
+    pub(crate) entries: Vec<ManifestEntry>,
+}
+
 /// Computes a deterministic SHA-256 digest of all content in a directory.
 /// It is fail-closed for resource exhaustion, unsupported entry types, links,
 /// and observations that change while being read.
@@ -38,6 +63,28 @@ pub fn directory_hash(path: &Path) -> Result<Baseline, String> {
 }
 
 pub(crate) fn observe_directory_hash(path: &Path) -> Result<Baseline, ObservationFailure> {
+    let mut state = HashState::new();
+    observe_directory(path, &mut state)?;
+    debug_assert!(state.entries_manifest.is_none());
+    Ok(state.baseline())
+}
+
+/// Capture the same bounded, descriptor-pinned walk used for a baseline while
+/// retaining its entries for a pending, read-only update preview.
+pub(crate) fn observe_directory_manifest(
+    path: &Path,
+) -> Result<DirectoryManifest, ObservationFailure> {
+    let mut state = HashState::new_manifest();
+    observe_directory(path, &mut state)?;
+    Ok(DirectoryManifest {
+        baseline: state.baseline(),
+        entries: state
+            .entries_manifest
+            .expect("manifest capture was requested"),
+    })
+}
+
+fn observe_directory(path: &Path, state: &mut HashState) -> Result<(), ObservationFailure> {
     let root = fs::symlink_metadata(path).map_err(|error| {
         ObservationFailure::io(
             format!("cannot inspect skill directory {}: {error}", path.display()),
@@ -47,20 +94,17 @@ pub(crate) fn observe_directory_hash(path: &Path) -> Result<Baseline, Observatio
     if !root.file_type().is_dir() {
         return Err(format!("skill baseline root is not a directory: {}", path.display()).into());
     }
-    let mut state = HashState::new();
     state.entry(Path::new(""), b'D', executable(&root), &[])?;
-    hash_directory(path, Path::new(""), 0, &mut state)?;
+    hash_directory(path, Path::new(""), 0, state)?;
     ensure_unchanged(path, &root)?;
-    Ok(Baseline {
-        version: BASELINE_VERSION,
-        digest: format!("{:x}", state.hasher.finalize()),
-    })
+    Ok(())
 }
 
 struct HashState {
     hasher: Sha256,
     entries: usize,
     bytes: usize,
+    entries_manifest: Option<Vec<ManifestEntry>>,
 }
 impl HashState {
     fn new() -> Self {
@@ -72,7 +116,13 @@ impl HashState {
             hasher,
             entries: 0,
             bytes: 0,
+            entries_manifest: None,
         }
+    }
+    fn new_manifest() -> Self {
+        let mut state = Self::new();
+        state.entries_manifest = Some(Vec::new());
+        state
     }
     fn entry(
         &mut self,
@@ -85,8 +135,8 @@ impl HashState {
         if self.entries > MAX_ENTRIES {
             return Err(format!("skill baseline exceeds {MAX_ENTRIES} entries").into());
         }
-        let path = path_bytes(path)?;
-        if path.len() > MAX_PATH_BYTES {
+        let encoded_path = path_bytes(path)?;
+        if encoded_path.len() > MAX_PATH_BYTES {
             return Err("skill baseline path is too long".into());
         }
         self.bytes = self
@@ -97,11 +147,126 @@ impl HashState {
             return Err(format!("skill baseline exceeds {MAX_BYTES} bytes").into());
         }
         self.hasher.update([kind, u8::from(executable)]);
-        self.hasher.update((path.len() as u64).to_be_bytes());
-        self.hasher.update(&path);
+        self.hasher
+            .update((encoded_path.len() as u64).to_be_bytes());
+        self.hasher.update(&encoded_path);
         self.hasher.update((bytes.len() as u64).to_be_bytes());
         self.hasher.update(bytes);
+        if let Some(entries) = &mut self.entries_manifest {
+            entries.push(ManifestEntry {
+                relative_path: path.to_path_buf(),
+                kind: match kind {
+                    b'D' => ManifestEntryKind::Directory,
+                    b'F' => ManifestEntryKind::File,
+                    b'L' => ManifestEntryKind::Symlink,
+                    _ => unreachable!("baseline entry kind is internal"),
+                },
+                executable,
+                bytes: bytes.to_vec(),
+            });
+        }
         Ok(())
+    }
+
+    fn baseline(&self) -> Baseline {
+        Baseline {
+            version: BASELINE_VERSION,
+            digest: format!("{:x}", self.hasher.clone().finalize()),
+        }
+    }
+}
+
+/// Build a candidate baseline while retaining known executable bits on its
+/// physical directories. Git trees do not store directory modes, so a caller
+/// supplies the modes the checked-out output will retain.
+pub(crate) fn baseline_from_regular_entries_with_directory_modes(
+    files: &[(std::path::PathBuf, bool, Vec<u8>)],
+    executable_directories: &BTreeMap<std::path::PathBuf, bool>,
+) -> Result<DirectoryManifest, String> {
+    let mut paths = BTreeSet::new();
+    paths.insert(std::path::PathBuf::new());
+    // Empty directories have no Git tree entry but are content the local
+    // baseline observed. A preview which promises to retain them must include
+    // them in its expected digest rather than accidentally advertising a noop.
+    paths.extend(executable_directories.keys().cloned());
+    for (path, _, _) in files {
+        let mut parent = path.parent();
+        while let Some(directory) = parent {
+            paths.insert(directory.to_path_buf());
+            parent = directory.parent();
+        }
+    }
+    let mut entries = Vec::with_capacity(paths.len() + files.len());
+    entries.extend(paths.into_iter().map(|relative_path| {
+        ManifestEntry {
+            executable: executable_directories
+                .get(&relative_path)
+                .copied()
+                .unwrap_or(cfg!(unix)),
+            relative_path,
+            kind: ManifestEntryKind::Directory,
+            bytes: Vec::new(),
+        }
+    }));
+    entries.extend(
+        files
+            .iter()
+            .map(|(relative_path, executable, bytes)| ManifestEntry {
+                relative_path: relative_path.clone(),
+                kind: ManifestEntryKind::File,
+                executable: cfg!(unix) && *executable,
+                bytes: bytes.clone(),
+            }),
+    );
+    entries
+        .sort_by(|left, right| compare_traversal_path(&left.relative_path, &right.relative_path));
+    let mut state = HashState::new_manifest();
+    for entry in &entries {
+        let kind = match entry.kind {
+            ManifestEntryKind::Directory => b'D',
+            ManifestEntryKind::File => b'F',
+            ManifestEntryKind::Symlink => {
+                return Err("candidate manifest contains a symlink".into());
+            }
+        };
+        state
+            .entry(&entry.relative_path, kind, entry.executable, &entry.bytes)
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(DirectoryManifest {
+        baseline: state.baseline(),
+        entries: state
+            .entries_manifest
+            .expect("manifest capture was requested"),
+    })
+}
+
+/// Match the recursive walk's order: compare one raw path component at a time
+/// and visit a directory's descendants before its next sibling. A flat byte
+/// comparison gets `a.txt` before `a/file`, producing a different digest.
+fn compare_traversal_path(left: &Path, right: &Path) -> std::cmp::Ordering {
+    let mut left = left.components();
+    let mut right = right.components();
+    loop {
+        match (left.next(), right.next()) {
+            (None, None) => return std::cmp::Ordering::Equal,
+            (None, Some(_)) => return std::cmp::Ordering::Less,
+            (Some(_), None) => return std::cmp::Ordering::Greater,
+            (Some(left), Some(right)) => {
+                let left = match left {
+                    std::path::Component::Normal(value) => value,
+                    _ => unreachable!(),
+                };
+                let right = match right {
+                    std::path::Component::Normal(value) => value,
+                    _ => unreachable!(),
+                };
+                match os_bytes(left).cmp(os_bytes(right)) {
+                    std::cmp::Ordering::Equal => {}
+                    order => return order,
+                }
+            }
+        }
     }
 }
 
@@ -697,6 +862,42 @@ mod tests {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, text).unwrap();
     }
+
+    #[test]
+    fn hash_only_walk_does_not_retain_manifest_entries() {
+        let temporary = tempdir().unwrap();
+        let root = temporary.path().join("skill");
+        write(&root.join("SKILL.md"), "fixture\n");
+        let mut state = HashState::new();
+        observe_directory(&root, &mut state).unwrap();
+        assert!(state.entries_manifest.is_none());
+        assert_eq!(state.baseline(), directory_hash(&root).unwrap());
+    }
+    #[test]
+    fn synthesized_directory_and_file_modes_match_materialized_tree() {
+        let temporary = tempdir().unwrap();
+        let root = temporary.path().join("candidate");
+        write(&root.join("new/nested/run"), "content");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for path in [
+                &root,
+                &root.join("new"),
+                &root.join("new/nested"),
+                &root.join("new/nested/run"),
+            ] {
+                fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+            }
+        }
+        let proposed = baseline_from_regular_entries_with_directory_modes(
+            &[("new/nested/run".into(), true, b"content".to_vec())],
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        assert_eq!(proposed, observe_directory_manifest(&root).unwrap());
+    }
+
     // Frozen against PR 68 before extracting the walker. Includes empty and
     // nested directories, binary/untracked content, executable bits
     // and dangling links, and both forms of excluded Git metadata.

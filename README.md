@@ -16,12 +16,15 @@ version is 0.2.0. It currently supports:
   incorrect or dangling links, guarded uninstall, and metadata-only Forget Source.
 - Explicit repository update checks and confirmed fast-forwards to the exact
   previewed revision, followed by a rescan and verification.
+- Explicit origin adoption and read-only vendored-skill update previews from
+  a confirmed origin; modified skills block before fetching.
 - Read-only inventory when private metadata is unavailable, with unknown state
   stated explicitly.
 
 Skilled never adopts unproven links. Install refuses occupied paths; repair and
 uninstall act only on links proven by ownership receipts; Forget Source leaves
-checkout content intact. Other network workflows remain future work. See the
+checkout content intact. Vendored checks write only their private cache; applying
+those updates remains future work. See the
 [user guide](docs/usage.md) for operation limits and update behavior.
 
 ## Requirements
@@ -60,7 +63,7 @@ After setup, the application opens Inventory. Press `?` for contextual help.
 | View | Key | Main actions |
 | --- | --- | --- |
 | Inventory | `1` | `/` filters; `x` previews uninstall of managed links. |
-| Sources | `2` | `a` adds a source; `i` on a variant previews install; `x` in Repositories previews Forget Source. |
+| Sources | `2` | `a` adds a source; `i` previews install; `p` confirms origin; `u` checks a variant’s origin; `x` previews Forget Source in Repositories. |
 | Updates | `3` | `u` checks repositories; Enter advances to Details and then to an available update preview. |
 | Doctor | `4` | Inspect findings; `r` previews repair where supported. |
 
