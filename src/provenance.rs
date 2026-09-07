@@ -28,7 +28,7 @@ pub(crate) enum ObservationFailure {
     Unavailable(String),
 }
 impl ObservationFailure {
-    fn io(message: String, error: io::Error) -> Self {
+    pub(crate) fn io(message: String, error: io::Error) -> Self {
         // No-follow opens report ELOOP when an expected physical entry has
         // become a link. Keep that observed path disagreement out of I/O unknowns.
         #[cfg(unix)]

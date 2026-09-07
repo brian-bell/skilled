@@ -221,7 +221,7 @@ fn directories(
     checkout: &Path,
     relative: &Path,
 ) -> Result<Vec<DirectoryIdentity>, ObservationFailure> {
-    use ObservationFailure::{Changed, Unavailable};
+    use ObservationFailure::Changed;
     let mut path = checkout.to_path_buf();
     let mut result = vec![];
     let mut components = relative.components();
@@ -230,7 +230,7 @@ fn directories(
             if error.kind() == std::io::ErrorKind::NotFound {
                 Changed(format!("A skill ancestor is absent: {}", path.display()))
             } else {
-                Unavailable(error.to_string())
+                ObservationFailure::io(error.to_string(), error)
             }
         })?;
         if !metadata.is_dir() || metadata.file_type().is_symlink() {
@@ -397,31 +397,8 @@ fn observe(
             ))
         });
     }
-    let validated = crate::validation::validate_portable_skill(&skill).map_err(|error| {
-        use crate::validation::PortableValidationError::*;
-        let changed = match &error {
-            // MissingSkillMd can also hide a directory-entry file_type error.
-            // Establish absence or a non-file explicitly before calling it a change.
-            MissingSkillMd => match fs::symlink_metadata(skill.join("SKILL.md")) {
-                Ok(metadata) => !metadata.is_file() || metadata.file_type().is_symlink(),
-                Err(error) => error.kind() == std::io::ErrorKind::NotFound,
-            },
-            UnreadableSkillMd(error) => matches!(
-                error.kind(),
-                std::io::ErrorKind::InvalidData | std::io::ErrorKind::NotFound
-            ),
-            ReadDirectory { source, .. } => source.kind() == std::io::ErrorKind::NotFound,
-            SourceInspectionLimitExceeded => false,
-            // A successfully observed size or entry-count violation also disagrees
-            // with the valid skill captured in the preview.
-            _ => true,
-        };
-        if changed {
-            Changed(error.to_string())
-        } else {
-            Unavailable(error.to_string())
-        }
-    })?;
+    let validated = crate::validation::validate_portable_skill(&skill)
+        .map_err(|error| validation_failure(&skill, error))?;
     if validated.name() != variant.skill_name() {
         return Err(Changed("The selected skill identity changed".into()));
     }
@@ -436,6 +413,36 @@ fn observe(
         evidence,
         baseline,
     })
+}
+
+fn validation_failure(
+    skill: &Path,
+    error: crate::validation::PortableValidationError,
+) -> ObservationFailure {
+    use crate::validation::PortableValidationError::*;
+    use ObservationFailure::{Changed, Unavailable};
+    let message = error.to_string();
+    match error {
+        // MissingSkillMd can also hide a directory-entry file_type error.
+        // Establish absence or a non-file explicitly before calling it a change.
+        MissingSkillMd => match fs::symlink_metadata(skill.join("SKILL.md")) {
+            Ok(metadata) if !metadata.is_file() || metadata.file_type().is_symlink() => {
+                Changed(message)
+            }
+            Ok(_) => Unavailable(message),
+            Err(error) => ObservationFailure::io(message, error),
+        },
+        UnreadableSkillMd(error) if error.kind() == std::io::ErrorKind::InvalidData => {
+            Changed(message)
+        }
+        UnreadableSkillMd(error) | ReadDirectory { source: error, .. } => {
+            ObservationFailure::io(message, error)
+        }
+        SourceInspectionLimitExceeded => Unavailable(message),
+        // A successfully observed size or entry-count violation also disagrees
+        // with the valid skill captured in the preview.
+        _ => Changed(message),
+    }
 }
 
 fn recheck(plan: &AdoptionPlan) -> Result<(), ObservationFailure> {
@@ -559,6 +566,59 @@ mod tests {
         ];
         let plan = plan(&draft, &store).unwrap();
         (temp, store, plan)
+    }
+
+    #[test]
+    fn validation_path_type_errors_are_changes_and_io_failures_remain_unavailable() {
+        use crate::validation::PortableValidationError;
+        use std::io::{Error, ErrorKind};
+        let temp = tempfile::tempdir().unwrap();
+        let skill = temp.path().join("skill");
+        for kind in [
+            ErrorKind::NotADirectory,
+            ErrorKind::IsADirectory,
+            ErrorKind::NotFound,
+            ErrorKind::PermissionDenied,
+            ErrorKind::Interrupted,
+        ] {
+            let should_change = matches!(
+                kind,
+                ErrorKind::NotADirectory | ErrorKind::IsADirectory | ErrorKind::NotFound
+            );
+            // Exercise both errors the validator can return in the window
+            // after ancestor inspection, without racing a background writer.
+            for directory_read in [false, true] {
+                let error = if directory_read {
+                    PortableValidationError::ReadDirectory {
+                        path: skill.clone(),
+                        source: Error::from(kind),
+                    }
+                } else {
+                    PortableValidationError::UnreadableSkillMd(Error::from(kind))
+                };
+                let failure = validation_failure(&skill, error);
+                assert_eq!(
+                    matches!(failure, ObservationFailure::Changed(_)),
+                    should_change,
+                    "{kind:?}: {failure:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn missing_document_recheck_recognizes_a_skill_replaced_by_a_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let skill = temp.path().join("skill");
+        fs::write(&skill, "replacement file").unwrap();
+        let failure = validation_failure(
+            &skill,
+            crate::validation::PortableValidationError::MissingSkillMd,
+        );
+        assert!(
+            matches!(failure, ObservationFailure::Changed(_)),
+            "{failure:?}"
+        );
     }
 
     #[test]
