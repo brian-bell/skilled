@@ -1064,7 +1064,7 @@ mod tests {
         for (directory, arguments) in [
             (
                 temporary.path(),
-                vec!["init", "--bare", remote.to_str().unwrap()],
+                vec!["init", "--bare", "-b", "main", remote.to_str().unwrap()],
             ),
             (
                 &source_root,
