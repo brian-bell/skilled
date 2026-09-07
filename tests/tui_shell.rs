@@ -5609,7 +5609,13 @@ fn adoption_focus_cycles_through_named_fields_at_supported_sizes() {
 #[test]
 fn adoption_confirmation_waits_for_the_complete_preview_after_resize() {
     let harness = Harness::new();
-    let mut app = harness.installable_source();
+    // Force wrapping even under short temporary roots such as Linux's /tmp.
+    let application_root = harness
+        .directory
+        .path()
+        .join("adoption-preview-overflow-fixture-with-a-deliberately-long-root")
+        .join("whose-length-does-not-depend-on-the-system-temporary-directory");
+    let mut app = harness.installable_source_at(&application_root);
     let update = app.update(Action::BeginAdoption);
     app.perform_effects(update.effects()).unwrap();
     for value in [

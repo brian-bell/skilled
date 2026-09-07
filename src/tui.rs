@@ -4212,6 +4212,7 @@ fn update_prompt_rows(prompt: &RepositoryUpdatePrompt, width: u16) -> Vec<Line<'
 }
 
 /// Materialize preview text as terminal rows, retaining line and span styles.
+/// Measure whole graphemes using the same segmentation and widths as Ratatui.
 /// Both measurement and rendering use these rows. The logical offset stays
 /// `usize`, so evidence after row 65,535 remains reachable without a `u16` cast.
 fn visual_rows(lines: Vec<Line<'static>>, width: u16) -> Vec<Line<'static>> {
@@ -4224,9 +4225,9 @@ fn visual_rows(lines: Vec<Line<'static>>, width: u16) -> Vec<Line<'static>> {
         let mut row: Vec<Span<'static>> = Vec::new();
         let mut row_width = 0_usize;
         for span in line.spans {
-            for character in span.content.chars() {
-                let character_width = Span::raw(character.to_string()).width();
-                if !row.is_empty() && row_width.saturating_add(character_width) > width {
+            for grapheme in span.styled_graphemes(span.style) {
+                let grapheme_width = Span::raw(grapheme.symbol).width();
+                if !row.is_empty() && row_width.saturating_add(grapheme_width) > width {
                     rows.push(Line::from(std::mem::take(&mut row)).style(line.style));
                     row_width = 0;
                 }
@@ -4234,11 +4235,11 @@ fn visual_rows(lines: Vec<Line<'static>>, width: u16) -> Vec<Line<'static>> {
                     .last_mut()
                     .filter(|previous| previous.style == span.style)
                 {
-                    previous.content.to_mut().push(character);
+                    previous.content.to_mut().push_str(grapheme.symbol);
                 } else {
-                    row.push(Span::styled(character.to_string(), span.style));
+                    row.push(Span::styled(grapheme.symbol.to_owned(), span.style));
                 }
-                row_width = row_width.saturating_add(character_width);
+                row_width = row_width.saturating_add(grapheme_width);
             }
         }
         rows.push(Line::from(row).style(line.style));
@@ -8219,6 +8220,41 @@ mod tests {
         assert_eq!(rows[0].style, theme::key_label());
         assert_eq!(rows[1].style, theme::key_label());
         assert_eq!(rows[1].spans[0].style, ratatui::style::Style::default());
+    }
+
+    #[test]
+    fn preview_rows_wrap_rendered_graphemes_without_clipping_boundary_cells() {
+        use ratatui::{buffer::Buffer, widgets::Widget};
+        for symbol in ["❤️", "👩‍💻", "🇺🇸", "e\u{301}"] {
+            let symbol_width = Span::raw(symbol).width() as u16;
+            for spare_column in [0, 1] {
+                let width = symbol_width + spare_column;
+                let rows = visual_rows(
+                    vec![Line::from(vec![
+                        Span::styled("x", theme::focus_marker()),
+                        Span::raw(format!("{symbol}y")),
+                    ])],
+                    width,
+                );
+                let expected = if spare_column == 0 {
+                    vec!["x".to_owned(), symbol.to_owned(), "y".to_owned()]
+                } else {
+                    vec![format!("x{symbol}"), "y".to_owned()]
+                };
+                assert_eq!(
+                    rows.iter().map(label_text).collect::<Vec<_>>(),
+                    expected,
+                    "{symbol:?}, width {width}"
+                );
+                let area = Rect::new(0, 0, width, rows.len() as u16);
+                let mut buffer = Buffer::empty(area);
+                Paragraph::new(rows).render(area, &mut buffer);
+                assert_eq!(buffer[(0, 0)].style().fg, theme::focus_marker().fg);
+                let (x, y) = if spare_column == 0 { (0, 1) } else { (1, 0) };
+                assert_eq!(buffer[(x, y)].symbol(), symbol, "{symbol:?}, width {width}");
+                assert_eq!(buffer[(0, area.height - 1)].symbol(), "y");
+            }
+        }
     }
 
     #[test]
