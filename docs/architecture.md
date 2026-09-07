@@ -20,7 +20,12 @@ current behavior; [AGENTS.md](../AGENTS.md) is the entry point for agent workflo
   revision or performs network access.
 - `src/adoption.rs`: exact-variant, metadata-only origin adoption with a
   separately confirmed preview, content/path/evidence rechecks, and immutable
-  baseline persistence. Schema v12 adds `origin_baselines`, keyed by source ID,
+  baseline persistence. One observation recipe captures preview evidence and
+  performs each guarded recheck. Evidence and baseline readers preserve typed
+  observation failures internally while the public hash interface remains
+  unchanged. Apply returns a saved verification result only
+  after commit; pre-save failures remain separate, and the TUI renders these
+  typed outcomes. Schema v12 adds `origin_baselines`, keyed by source ID,
   catalog path, and variant path; manifests are not persisted.
 - `src/inventory.rs`: read-only scan of the native agent skill roots; owns the
   finding codes, the state vocabulary, and the count-or-phrase verdict.

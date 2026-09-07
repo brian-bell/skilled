@@ -8,6 +8,7 @@
 //! descriptors; other platforms retain the conservative before-and-after
 //! metadata checks but do not claim descriptor-pinned traversal.
 
+use super::ObservationFailure;
 use sha2::{Digest, Sha256};
 use std::{
     ffi::OsStr,
@@ -33,13 +34,18 @@ pub struct Baseline {
 /// It is fail-closed for resource exhaustion, unsupported entry types, links,
 /// and observations that change while being read.
 pub fn directory_hash(path: &Path) -> Result<Baseline, String> {
-    let root = fs::symlink_metadata(path)
-        .map_err(|error| format!("cannot inspect skill directory {}: {error}", path.display()))?;
+    observe_directory_hash(path).map_err(|error| error.to_string())
+}
+
+pub(crate) fn observe_directory_hash(path: &Path) -> Result<Baseline, ObservationFailure> {
+    let root = fs::symlink_metadata(path).map_err(|error| {
+        ObservationFailure::io(
+            format!("cannot inspect skill directory {}: {error}", path.display()),
+            error,
+        )
+    })?;
     if !root.file_type().is_dir() {
-        return Err(format!(
-            "skill baseline root is not a directory: {}",
-            path.display()
-        ));
+        return Err(format!("skill baseline root is not a directory: {}", path.display()).into());
     }
     let mut state = HashState::new();
     state.entry(Path::new(""), b'D', executable(&root), &[])?;
@@ -74,10 +80,10 @@ impl HashState {
         kind: u8,
         executable: bool,
         bytes: &[u8],
-    ) -> Result<(), String> {
+    ) -> Result<(), ObservationFailure> {
         self.entries += 1;
         if self.entries > MAX_ENTRIES {
-            return Err(format!("skill baseline exceeds {MAX_ENTRIES} entries"));
+            return Err(format!("skill baseline exceeds {MAX_ENTRIES} entries").into());
         }
         let path = path_bytes(path)?;
         if path.len() > MAX_PATH_BYTES {
@@ -88,7 +94,7 @@ impl HashState {
             .checked_add(bytes.len())
             .ok_or("skill baseline size overflow")?;
         if self.bytes > MAX_BYTES {
-            return Err(format!("skill baseline exceeds {MAX_BYTES} bytes"));
+            return Err(format!("skill baseline exceeds {MAX_BYTES} bytes").into());
         }
         self.hasher.update([kind, u8::from(executable)]);
         self.hasher.update((path.len() as u64).to_be_bytes());
@@ -118,17 +124,18 @@ fn hash_directory(
     relative: &Path,
     depth: usize,
     state: &mut HashState,
-) -> Result<(), String> {
+) -> Result<(), ObservationFailure> {
     let path = root.join(relative);
-    let before = fs::symlink_metadata(&path)
-        .map_err(|error| format!("cannot inspect {}: {error}", path.display()))?;
+    let before = fs::symlink_metadata(&path).map_err(|error| {
+        ObservationFailure::io(format!("cannot inspect {}: {error}", path.display()), error)
+    })?;
     let held = open_directory_without_following(&path)?;
     ensure_unchanged_metadata(
         &path,
         &before,
-        &held
-            .metadata()
-            .map_err(|error| format!("cannot inspect {}: {error}", path.display()))?,
+        &held.metadata().map_err(|error| {
+            ObservationFailure::io(format!("cannot inspect {}: {error}", path.display()), error)
+        })?,
     )?;
     hash_directory_bound(root, &held, relative, depth, state)
 }
@@ -140,15 +147,18 @@ fn hash_directory_bound(
     relative: &Path,
     depth: usize,
     state: &mut HashState,
-) -> Result<(), String> {
+) -> Result<(), ObservationFailure> {
     let directory_before = stat_file(directory)?;
     if depth > MAX_DEPTH {
-        return Err(format!(
-            "skill baseline exceeds {MAX_DEPTH} directory levels"
-        ));
+        return Err(format!("skill baseline exceeds {MAX_DEPTH} directory levels").into());
     }
     let mut entries = crate::git::bound_directory_entries(directory, MAX_ENTRIES)
-        .map_err(|error| format!("cannot read {}: {error}", root.join(relative).display()))?
+        .map_err(|error| {
+            ObservationFailure::io(
+                format!("cannot read {}: {error}", root.join(relative).display()),
+                error,
+            )
+        })?
         .ok_or_else(|| format!("skill baseline exceeds {MAX_ENTRIES} entries"))?
         .into_iter()
         .map(|entry| entry.name)
@@ -164,16 +174,20 @@ fn hash_directory_bound(
             libc::S_IFDIR => {
                 state.entry(&child_relative, b'D', before.executable(), &[])?;
                 let child = crate::git::open_directory_at(directory, &name).map_err(|error| {
-                    format!(
-                        "cannot open {}: {error}",
-                        root.join(&child_relative).display()
+                    ObservationFailure::io(
+                        format!(
+                            "cannot open {}: {error}",
+                            root.join(&child_relative).display()
+                        ),
+                        error,
                     )
                 })?;
                 if !before.same(&stat_file(&child)?) {
                     return Err(format!(
                         "skill baseline changed while reading: {}",
                         root.join(&child_relative).display()
-                    ));
+                    )
+                    .into());
                 }
                 hash_directory_bound(root, &child, &child_relative, depth + 1, state)?;
             }
@@ -189,7 +203,8 @@ fn hash_directory_bound(
                     return Err(format!(
                         "skill baseline changed while reading: {}",
                         root.join(&child_relative).display()
-                    ));
+                    )
+                    .into());
                 }
                 state.entry(&child_relative, b'L', before.executable(), &target)?;
             }
@@ -197,7 +212,8 @@ fn hash_directory_bound(
                 return Err(format!(
                     "skill baseline contains unsupported entry: {}",
                     root.join(&child_relative).display()
-                ));
+                )
+                .into());
             }
         }
     }
@@ -205,7 +221,8 @@ fn hash_directory_bound(
         return Err(format!(
             "skill baseline directory changed while reading: {}",
             root.join(relative).display()
-        ));
+        )
+        .into());
     }
     Ok(())
 }
@@ -218,24 +235,31 @@ fn hash_file_bound(
     relative: &Path,
     before: &UnixStat,
     state: &mut HashState,
-) -> Result<(), String> {
+) -> Result<(), ObservationFailure> {
     let mut file = open_file_at(parent, name)?;
     if !before.same(&stat_file(&file)?) {
         return Err(format!(
             "skill baseline changed while reading: {}",
             root.join(relative).display()
-        ));
+        )
+        .into());
     }
     let mut content = Vec::new();
     file.by_ref()
         .take((MAX_BYTES + 1) as u64)
         .read_to_end(&mut content)
-        .map_err(|error| format!("cannot read {}: {error}", root.join(relative).display()))?;
+        .map_err(|error| {
+            ObservationFailure::io(
+                format!("cannot read {}: {error}", root.join(relative).display()),
+                error,
+            )
+        })?;
     if !before.same(&stat_file(&file)?) {
         return Err(format!(
             "skill baseline changed while reading: {}",
             root.join(relative).display()
-        ));
+        )
+        .into());
     }
     state.entry(relative, b'F', before.executable(), &content)
 }
@@ -270,7 +294,7 @@ fn stat_times_equal(left: &libc::stat, right: &libc::stat) -> bool {
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-fn stat_at(parent: &fs::File, name: &OsStr) -> Result<UnixStat, String> {
+fn stat_at(parent: &fs::File, name: &OsStr) -> Result<UnixStat, ObservationFailure> {
     use std::os::{fd::AsRawFd, unix::ffi::OsStrExt};
     let name = std::ffi::CString::new(name.as_bytes())
         .map_err(|_| "skill baseline path contains a NUL byte")?;
@@ -284,29 +308,31 @@ fn stat_at(parent: &fs::File, name: &OsStr) -> Result<UnixStat, String> {
         )
     } != 0
     {
-        return Err(format!(
-            "cannot inspect entry: {}",
-            io::Error::last_os_error()
+        let error = io::Error::last_os_error();
+        return Err(ObservationFailure::io(
+            format!("cannot inspect entry: {}", error),
+            error,
         ));
     }
     Ok(UnixStat(stat))
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-fn stat_file(file: &fs::File) -> Result<UnixStat, String> {
+fn stat_file(file: &fs::File) -> Result<UnixStat, ObservationFailure> {
     use std::os::fd::AsRawFd;
     let mut stat = unsafe { std::mem::zeroed::<libc::stat>() };
     if unsafe { libc::fstat(file.as_raw_fd(), &mut stat) } != 0 {
-        return Err(format!(
-            "cannot inspect held entry: {}",
-            io::Error::last_os_error()
+        let error = io::Error::last_os_error();
+        return Err(ObservationFailure::io(
+            format!("cannot inspect held entry: {}", error),
+            error,
         ));
     }
     Ok(UnixStat(stat))
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-fn open_file_at(parent: &fs::File, name: &OsStr) -> Result<fs::File, String> {
+fn open_file_at(parent: &fs::File, name: &OsStr) -> Result<fs::File, ObservationFailure> {
     use std::os::{
         fd::{AsRawFd, FromRawFd},
         unix::ffi::OsStrExt,
@@ -321,16 +347,17 @@ fn open_file_at(parent: &fs::File, name: &OsStr) -> Result<fs::File, String> {
         )
     };
     if descriptor < 0 {
-        return Err(format!(
-            "cannot open entry without following links: {}",
-            io::Error::last_os_error()
+        let error = io::Error::last_os_error();
+        return Err(ObservationFailure::io(
+            format!("cannot open entry without following links: {}", error),
+            error,
         ));
     }
     Ok(unsafe { fs::File::from_raw_fd(descriptor) })
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-fn read_link_at(parent: &fs::File, name: &OsStr) -> Result<Vec<u8>, String> {
+fn read_link_at(parent: &fs::File, name: &OsStr) -> Result<Vec<u8>, ObservationFailure> {
     use std::os::{fd::AsRawFd, unix::ffi::OsStrExt};
     let name = std::ffi::CString::new(name.as_bytes())
         .map_err(|_| "skill baseline path contains a NUL byte")?;
@@ -344,9 +371,10 @@ fn read_link_at(parent: &fs::File, name: &OsStr) -> Result<Vec<u8>, String> {
         )
     };
     if length < 0 {
-        return Err(format!(
-            "cannot read link target: {}",
-            io::Error::last_os_error()
+        let error = io::Error::last_os_error();
+        return Err(ObservationFailure::io(
+            format!("cannot read link target: {}", error),
+            error,
         ));
     }
     let length = length as usize;
@@ -363,26 +391,36 @@ fn hash_directory(
     relative: &Path,
     depth: usize,
     state: &mut HashState,
-) -> Result<(), String> {
+) -> Result<(), ObservationFailure> {
     if depth > MAX_DEPTH {
-        return Err(format!(
-            "skill baseline exceeds {MAX_DEPTH} directory levels"
-        ));
+        return Err(format!("skill baseline exceeds {MAX_DEPTH} directory levels").into());
     }
     let directory = root.join(relative);
-    let before = fs::symlink_metadata(&directory)
-        .map_err(|error| format!("cannot inspect {}: {error}", directory.display()))?;
+    let before = fs::symlink_metadata(&directory).map_err(|error| {
+        ObservationFailure::io(
+            format!("cannot inspect {}: {error}", directory.display()),
+            error,
+        )
+    })?;
     let held = open_directory_without_following(&directory)?;
     ensure_unchanged_metadata(
         &directory,
         &before,
-        &held
-            .metadata()
-            .map_err(|error| format!("cannot inspect {}: {error}", directory.display()))?,
+        &held.metadata().map_err(|error| {
+            ObservationFailure::io(
+                format!("cannot inspect {}: {error}", directory.display()),
+                error,
+            )
+        })?,
     )?;
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     let mut entries = crate::git::bound_directory_entries(&held, MAX_ENTRIES)
-        .map_err(|error| format!("cannot read {}: {error}", directory.display()))?
+        .map_err(|error| {
+            ObservationFailure::io(
+                format!("cannot read {}: {error}", directory.display()),
+                error,
+            )
+        })?
         .ok_or_else(|| format!("skill baseline exceeds {MAX_ENTRIES} entries"))?
         .into_iter()
         .map(|entry| entry.name)
@@ -390,15 +428,23 @@ fn hash_directory(
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     let mut entries = {
         let mut entries = Vec::new();
-        for entry in fs::read_dir(&directory)
-            .map_err(|error| format!("cannot read {}: {error}", directory.display()))?
-        {
+        for entry in fs::read_dir(&directory).map_err(|error| {
+            ObservationFailure::io(
+                format!("cannot read {}: {error}", directory.display()),
+                error,
+            )
+        })? {
             if entries.len() == MAX_ENTRIES {
-                return Err(format!("skill baseline exceeds {MAX_ENTRIES} entries"));
+                return Err(format!("skill baseline exceeds {MAX_ENTRIES} entries").into());
             }
             entries.push(
                 entry
-                    .map_err(|error| format!("cannot read {}: {error}", directory.display()))?
+                    .map_err(|error| {
+                        ObservationFailure::io(
+                            format!("cannot read {}: {error}", directory.display()),
+                            error,
+                        )
+                    })?
                     .file_name(),
             );
         }
@@ -411,8 +457,12 @@ fn hash_directory(
         }
         let child_relative = relative.join(&name);
         let child = root.join(&child_relative);
-        let metadata = fs::symlink_metadata(&child)
-            .map_err(|error| format!("cannot inspect {}: {error}", child.display()))?;
+        let metadata = fs::symlink_metadata(&child).map_err(|error| {
+            ObservationFailure::io(
+                format!("cannot inspect {}: {error}", child.display()),
+                error,
+            )
+        })?;
         let file_type = metadata.file_type();
         if file_type.is_dir() {
             state.entry(&child_relative, b'D', executable(&metadata), &[])?;
@@ -420,30 +470,42 @@ fn hash_directory(
         } else if file_type.is_file() {
             hash_file(&child, &child_relative, &metadata, state)?;
         } else if file_type.is_symlink() {
-            let target = fs::read_link(&child)
-                .map_err(|error| format!("cannot read link {}: {error}", child.display()))?;
+            let target = fs::read_link(&child).map_err(|error| {
+                ObservationFailure::io(
+                    format!("cannot read link {}: {error}", child.display()),
+                    error,
+                )
+            })?;
             let target = path_bytes(&target)?;
             if target.len() > MAX_SYMLINK_BYTES {
                 return Err("skill baseline symlink target is too long".into());
             }
-            let after = fs::symlink_metadata(&child)
-                .map_err(|error| format!("cannot inspect {}: {error}", child.display()))?;
+            let after = fs::symlink_metadata(&child).map_err(|error| {
+                ObservationFailure::io(
+                    format!("cannot inspect {}: {error}", child.display()),
+                    error,
+                )
+            })?;
             ensure_unchanged_metadata(&child, &metadata, &after)?;
             state.entry(&child_relative, b'L', executable(&metadata), &target)?;
         } else {
             return Err(format!(
                 "skill baseline contains unsupported entry: {}",
                 child.display()
-            ));
+            )
+            .into());
         }
     }
     ensure_unchanged(&directory, &before)?;
     ensure_unchanged_metadata(
         &directory,
         &before,
-        &held
-            .metadata()
-            .map_err(|error| format!("cannot inspect {}: {error}", directory.display()))?,
+        &held.metadata().map_err(|error| {
+            ObservationFailure::io(
+                format!("cannot inspect {}: {error}", directory.display()),
+                error,
+            )
+        })?,
     )
 }
 
@@ -453,29 +515,33 @@ fn hash_file(
     relative: &Path,
     before: &fs::Metadata,
     state: &mut HashState,
-) -> Result<(), String> {
+) -> Result<(), ObservationFailure> {
     let mut file = open_file_without_following(path)?;
     ensure_unchanged_metadata(
         path,
         before,
-        &file
-            .metadata()
-            .map_err(|error| format!("cannot inspect {}: {error}", path.display()))?,
+        &file.metadata().map_err(|error| {
+            ObservationFailure::io(format!("cannot inspect {}: {error}", path.display()), error)
+        })?,
     )?;
     let mut content = Vec::new();
     file.by_ref()
         .take((MAX_BYTES + 1) as u64)
         .read_to_end(&mut content)
-        .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
-    let after = fs::symlink_metadata(path)
-        .map_err(|error| format!("cannot inspect {}: {error}", path.display()))?;
+        .map_err(|error| {
+            ObservationFailure::io(format!("cannot read {}: {error}", path.display()), error)
+        })?;
+    let after = fs::symlink_metadata(path).map_err(|error| {
+        ObservationFailure::io(format!("cannot inspect {}: {error}", path.display()), error)
+    })?;
     ensure_unchanged_metadata(path, before, &after)?;
     state.entry(relative, b'F', executable(before), &content)
 }
 
-fn ensure_unchanged(path: &Path, before: &fs::Metadata) -> Result<(), String> {
-    let after = fs::symlink_metadata(path)
-        .map_err(|error| format!("cannot inspect {}: {error}", path.display()))?;
+fn ensure_unchanged(path: &Path, before: &fs::Metadata) -> Result<(), ObservationFailure> {
+    let after = fs::symlink_metadata(path).map_err(|error| {
+        ObservationFailure::io(format!("cannot inspect {}: {error}", path.display()), error)
+    })?;
     ensure_unchanged_metadata(path, before, &after)
 }
 
@@ -483,17 +549,14 @@ fn ensure_unchanged_metadata(
     path: &Path,
     before: &fs::Metadata,
     after: &fs::Metadata,
-) -> Result<(), String> {
+) -> Result<(), ObservationFailure> {
     if before.file_type() != after.file_type()
         || before.len() != after.len()
         || before.modified().ok() != after.modified().ok()
         || executable(before) != executable(after)
         || !same_file_identity(before, after)
     {
-        Err(format!(
-            "skill baseline changed while reading: {}",
-            path.display()
-        ))
+        Err(format!("skill baseline changed while reading: {}", path.display()).into())
     } else {
         Ok(())
     }
@@ -517,21 +580,24 @@ fn same_file_identity(_: &fs::Metadata, _: &fs::Metadata) -> bool {
     true
 }
 #[cfg(unix)]
-fn open_directory_without_following(path: &Path) -> Result<fs::File, String> {
+fn open_directory_without_following(path: &Path) -> Result<fs::File, ObservationFailure> {
     use std::os::unix::fs::OpenOptionsExt;
     fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_NONBLOCK)
         .open(path)
         .map_err(|error| {
-            format!(
-                "cannot open directory {} without following links: {error}",
-                path.display()
+            ObservationFailure::io(
+                format!(
+                    "cannot open directory {} without following links: {error}",
+                    path.display()
+                ),
+                error,
             )
         })
 }
 #[cfg(windows)]
-fn open_directory_without_following(path: &Path) -> Result<fs::File, String> {
+fn open_directory_without_following(path: &Path) -> Result<fs::File, ObservationFailure> {
     use std::os::windows::fs::OpenOptionsExt;
     use windows_sys::Win32::Storage::FileSystem::{
         FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
@@ -540,62 +606,81 @@ fn open_directory_without_following(path: &Path) -> Result<fs::File, String> {
         .read(true)
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
         .open(path)
-        .map_err(|error| format!("cannot open directory {}: {error}", path.display()))
+        .map_err(|error| {
+            ObservationFailure::io(
+                format!("cannot open directory {}: {error}", path.display()),
+                error,
+            )
+        })
 }
 
 #[cfg(not(any(unix, windows)))]
-fn open_directory_without_following(path: &Path) -> Result<fs::File, String> {
-    fs::File::open(path)
-        .map_err(|error| format!("cannot open directory {}: {error}", path.display()))
+fn open_directory_without_following(path: &Path) -> Result<fs::File, ObservationFailure> {
+    fs::File::open(path).map_err(|error| {
+        ObservationFailure::io(
+            format!("cannot open directory {}: {error}", path.display()),
+            error,
+        )
+    })
 }
 #[cfg(not(unix))]
 fn executable(_: &fs::Metadata) -> bool {
     false
 }
 #[cfg(unix)]
-pub(super) fn open_file_without_following(path: &Path) -> Result<fs::File, String> {
+pub(super) fn open_file_without_following(path: &Path) -> Result<fs::File, ObservationFailure> {
     use std::os::unix::fs::OpenOptionsExt;
     fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
         .open(path)
         .map_err(|error| {
-            format!(
-                "cannot read {} without following links: {error}",
-                path.display()
+            ObservationFailure::io(
+                format!(
+                    "cannot read {} without following links: {error}",
+                    path.display()
+                ),
+                error,
             )
         })
 }
 #[cfg(windows)]
-pub(super) fn open_file_without_following(path: &Path) -> Result<fs::File, String> {
+pub(super) fn open_file_without_following(path: &Path) -> Result<fs::File, ObservationFailure> {
     use std::os::windows::fs::OpenOptionsExt;
     use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
     let file = fs::OpenOptions::new()
         .read(true)
         .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
         .open(path)
-        .map_err(|error| format!("cannot open file {}: {error}", path.display()))?;
+        .map_err(|error| {
+            ObservationFailure::io(
+                format!("cannot open file {}: {error}", path.display()),
+                error,
+            )
+        })?;
     if !file
         .metadata()
-        .map_err(|error| error.to_string())?
+        .map_err(|error| ObservationFailure::io(error.to_string(), error))?
         .is_file()
     {
-        return Err(format!("not a regular file: {}", path.display()));
+        return Err(format!("not a regular file: {}", path.display()).into());
     }
     Ok(file)
 }
 
 #[cfg(not(any(unix, windows)))]
-pub(super) fn open_file_without_following(path: &Path) -> Result<fs::File, String> {
+pub(super) fn open_file_without_following(path: &Path) -> Result<fs::File, ObservationFailure> {
     // The lstat checks before and after the read reject a replacement with a
     // link. Windows' standard library opens reparse points through this path;
     // this build has no descriptor-level no-follow primitive available here.
-    fs::File::open(path).map_err(|error| format!("cannot read {}: {error}", path.display()))
+    fs::File::open(path).map_err(|error| {
+        ObservationFailure::io(format!("cannot read {}: {error}", path.display()), error)
+    })
 }
 fn os_bytes(value: &OsStr) -> &[u8] {
     value.as_encoded_bytes()
 }
-fn path_bytes(path: &Path) -> Result<Vec<u8>, String> {
+fn path_bytes(path: &Path) -> Result<Vec<u8>, ObservationFailure> {
     let bytes = os_bytes(path.as_os_str());
     if bytes.contains(&0) {
         Err("skill baseline path contains a NUL byte".into())

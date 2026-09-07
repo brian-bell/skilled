@@ -10,7 +10,7 @@ use ratatui::{
 use crate::{
     AgentKind, DoctorItem, DoctorPane, InventoryPane, RegistryAvailability, SessionIdentity,
     SetupStep, SkilledApp, SourcesPane, UpdatesPane, View,
-    adoption::AdoptionPrompt,
+    adoption::{AdoptionPrompt, AdoptionVerification},
     app::{ListWindow, MAX_INVENTORY_FILTER, SourceRow, catalog_rows},
     components::{self, KeyHint, terminal_safe},
     inventory::{
@@ -4027,11 +4027,11 @@ fn adoption_prompt_heading(prompt: &AdoptionPrompt) -> (&'static str, &'static s
         AdoptionPrompt::Editing(_) | AdoptionPrompt::Preview(_) => {
             ("Confirm origin", "nothing written yet")
         }
-        AdoptionPrompt::Report(_) => ("Origin established", "baseline recorded"),
-        // Applying adoption rechecks content after committing metadata. A
-        // post-commit verification failure therefore cannot honestly claim
-        // that nothing was recorded.
-        AdoptionPrompt::Failed(_) => ("Adoption needs attention", "see result below"),
+        AdoptionPrompt::Report(AdoptionVerification::Verified) => {
+            ("Origin established", "baseline recorded")
+        }
+        AdoptionPrompt::Report(_) => ("Adoption needs attention", "baseline recorded"),
+        AdoptionPrompt::Failed(_) => ("Adoption needs attention", "nothing written"),
     }
 }
 
@@ -4104,7 +4104,19 @@ fn adoption_prompt_status(
                 "Result continues above and below".to_owned()
             }
             Some(max) if scroll < max => "Result continues below".to_owned(),
-            _ => "Origin and baseline recorded".to_owned(),
+            _ => match prompt {
+                AdoptionPrompt::Report(AdoptionVerification::Verified) => {
+                    "Origin and baseline recorded"
+                }
+                AdoptionPrompt::Report(AdoptionVerification::Failed(_)) => {
+                    "Baseline saved; verification failed"
+                }
+                AdoptionPrompt::Report(AdoptionVerification::Incomplete(_)) => {
+                    "Baseline saved; verification incomplete"
+                }
+                _ => unreachable!("report branch"),
+            }
+            .to_owned(),
         },
         AdoptionPrompt::Failed(_) => match extent {
             Some(max) if scroll > 0 && scroll < max => {
@@ -4135,9 +4147,12 @@ fn adoption_prompt_lines(prompt: &AdoptionPrompt) -> Vec<Line<'static>> {
     }
     let lines = match prompt {
         AdoptionPrompt::Preview(plan) => plan.lines(),
-        AdoptionPrompt::Report(report) | AdoptionPrompt::Failed(report) => {
-            report.lines().map(str::to_owned).collect()
-        }
+        AdoptionPrompt::Report(verification) => vec![match verification {
+            AdoptionVerification::Verified => "Origin and current-content baseline saved and verified. Future comparisons start here; no historical revision was proven.".into(),
+            AdoptionVerification::Failed(failure) => format!("Baseline saved; verification failed: {}", failure.message),
+            AdoptionVerification::Incomplete(failure) => format!("Baseline saved; verification incomplete: {}", failure.message),
+        }],
+        AdoptionPrompt::Failed(failure) => failure.message.lines().map(str::to_owned).collect(),
         AdoptionPrompt::Editing(_) => unreachable!("handled above"),
     };
     lines
@@ -8179,23 +8194,97 @@ mod tests {
 
     #[test]
     fn adoption_result_failure_does_not_claim_that_nothing_was_recorded() {
-        let prompt = AdoptionPrompt::Failed(
-            "Baseline saved, but post-save verification could not finish".to_owned(),
-        );
+        let prompt = AdoptionPrompt::Report(AdoptionVerification::Incomplete(
+            "post-save verification could not finish".into(),
+        ));
 
         assert_eq!(
             adoption_prompt_heading(&prompt),
-            ("Adoption needs attention", "see result below")
+            ("Adoption needs attention", "baseline recorded")
         );
         assert_eq!(
             adoption_prompt_status(&prompt, 0, Some(0), true),
-            "Review the result below"
+            "Baseline saved; verification incomplete"
         );
     }
 
     #[test]
+    fn adoption_outcomes_have_text_and_cell_styles_at_supported_sizes() {
+        use ratatui::{Terminal, backend::TestBackend};
+        for (name, prompt, status, scope) in [
+            (
+                "not_saved",
+                AdoptionPrompt::Failed("Skill content changed after the adoption preview".into()),
+                "Review the result below",
+                "nothing written",
+            ),
+            (
+                "saved_verified",
+                AdoptionPrompt::Report(AdoptionVerification::Verified),
+                "Origin and baseline recorded",
+                "baseline recorded",
+            ),
+            (
+                "saved_failed",
+                AdoptionPrompt::Report(AdoptionVerification::Failed(
+                    "Skill content changed after the adoption preview".into(),
+                )),
+                "Baseline saved; verification failed",
+                "baseline recorded",
+            ),
+            (
+                "saved_incomplete",
+                AdoptionPrompt::Report(AdoptionVerification::Incomplete(
+                    "Skill content could not be read".into(),
+                )),
+                "Baseline saved; verification incomplete",
+                "baseline recorded",
+            ),
+        ] {
+            for (width, height) in [(80, 24), (120, 40)] {
+                let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+                terminal
+                    .draw(|frame| {
+                        render_adoption_prompt(frame, frame.area(), &prompt, 0, Some(0), true);
+                    })
+                    .unwrap();
+                let buffer = terminal.backend().buffer();
+                let rows: Vec<String> = (0..height)
+                    .map(|y| (0..width).map(|x| buffer[(x, y)].symbol()).collect())
+                    .collect();
+                let rendered = rows
+                    .iter()
+                    .map(|row| row.trim_end())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                assert!(rendered.contains(scope), "{rendered}");
+                let y = rows.iter().rposition(|row| row.contains(status)).unwrap();
+                let x = rows[y]
+                    .chars()
+                    .collect::<Vec<_>>()
+                    .windows(status.chars().count())
+                    .position(|chars| chars.iter().collect::<String>() == status)
+                    .unwrap();
+                for offset in 0..status.chars().count() {
+                    assert_eq!(
+                        buffer[((x + offset) as u16, y as u16)].fg,
+                        theme::key_label().fg.unwrap()
+                    );
+                }
+                assert!(rendered.contains("Esc Close"));
+                assert!(!rendered.contains("Enter Confirm"));
+                if width == 80 {
+                    insta::with_settings!({snapshot_path => "../tests/snapshots"}, {
+                        insta::assert_snapshot!(format!("adoption_outcome_{name}"), rendered);
+                    });
+                }
+            }
+        }
+    }
+
+    #[test]
     fn adoption_rows_keep_offsets_beyond_the_paragraph_scroll_limit() {
-        let prompt = AdoptionPrompt::Failed("x".repeat(65_540));
+        let prompt = AdoptionPrompt::Failed("x".repeat(65_540).into());
         let rows = adoption_prompt_rows(&prompt, 1);
 
         assert_eq!(rows.len(), 65_540);

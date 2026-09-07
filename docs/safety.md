@@ -156,7 +156,17 @@ skill ancestors, portable skill validation, evidence, full content hash, and the
 exact catalog registration. The registration check and insert share an immediate
 SQLite transaction. A second content check before commit rolls the metadata back
 if the observed content changed; post-commit checks report a saved-but-unverified
-baseline distinctly from success. Filesystem reads and SQLite are not one atomic
+baseline distinctly from success. The same observation routine captures preview
+content and performs every recheck, checking expected checkout and ancestor
+identities before reading skill content. A successful commit returns a saved
+outcome even if verification later fails. Observed disagreement is failed
+verification, including observed invalid evidence, unsupported entries, and
+exceeded content limits; an unavailable read is incomplete verification. The
+readers preserve this distinction before formatting errors. Guards retain their
+fail-fast order: incomplete verification makes no claim about later checks that
+were withheld. Neither result is
+inferred from message text, and unavailable private metadata still degrades the
+session. Filesystem reads and SQLite are not one atomic
 snapshot: an external writer can still change a file after the last reading.
 Adoption does not lock another editor's files or claim to prevent later changes.
 Metadata failures degrade the session to read-only operation.
