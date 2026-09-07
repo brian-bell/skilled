@@ -5554,6 +5554,97 @@ fn adoption_draft_names_the_focused_origin_field_and_its_controls() {
     assert!(footer.contains("Esc Cancel"), "{footer}");
 }
 
+#[cfg(unix)]
+#[test]
+fn adoption_focus_cycles_through_named_fields_at_supported_sizes() {
+    use skilled::adoption::AdoptionPrompt;
+    for (width, height) in [(80, 24), (120, 40)] {
+        let harness = Harness::new();
+        let mut app = harness.installable_source();
+        let update = app.update(Action::BeginAdoption);
+        app.perform_effects(update.effects()).unwrap();
+        let mut focused_rows = Vec::new();
+        for (label, value) in [
+            ("Repository URL", "https://github.com/example/upstream"),
+            ("Subdirectory", "."),
+            ("Tracking branch (refs/heads/…)", "refs/heads/main"),
+        ] {
+            for character in value.chars() {
+                app.update(Action::AppendAdoptionCharacter(character));
+            }
+            app.update(Action::AppendAdoptionCharacter('界'));
+            app.update(Action::DeleteAdoptionCharacter);
+            // Controls must not enter the draft, even if dispatched directly.
+            app.update(Action::AppendAdoptionCharacter('\u{1b}'));
+            let screen = buffer(&app, width, height);
+            let marker = format!("> {label}:");
+            let row = row_containing(&screen, &marker);
+            focused_rows.push(row_text(&screen, row).trim().to_owned());
+            assert_eq!(
+                style_in_row(&screen, row, ">").fg,
+                Some(Color::Rgb(0x73, 0xd7, 0xee))
+            );
+            app.update(Action::NextAdoptionField);
+        }
+        let screen = buffer(&app, width, height);
+        let row = row_containing(&screen, "> Repository URL:");
+        assert_eq!(
+            style_in_row(&screen, row, ">").fg,
+            Some(Color::Rgb(0x73, 0xd7, 0xee))
+        );
+        insta::assert_snapshot!(
+            format!("adoption_focus_cycle_{width}"),
+            focused_rows.join("\n")
+        );
+        let Some(AdoptionPrompt::Editing(form)) = app.pending_adoption() else {
+            panic!("expected form")
+        };
+        assert_eq!(form.draft.repository, "https://github.com/example/upstream");
+        assert_eq!(form.draft.subdirectory, ".");
+        assert_eq!(form.draft.update_ref, "refs/heads/main");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn adoption_confirmation_waits_for_the_complete_preview_after_resize() {
+    let harness = Harness::new();
+    // Force wrapping even under short temporary roots such as Linux's /tmp.
+    let application_root = harness
+        .directory
+        .path()
+        .join("adoption-preview-overflow-fixture-with-a-deliberately-long-root")
+        .join("whose-length-does-not-depend-on-the-system-temporary-directory");
+    let mut app = harness.installable_source_at(&application_root);
+    let update = app.update(Action::BeginAdoption);
+    app.perform_effects(update.effects()).unwrap();
+    for value in [
+        "https://github.com/example/upstream",
+        ".",
+        "refs/heads/main",
+    ] {
+        for character in value.chars() {
+            app.update(Action::AppendAdoptionCharacter(character));
+        }
+        app.update(Action::NextAdoptionField);
+    }
+    let update = app.update(Action::PreviewAdoption);
+    app.perform_effects(update.effects()).unwrap();
+    assert!(app.update(Action::ConfirmAdoption).effects().is_empty());
+    app.note_detail_max_scroll(feedback(&app, 120, 40).detail_max_scroll());
+    assert!(app.adoption_preview_fully_seen());
+    // A smaller frame requires more scrolling before the last plan row is visible.
+    app.note_detail_max_scroll(feedback(&app, 80, 24).detail_max_scroll());
+    assert!(!app.adoption_preview_fully_seen());
+    assert!(app.update(Action::ConfirmAdoption).effects().is_empty());
+    let extent = measured_extent(&app, 80, 24);
+    scroll_detail(&mut app, 80, 24, extent);
+    app.note_detail_max_scroll(feedback(&app, 80, 24).detail_max_scroll());
+    assert!(app.adoption_preview_fully_seen());
+    assert!(text(&buffer(&app, 80, 24)).contains("Complete origin and baseline plan shown"));
+    assert!(!app.update(Action::ConfirmAdoption).effects().is_empty());
+}
+
 /// The report escapes what it prints, as every other surface does.
 ///
 /// A step's failure reason carries paths and operating-system error text, both

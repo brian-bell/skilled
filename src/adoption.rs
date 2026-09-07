@@ -91,62 +91,13 @@ pub struct OriginRecord {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AdoptionDraft {
-    pub fields: [String; 3],
-    pub focused: usize,
+    pub repository: String,
+    pub subdirectory: String,
+    pub update_ref: String,
     pub evidence: Evidence,
-    pub error: Option<String>,
     pub(crate) variant: VariantRef,
     pub(crate) checkout: PathBuf,
     pub(crate) identity: RepositoryIdentity,
-}
-
-impl AdoptionDraft {
-    pub fn lines(&self) -> Vec<String> {
-        let mut lines = vec![
-            format!(
-                "Skill: {}",
-                self.checkout
-                    .join(self.variant.variant_relative_path())
-                    .display()
-            ),
-            "Confirm an exact origin and tracking branch. Use . for the repository root.".into(),
-            "Attribution and lock entries are hints, not proof of a historical revision.".into(),
-        ];
-        if self.evidence.is_ambiguous() {
-            lines.push(
-                "Ambiguous evidence: enter one exact origin to resolve it before previewing."
-                    .into(),
-            );
-        }
-        for origin in &self.evidence.candidates {
-            lines.push(format!(
-                "Hint: {} · {}",
-                origin.repository,
-                origin.subdirectory.as_deref().unwrap_or_default()
-            ));
-        }
-        for problem in &self.evidence.problems {
-            lines.push(format!("Evidence: {problem}"));
-        }
-        for (i, label) in [
-            "Repository URL",
-            "Subdirectory",
-            "Tracking branch (refs/heads/…)",
-        ]
-        .iter()
-        .enumerate()
-        {
-            lines.push(format!(
-                "{} {label}: {}",
-                if self.focused == i { ">" } else { " " },
-                self.fields[i]
-            ));
-        }
-        if let Some(error) = &self.error {
-            lines.push(format!("Blocked: {error}"));
-        }
-        lines
-    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -196,7 +147,7 @@ impl AdoptionPlan {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AdoptionPrompt {
-    Editing(AdoptionDraft),
+    Editing(crate::app::AdoptionForm),
     Preview(AdoptionPlan),
     /// The transaction committed; verification may still have failed or be incomplete.
     Report(AdoptionVerification),
@@ -293,12 +244,12 @@ pub(crate) fn begin(
         &checkout.join(variant.variant_relative_path()),
         variant.skill_name(),
     );
-    let fields = evidence.suggested_fields();
+    let [repository, subdirectory, update_ref] = evidence.suggested_fields();
     Ok(AdoptionDraft {
-        fields,
-        focused: 0,
+        repository,
+        subdirectory,
+        update_ref,
         evidence,
-        error: None,
         variant,
         checkout,
         identity,
@@ -306,8 +257,8 @@ pub(crate) fn begin(
 }
 
 pub(crate) fn plan(draft: &AdoptionDraft, store: &Store) -> Result<AdoptionPlan, AdoptionFailure> {
-    let origin = Origin::from_input(&draft.fields[0], &draft.fields[1])?;
-    let update_ref = draft.fields[2].trim().to_owned();
+    let origin = Origin::from_input(&draft.repository, &draft.subdirectory)?;
+    let update_ref = draft.update_ref.trim().to_owned();
     crate::provenance::validate_update_ref(&update_ref)?;
     if !update_ref.starts_with("refs/heads/") {
         return Err("Enter an explicit tracking branch such as refs/heads/main".into());
@@ -559,11 +510,9 @@ mod tests {
         let variant = VariantRef::of(source, catalog, &catalog.candidates()[0]);
         let store = Store::open(&temp.path().join("data")).unwrap();
         let mut draft = begin(source, variant, &store).unwrap();
-        draft.fields = [
-            "https://github.com/example/upstream".into(),
-            "skills/demo".into(),
-            "refs/heads/main".into(),
-        ];
+        draft.repository = "https://github.com/example/upstream".into();
+        draft.subdirectory = "skills/demo".into();
+        draft.update_ref = "refs/heads/main".into();
         let plan = plan(&draft, &store).unwrap();
         (temp, store, plan)
     }
