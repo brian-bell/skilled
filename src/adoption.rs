@@ -81,7 +81,7 @@ impl AdoptionDraft {
             "Confirm an exact origin and tracking branch. Use . for the repository root.".into(),
             "Attribution and lock entries are hints, not proof of a historical revision.".into(),
         ];
-        if self.evidence.candidates.len() > 1 {
+        if self.evidence.is_ambiguous() {
             lines.push(
                 "Ambiguous evidence: enter one exact origin to resolve it before previewing."
                     .into(),
@@ -90,7 +90,8 @@ impl AdoptionDraft {
         for origin in &self.evidence.candidates {
             lines.push(format!(
                 "Hint: {} · {}",
-                origin.repository, origin.subdirectory
+                origin.repository,
+                origin.subdirectory.as_deref().unwrap_or_default()
             ));
         }
         for problem in &self.evidence.problems {
@@ -146,8 +147,8 @@ impl AdoptionPlan {
                     .join(&self.record.variant_relative_path)
                     .display()
             ),
-            format!("Origin: {}", self.record.origin.repository),
-            format!("Origin subdirectory: {}", self.record.origin.subdirectory),
+            format!("Origin: {}", self.record.origin.repository()),
+            format!("Origin subdirectory: {}", self.record.origin.subdirectory()),
             format!("Tracking branch: {}", self.record.update_ref),
             format!(
                 "Baseline v{}: {}",
@@ -246,11 +247,7 @@ pub(crate) fn begin(
         &checkout.join(variant.variant_relative_path()),
         variant.skill_name(),
     );
-    let mut fields = [String::new(), String::new(), String::new()];
-    if let [origin] = evidence.candidates.as_slice() {
-        fields[0] = origin.repository.clone();
-        fields[1] = origin.subdirectory.clone();
-    }
+    let fields = evidence.suggested_fields();
     Ok(AdoptionDraft {
         fields,
         focused: 0,
@@ -263,11 +260,7 @@ pub(crate) fn begin(
 }
 
 pub(crate) fn plan(draft: &AdoptionDraft, store: &Store) -> Result<AdoptionPlan, AdoptionFailure> {
-    let origin = Origin {
-        repository: draft.fields[0].trim().into(),
-        subdirectory: draft.fields[1].trim().into(),
-    };
-    crate::provenance::validate_origin(&origin)?;
+    let origin = Origin::from_input(&draft.fields[0], &draft.fields[1])?;
     let update_ref = draft.fields[2].trim().to_owned();
     crate::provenance::validate_update_ref(&update_ref)?;
     if !update_ref.starts_with("refs/heads/") {
@@ -278,36 +271,7 @@ pub(crate) fn plan(draft: &AdoptionDraft, store: &Store) -> Result<AdoptionPlan,
     if evidence != draft.evidence {
         return Err("Origin evidence changed; close and reopen adoption".into());
     }
-    if !evidence.problems.is_empty() {
-        return Err(
-            "Origin evidence is incomplete; resolve its reported problems before adoption".into(),
-        );
-    }
-    // A bare repository hint leaves the subdirectory unknown. The user must
-    // enter that path explicitly and then confirm the complete declaration;
-    // it is not inferred evidence or a historical claim. A hint that actually
-    // names a subdirectory must match, and conflicting repository hints must
-    // be resolved to one of the repositories shown in the form.
-    if !evidence.candidates.is_empty() {
-        let repository_hints: Vec<_> = evidence
-            .candidates
-            .iter()
-            .filter(|hint| hint.repository == origin.repository)
-            .collect();
-        let has_known_path = repository_hints
-            .iter()
-            .any(|hint| !hint.subdirectory.is_empty());
-        if repository_hints.is_empty()
-            || (has_known_path
-                && !repository_hints
-                    .iter()
-                    .any(|hint| hint.subdirectory == origin.subdirectory))
-        {
-            return Err(
-                "Choose one hinted repository and match its subdirectory when specified".into(),
-            );
-        }
-    }
+    let origin = evidence.resolve(origin)?;
     let identities = directories(&draft.checkout, draft.variant.variant_relative_path())?;
     let validated =
         crate::validation::validate_portable_skill(&skill).map_err(|e| e.to_string())?;

@@ -517,3 +517,48 @@ fn forget_refuses_an_origin_added_after_an_empty_preview() {
     assert_eq!(count(&temp), 1);
     assert!(!app.sources().is_empty());
 }
+
+#[test]
+fn unknown_hint_path_requires_explicit_input_and_root_is_an_explicit_choice() {
+    let (temp, mut app) = fixture();
+    fs::write(
+        temp.path().join("source/ATTRIBUTION.md"),
+        "| Skill | Source |\n| `demo` | https://github.com/example/upstream |\n",
+    )
+    .unwrap();
+    dispatch(&mut app, Action::BeginAdoption);
+    assert!(
+        matches!(app.pending_adoption(), Some(AdoptionPrompt::Editing(draft)) if draft.fields[1].is_empty())
+    );
+    dispatch(&mut app, Action::NextAdoptionField);
+    dispatch(&mut app, Action::NextAdoptionField);
+    for c in " refs/heads/main ".chars() {
+        dispatch(&mut app, Action::AppendAdoptionCharacter(c));
+    }
+    dispatch(&mut app, Action::PreviewAdoption);
+    assert!(
+        matches!(app.pending_adoption(), Some(AdoptionPrompt::Editing(draft)) if draft.error.as_deref() == Some("origin subdirectory is not a safe relative path"))
+    );
+    dispatch(&mut app, Action::NextAdoptionField);
+    dispatch(&mut app, Action::NextAdoptionField);
+    for c in " . ".chars() {
+        dispatch(&mut app, Action::AppendAdoptionCharacter(c));
+    }
+    dispatch(&mut app, Action::PreviewAdoption);
+    assert!(matches!(
+        app.pending_adoption(),
+        Some(AdoptionPrompt::Preview(_))
+    ));
+    app.note_detail_max_scroll(Some(0));
+    dispatch(&mut app, Action::ConfirmAdoption);
+    assert_eq!(count(&temp), 1);
+    let db = rusqlite::Connection::open(temp.path().join("data/skilled.sqlite3")).unwrap();
+    let saved: (String, String) = db
+        .query_row(
+            "SELECT subdirectory, update_ref FROM origin_baselines",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(saved, (".".into(), "refs/heads/main".into()));
+}

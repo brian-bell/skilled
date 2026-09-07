@@ -1,12 +1,11 @@
-//! Bounded, local provenance evidence and content baselines.
+//! Bounded local attribution evidence and explicit origin resolution.
 //!
-//! This module never contacts an origin or asks Git whether a worktree is
-//! clean. Its digest deliberately covers the bytes presently in a skill
-//! directory: ignored and untracked entries are part of it. The only excluded
-//! entries are `.git` directories (or gitfiles) at any level, which are Git
-//! metadata rather than skill content. Unix opens use no-follow, nonblocking
-//! descriptors; other platforms retain the conservative before-and-after
-//! metadata checks but do not claim descriptor-pinned traversal.
+//! Parsing never contacts an origin. Raw input fingerprints remain part of
+//! evidence equality even when distinct inputs suggest the same origin.
+
+mod baseline;
+use baseline::open_file_without_following;
+pub use baseline::{Baseline, directory_hash};
 
 use std::{
     collections::BTreeSet,
@@ -19,48 +18,110 @@ use std::{
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
-const BASELINE_VERSION: u32 = 1;
-const MAX_ENTRIES: usize = 16_384;
-const MAX_BYTES: usize = 32 * 1024 * 1024;
-const MAX_DEPTH: usize = 32;
-const MAX_PATH_BYTES: usize = 16 * 1024;
-const MAX_SYMLINK_BYTES: usize = 16 * 1024;
 const MAX_EVIDENCE_BYTES: usize = 1024 * 1024;
 const MAX_EVIDENCE_CANDIDATES: usize = 128;
 const CANDIDATE_LIMIT_PROBLEM: &str = "provenance evidence exceeds 128 distinct origin candidates";
 
-/// An origin identified by a supported attribution format.
-///
+/// A local hint may identify a repository without identifying its skill path.
+/// `None` is unknown; `Some(".")` explicitly names the repository root.
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
-pub struct Origin {
+pub struct OriginHint {
     pub repository: String,
-    pub subdirectory: String,
+    pub subdirectory: Option<String>,
 }
 
-/// Evidence found without accessing the network.
+/// A complete, validated origin declaration. It does not prove a revision.
+/// Adoption confirms this declaration only after the full preview is visible.
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub struct Origin {
+    repository: String,
+    subdirectory: String,
+}
+
+impl Origin {
+    /// Validate exact values, including schema 12 values read from storage.
+    /// Stored values are never silently trimmed or otherwise repaired.
+    pub fn new(repository: String, subdirectory: String) -> Result<Self, String> {
+        if !valid_repository(&repository) {
+            return Err("origin repository must be an https://github.com/owner/name URL".into());
+        }
+        if !valid_subdirectory(&subdirectory) {
+            return Err("origin subdirectory is not a safe relative path".into());
+        }
+        Ok(Self {
+            repository,
+            subdirectory,
+        })
+    }
+
+    /// Form whitespace is ignored, but an unknown path must be entered.
+    pub fn from_input(repository: &str, subdirectory: &str) -> Result<Self, String> {
+        Self::new(repository.trim().into(), subdirectory.trim().into())
+    }
+
+    pub fn repository(&self) -> &str {
+        &self.repository
+    }
+    pub fn subdirectory(&self) -> &str {
+        &self.subdirectory
+    }
+}
+
+/// Evidence found without accessing the network. Problems block resolution;
+/// missing files and unknown paths are distinct from unreadable evidence.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Evidence {
-    pub candidates: Vec<Origin>,
+    pub candidates: Vec<OriginHint>,
     pub problems: Vec<String>,
     fingerprints: Vec<(PathBuf, Option<String>)>,
 }
 
-/// A versioned whole-directory content baseline.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Baseline {
-    pub version: u32,
-    pub digest: String,
-}
+impl Evidence {
+    pub fn is_ambiguous(&self) -> bool {
+        self.candidates.len() > 1
+    }
 
-/// Validates the GitHub URL and portable subdirectory the user confirms.
-pub fn validate_origin(origin: &Origin) -> Result<(), String> {
-    if !valid_repository(&origin.repository) {
-        return Err("origin repository must be an https://github.com/owner/name URL".into());
+    /// Preserve the form's single-hint defaults, including an empty unknown path.
+    pub fn suggested_fields(&self) -> [String; 3] {
+        let mut fields = [String::new(), String::new(), String::new()];
+        if let [hint] = self.candidates.as_slice() {
+            fields[0] = hint.repository.clone();
+            fields[1] = hint.subdirectory.clone().unwrap_or_default();
+        }
+        fields
     }
-    if !valid_subdirectory(&origin.subdirectory) {
-        return Err("origin subdirectory is not a safe relative path".into());
+
+    /// Resolve a validated selection against all hints. Bare hints allow an
+    /// explicitly entered path only if no hint for that repository knows one.
+    /// Multiple repositories or paths require one exact supported selection.
+    pub fn resolve(&self, origin: Origin) -> Result<Origin, String> {
+        if !self.problems.is_empty() {
+            return Err(
+                "Origin evidence is incomplete; resolve its reported problems before adoption"
+                    .into(),
+            );
+        }
+        if !self.candidates.is_empty() {
+            let mut repository_found = false;
+            let mut known_path = false;
+            let mut path_matches = false;
+            for hint in &self.candidates {
+                if hint.repository == origin.repository {
+                    repository_found = true;
+                    if let Some(path) = &hint.subdirectory {
+                        known_path = true;
+                        path_matches |= path == &origin.subdirectory;
+                    }
+                }
+            }
+            if !repository_found || (known_path && !path_matches) {
+                return Err(
+                    "Choose one hinted repository and match its subdirectory when specified".into(),
+                );
+            }
+        }
+        Ok(origin)
     }
-    Ok(())
 }
 
 /// Checks a narrow, fully-qualified branch ref for a later explicit update
@@ -135,28 +196,6 @@ fn physical_skill_directory(path: &Path) -> bool {
         .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
         && fs::symlink_metadata(path.join("SKILL.md"))
             .is_ok_and(|metadata| metadata.is_file() && !metadata.file_type().is_symlink())
-}
-
-/// Computes a deterministic SHA-256 digest of all content in a directory.
-/// It is fail-closed for resource exhaustion, unsupported entry types, links,
-/// and observations that change while being read.
-pub fn directory_hash(path: &Path) -> Result<Baseline, String> {
-    let root = fs::symlink_metadata(path)
-        .map_err(|error| format!("cannot inspect skill directory {}: {error}", path.display()))?;
-    if !root.file_type().is_dir() {
-        return Err(format!(
-            "skill baseline root is not a directory: {}",
-            path.display()
-        ));
-    }
-    let mut state = HashState::new();
-    state.entry(Path::new(""), b'D', executable(&root), &[])?;
-    hash_directory(path, Path::new(""), 0, &mut state)?;
-    ensure_unchanged(path, &root)?;
-    Ok(Baseline {
-        version: BASELINE_VERSION,
-        digest: format!("{:x}", state.hasher.finalize()),
-    })
 }
 
 fn read_root_attribution(source_root: &Path, skill_name: &str, evidence: &mut Evidence) {
@@ -246,11 +285,11 @@ fn read_skill_attribution(skill_path: &Path, evidence: &mut Evidence) {
     }
     let pinned_repositories: BTreeSet<String> = origins
         .iter()
-        .filter(|origin| !origin.subdirectory.is_empty())
+        .filter(|origin| origin.subdirectory.is_some())
         .map(|origin| origin.repository.clone())
         .collect();
     for origin in origins {
-        if !origin.subdirectory.is_empty() || !pinned_repositories.contains(&origin.repository) {
+        if origin.subdirectory.is_some() || !pinned_repositories.contains(&origin.repository) {
             push_candidate(evidence, origin);
         }
     }
@@ -308,19 +347,21 @@ fn read_lock_hint(
     // a revision.  Intentionally do not read it into `Origin`.
     push_candidate(
         evidence,
-        Origin {
+        OriginHint {
             repository: format!("https://github.com/{}", entry.source),
-            subdirectory: skill_path
-                .strip_prefix(source_root)
-                .ok()
-                .and_then(path_to_slash)
-                .filter(|path| !path.is_empty())
-                .unwrap_or_else(|| ".".into()),
+            subdirectory: Some(
+                skill_path
+                    .strip_prefix(source_root)
+                    .ok()
+                    .and_then(path_to_slash)
+                    .filter(|path| !path.is_empty())
+                    .unwrap_or_else(|| ".".into()),
+            ),
         },
     );
 }
 
-fn push_candidate(evidence: &mut Evidence, origin: Origin) {
+fn push_candidate(evidence: &mut Evidence, origin: OriginHint) {
     if evidence
         .problems
         .iter()
@@ -440,7 +481,7 @@ fn markdown_code(value: &str) -> Option<&str> {
     value.strip_prefix('`')?.strip_suffix('`')
 }
 
-fn parse_origin_url(text: &str) -> Option<Origin> {
+fn parse_origin_url(text: &str) -> Option<OriginHint> {
     let start = text.find("https://github.com/")?;
     let url = &text[start..]
         .split_whitespace()
@@ -458,9 +499,9 @@ fn parse_origin_url(text: &str) -> Option<Origin> {
         return None;
     }
     if parts.len() == 2 {
-        return Some(Origin {
+        return Some(OriginHint {
             repository: format!("https://github.com/{repository}"),
-            subdirectory: String::new(),
+            subdirectory: None,
         });
     }
     if parts.len() < 4 || parts[2] != "tree" || !valid_pinned_commit(parts[3]) {
@@ -474,9 +515,9 @@ fn parse_origin_url(text: &str) -> Option<Origin> {
     if !valid_subdirectory(&subdirectory) {
         return None;
     }
-    Some(Origin {
+    Some(OriginHint {
         repository: format!("https://github.com/{repository}"),
-        subdirectory,
+        subdirectory: Some(subdirectory),
     })
 }
 
@@ -576,559 +617,6 @@ fn path_to_slash(path: &Path) -> Option<String> {
     Some(output)
 }
 
-struct HashState {
-    hasher: Sha256,
-    entries: usize,
-    bytes: usize,
-}
-impl HashState {
-    fn new() -> Self {
-        let mut hasher = Sha256::new();
-        hasher.update(b"skilled-directory-baseline-v1\0");
-        hasher.update(baseline_platform_tag());
-        hasher.update(b"\0");
-        Self {
-            hasher,
-            entries: 0,
-            bytes: 0,
-        }
-    }
-    fn entry(
-        &mut self,
-        path: &Path,
-        kind: u8,
-        executable: bool,
-        bytes: &[u8],
-    ) -> Result<(), String> {
-        self.entries += 1;
-        if self.entries > MAX_ENTRIES {
-            return Err(format!("skill baseline exceeds {MAX_ENTRIES} entries"));
-        }
-        let path = path_bytes(path)?;
-        if path.len() > MAX_PATH_BYTES {
-            return Err("skill baseline path is too long".into());
-        }
-        self.bytes = self
-            .bytes
-            .checked_add(bytes.len())
-            .ok_or("skill baseline size overflow")?;
-        if self.bytes > MAX_BYTES {
-            return Err(format!("skill baseline exceeds {MAX_BYTES} bytes"));
-        }
-        self.hasher.update([kind, u8::from(executable)]);
-        self.hasher.update((path.len() as u64).to_be_bytes());
-        self.hasher.update(&path);
-        self.hasher.update((bytes.len() as u64).to_be_bytes());
-        self.hasher.update(bytes);
-        Ok(())
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn baseline_platform_tag() -> &'static [u8] {
-    b"linux"
-}
-#[cfg(target_os = "macos")]
-fn baseline_platform_tag() -> &'static [u8] {
-    b"macos"
-}
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn baseline_platform_tag() -> &'static [u8] {
-    b"other"
-}
-
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-fn hash_directory(
-    root: &Path,
-    relative: &Path,
-    depth: usize,
-    state: &mut HashState,
-) -> Result<(), String> {
-    let path = root.join(relative);
-    let before = fs::symlink_metadata(&path)
-        .map_err(|error| format!("cannot inspect {}: {error}", path.display()))?;
-    let held = open_directory_without_following(&path)?;
-    ensure_unchanged_metadata(
-        &path,
-        &before,
-        &held
-            .metadata()
-            .map_err(|error| format!("cannot inspect {}: {error}", path.display()))?,
-    )?;
-    hash_directory_bound(root, &held, relative, depth, state)
-}
-
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-fn hash_directory_bound(
-    root: &Path,
-    directory: &fs::File,
-    relative: &Path,
-    depth: usize,
-    state: &mut HashState,
-) -> Result<(), String> {
-    let directory_before = stat_file(directory)?;
-    if depth > MAX_DEPTH {
-        return Err(format!(
-            "skill baseline exceeds {MAX_DEPTH} directory levels"
-        ));
-    }
-    let mut entries = crate::git::bound_directory_entries(directory, MAX_ENTRIES)
-        .map_err(|error| format!("cannot read {}: {error}", root.join(relative).display()))?
-        .ok_or_else(|| format!("skill baseline exceeds {MAX_ENTRIES} entries"))?
-        .into_iter()
-        .map(|entry| entry.name)
-        .collect::<Vec<_>>();
-    entries.sort_by(|left, right| os_bytes(left).cmp(os_bytes(right)));
-    for name in entries {
-        if name == OsStr::new(".git") {
-            continue;
-        }
-        let child_relative = relative.join(&name);
-        let before = stat_at(directory, &name)?;
-        match before.kind() {
-            libc::S_IFDIR => {
-                state.entry(&child_relative, b'D', before.executable(), &[])?;
-                let child = crate::git::open_directory_at(directory, &name).map_err(|error| {
-                    format!(
-                        "cannot open {}: {error}",
-                        root.join(&child_relative).display()
-                    )
-                })?;
-                if !before.same(&stat_file(&child)?) {
-                    return Err(format!(
-                        "skill baseline changed while reading: {}",
-                        root.join(&child_relative).display()
-                    ));
-                }
-                hash_directory_bound(root, &child, &child_relative, depth + 1, state)?;
-            }
-            libc::S_IFREG => {
-                hash_file_bound(root, directory, &name, &child_relative, &before, state)?
-            }
-            libc::S_IFLNK => {
-                let target = read_link_at(directory, &name)?;
-                if target.len() > MAX_SYMLINK_BYTES {
-                    return Err("skill baseline symlink target is too long".into());
-                }
-                if !before.same(&stat_at(directory, &name)?) {
-                    return Err(format!(
-                        "skill baseline changed while reading: {}",
-                        root.join(&child_relative).display()
-                    ));
-                }
-                state.entry(&child_relative, b'L', before.executable(), &target)?;
-            }
-            _ => {
-                return Err(format!(
-                    "skill baseline contains unsupported entry: {}",
-                    root.join(&child_relative).display()
-                ));
-            }
-        }
-    }
-    if !directory_before.same(&stat_file(directory)?) {
-        return Err(format!(
-            "skill baseline directory changed while reading: {}",
-            root.join(relative).display()
-        ));
-    }
-    Ok(())
-}
-
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-fn hash_file_bound(
-    root: &Path,
-    parent: &fs::File,
-    name: &OsStr,
-    relative: &Path,
-    before: &UnixStat,
-    state: &mut HashState,
-) -> Result<(), String> {
-    let mut file = open_file_at(parent, name)?;
-    if !before.same(&stat_file(&file)?) {
-        return Err(format!(
-            "skill baseline changed while reading: {}",
-            root.join(relative).display()
-        ));
-    }
-    let mut content = Vec::new();
-    file.by_ref()
-        .take((MAX_BYTES + 1) as u64)
-        .read_to_end(&mut content)
-        .map_err(|error| format!("cannot read {}: {error}", root.join(relative).display()))?;
-    if !before.same(&stat_file(&file)?) {
-        return Err(format!(
-            "skill baseline changed while reading: {}",
-            root.join(relative).display()
-        ));
-    }
-    state.entry(relative, b'F', before.executable(), &content)
-}
-
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-#[derive(Clone, Copy)]
-struct UnixStat(libc::stat);
-
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-impl UnixStat {
-    fn kind(self) -> libc::mode_t {
-        self.0.st_mode & libc::S_IFMT
-    }
-    fn executable(self) -> bool {
-        self.0.st_mode & 0o111 != 0
-    }
-    fn same(self, other: &Self) -> bool {
-        self.0.st_dev == other.0.st_dev
-            && self.0.st_ino == other.0.st_ino
-            && self.0.st_mode == other.0.st_mode
-            && self.0.st_size == other.0.st_size
-            && stat_times_equal(&self.0, &other.0)
-    }
-}
-
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-fn stat_times_equal(left: &libc::stat, right: &libc::stat) -> bool {
-    left.st_mtime == right.st_mtime
-        && left.st_mtime_nsec == right.st_mtime_nsec
-        && left.st_ctime == right.st_ctime
-        && left.st_ctime_nsec == right.st_ctime_nsec
-}
-
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-fn stat_at(parent: &fs::File, name: &OsStr) -> Result<UnixStat, String> {
-    use std::os::{fd::AsRawFd, unix::ffi::OsStrExt};
-    let name = std::ffi::CString::new(name.as_bytes())
-        .map_err(|_| "skill baseline path contains a NUL byte")?;
-    let mut stat = unsafe { std::mem::zeroed::<libc::stat>() };
-    if unsafe {
-        libc::fstatat(
-            parent.as_raw_fd(),
-            name.as_ptr(),
-            &mut stat,
-            libc::AT_SYMLINK_NOFOLLOW,
-        )
-    } != 0
-    {
-        return Err(format!(
-            "cannot inspect entry: {}",
-            io::Error::last_os_error()
-        ));
-    }
-    Ok(UnixStat(stat))
-}
-
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-fn stat_file(file: &fs::File) -> Result<UnixStat, String> {
-    use std::os::fd::AsRawFd;
-    let mut stat = unsafe { std::mem::zeroed::<libc::stat>() };
-    if unsafe { libc::fstat(file.as_raw_fd(), &mut stat) } != 0 {
-        return Err(format!(
-            "cannot inspect held entry: {}",
-            io::Error::last_os_error()
-        ));
-    }
-    Ok(UnixStat(stat))
-}
-
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-fn open_file_at(parent: &fs::File, name: &OsStr) -> Result<fs::File, String> {
-    use std::os::{
-        fd::{AsRawFd, FromRawFd},
-        unix::ffi::OsStrExt,
-    };
-    let name = std::ffi::CString::new(name.as_bytes())
-        .map_err(|_| "skill baseline path contains a NUL byte")?;
-    let descriptor = unsafe {
-        libc::openat(
-            parent.as_raw_fd(),
-            name.as_ptr(),
-            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
-        )
-    };
-    if descriptor < 0 {
-        return Err(format!(
-            "cannot open entry without following links: {}",
-            io::Error::last_os_error()
-        ));
-    }
-    Ok(unsafe { fs::File::from_raw_fd(descriptor) })
-}
-
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-fn read_link_at(parent: &fs::File, name: &OsStr) -> Result<Vec<u8>, String> {
-    use std::os::{fd::AsRawFd, unix::ffi::OsStrExt};
-    let name = std::ffi::CString::new(name.as_bytes())
-        .map_err(|_| "skill baseline path contains a NUL byte")?;
-    let mut target = vec![0; MAX_SYMLINK_BYTES + 1];
-    let length = unsafe {
-        libc::readlinkat(
-            parent.as_raw_fd(),
-            name.as_ptr(),
-            target.as_mut_ptr().cast(),
-            target.len(),
-        )
-    };
-    if length < 0 {
-        return Err(format!(
-            "cannot read link target: {}",
-            io::Error::last_os_error()
-        ));
-    }
-    let length = length as usize;
-    if length == target.len() {
-        return Err("skill baseline symlink target is too long".into());
-    }
-    target.truncate(length);
-    Ok(target)
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn hash_directory(
-    root: &Path,
-    relative: &Path,
-    depth: usize,
-    state: &mut HashState,
-) -> Result<(), String> {
-    if depth > MAX_DEPTH {
-        return Err(format!(
-            "skill baseline exceeds {MAX_DEPTH} directory levels"
-        ));
-    }
-    let directory = root.join(relative);
-    let before = fs::symlink_metadata(&directory)
-        .map_err(|error| format!("cannot inspect {}: {error}", directory.display()))?;
-    let held = open_directory_without_following(&directory)?;
-    ensure_unchanged_metadata(
-        &directory,
-        &before,
-        &held
-            .metadata()
-            .map_err(|error| format!("cannot inspect {}: {error}", directory.display()))?,
-    )?;
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    let mut entries = crate::git::bound_directory_entries(&held, MAX_ENTRIES)
-        .map_err(|error| format!("cannot read {}: {error}", directory.display()))?
-        .ok_or_else(|| format!("skill baseline exceeds {MAX_ENTRIES} entries"))?
-        .into_iter()
-        .map(|entry| entry.name)
-        .collect::<Vec<_>>();
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    let mut entries = {
-        let mut entries = Vec::new();
-        for entry in fs::read_dir(&directory)
-            .map_err(|error| format!("cannot read {}: {error}", directory.display()))?
-        {
-            if entries.len() == MAX_ENTRIES {
-                return Err(format!("skill baseline exceeds {MAX_ENTRIES} entries"));
-            }
-            entries.push(
-                entry
-                    .map_err(|error| format!("cannot read {}: {error}", directory.display()))?
-                    .file_name(),
-            );
-        }
-        entries
-    };
-    entries.sort_by(|left, right| os_bytes(left).cmp(os_bytes(right)));
-    for name in entries {
-        if name == OsStr::new(".git") {
-            continue;
-        }
-        let child_relative = relative.join(&name);
-        let child = root.join(&child_relative);
-        let metadata = fs::symlink_metadata(&child)
-            .map_err(|error| format!("cannot inspect {}: {error}", child.display()))?;
-        let file_type = metadata.file_type();
-        if file_type.is_dir() {
-            state.entry(&child_relative, b'D', executable(&metadata), &[])?;
-            hash_directory(root, &child_relative, depth + 1, state)?;
-        } else if file_type.is_file() {
-            hash_file(&child, &child_relative, &metadata, state)?;
-        } else if file_type.is_symlink() {
-            let target = fs::read_link(&child)
-                .map_err(|error| format!("cannot read link {}: {error}", child.display()))?;
-            let target = path_bytes(&target)?;
-            if target.len() > MAX_SYMLINK_BYTES {
-                return Err("skill baseline symlink target is too long".into());
-            }
-            let after = fs::symlink_metadata(&child)
-                .map_err(|error| format!("cannot inspect {}: {error}", child.display()))?;
-            ensure_unchanged_metadata(&child, &metadata, &after)?;
-            state.entry(&child_relative, b'L', executable(&metadata), &target)?;
-        } else {
-            return Err(format!(
-                "skill baseline contains unsupported entry: {}",
-                child.display()
-            ));
-        }
-    }
-    ensure_unchanged(&directory, &before)?;
-    ensure_unchanged_metadata(
-        &directory,
-        &before,
-        &held
-            .metadata()
-            .map_err(|error| format!("cannot inspect {}: {error}", directory.display()))?,
-    )
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn hash_file(
-    path: &Path,
-    relative: &Path,
-    before: &fs::Metadata,
-    state: &mut HashState,
-) -> Result<(), String> {
-    let mut file = open_file_without_following(path)?;
-    ensure_unchanged_metadata(
-        path,
-        before,
-        &file
-            .metadata()
-            .map_err(|error| format!("cannot inspect {}: {error}", path.display()))?,
-    )?;
-    let mut content = Vec::new();
-    file.by_ref()
-        .take((MAX_BYTES + 1) as u64)
-        .read_to_end(&mut content)
-        .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
-    let after = fs::symlink_metadata(path)
-        .map_err(|error| format!("cannot inspect {}: {error}", path.display()))?;
-    ensure_unchanged_metadata(path, before, &after)?;
-    state.entry(relative, b'F', executable(before), &content)
-}
-
-fn ensure_unchanged(path: &Path, before: &fs::Metadata) -> Result<(), String> {
-    let after = fs::symlink_metadata(path)
-        .map_err(|error| format!("cannot inspect {}: {error}", path.display()))?;
-    ensure_unchanged_metadata(path, before, &after)
-}
-
-fn ensure_unchanged_metadata(
-    path: &Path,
-    before: &fs::Metadata,
-    after: &fs::Metadata,
-) -> Result<(), String> {
-    if before.file_type() != after.file_type()
-        || before.len() != after.len()
-        || before.modified().ok() != after.modified().ok()
-        || executable(before) != executable(after)
-        || !same_file_identity(before, after)
-    {
-        Err(format!(
-            "skill baseline changed while reading: {}",
-            path.display()
-        ))
-    } else {
-        Ok(())
-    }
-}
-
-#[cfg(unix)]
-fn executable(metadata: &fs::Metadata) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    metadata.permissions().mode() & 0o111 != 0
-}
-#[cfg(unix)]
-fn same_file_identity(before: &fs::Metadata, after: &fs::Metadata) -> bool {
-    use std::os::unix::fs::MetadataExt;
-    before.dev() == after.dev()
-        && before.ino() == after.ino()
-        && before.ctime() == after.ctime()
-        && before.ctime_nsec() == after.ctime_nsec()
-}
-#[cfg(not(unix))]
-fn same_file_identity(_: &fs::Metadata, _: &fs::Metadata) -> bool {
-    true
-}
-#[cfg(unix)]
-fn open_directory_without_following(path: &Path) -> Result<fs::File, String> {
-    use std::os::unix::fs::OpenOptionsExt;
-    fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(path)
-        .map_err(|error| {
-            format!(
-                "cannot open directory {} without following links: {error}",
-                path.display()
-            )
-        })
-}
-#[cfg(windows)]
-fn open_directory_without_following(path: &Path) -> Result<fs::File, String> {
-    use std::os::windows::fs::OpenOptionsExt;
-    use windows_sys::Win32::Storage::FileSystem::{
-        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
-    };
-    fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
-        .open(path)
-        .map_err(|error| format!("cannot open directory {}: {error}", path.display()))
-}
-
-#[cfg(not(any(unix, windows)))]
-fn open_directory_without_following(path: &Path) -> Result<fs::File, String> {
-    fs::File::open(path)
-        .map_err(|error| format!("cannot open directory {}: {error}", path.display()))
-}
-#[cfg(not(unix))]
-fn executable(_: &fs::Metadata) -> bool {
-    false
-}
-#[cfg(unix)]
-fn open_file_without_following(path: &Path) -> Result<fs::File, String> {
-    use std::os::unix::fs::OpenOptionsExt;
-    fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(path)
-        .map_err(|error| {
-            format!(
-                "cannot read {} without following links: {error}",
-                path.display()
-            )
-        })
-}
-#[cfg(windows)]
-fn open_file_without_following(path: &Path) -> Result<fs::File, String> {
-    use std::os::windows::fs::OpenOptionsExt;
-    use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
-    let file = fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
-        .open(path)
-        .map_err(|error| format!("cannot open file {}: {error}", path.display()))?;
-    if !file
-        .metadata()
-        .map_err(|error| error.to_string())?
-        .is_file()
-    {
-        return Err(format!("not a regular file: {}", path.display()));
-    }
-    Ok(file)
-}
-
-#[cfg(not(any(unix, windows)))]
-fn open_file_without_following(path: &Path) -> Result<fs::File, String> {
-    // The lstat checks before and after the read reject a replacement with a
-    // link. Windows' standard library opens reparse points through this path;
-    // this build has no descriptor-level no-follow primitive available here.
-    fs::File::open(path).map_err(|error| format!("cannot read {}: {error}", path.display()))
-}
-fn os_bytes(value: &OsStr) -> &[u8] {
-    value.as_encoded_bytes()
-}
-fn path_bytes(path: &Path) -> Result<Vec<u8>, String> {
-    let bytes = os_bytes(path.as_os_str());
-    if bytes.contains(&0) {
-        Err("skill baseline path contains a NUL byte".into())
-    } else {
-        Ok(bytes.to_vec())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1203,9 +691,9 @@ mod tests {
         let evidence = read_evidence(root, &skill, "slice-issues");
         assert_eq!(
             evidence.candidates,
-            vec![Origin {
+            vec![OriginHint {
                 repository: "https://github.com/mattpocock/skills".into(),
-                subdirectory: "skills/engineering/to-tickets".into()
+                subdirectory: Some("skills/engineering/to-tickets".into())
             }]
         );
         assert!(evidence.problems.is_empty());
@@ -1280,9 +768,9 @@ mod tests {
         );
         assert_eq!(
             read_evidence(root, &common, "example").candidates,
-            vec![Origin {
+            vec![OriginHint {
                 repository: "https://github.com/owner/common".into(),
-                subdirectory: String::new(),
+                subdirectory: None,
             }]
         );
         assert!(
@@ -1326,9 +814,9 @@ mod tests {
         let evidence = read_evidence(root, &skill, "slice-issues");
         assert_eq!(
             evidence.candidates,
-            vec![Origin {
+            vec![OriginHint {
                 repository: "https://github.com/brian-bell/agent-skills".into(),
-                subdirectory: "catalogs/first-party/codex/skills/slice-issues".into()
+                subdirectory: Some("catalogs/first-party/codex/skills/slice-issues".into())
             }]
         );
     }
@@ -1370,108 +858,76 @@ mod tests {
     }
 
     #[test]
-    fn directory_digest_is_stable_includes_links_and_excludes_git() {
-        let temp = tempdir().unwrap();
-        let skill = temp.path().join("skill");
-        write(&skill.join("SKILL.md"), "one");
-        write(&skill.join("nested/file"), "two");
-        write(&skill.join(".git/config"), "ignored");
-        #[cfg(unix)]
-        std::os::unix::fs::symlink("nested/file", skill.join("alias")).unwrap();
-        let first = directory_hash(&skill).unwrap();
-        let second = directory_hash(&skill).unwrap();
-        assert_eq!(first, second);
-        assert_eq!(first.version, 1);
-        assert_eq!(first.digest.len(), 64);
-        write(&skill.join(".git/config"), "still ignored");
-        assert_eq!(first, directory_hash(&skill).unwrap());
-        write(&skill.join("nested/file"), "changed");
-        assert_ne!(first, directory_hash(&skill).unwrap());
+    fn resolution_keeps_unknown_paths_separate_from_known_roots_and_conflicts() {
+        let repository = "https://github.com/owner/repo";
+        let origin = |path: &str| Origin::from_input(repository, path).unwrap();
+        let mut evidence = Evidence::default();
+        assert!(evidence.resolve(origin("arbitrary/path")).is_ok());
+        evidence.candidates.push(OriginHint {
+            repository: repository.into(),
+            subdirectory: None,
+        });
+        assert_eq!(
+            evidence.suggested_fields(),
+            [repository.into(), String::new(), String::new()]
+        );
+        assert!(Origin::from_input(repository, " ").is_err());
+        assert!(evidence.resolve(origin(".")).is_ok());
+        evidence.candidates.push(OriginHint {
+            repository: repository.into(),
+            subdirectory: Some(".".into()),
+        });
+        assert!(evidence.is_ambiguous());
+        assert_eq!(
+            evidence.suggested_fields(),
+            [String::new(), String::new(), String::new()]
+        );
+        assert!(evidence.resolve(origin("arbitrary/path")).is_err());
+        assert!(evidence.resolve(origin(".")).is_ok());
+        evidence.candidates.push(OriginHint {
+            repository: repository.into(),
+            subdirectory: Some("known/path".into()),
+        });
+        assert!(evidence.resolve(origin("known/path")).is_ok());
+        assert!(
+            evidence
+                .resolve(Origin::from_input("https://github.com/other/repo", ".").unwrap())
+                .is_err()
+        );
+        evidence.problems.push("unreadable evidence".into());
+        assert!(
+            evidence
+                .resolve(origin("known/path"))
+                .unwrap_err()
+                .contains("incomplete")
+        );
     }
 
-    #[cfg(unix)]
     #[test]
-    fn digest_includes_modes_and_raw_link_targets_without_following_them() {
-        use std::os::unix::fs::{PermissionsExt, symlink};
-
-        let temp = tempdir().unwrap();
-        let skill = temp.path().join("skill");
-        write(&skill.join("SKILL.md"), "one");
-        symlink("missing-one", skill.join("alias")).unwrap();
-        let first = directory_hash(&skill).unwrap();
-        symlink("missing-two", skill.join("replacement")).unwrap();
-        fs::remove_file(skill.join("alias")).unwrap();
-        fs::rename(skill.join("replacement"), skill.join("alias")).unwrap();
-        assert_ne!(first, directory_hash(&skill).unwrap());
-        let mut permissions = fs::metadata(skill.join("SKILL.md")).unwrap().permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(skill.join("SKILL.md"), permissions).unwrap();
-        assert_ne!(first, directory_hash(&skill).unwrap());
+    fn form_normalization_does_not_repair_persisted_origins() {
+        let normalized = Origin::from_input(" https://github.com/owner/repo ", " . ").unwrap();
+        assert_eq!(normalized.repository(), "https://github.com/owner/repo");
+        assert_eq!(normalized.subdirectory(), ".");
+        assert!(Origin::new(" https://github.com/owner/repo ".into(), ".".into()).is_err());
+        assert!(Origin::new("https://github.com/owner/repo".into(), " . ".into()).is_err());
     }
 
     #[test]
-    fn digest_includes_ignored_content_and_refuses_excessive_depth() {
+    fn absent_unreadable_and_malformed_evidence_stay_distinct() {
         let temp = tempdir().unwrap();
-        let skill = temp.path().join("skill");
-        write(&skill.join("SKILL.md"), "one");
-        write(&skill.join("ignored-by-git.log"), "first");
-        let first = directory_hash(&skill).unwrap();
-        write(&skill.join("ignored-by-git.log"), "second");
-        assert_ne!(first, directory_hash(&skill).unwrap());
-        let mut nested = skill;
-        for number in 0..=MAX_DEPTH {
-            nested = nested.join(number.to_string());
-        }
-        write(&nested.join("too-deep"), "x");
-        assert!(directory_hash(temp.path().join("skill").as_path()).is_err());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn digest_refuses_fifo_without_blocking() {
-        use std::{ffi::CString, os::unix::ffi::OsStrExt};
-
-        let temp = tempdir().unwrap();
-        let skill = temp.path().join("skill");
-        write(&skill.join("SKILL.md"), "one");
-        let fifo = skill.join("stream");
-        let fifo = CString::new(fifo.as_os_str().as_bytes()).unwrap();
-        // SAFETY: the C string is NUL-terminated and names a fresh test path.
-        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
-        assert!(directory_hash(&skill).is_err());
-    }
-
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    #[test]
-    fn bound_walker_keeps_reading_the_held_directory_after_its_path_is_replaced() {
-        use std::os::unix::fs::symlink;
-
-        let temp = tempdir().unwrap();
-        let skill = temp.path().join("skill");
-        let moved = temp.path().join("moved");
-        let impostor = temp.path().join("impostor");
-        write(&skill.join("SKILL.md"), "held");
-        write(&impostor.join("SKILL.md"), "impostor");
-        let held = open_directory_without_following(&skill).unwrap();
-        fs::rename(&skill, &moved).unwrap();
-        symlink(&impostor, &skill).unwrap();
-
-        let mut state = HashState::new();
-        state
-            .entry(
-                Path::new(""),
-                b'D',
-                executable(&held.metadata().unwrap()),
-                &[],
-            )
-            .unwrap();
-        hash_directory_bound(temp.path(), &held, Path::new(""), 0, &mut state).unwrap();
-        let held_digest = Baseline {
-            version: BASELINE_VERSION,
-            digest: format!("{:x}", state.hasher.finalize()),
-        };
-        assert_eq!(held_digest, directory_hash(&moved).unwrap());
-        assert_ne!(held_digest, directory_hash(&impostor).unwrap());
+        let skill = temp.path().join("skills/example");
+        fs::create_dir_all(&skill).unwrap();
+        let absent = read_evidence(temp.path(), &skill, "example");
+        assert!(absent.problems.is_empty());
+        fs::create_dir(skill.join("ATTRIBUTION.md")).unwrap();
+        let unreadable = read_evidence(temp.path(), &skill, "example");
+        assert!(unreadable.problems[0].contains("unreadable"));
+        fs::remove_dir(skill.join("ATTRIBUTION.md")).unwrap();
+        write(&skill.join("ATTRIBUTION.md"), "Upstream: unsupported");
+        let malformed = read_evidence(temp.path(), &skill, "example");
+        assert!(malformed.problems[0].contains("malformed or unsupported"));
+        assert_ne!(absent, unreadable);
+        assert_ne!(unreadable, malformed);
     }
 
     #[test]
@@ -1481,12 +937,6 @@ mod tests {
         assert!(validate_update_ref("refs/heads/../main").is_err());
         assert!(validate_update_ref("refs/heads/release..next").is_err());
         assert!(validate_update_ref("refs/heads/.private").is_err());
-        assert!(
-            validate_origin(&Origin {
-                repository: "https://github.com/owner/repo".into(),
-                subdirectory: "../example".into()
-            })
-            .is_err()
-        );
+        assert!(Origin::new("https://github.com/owner/repo".into(), "../example".into()).is_err());
     }
 }
