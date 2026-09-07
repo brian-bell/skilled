@@ -1,4 +1,7 @@
-use skilled::{Action, AppEnvironment, SkilledApp, adoption::AdoptionPrompt};
+use skilled::{
+    Action, AppEnvironment, SkilledApp,
+    adoption::{AdoptionPrompt, AdoptionVerification, MetadataAvailability},
+};
 use std::{fs, path::Path, process::Command};
 
 fn dispatch(app: &mut SkilledApp, action: Action) {
@@ -99,7 +102,10 @@ fn confirmation_requires_visible_preview_and_saves_an_honest_baseline() {
     app.note_detail_max_scroll(Some(0));
     dispatch(&mut app, Action::ConfirmAdoption);
     assert!(
-        matches!(app.pending_adoption(), Some(AdoptionPrompt::Report(_))),
+        matches!(
+            app.pending_adoption(),
+            Some(AdoptionPrompt::Report(AdoptionVerification::Verified))
+        ),
         "{:?}",
         app.pending_adoption()
     );
@@ -109,7 +115,7 @@ fn confirmation_requires_visible_preview_and_saves_an_honest_baseline() {
     dispatch(&mut app, Action::DismissAdoption);
     dispatch(&mut app, Action::BeginAdoption);
     assert!(
-        matches!(app.pending_adoption(), Some(AdoptionPrompt::Failed(message)) if message.contains("already"))
+        matches!(app.pending_adoption(), Some(AdoptionPrompt::Failed(message)) if message.message.contains("already"))
     );
 }
 
@@ -125,7 +131,7 @@ fn changed_content_invalidates_preview_without_saving_metadata() {
     app.note_detail_max_scroll(Some(0));
     dispatch(&mut app, Action::ConfirmAdoption);
     assert!(
-        matches!(app.pending_adoption(), Some(AdoptionPrompt::Failed(message)) if message.contains("content changed") && !message.contains("saved"))
+        matches!(app.pending_adoption(), Some(AdoptionPrompt::Failed(message)) if message.message.contains("content changed") && !message.message.contains("saved"))
     );
     assert_eq!(count(&temp), 0);
 }
@@ -229,7 +235,10 @@ fn a_repository_root_skill_can_establish_a_baseline() {
     app.note_detail_max_scroll(Some(0));
     dispatch(&mut app, Action::ConfirmAdoption);
     assert!(
-        matches!(app.pending_adoption(), Some(AdoptionPrompt::Report(_))),
+        matches!(
+            app.pending_adoption(),
+            Some(AdoptionPrompt::Report(AdoptionVerification::Verified))
+        ),
         "{:?}",
         app.pending_adoption()
     );
@@ -257,7 +266,7 @@ fn a_changed_saved_record_is_reported_as_saved_and_degrades_metadata() {
     dispatch(&mut app, Action::ConfirmAdoption);
     assert!(app.metadata_failure().is_some());
     assert!(
-        matches!(app.pending_adoption(), Some(AdoptionPrompt::Failed(message)) if message.contains("Baseline saved") && message.contains("verification failed"))
+        matches!(app.pending_adoption(), Some(AdoptionPrompt::Report(AdoptionVerification::Failed(failure))) if failure.metadata == MetadataAvailability::Unavailable)
     );
     assert_eq!(count(&temp), 1);
 }
@@ -290,7 +299,7 @@ fn changing_only_a_pinned_attribution_commit_invalidates_confirmation() {
     app.note_detail_max_scroll(Some(0));
     dispatch(&mut app, Action::ConfirmAdoption);
     assert!(
-        matches!(app.pending_adoption(), Some(AdoptionPrompt::Failed(message)) if message.contains("evidence changed"))
+        matches!(app.pending_adoption(), Some(AdoptionPrompt::Failed(message)) if message.message.contains("evidence changed"))
     );
     assert_eq!(count(&temp), 0);
 }
@@ -561,4 +570,48 @@ fn unknown_hint_path_requires_explicit_input_and_root_is_an_explicit_choice() {
         )
         .unwrap();
     assert_eq!(saved, (".".into(), "refs/heads/main".into()));
+}
+
+#[test]
+fn an_unreadable_saved_record_is_reported_as_incomplete_and_degrades_metadata() {
+    let (temp, mut app) = fixture();
+    fill(&mut app);
+    let db = rusqlite::Connection::open(temp.path().join("data/skilled.sqlite3")).unwrap();
+    db.execute_batch("CREATE TRIGGER corrupt_adoption AFTER INSERT ON origin_baselines BEGIN UPDATE origin_baselines SET baseline_digest = 'invalid'; END;").unwrap();
+    app.note_detail_max_scroll(Some(0));
+    dispatch(&mut app, Action::ConfirmAdoption);
+    assert!(
+        matches!(app.pending_adoption(), Some(AdoptionPrompt::Report(AdoptionVerification::Incomplete(failure))) if failure.metadata == MetadataAvailability::Unavailable)
+    );
+    assert!(app.metadata_failure().is_some());
+    assert_eq!(count(&temp), 1);
+}
+
+#[test]
+fn a_concurrent_adoption_cannot_replace_the_first_baseline() {
+    let (temp, mut app) = fixture();
+    fill(&mut app);
+    let mut other = SkilledApp::open(AppEnvironment::new(
+        temp.path().join("home"),
+        temp.path().join("data"),
+        "",
+    ))
+    .unwrap();
+    dispatch(&mut other, Action::OpenSources);
+    dispatch(&mut other, Action::AdvanceSourcesPane);
+    fill(&mut other);
+    other.note_detail_max_scroll(Some(0));
+    dispatch(&mut other, Action::ConfirmAdoption);
+    assert!(matches!(
+        other.pending_adoption(),
+        Some(AdoptionPrompt::Report(AdoptionVerification::Verified))
+    ));
+    app.note_detail_max_scroll(Some(0));
+    dispatch(&mut app, Action::ConfirmAdoption);
+    assert!(matches!(
+        app.pending_adoption(),
+        Some(AdoptionPrompt::Failed(_))
+    ));
+    assert!(app.metadata_failure().is_none());
+    assert_eq!(count(&temp), 1);
 }

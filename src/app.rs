@@ -1251,13 +1251,13 @@ impl SkilledApp {
         &mut self,
         failure: crate::adoption::AdoptionFailure,
     ) -> crate::adoption::AdoptionPrompt {
-        if failure.metadata {
+        if failure.metadata == crate::adoption::MetadataAvailability::Unavailable {
             self.degrade(MetadataFailure::new(
                 self.environment.data_dir.join("skilled.sqlite3"),
                 failure.message.clone(),
             ));
         }
-        crate::adoption::AdoptionPrompt::Failed(failure.message)
+        crate::adoption::AdoptionPrompt::Failed(failure)
     }
 
     fn begin_adoption(&mut self) {
@@ -1294,7 +1294,9 @@ impl SkilledApp {
             .and_then(|store| crate::adoption::plan(&draft, store));
         self.pending_adoption = Some(match result {
             Ok(plan) => crate::adoption::AdoptionPrompt::Preview(plan),
-            Err(error) if error.metadata => self.adoption_failure(error),
+            Err(error) if error.metadata == crate::adoption::MetadataAvailability::Unavailable => {
+                self.adoption_failure(error)
+            }
             Err(error) => {
                 draft.error = Some(error.message);
                 crate::adoption::AdoptionPrompt::Editing(draft)
@@ -1317,7 +1319,17 @@ impl SkilledApp {
             .and_then(|store| crate::adoption::apply(&plan, store));
         self.rescan_installations();
         self.pending_adoption = Some(match result {
-            Ok(()) => crate::adoption::AdoptionPrompt::Report("Origin and current-content baseline saved and verified. Future comparisons start here; no historical revision was proven.".into()),
+            Ok(verification) => {
+                if let Some(failure) = verification.failure()
+                    && failure.metadata == crate::adoption::MetadataAvailability::Unavailable
+                {
+                    self.degrade(MetadataFailure::new(
+                        self.environment.data_dir.join("skilled.sqlite3"),
+                        failure.message.clone(),
+                    ));
+                }
+                crate::adoption::AdoptionPrompt::Report(verification)
+            }
             Err(error) => self.adoption_failure(error),
         });
         self.reset_detail_scroll();

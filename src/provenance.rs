@@ -4,6 +4,7 @@
 //! evidence equality even when distinct inputs suggest the same origin.
 
 mod baseline;
+pub(crate) use baseline::observe_directory_hash;
 use baseline::open_file_without_following;
 pub use baseline::{Baseline, directory_hash};
 
@@ -17,6 +18,55 @@ use std::{
 
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
+
+/// A completed observation can disagree with a valid preview even when it
+/// cannot produce a digest (for example an observed limit or type violation).
+/// Preserve that distinction before formatting operating-system errors.
+#[derive(Debug)]
+pub(crate) enum ObservationFailure {
+    Changed(String),
+    Unavailable(String),
+}
+impl ObservationFailure {
+    fn io(message: String, error: io::Error) -> Self {
+        // No-follow opens report ELOOP when an expected physical entry has
+        // become a link. Keep that observed path disagreement out of I/O unknowns.
+        #[cfg(unix)]
+        let redirected = error.raw_os_error() == Some(libc::ELOOP);
+        #[cfg(not(unix))]
+        let redirected = false;
+        if redirected
+            || matches!(
+                error.kind(),
+                io::ErrorKind::NotFound
+                    | io::ErrorKind::NotADirectory
+                    | io::ErrorKind::IsADirectory
+            )
+        {
+            Self::Changed(message)
+        } else {
+            Self::Unavailable(message)
+        }
+    }
+}
+impl From<String> for ObservationFailure {
+    fn from(message: String) -> Self {
+        Self::Changed(message)
+    }
+}
+impl From<&str> for ObservationFailure {
+    fn from(message: &str) -> Self {
+        Self::Changed(message.into())
+    }
+}
+impl std::fmt::Display for ObservationFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Changed(message) | Self::Unavailable(message) => message.fmt(f),
+        }
+    }
+}
+impl std::error::Error for ObservationFailure {}
 
 const MAX_EVIDENCE_BYTES: usize = 1024 * 1024;
 const MAX_EVIDENCE_CANDIDATES: usize = 128;
@@ -74,9 +124,24 @@ pub struct Evidence {
     pub candidates: Vec<OriginHint>,
     pub problems: Vec<String>,
     fingerprints: Vec<(PathBuf, Option<String>)>,
+    unavailable_read: bool,
+    invalid_read: bool,
 }
 
 impl Evidence {
+    /// Known changed bytes or an observed invalid input take precedence over
+    /// another file whose read was unavailable. The preview had complete evidence.
+    pub(crate) fn change_is_unavailable(&self, before: &Self) -> bool {
+        self.unavailable_read
+            && !self.invalid_read
+            && !self.fingerprints.iter().any(|(path, digest)| {
+                before
+                    .fingerprints
+                    .iter()
+                    .any(|(old_path, old_digest)| path == old_path && digest != old_digest)
+            })
+    }
+
     pub fn is_ambiguous(&self) -> bool {
         self.candidates.len() > 1
     }
@@ -438,6 +503,8 @@ fn read_optional_text(
             Ok(None)
         }
         Err(error) => {
+            evidence.unavailable_read |= error.kind() != io::ErrorKind::InvalidData;
+            evidence.invalid_read |= error.kind() == io::ErrorKind::InvalidData;
             evidence
                 .problems
                 .push(format!("{label} is unreadable: {error}"));
@@ -449,25 +516,43 @@ fn read_optional_text(
 fn read_text_without_following(path: &Path) -> io::Result<String> {
     let before = fs::symlink_metadata(path)?;
     if before.file_type().is_symlink() || !before.file_type().is_file() {
-        return Err(io::Error::other("evidence is not a regular file"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "evidence is not a regular file",
+        ));
     }
     if before.len() > MAX_EVIDENCE_BYTES as u64 {
-        return Err(io::Error::other("evidence exceeds the byte limit"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "evidence exceeds the byte limit",
+        ));
     }
-    let mut file = open_file_without_following(path).map_err(io::Error::other)?;
+    let mut file = open_file_without_following(path).map_err(|error| {
+        let kind = match &error {
+            ObservationFailure::Changed(_) => io::ErrorKind::InvalidData,
+            ObservationFailure::Unavailable(_) => io::ErrorKind::Other,
+        };
+        io::Error::new(kind, error)
+    })?;
     let mut bytes = Vec::with_capacity(before.len() as usize);
     file.by_ref()
         .take((MAX_EVIDENCE_BYTES + 1) as u64)
         .read_to_end(&mut bytes)?;
     if bytes.len() > MAX_EVIDENCE_BYTES {
-        return Err(io::Error::other("evidence exceeds the byte limit"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "evidence exceeds the byte limit",
+        ));
     }
     let after = fs::symlink_metadata(path)?;
     if before.file_type() != after.file_type()
         || before.len() != after.len()
         || before.modified().ok() != after.modified().ok()
     {
-        return Err(io::Error::other("evidence changed while reading"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "evidence changed while reading",
+        ));
     }
     String::from_utf8(bytes).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }

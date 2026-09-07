@@ -9,23 +9,33 @@ use std::{
 };
 
 use crate::{
-    provenance::{Baseline, Evidence, Origin, directory_hash, read_evidence},
+    provenance::{
+        Baseline, Evidence, ObservationFailure, Origin, observe_directory_hash, read_evidence,
+    },
     resolution::VariantRef,
     source::{RegisteredSource, RepositoryIdentity, repository_identity},
     store::Store,
 };
 
-/// A refusal of the request is separate from unavailable private metadata.
-#[derive(Debug)]
-pub(crate) struct AdoptionFailure {
+/// Whether the session can continue using its private metadata.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MetadataAvailability {
+    Available,
+    Unavailable,
+}
+
+/// A refusal before saving, or the reason a saved baseline is unverified.
+/// Persistence is carried by `AdoptionPrompt`, never inferred from this text.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AdoptionFailure {
     pub message: String,
-    pub metadata: bool,
+    pub metadata: MetadataAvailability,
 }
 impl From<String> for AdoptionFailure {
     fn from(message: String) -> Self {
         Self {
             message,
-            metadata: false,
+            metadata: MetadataAvailability::Available,
         }
     }
 }
@@ -42,8 +52,29 @@ impl std::fmt::Display for AdoptionFailure {
 impl AdoptionFailure {
     pub(crate) fn metadata(error: crate::Error) -> Self {
         Self {
-            metadata: !matches!(error, crate::Error::SourceChangedAfterPreview),
+            metadata: if matches!(error, crate::Error::SourceChangedAfterPreview) {
+                MetadataAvailability::Available
+            } else {
+                MetadataAvailability::Unavailable
+            },
             message: error.to_string(),
+        }
+    }
+}
+
+/// Verification of a baseline whose metadata transaction has committed.
+/// A failed observation differs from one we could not finish reading.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AdoptionVerification {
+    Verified,
+    Failed(AdoptionFailure),
+    Incomplete(AdoptionFailure),
+}
+impl AdoptionVerification {
+    pub fn failure(&self) -> Option<&AdoptionFailure> {
+        match self {
+            Self::Verified => None,
+            Self::Failed(failure) | Self::Incomplete(failure) => Some(failure),
         }
     }
 }
@@ -124,9 +155,8 @@ pub struct AdoptionPlan {
     pub(crate) variant: VariantRef,
     pub(crate) checkout: PathBuf,
     pub(crate) database: PathBuf,
-    pub(crate) evidence: Evidence,
+    observation: AdoptionObservation,
     pub(crate) identity: RepositoryIdentity,
-    pub(crate) directories: Vec<DirectoryIdentity>,
 }
 
 impl AdoptionPlan {
@@ -168,8 +198,10 @@ impl AdoptionPlan {
 pub enum AdoptionPrompt {
     Editing(AdoptionDraft),
     Preview(AdoptionPlan),
-    Report(String),
-    Failed(String),
+    /// The transaction committed; verification may still have failed or be incomplete.
+    Report(AdoptionVerification),
+    /// The operation saved nothing. Also used for draft/preview failures.
+    Failed(AdoptionFailure),
 }
 
 // Directory identities protect a same-content directory replacement between
@@ -185,17 +217,27 @@ pub(crate) struct DirectoryIdentity {
     inode: u64,
 }
 
-fn directories(checkout: &Path, relative: &Path) -> Result<Vec<DirectoryIdentity>, String> {
+fn directories(
+    checkout: &Path,
+    relative: &Path,
+) -> Result<Vec<DirectoryIdentity>, ObservationFailure> {
+    use ObservationFailure::{Changed, Unavailable};
     let mut path = checkout.to_path_buf();
     let mut result = vec![];
     let mut components = relative.components();
     loop {
-        let metadata = fs::symlink_metadata(&path).map_err(|e| e.to_string())?;
+        let metadata = fs::symlink_metadata(&path).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                Changed(format!("A skill ancestor is absent: {}", path.display()))
+            } else {
+                Unavailable(error.to_string())
+            }
+        })?;
         if !metadata.is_dir() || metadata.file_type().is_symlink() {
-            return Err(format!(
+            return Err(Changed(format!(
                 "A skill ancestor is not a physical directory: {}",
                 path.display()
-            ));
+            )));
         }
         #[cfg(unix)]
         use std::os::unix::fs::MetadataExt;
@@ -211,7 +253,11 @@ fn directories(checkout: &Path, relative: &Path) -> Result<Vec<DirectoryIdentity
             None => break,
             Some(Component::Normal(name)) => path.push(name),
             Some(Component::CurDir) if relative == Path::new(".") => break,
-            _ => return Err("Skill path must stay inside its registered source".into()),
+            _ => {
+                return Err(Changed(
+                    "Skill path must stay inside its registered source".into(),
+                ));
+            }
         }
     }
     Ok(result)
@@ -266,19 +312,11 @@ pub(crate) fn plan(draft: &AdoptionDraft, store: &Store) -> Result<AdoptionPlan,
     if !update_ref.starts_with("refs/heads/") {
         return Err("Enter an explicit tracking branch such as refs/heads/main".into());
     }
-    let skill = draft.checkout.join(draft.variant.variant_relative_path());
-    let evidence = read_evidence(&draft.checkout, &skill, draft.variant.skill_name());
-    if evidence != draft.evidence {
+    let observation = observe(&draft.checkout, &draft.variant, &draft.identity, None)?;
+    if observation.evidence != draft.evidence {
         return Err("Origin evidence changed; close and reopen adoption".into());
     }
-    let origin = evidence.resolve(origin)?;
-    let identities = directories(&draft.checkout, draft.variant.variant_relative_path())?;
-    let validated =
-        crate::validation::validate_portable_skill(&skill).map_err(|e| e.to_string())?;
-    if validated.name() != draft.variant.skill_name() {
-        return Err("The selected skill identity changed".into());
-    }
-    let baseline = directory_hash(&skill)?;
+    let origin = observation.evidence.resolve(origin)?;
     let result = AdoptionPlan {
         record: OriginRecord {
             source_id: draft.variant.source_id(),
@@ -286,14 +324,13 @@ pub(crate) fn plan(draft: &AdoptionDraft, store: &Store) -> Result<AdoptionPlan,
             variant_relative_path: draft.variant.variant_relative_path().into(),
             origin,
             update_ref,
-            baseline,
+            baseline: observation.baseline.clone(),
         },
         variant: draft.variant.clone(),
         checkout: draft.checkout.clone(),
         database: store.database_path().into(),
-        evidence,
+        observation,
         identity: draft.identity.clone(),
-        directories: identities,
     };
     recheck(&result)?;
     let guard = store
@@ -309,28 +346,114 @@ pub(crate) fn plan(draft: &AdoptionDraft, store: &Store) -> Result<AdoptionPlan,
     Ok(result)
 }
 
-fn recheck(plan: &AdoptionPlan) -> Result<(), String> {
-    if repository_identity(&plan.checkout).map_err(|e| e.to_string())? != plan.identity
-        || directories(&plan.checkout, &plan.record.variant_relative_path)? != plan.directories
-    {
-        return Err("Paths changed after the adoption preview".into());
-    }
-    let skill = plan.checkout.join(&plan.record.variant_relative_path);
-    if read_evidence(&plan.checkout, &skill, plan.variant.skill_name()) != plan.evidence {
-        return Err("Origin evidence changed after the adoption preview".into());
-    }
-    let validated =
-        crate::validation::validate_portable_skill(&skill).map_err(|e| e.to_string())?;
-    if validated.name() != plan.variant.skill_name() {
-        return Err("The selected skill identity changed".into());
-    }
-    if directory_hash(&skill)? != plan.record.baseline {
-        return Err("Skill content changed after the adoption preview".into());
-    }
-    Ok(())
+/// One observation recipe for preview capture and every subsequent guard.
+/// Expected identities are checked before reading skill content.
+/// Repeated captures detect observed changes; they do not lock external writers.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct AdoptionObservation {
+    directories: Vec<DirectoryIdentity>,
+    evidence: Evidence,
+    baseline: Baseline,
 }
 
-pub(crate) fn apply(plan: &AdoptionPlan, store: &mut Store) -> Result<(), AdoptionFailure> {
+impl From<ObservationFailure> for AdoptionFailure {
+    fn from(failure: ObservationFailure) -> Self {
+        match failure {
+            ObservationFailure::Changed(message) | ObservationFailure::Unavailable(message) => {
+                message.into()
+            }
+        }
+    }
+}
+
+fn observe(
+    checkout: &Path,
+    variant: &VariantRef,
+    identity: &RepositoryIdentity,
+    expected: Option<&AdoptionObservation>,
+) -> Result<AdoptionObservation, ObservationFailure> {
+    use ObservationFailure::{Changed, Unavailable};
+    if repository_identity(checkout).map_err(|e| Unavailable(e.to_string()))? != *identity {
+        return Err(Changed("Paths changed after the adoption preview".into()));
+    }
+    let directories = directories(checkout, variant.variant_relative_path())?;
+    if expected.is_some_and(|before| before.directories != directories) {
+        return Err(Changed("Paths changed after the adoption preview".into()));
+    }
+    let skill = checkout.join(variant.variant_relative_path());
+    let evidence = read_evidence(checkout, &skill, variant.skill_name());
+    if let Some(before) = expected
+        && before.evidence != evidence
+    {
+        // Unreadable evidence is not proof that its bytes changed. Preserve
+        // the guard's fail-fast order: Incomplete means later content checks
+        // were withheld, not that those unchecked postconditions agree.
+        return Err(if !evidence.change_is_unavailable(&before.evidence) {
+            Changed("Origin evidence changed after the adoption preview".into())
+        } else {
+            Unavailable(format!(
+                "Origin evidence changed or could not be read after the adoption preview: {}",
+                evidence.problems.join("; ")
+            ))
+        });
+    }
+    let validated = crate::validation::validate_portable_skill(&skill).map_err(|error| {
+        use crate::validation::PortableValidationError::*;
+        let changed = match &error {
+            // MissingSkillMd can also hide a directory-entry file_type error.
+            // Establish absence or a non-file explicitly before calling it a change.
+            MissingSkillMd => match fs::symlink_metadata(skill.join("SKILL.md")) {
+                Ok(metadata) => !metadata.is_file() || metadata.file_type().is_symlink(),
+                Err(error) => error.kind() == std::io::ErrorKind::NotFound,
+            },
+            UnreadableSkillMd(error) => matches!(
+                error.kind(),
+                std::io::ErrorKind::InvalidData | std::io::ErrorKind::NotFound
+            ),
+            ReadDirectory { source, .. } => source.kind() == std::io::ErrorKind::NotFound,
+            SourceInspectionLimitExceeded => false,
+            // A successfully observed size or entry-count violation also disagrees
+            // with the valid skill captured in the preview.
+            _ => true,
+        };
+        if changed {
+            Changed(error.to_string())
+        } else {
+            Unavailable(error.to_string())
+        }
+    })?;
+    if validated.name() != variant.skill_name() {
+        return Err(Changed("The selected skill identity changed".into()));
+    }
+    let baseline = observe_directory_hash(&skill)?;
+    if expected.is_some_and(|before| before.baseline != baseline) {
+        return Err(Changed(
+            "Skill content changed after the adoption preview".into(),
+        ));
+    }
+    Ok(AdoptionObservation {
+        directories,
+        evidence,
+        baseline,
+    })
+}
+
+fn recheck(plan: &AdoptionPlan) -> Result<(), ObservationFailure> {
+    observe(
+        &plan.checkout,
+        &plan.variant,
+        &plan.identity,
+        Some(&plan.observation),
+    )
+    .map(|_| ())
+}
+
+/// `Err` means nothing was saved. Once commit succeeds, all exits return `Ok`
+/// with a typed verification outcome, including unavailable postconditions.
+pub(crate) fn apply(
+    plan: &AdoptionPlan,
+    store: &mut Store,
+) -> Result<AdoptionVerification, AdoptionFailure> {
     let transaction = store.begin_mutation().map_err(AdoptionFailure::metadata)?;
     if !transaction
         .variant_registration_matches(&plan.variant, &plan.checkout)
@@ -342,29 +465,271 @@ pub(crate) fn apply(plan: &AdoptionPlan, store: &mut Store) -> Result<(), Adopti
     transaction
         .record_origin(&plan.record)
         .map_err(AdoptionFailure::metadata)?;
-    // A second reading before commit rolls the metadata back if a concurrent
-    // writer changed the content while SQLite prepared the row.
+    // Retain the second reading before commit: a change during insertion rolls back.
     recheck(plan)?;
     transaction.commit().map_err(AdoptionFailure::metadata)?;
-    if store
-        .origin_record(
-            plan.record.source_id,
-            &plan.record.catalog_relative_path,
-            &plan.record.variant_relative_path,
-        )
-        .map_err(|e| AdoptionFailure {
-            metadata: true,
-            message: format!("Baseline saved; verification incomplete: {e}"),
-        })?
-        != Some(plan.record.clone())
-    {
-        return Err(AdoptionFailure {
-            metadata: true,
-            message:
-                "Baseline saved; metadata verification failed because the stored record differs"
-                    .into(),
-        });
+    Ok(verify_saved(plan, store))
+}
+
+fn verify_saved(plan: &AdoptionPlan, store: &Store) -> AdoptionVerification {
+    match store.origin_record(
+        plan.record.source_id,
+        &plan.record.catalog_relative_path,
+        &plan.record.variant_relative_path,
+    ) {
+        Err(error) => return AdoptionVerification::Incomplete(AdoptionFailure::metadata(error)),
+        Ok(record) if record != Some(plan.record.clone()) => {
+            return AdoptionVerification::Failed(AdoptionFailure {
+                metadata: MetadataAvailability::Unavailable,
+                message: "stored metadata differs from the confirmed baseline".into(),
+            });
+        }
+        Ok(_) => {}
     }
-    recheck(plan)
-        .map_err(|e| format!("Baseline saved, but post-save verification failed: {e}").into())
+    match recheck(plan) {
+        Ok(()) => AdoptionVerification::Verified,
+        Err(ObservationFailure::Changed(message)) => AdoptionVerification::Failed(message.into()),
+        Err(ObservationFailure::Unavailable(message)) => {
+            AdoptionVerification::Incomplete(message.into())
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{AppEnvironment, SkilledApp};
+    use std::process::Command;
+
+    fn fixture() -> (tempfile::TempDir, Store, AdoptionPlan) {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("source");
+        fs::create_dir_all(root.join("skills/demo")).unwrap();
+        fs::write(
+            root.join("skills/demo/SKILL.md"),
+            "---\nname: demo\ndescription: Fixture\n---\nBody\n",
+        )
+        .unwrap();
+        for args in [
+            vec!["init", "-b", "main"],
+            vec!["add", "."],
+            vec![
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.test",
+                "commit",
+                "-m",
+                "initial",
+            ],
+        ] {
+            let output = Command::new("git")
+                .arg("-C")
+                .arg(&root)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        let mut app = SkilledApp::open(AppEnvironment::new(
+            temp.path().join("home"),
+            temp.path().join("data"),
+            "",
+        ))
+        .unwrap();
+        app.confirm_source(app.preview_source(&root).unwrap())
+            .unwrap();
+        let source = &app.sources()[0];
+        let catalog = source
+            .catalogs()
+            .iter()
+            .find(|c| !c.candidates().is_empty())
+            .unwrap();
+        let variant = VariantRef::of(source, catalog, &catalog.candidates()[0]);
+        let store = Store::open(&temp.path().join("data")).unwrap();
+        let mut draft = begin(source, variant, &store).unwrap();
+        draft.fields = [
+            "https://github.com/example/upstream".into(),
+            "skills/demo".into(),
+            "refs/heads/main".into(),
+        ];
+        let plan = plan(&draft, &store).unwrap();
+        (temp, store, plan)
+    }
+
+    #[test]
+    fn saved_content_disagreement_and_unavailable_reads_have_distinct_outcomes() {
+        let (temp, mut store, plan) = fixture();
+        assert_eq!(
+            apply(&plan, &mut store).unwrap(),
+            AdoptionVerification::Verified
+        );
+        let skill = temp.path().join("source/skills/demo");
+        fs::write(skill.join("untracked"), "changed").unwrap();
+        assert!(
+            matches!(verify_saved(&plan, &store), AdoptionVerification::Failed(failure)
+            if failure.metadata == MetadataAvailability::Available)
+        );
+        fs::remove_file(skill.join("untracked")).unwrap();
+        #[cfg(unix)]
+        if unsafe { libc::geteuid() } != 0 {
+            use std::os::unix::fs::PermissionsExt;
+            let evidence = temp.path().join("source/ATTRIBUTION.md");
+            fs::write(&evidence, "unreadable").unwrap();
+            fs::set_permissions(&evidence, fs::Permissions::from_mode(0o000)).unwrap();
+            assert!(
+                matches!(verify_saved(&plan, &store), AdoptionVerification::Incomplete(failure)
+                if failure.metadata == MetadataAvailability::Available)
+            );
+            // A second, successfully read change still proves disagreement.
+            let lock = temp.path().join("source/skills-lock.json");
+            fs::write(&lock, "invalid JSON").unwrap();
+            assert!(matches!(
+                verify_saved(&plan, &store),
+                AdoptionVerification::Failed(_)
+            ));
+            fs::remove_file(lock).unwrap();
+            fs::remove_file(evidence).unwrap();
+            let unreadable = skill.join("unreadable");
+            fs::write(&unreadable, "content").unwrap();
+            fs::set_permissions(unreadable, fs::Permissions::from_mode(0o000)).unwrap();
+            assert!(matches!(
+                verify_saved(&plan, &store),
+                AdoptionVerification::Incomplete(_)
+            ));
+        }
+        assert_eq!(
+            store
+                .origin_record(
+                    plan.record.source_id,
+                    &plan.record.catalog_relative_path,
+                    &plan.record.variant_relative_path
+                )
+                .unwrap(),
+            Some(plan.record)
+        );
+    }
+
+    #[test]
+    fn observed_missing_invalid_and_oversized_documents_fail_saved_verification() {
+        for content in [
+            None,
+            Some(b"invalid document".to_vec()),
+            Some(vec![0xff]),
+            Some(vec![b'x'; 1024 * 1024 + 1]),
+        ] {
+            let (temp, mut store, plan) = fixture();
+            assert_eq!(
+                apply(&plan, &mut store).unwrap(),
+                AdoptionVerification::Verified
+            );
+            let path = temp.path().join("source/skills/demo/SKILL.md");
+            match content {
+                None => fs::remove_file(path).unwrap(),
+                Some(bytes) => fs::write(path, bytes).unwrap(),
+            }
+            let verification = verify_saved(&plan, &store);
+            assert!(
+                matches!(verification, AdoptionVerification::Failed(_)),
+                "{verification:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn observed_invalid_evidence_fails_saved_verification() {
+        for (name, bytes) in [
+            (
+                "ATTRIBUTION.md",
+                b"| Skill | Source |\n| `demo` | invalid |\n".to_vec(),
+            ),
+            ("skills-lock.json", b"invalid JSON".to_vec()),
+            ("ATTRIBUTION.md", vec![0xff]),
+            ("ATTRIBUTION.md", vec![b'x'; 1024 * 1024 + 1]),
+        ] {
+            let (temp, mut store, plan) = fixture();
+            assert_eq!(
+                apply(&plan, &mut store).unwrap(),
+                AdoptionVerification::Verified
+            );
+            fs::write(temp.path().join("source").join(name), bytes).unwrap();
+            let verification = verify_saved(&plan, &store);
+            assert!(
+                matches!(verification, AdoptionVerification::Failed(_)),
+                "{verification:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn observed_baseline_limits_fail_saved_verification() {
+        for excessive_depth in [false, true] {
+            let (temp, mut store, plan) = fixture();
+            assert_eq!(
+                apply(&plan, &mut store).unwrap(),
+                AdoptionVerification::Verified
+            );
+            let skill = temp.path().join("source/skills/demo");
+            if excessive_depth {
+                let path = (0..33).fold(skill, |path, _| path.join("d"));
+                fs::create_dir_all(path).unwrap();
+            } else {
+                fs::File::create(skill.join("oversized"))
+                    .unwrap()
+                    .set_len(32 * 1024 * 1024 + 1)
+                    .unwrap();
+            }
+            let verification = verify_saved(&plan, &store);
+            assert!(
+                matches!(verification, AdoptionVerification::Failed(_)),
+                "{verification:?}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_observed_unsupported_entry_fails_saved_verification() {
+        let (temp, mut store, plan) = fixture();
+        assert_eq!(
+            apply(&plan, &mut store).unwrap(),
+            AdoptionVerification::Verified
+        );
+        // A socket needs no content read and cannot appear in a valid baseline.
+        let socket = temp.path().join("source/skills/demo/socket");
+        let _listener = std::os::unix::net::UnixListener::bind(socket).unwrap();
+        assert!(matches!(
+            verify_saved(&plan, &store),
+            AdoptionVerification::Failed(_)
+        ));
+    }
+
+    #[test]
+    fn same_content_directory_replacement_is_refused_by_the_shared_observation() {
+        let (temp, mut store, plan) = fixture();
+        let skill = temp.path().join("source/skills/demo");
+        let bytes = fs::read(skill.join("SKILL.md")).unwrap();
+        fs::rename(&skill, temp.path().join("moved")).unwrap();
+        fs::create_dir(&skill).unwrap();
+        fs::write(skill.join("SKILL.md"), bytes).unwrap();
+        assert!(matches!(
+            recheck(&plan),
+            Err(ObservationFailure::Changed(_))
+        ));
+        assert!(apply(&plan, &mut store).is_err());
+        assert_eq!(
+            store
+                .origin_record(
+                    plan.record.source_id,
+                    &plan.record.catalog_relative_path,
+                    &plan.record.variant_relative_path
+                )
+                .unwrap(),
+            None
+        );
+    }
 }
