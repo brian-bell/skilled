@@ -1077,8 +1077,8 @@ impl Mutation<'_> {
                 record.source_id,
                 catalog,
                 variant,
-                &record.origin.repository,
-                &record.origin.subdirectory,
+                record.origin.repository(),
+                record.origin.subdirectory(),
                 &record.update_ref,
                 record.baseline.version,
                 &record.baseline.digest,
@@ -1648,11 +1648,8 @@ fn origin_record_on(
             "baseline digest is not 64 lowercase hexadecimal SHA-256 characters",
         ));
     }
-    let origin = crate::provenance::Origin {
-        repository,
-        subdirectory,
-    };
-    crate::provenance::validate_origin(&origin).map_err(invalid_origin_metadata)?;
+    let origin = crate::provenance::Origin::new(repository, subdirectory)
+        .map_err(invalid_origin_metadata)?;
     crate::provenance::validate_update_ref(&update_ref).map_err(invalid_origin_metadata)?;
     Ok(Some(OriginRecord {
         source_id,
@@ -1786,10 +1783,11 @@ mod tests {
             source_id: 1,
             catalog_relative_path: PathBuf::from(".agents/skills"),
             variant_relative_path: PathBuf::from("format"),
-            origin: crate::provenance::Origin {
-                repository: "https://github.com/acme/skills".to_owned(),
-                subdirectory: "skills/format".to_owned(),
-            },
+            origin: crate::provenance::Origin::new(
+                "https://github.com/acme/skills".to_owned(),
+                "skills/format".to_owned(),
+            )
+            .unwrap(),
             update_ref: "refs/heads/main".to_owned(),
             baseline: crate::provenance::Baseline {
                 version: 1,
@@ -1914,10 +1912,11 @@ mod tests {
             source_id,
             catalog_relative_path: PathBuf::from("skills"),
             variant_relative_path: PathBuf::from("skills/format"),
-            origin: crate::provenance::Origin {
-                repository: "https://github.com/acme/skills".to_owned(),
-                subdirectory: "skills/format".to_owned(),
-            },
+            origin: crate::provenance::Origin::new(
+                "https://github.com/acme/skills".to_owned(),
+                "skills/format".to_owned(),
+            )
+            .unwrap(),
             update_ref: "refs/heads/main".to_owned(),
             baseline: crate::provenance::Baseline {
                 version: 1,

@@ -6002,8 +6002,8 @@ fn forget_prompt_lines(prompt: &ForgetPrompt) -> Vec<Line<'static>> {
                             .join(&record.variant_relative_path)
                             .display()
                     ),
-                    format!("Origin: {}", record.origin.repository),
-                    format!("Subdirectory: {}", record.origin.subdirectory),
+                    format!("Origin: {}", record.origin.repository()),
+                    format!("Subdirectory: {}", record.origin.subdirectory()),
                     format!("Tracking ref: {}", record.update_ref),
                     format!(
                         "Baseline v{}: {}",
