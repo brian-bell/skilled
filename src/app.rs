@@ -43,6 +43,51 @@ use crate::{
     validation::valid_skill_name,
 };
 
+/// The editable origin declaration; focus and errors belong to the UI session.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AdoptionForm {
+    pub draft: crate::adoption::AdoptionDraft,
+    pub focused: AdoptionField,
+    pub error: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AdoptionField {
+    Repository,
+    Subdirectory,
+    TrackingBranch,
+}
+
+impl AdoptionField {
+    pub const ALL: [Self; 3] = [Self::Repository, Self::Subdirectory, Self::TrackingBranch];
+
+    fn next(self) -> Self {
+        match self {
+            Self::Repository => Self::Subdirectory,
+            Self::Subdirectory => Self::TrackingBranch,
+            Self::TrackingBranch => Self::Repository,
+        }
+    }
+}
+
+impl AdoptionForm {
+    pub fn value(&self, field: AdoptionField) -> &str {
+        match field {
+            AdoptionField::Repository => &self.draft.repository,
+            AdoptionField::Subdirectory => &self.draft.subdirectory,
+            AdoptionField::TrackingBranch => &self.draft.update_ref,
+        }
+    }
+
+    fn focused_value_mut(&mut self) -> &mut String {
+        match self.focused {
+            AdoptionField::Repository => &mut self.draft.repository,
+            AdoptionField::Subdirectory => &mut self.draft.subdirectory,
+            AdoptionField::TrackingBranch => &mut self.draft.update_ref,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SetupStep {
     Welcome,
@@ -1276,14 +1321,18 @@ impl SkilledApp {
             )
         })();
         self.pending_adoption = Some(match result {
-            Ok(draft) => crate::adoption::AdoptionPrompt::Editing(draft),
+            Ok(draft) => crate::adoption::AdoptionPrompt::Editing(AdoptionForm {
+                draft,
+                focused: AdoptionField::Repository,
+                error: None,
+            }),
             Err(error) => self.adoption_failure(error),
         });
         self.reset_detail_scroll();
     }
 
     fn preview_adoption(&mut self) {
-        let Some(crate::adoption::AdoptionPrompt::Editing(mut draft)) =
+        let Some(crate::adoption::AdoptionPrompt::Editing(mut form)) =
             self.pending_adoption.clone()
         else {
             return;
@@ -1291,15 +1340,15 @@ impl SkilledApp {
         let result = self
             .store()
             .map_err(crate::adoption::AdoptionFailure::metadata)
-            .and_then(|store| crate::adoption::plan(&draft, store));
+            .and_then(|store| crate::adoption::plan(&form.draft, store));
         self.pending_adoption = Some(match result {
             Ok(plan) => crate::adoption::AdoptionPrompt::Preview(plan),
             Err(error) if error.metadata == crate::adoption::MetadataAvailability::Unavailable => {
                 self.adoption_failure(error)
             }
             Err(error) => {
-                draft.error = Some(error.message);
-                crate::adoption::AdoptionPrompt::Editing(draft)
+                form.error = Some(error.message);
+                crate::adoption::AdoptionPrompt::Editing(form)
             }
         });
         self.reset_detail_scroll();
@@ -1679,25 +1728,25 @@ impl SkilledApp {
                     vec![Effect::PreviewAdoption]
                 }
                 Action::AppendAdoptionCharacter(character) => {
-                    if let Some(AdoptionPrompt::Editing(draft)) = &mut self.pending_adoption
+                    if let Some(AdoptionPrompt::Editing(form)) = &mut self.pending_adoption
                         && !character.is_control()
-                        && draft.fields[draft.focused].len() < 2048
+                        && form.value(form.focused).len() < 2048
                     {
-                        draft.fields[draft.focused].push(character);
-                        draft.error = None;
+                        form.focused_value_mut().push(character);
+                        form.error = None;
                     }
                     Vec::new()
                 }
                 Action::DeleteAdoptionCharacter => {
-                    if let Some(AdoptionPrompt::Editing(draft)) = &mut self.pending_adoption {
-                        draft.fields[draft.focused].pop();
-                        draft.error = None;
+                    if let Some(AdoptionPrompt::Editing(form)) = &mut self.pending_adoption {
+                        form.focused_value_mut().pop();
+                        form.error = None;
                     }
                     Vec::new()
                 }
                 Action::NextAdoptionField => {
-                    if let Some(AdoptionPrompt::Editing(draft)) = &mut self.pending_adoption {
-                        draft.focused = (draft.focused + 1) % 3;
+                    if let Some(AdoptionPrompt::Editing(form)) = &mut self.pending_adoption {
+                        form.focused = form.focused.next();
                     }
                     Vec::new()
                 }
@@ -3743,6 +3792,7 @@ impl SkilledApp {
         if self.pending_operation.is_some()
             || self.pending_repair.is_some()
             || self.pending_update.is_some()
+            || self.pending_adoption.is_some()
         {
             return true;
         }

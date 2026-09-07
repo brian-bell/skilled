@@ -4129,21 +4129,8 @@ fn adoption_prompt_status(
 }
 
 fn adoption_prompt_lines(prompt: &AdoptionPrompt) -> Vec<Line<'static>> {
-    if let AdoptionPrompt::Editing(draft) = prompt {
-        return draft
-            .lines()
-            .into_iter()
-            .map(|line| {
-                if let Some(field) = line.strip_prefix("> ") {
-                    Line::from(vec![
-                        Span::styled(">", theme::focus_marker()),
-                        Span::raw(format!(" {}", terminal_safe(field))),
-                    ])
-                } else {
-                    Line::raw(terminal_safe(&line))
-                }
-            })
-            .collect();
+    if let AdoptionPrompt::Editing(form) = prompt {
+        return adoption_form_lines(form);
     }
     let lines = match prompt {
         AdoptionPrompt::Preview(plan) => plan.lines(),
@@ -4161,45 +4148,72 @@ fn adoption_prompt_lines(prompt: &AdoptionPrompt) -> Vec<Line<'static>> {
         .collect()
 }
 
-/// Materialize adoption text as rows rather than passing an offset through
-/// `Paragraph::scroll`, whose `u16` row count would strand content after row
-/// 65,535. The focus marker keeps its style while field text wraps.
+fn adoption_form_lines(form: &crate::app::AdoptionForm) -> Vec<Line<'static>> {
+    use crate::app::AdoptionField;
+    let draft = &form.draft;
+    let mut text = vec![
+        format!(
+            "Skill: {}",
+            draft
+                .checkout
+                .join(draft.variant.variant_relative_path())
+                .display()
+        ),
+        "Confirm an exact origin and tracking branch. Use . for the repository root.".into(),
+        "Attribution and lock entries are hints, not proof of a historical revision.".into(),
+    ];
+    if draft.evidence.is_ambiguous() {
+        text.push(
+            "Ambiguous evidence: enter one exact origin to resolve it before previewing.".into(),
+        );
+    }
+    for origin in &draft.evidence.candidates {
+        text.push(format!(
+            "Hint: {} · {}",
+            origin.repository,
+            origin.subdirectory.as_deref().unwrap_or_default()
+        ));
+    }
+    for problem in &draft.evidence.problems {
+        text.push(format!("Evidence: {problem}"));
+    }
+    let mut lines: Vec<_> = text
+        .into_iter()
+        .map(|text| Line::raw(terminal_safe(&text)))
+        .collect();
+    for field in AdoptionField::ALL {
+        let label = match field {
+            AdoptionField::Repository => "Repository URL",
+            AdoptionField::Subdirectory => "Subdirectory",
+            AdoptionField::TrackingBranch => "Tracking branch (refs/heads/…)",
+        };
+        let marker = if form.focused == field {
+            Span::styled(">", theme::focus_marker())
+        } else {
+            Span::raw(" ")
+        };
+        lines.push(Line::from(vec![
+            marker,
+            Span::raw(format!(" {label}: {}", terminal_safe(form.value(field)))),
+        ]));
+    }
+    if let Some(error) = &form.error {
+        lines.push(Line::raw(format!("Blocked: {}", terminal_safe(error))));
+    }
+    lines
+}
+
 fn adoption_prompt_rows(prompt: &AdoptionPrompt, width: u16) -> Vec<Line<'static>> {
-    if width == 0 {
-        return Vec::new();
-    }
-    let width = usize::from(width);
-    let mut rows = Vec::new();
-    for line in adoption_prompt_lines(prompt) {
-        if line.spans.is_empty() {
-            rows.push(Line::default());
-            continue;
-        }
-        let mut row = Vec::new();
-        let mut row_width = 0_usize;
-        for span in line.spans {
-            for character in span.content.chars() {
-                let character_width = Span::raw(character.to_string()).width();
-                if !row.is_empty() && row_width.saturating_add(character_width) > width {
-                    rows.push(Line::from(std::mem::take(&mut row)));
-                    row_width = 0;
-                }
-                row.push(Span::styled(character.to_string(), span.style));
-                row_width = row_width.saturating_add(character_width);
-            }
-        }
-        rows.push(Line::from(row));
-    }
-    rows
+    visual_rows(adoption_prompt_lines(prompt), width)
 }
 
 fn update_prompt_rows(prompt: &RepositoryUpdatePrompt, width: u16) -> Vec<Line<'static>> {
     visual_rows(update_prompt_lines(prompt), width)
 }
 
-/// Materialize the update dialog as terminal rows. Unlike `Paragraph::scroll`,
-/// this keeps the logical offset as `usize`, so complete evidence remains
-/// reachable after row 65,535 instead of wrapping through a `u16` cast.
+/// Materialize preview text as terminal rows, retaining line and span styles.
+/// Both measurement and rendering use these rows. The logical offset stays
+/// `usize`, so evidence after row 65,535 remains reachable without a `u16` cast.
 fn visual_rows(lines: Vec<Line<'static>>, width: u16) -> Vec<Line<'static>> {
     if width == 0 {
         return Vec::new();
@@ -4207,27 +4221,27 @@ fn visual_rows(lines: Vec<Line<'static>>, width: u16) -> Vec<Line<'static>> {
     let width = usize::from(width);
     let mut rows = Vec::new();
     for line in lines {
-        let text = line
-            .spans
-            .iter()
-            .map(|span| span.content.as_ref())
-            .collect::<String>();
-        if text.is_empty() {
-            rows.push(Line::raw(String::new()));
-            continue;
-        }
-        let mut row = String::new();
+        let mut row: Vec<Span<'static>> = Vec::new();
         let mut row_width = 0_usize;
-        for character in text.chars() {
-            let character_width = Span::raw(character.to_string()).width();
-            if !row.is_empty() && row_width.saturating_add(character_width) > width {
-                rows.push(Line::raw(std::mem::take(&mut row)));
-                row_width = 0;
+        for span in line.spans {
+            for character in span.content.chars() {
+                let character_width = Span::raw(character.to_string()).width();
+                if !row.is_empty() && row_width.saturating_add(character_width) > width {
+                    rows.push(Line::from(std::mem::take(&mut row)).style(line.style));
+                    row_width = 0;
+                }
+                if let Some(previous) = row
+                    .last_mut()
+                    .filter(|previous| previous.style == span.style)
+                {
+                    previous.content.to_mut().push(character);
+                } else {
+                    row.push(Span::styled(character.to_string(), span.style));
+                }
+                row_width = row_width.saturating_add(character_width);
             }
-            row.push(character);
-            row_width = row_width.saturating_add(character_width);
         }
-        rows.push(Line::raw(row));
+        rows.push(Line::from(row).style(line.style));
     }
     rows
 }
@@ -8181,6 +8195,30 @@ mod tests {
             .collect::<String>()
             .trim_end()
             .to_owned()
+    }
+
+    #[test]
+    fn preview_rows_preserve_styles_across_wraps_and_empty_lines() {
+        let lines = vec![
+            Line::from(vec![
+                Span::styled(">", theme::focus_marker()),
+                Span::raw(" 界ae\u{301}"),
+            ])
+            .style(theme::key_label()),
+            Line::default(),
+            Line::raw(""),
+        ];
+        assert!(visual_rows(lines.clone(), 0).is_empty());
+        let rows = visual_rows(lines, 4);
+        assert_eq!(
+            rows.iter().map(label_text).collect::<Vec<_>>(),
+            ["> 界", "ae\u{301}", "", ""]
+        );
+        assert_eq!(rows[1].spans[0].content, "ae\u{301}");
+        assert_eq!(rows[0].spans[0].style, theme::focus_marker());
+        assert_eq!(rows[0].style, theme::key_label());
+        assert_eq!(rows[1].style, theme::key_label());
+        assert_eq!(rows[1].spans[0].style, ratatui::style::Style::default());
     }
 
     #[test]

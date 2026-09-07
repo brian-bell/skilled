@@ -6,7 +6,8 @@ current behavior; [AGENTS.md](../AGENTS.md) is the entry point for agent workflo
 ## Module map
 
 - `src/app.rs`: application state, actions, pure reducer transitions, typed
-  effects.
+  effects. Adoption form focus and validation errors live here; the adoption
+  draft carries named repository, subdirectory, and tracking-branch inputs.
 - `src/agents.rs`: Claude Code, Codex, and OpenCode adapters; agent path
   conventions and non-executing detection belong here.
 - `src/source.rs`: local Git source inspection, catalog discovery, and skill
@@ -25,7 +26,8 @@ current behavior; [AGENTS.md](../AGENTS.md) is the entry point for agent workflo
   observation failures internally while the public hash interface remains
   unchanged. Apply returns a saved verification result only
   after commit; pre-save failures remain separate, and the TUI renders these
-  typed outcomes. Schema v12 adds `origin_baselines`, keyed by source ID,
+  typed outcomes. Adoption and repository-update previews share a style-preserving
+  row layout in `tui.rs` for both drawing and scroll measurement. Schema v12 adds `origin_baselines`, keyed by source ID,
   catalog path, and variant path; manifests are not persisted.
 - `src/inventory.rs`: read-only scan of the native agent skill roots; owns the
   finding codes, the state vocabulary, and the count-or-phrase verdict.

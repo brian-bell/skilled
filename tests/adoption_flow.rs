@@ -537,7 +537,7 @@ fn unknown_hint_path_requires_explicit_input_and_root_is_an_explicit_choice() {
     .unwrap();
     dispatch(&mut app, Action::BeginAdoption);
     assert!(
-        matches!(app.pending_adoption(), Some(AdoptionPrompt::Editing(draft)) if draft.fields[1].is_empty())
+        matches!(app.pending_adoption(), Some(AdoptionPrompt::Editing(draft)) if draft.draft.subdirectory.is_empty())
     );
     dispatch(&mut app, Action::NextAdoptionField);
     dispatch(&mut app, Action::NextAdoptionField);
