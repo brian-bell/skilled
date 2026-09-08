@@ -16,6 +16,7 @@ use std::{
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct RepositoryState {
     head: git::HeadState,
+    head_file: Vec<u8>,
     git_dir: PathBuf,
     index: Option<Vec<u8>>,
 }
@@ -24,6 +25,30 @@ struct RepositoryState {
 struct LinkState {
     path: PathBuf,
     target: Option<std::ffi::OsString>,
+}
+
+enum StableGuardFailure {
+    Changed(AdoptionFailure),
+    Unavailable(AdoptionFailure),
+}
+
+impl StableGuardFailure {
+    fn io(error: std::io::Error) -> Self {
+        match crate::provenance::ObservationFailure::io(error.to_string(), error) {
+            crate::provenance::ObservationFailure::Changed(message) => {
+                Self::Changed(message.into())
+            }
+            crate::provenance::ObservationFailure::Unavailable(message) => {
+                Self::Unavailable(message.into())
+            }
+        }
+    }
+
+    fn into_failure(self) -> AdoptionFailure {
+        match self {
+            Self::Changed(failure) | Self::Unavailable(failure) => failure,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -133,11 +158,10 @@ impl ApplyPlan {
         if let Some(request) = self.preview.request.as_deref() {
             for entry in &self.preview.expected_entries {
                 if entry.kind == ManifestEntryKind::Directory
-                    && !request
-                        .local
-                        .entries
-                        .iter()
-                        .any(|old| old.relative_path == entry.relative_path)
+                    && !request.local.entries.iter().any(|old| {
+                        old.relative_path == entry.relative_path
+                            && old.kind == ManifestEntryKind::Directory
+                    })
                 {
                     lines.push(format!(
                         "Create directory: {}",
@@ -147,11 +171,10 @@ impl ApplyPlan {
             }
             for entry in &request.local.entries {
                 if entry.kind == ManifestEntryKind::File
-                    && !self
-                        .preview
-                        .expected_entries
-                        .iter()
-                        .any(|new| new.relative_path == entry.relative_path)
+                    && !self.preview.expected_entries.iter().any(|new| {
+                        new.relative_path == entry.relative_path
+                            && new.kind == ManifestEntryKind::File
+                    })
                 {
                     lines.push(format!(
                         "Retain removed file at: {}",
@@ -210,7 +233,8 @@ pub(crate) fn plan_apply(preview: &Preview, data_dir: &Path) -> Result<ApplyPlan
             replacement_supported,
         });
     }
-    let repository = repository_state(&request.checkout)?;
+    let repository =
+        repository_state(&request.checkout).map_err(StableGuardFailure::into_failure)?;
     let handle =
         git::RepositoryHandle::open(&request.checkout).map_err(|error| error.to_string())?;
     let state = git::worktree_state((&handle).into()).map_err(|error| error.to_string())?;
@@ -222,7 +246,8 @@ pub(crate) fn plan_apply(preview: &Preview, data_dir: &Path) -> Result<ApplyPlan
     if repository.head.reference().is_none() {
         return Err("Repository HEAD is detached".into());
     }
-    let links = link_states(&request.affected_installations)?;
+    let links =
+        link_states(&request.affected_installations).map_err(StableGuardFailure::into_failure)?;
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -248,22 +273,33 @@ pub(crate) fn plan_apply(preview: &Preview, data_dir: &Path) -> Result<ApplyPlan
     })
 }
 
-fn link_states(installations: &[AffectedInstallation]) -> Result<Vec<LinkState>, AdoptionFailure> {
+fn link_states(
+    installations: &[AffectedInstallation],
+) -> Result<Vec<LinkState>, StableGuardFailure> {
     installations
         .iter()
         .map(|installation| {
             let metadata =
-                fs::symlink_metadata(&installation.path).map_err(|error| error.to_string())?;
+                fs::symlink_metadata(&installation.path).map_err(StableGuardFailure::io)?;
             let target = if metadata.file_type().is_symlink() {
                 Some(
                     fs::read_link(&installation.path)
-                        .map_err(|error| error.to_string())?
+                        .map_err(|error| {
+                            // read_link rejects a path that became a regular object.
+                            if error.kind() == std::io::ErrorKind::InvalidInput {
+                                StableGuardFailure::Changed(error.to_string().into())
+                            } else {
+                                StableGuardFailure::io(error)
+                            }
+                        })?
                         .into_os_string(),
                 )
             } else if metadata.is_dir() {
                 None
             } else {
-                return Err("Affected installation is no longer a directory or link".into());
+                return Err(StableGuardFailure::Changed(
+                    "Affected installation is no longer a directory or link".into(),
+                ));
             };
             Ok(LinkState {
                 path: installation.path.clone(),
@@ -273,10 +309,16 @@ fn link_states(installations: &[AffectedInstallation]) -> Result<Vec<LinkState>,
         .collect()
 }
 
-fn repository_state(checkout: &Path) -> Result<RepositoryState, AdoptionFailure> {
-    let handle = git::RepositoryHandle::open(checkout).map_err(|error| error.to_string())?;
-    let head = git::head_state((&handle).into()).map_err(|error| error.to_string())?;
-    let git_dir = git::repository_git_dir((&handle).into()).map_err(|error| error.to_string())?;
+fn repository_state(checkout: &Path) -> Result<RepositoryState, StableGuardFailure> {
+    let handle = git::RepositoryHandle::open(checkout)
+        .map_err(|error| StableGuardFailure::Unavailable(error.to_string().into()))?;
+    // A Git command failure alone does not distinguish an absent/corrupt ref
+    // from unreadable objects or metadata. Directly observed path/HEAD/index
+    // changes are classified separately; do not infer disagreement from stderr.
+    let head = git::head_state((&handle).into())
+        .map_err(|error| StableGuardFailure::Unavailable(error.to_string().into()))?;
+    let git_dir = git::repository_git_dir((&handle).into())
+        .map_err(|error| StableGuardFailure::Unavailable(error.to_string().into()))?;
     for marker in [
         "MERGE_HEAD",
         "REBASE_HEAD",
@@ -288,24 +330,28 @@ fn repository_state(checkout: &Path) -> Result<RepositoryState, AdoptionFailure>
     ] {
         match fs::symlink_metadata(git_dir.join(marker)) {
             Ok(_) => {
-                return Err(
+                return Err(StableGuardFailure::Changed(
                     format!("Repository operation marker blocks replacement: {marker}").into(),
-                );
+                ));
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.to_string().into()),
+            Err(error) => {
+                return Err(StableGuardFailure::io(error));
+            }
         }
     }
     let path = git_dir.join("index");
     let index = match fs::symlink_metadata(&path) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(error) => return Err(error.to_string().into()),
+        Err(error) => return Err(StableGuardFailure::io(error)),
         Ok(metadata) => {
             if !metadata.is_file()
                 || metadata.file_type().is_symlink()
                 || metadata.len() > 32 * 1024 * 1024
             {
-                return Err("Repository index is unsafe or exceeds its read budget".into());
+                return Err(StableGuardFailure::Changed(
+                    "Repository index is unsafe or exceeds its read budget".into(),
+                ));
             }
             let mut bytes = Vec::new();
             let mut options = fs::OpenOptions::new();
@@ -317,45 +363,142 @@ fn repository_state(checkout: &Path) -> Result<RepositoryState, AdoptionFailure>
             }
             options
                 .open(&path)
-                .map_err(|error| error.to_string())?
+                .map_err(StableGuardFailure::io)?
                 .take(32 * 1024 * 1024 + 1)
                 .read_to_end(&mut bytes)
-                .map_err(|error| error.to_string())?;
+                .map_err(StableGuardFailure::io)?;
             if bytes.len() > 32 * 1024 * 1024 {
-                return Err("Repository index exceeds its read budget".into());
+                return Err(StableGuardFailure::Changed(
+                    "Repository index exceeds its read budget".into(),
+                ));
             }
             Some(bytes)
         }
     };
     handle
         .still_names_its_path()
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| StableGuardFailure::Unavailable(error.to_string().into()))?;
     Ok(RepositoryState {
+        head_file: read_head_file(&git_dir)?,
         head,
         git_dir,
         index,
     })
 }
 
-fn stable_guards(plan: &ApplyPlan, request: &CheckRequest) -> Result<(), AdoptionFailure> {
-    if adoption::directories(&request.checkout, request.variant.variant_relative_path())
-        .map_err(observation_failure)?
-        != request.directories
+fn read_head_file(git_dir: &Path) -> Result<Vec<u8>, StableGuardFailure> {
+    let path = git_dir.join("HEAD");
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
     {
-        return Err("Selected skill ancestors changed after preview".into());
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
     }
-    if crate::source::repository_identity(&request.checkout).map_err(|error| error.to_string())?
-        != request.identity
+    let file = options.open(path).map_err(StableGuardFailure::io)?;
+    let metadata = file.metadata().map_err(StableGuardFailure::io)?;
+    if !metadata.is_file() || metadata.len() > 64 * 1024 {
+        return Err(StableGuardFailure::Changed(
+            "Repository HEAD is unsafe or exceeds its read budget".into(),
+        ));
+    }
+    let mut bytes = Vec::new();
+    file.take(64 * 1024 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(StableGuardFailure::io)?;
+    if bytes.len() > 64 * 1024 {
+        return Err(StableGuardFailure::Changed(
+            "Repository HEAD exceeds its read budget".into(),
+        ));
+    }
+    Ok(bytes)
+}
+
+fn stable_guards(plan: &ApplyPlan, request: &CheckRequest) -> Result<(), StableGuardFailure> {
+    if adoption::directories(&request.checkout, request.variant.variant_relative_path()).map_err(
+        |failure| match failure {
+            crate::provenance::ObservationFailure::Changed(message) => {
+                StableGuardFailure::Changed(message.into())
+            }
+            crate::provenance::ObservationFailure::Unavailable(message) => {
+                StableGuardFailure::Unavailable(message.into())
+            }
+        },
+    )? != request.directories
     {
-        return Err("Selected source identity changed after preview".into());
+        return Err(StableGuardFailure::Changed(
+            "Selected skill ancestors changed after preview".into(),
+        ));
     }
-    if Some(repository_state(&request.checkout)?) != plan.repository {
-        return Err("Repository HEAD, index, or operation state changed after preview".into());
+    // Observe the confirmed Git directory directly before invoking Git: a
+    // missing or redirected directory is evidence of change, even when Git
+    // subsequently reports only a generic command failure.
+    if let Some(repository) = &plan.repository {
+        let metadata = fs::symlink_metadata(&repository.git_dir).map_err(StableGuardFailure::io)?;
+        if !metadata.is_dir()
+            || metadata.file_type().is_symlink()
+            || repository
+                .git_dir
+                .canonicalize()
+                .map_err(StableGuardFailure::io)?
+                != repository.git_dir
+        {
+            return Err(StableGuardFailure::Changed(
+                "Confirmed Git directory changed after preview".into(),
+            ));
+        }
     }
-    if link_states(&request.affected_installations)? != plan.links {
-        return Err("Installation links changed after preview".into());
+    if let Some(repository) = &plan.repository
+        && read_head_file(&repository.git_dir)? != repository.head_file
+    {
+        return Err(StableGuardFailure::Changed(
+            "Repository HEAD file changed after preview".into(),
+        ));
+    }
+    if crate::source::repository_identity(&request.checkout).map_err(|error| match error {
+        crate::Error::Io(error) => StableGuardFailure::io(error),
+        error => StableGuardFailure::Unavailable(error.to_string().into()),
+    })? != request.identity
+    {
+        return Err(StableGuardFailure::Changed(
+            "Selected source identity changed after preview".into(),
+        ));
+    }
+    let current_repository = repository_state(&request.checkout)?;
+    if Some(current_repository) != plan.repository {
+        return Err(StableGuardFailure::Changed(
+            "Repository HEAD, index, or operation state changed after preview".into(),
+        ));
+    }
+    let current_links = link_states(&request.affected_installations)?;
+    if current_links != plan.links {
+        return Err(StableGuardFailure::Changed(
+            "Installation links changed after preview".into(),
+        ));
     }
     Ok(())
+}
+
+fn postwrite_guards(
+    plan: &ApplyPlan,
+    request: &CheckRequest,
+    outcome: &mut ApplyOutcome,
+) -> Result<(), AdoptionFailure> {
+    classify_postwrite_guards(stable_guards(plan, request), outcome)
+}
+
+fn classify_postwrite_guards(
+    result: Result<(), StableGuardFailure>,
+    outcome: &mut ApplyOutcome,
+) -> Result<(), AdoptionFailure> {
+    match result {
+        Ok(()) => Ok(()),
+        Err(StableGuardFailure::Changed(failure)) => {
+            outcome.status = ApplyStatus::VerificationFailed;
+            Err(failure)
+        }
+        Err(StableGuardFailure::Unavailable(failure)) => Err(failure),
+    }
 }
 
 pub(crate) fn apply(plan: &ApplyPlan, data_dir: &Path) -> ApplyOutcome {
@@ -403,7 +546,7 @@ fn apply_inner(
     if !plan.can_apply() {
         return Err("Guarded replacement is unavailable on this platform".into());
     }
-    stable_guards(plan, request)?;
+    stable_guards(plan, request).map_err(StableGuardFailure::into_failure)?;
     clean_worktree(request)?;
     let expected = DirectoryManifest {
         baseline: plan.preview.proposed_baseline.clone(),
@@ -425,10 +568,10 @@ fn apply_inner(
         .details
         .push(format!("Staging retained at {}", plan.staging.display()));
     recheck_under_guard(request, &mutation)?;
-    stable_guards(plan, request)?;
+    stable_guards(plan, request).map_err(StableGuardFailure::into_failure)?;
     clean_worktree(request)?;
     let report = stage.apply_with_guard(&request.local, || {
-        stable_guards(plan, request).map_err(|error| error.message)
+        stable_guards(plan, request).map_err(|error| error.into_failure().message)
     });
     if report.changed() {
         outcome.status = ApplyStatus::Partial;
@@ -457,8 +600,7 @@ fn apply_inner(
         outcome.status = ApplyStatus::VerificationFailed;
         return Err("Materialized skill differs from the confirmed expected manifest".into());
     }
-    stable_guards(plan, request)
-        .inspect_err(|_| outcome.status = ApplyStatus::VerificationFailed)?;
+    postwrite_guards(plan, request, outcome)?;
     rescan?;
     outcome.status = ApplyStatus::Partial;
     mutation
@@ -481,8 +623,7 @@ fn apply_inner(
         outcome.status = ApplyStatus::VerificationFailed;
         return Err("Saved provenance differs from the verified replacement".into());
     }
-    stable_guards(plan, request)
-        .inspect_err(|_| outcome.status = ApplyStatus::VerificationFailed)?;
+    postwrite_guards(plan, request, outcome)?;
     let sources = store
         .registered_sources_leaving_uninspected(&request.checkout)
         .map_err(metadata_failure)?;
@@ -634,6 +775,171 @@ mod tests {
                 .find(|e| e.relative_path == Path::new("SKILL.md"))
                 .unwrap()
                 .bytes
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn missing_installation_is_a_failed_postwrite_guard() {
+        let (temporary, _store, mut preview) = super::super::tests::apply_fixture();
+        let link = temporary
+            .path()
+            .join("home")
+            .join(crate::agents::adapter(crate::AgentKind::Codex).native_skill_root())
+            .join("demo");
+        fs::create_dir_all(link.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&preview.skill, &link).unwrap();
+        preview
+            .request
+            .as_mut()
+            .unwrap()
+            .affected_installations
+            .push(AffectedInstallation {
+                path: link.clone(),
+                agent: crate::AgentKind::Codex,
+            });
+        let plan = plan_apply(&preview, &temporary.path().join("data")).unwrap();
+        fs::remove_file(&link).unwrap();
+        let mut outcome = ApplyOutcome {
+            status: ApplyStatus::VerificationIncomplete,
+            details: vec![],
+            metadata: MetadataAvailability::Available,
+        };
+        assert!(
+            postwrite_guards(&plan, preview.request.as_deref().unwrap(), &mut outcome).is_err()
+        );
+        assert_eq!(outcome.status, ApplyStatus::VerificationFailed);
+        assert!(matches!(
+            StableGuardFailure::io(std::io::Error::from(std::io::ErrorKind::PermissionDenied)),
+            StableGuardFailure::Unavailable(_)
+        ));
+    }
+
+    #[test]
+    fn missing_or_corrupted_head_is_failed_verification() {
+        for corrupt in [false, true] {
+            let (temporary, _store, preview) = super::super::tests::apply_fixture();
+            let plan = plan_apply(&preview, &temporary.path().join("data")).unwrap();
+            let head = plan.repository.as_ref().unwrap().git_dir.join("HEAD");
+            if corrupt {
+                fs::write(&head, "invalid HEAD").unwrap();
+            } else {
+                fs::remove_file(&head).unwrap();
+            }
+            let mut outcome = ApplyOutcome {
+                status: ApplyStatus::VerificationIncomplete,
+                details: vec![],
+                metadata: MetadataAvailability::Available,
+            };
+            assert!(
+                postwrite_guards(&plan, preview.request.as_deref().unwrap(), &mut outcome).is_err()
+            );
+            assert_eq!(outcome.status, ApplyStatus::VerificationFailed);
+        }
+    }
+
+    #[test]
+    fn disappeared_or_replaced_git_directory_is_failed_verification() {
+        for replaced in [false, true] {
+            let (temporary, _store, preview) = super::super::tests::apply_fixture();
+            let plan = plan_apply(&preview, &temporary.path().join("data")).unwrap();
+            let git_dir = &plan.repository.as_ref().unwrap().git_dir;
+            fs::rename(git_dir, temporary.path().join("retained-git")).unwrap();
+            if replaced {
+                fs::write(git_dir, "not a Git directory").unwrap();
+            }
+            let mut outcome = ApplyOutcome {
+                status: ApplyStatus::VerificationIncomplete,
+                details: vec![],
+                metadata: MetadataAvailability::Available,
+            };
+            assert!(
+                postwrite_guards(&plan, preview.request.as_deref().unwrap(), &mut outcome).is_err()
+            );
+            assert_eq!(outcome.status, ApplyStatus::VerificationFailed);
+        }
+    }
+
+    #[test]
+    fn file_to_directory_preview_discloses_the_hashed_recovery_path() {
+        let (temporary, _store, preview) = super::super::tests::apply_fixture();
+        let data = temporary.path().join("data");
+        let mut plan = plan_apply(&preview, &data).expect("live plan");
+        let request = plan.preview.request.as_mut().expect("request");
+        request.local.entries.push(ManifestEntry {
+            relative_path: PathBuf::from("assets"),
+            kind: ManifestEntryKind::File,
+            executable: false,
+            bytes: b"old file\n".to_vec(),
+        });
+        plan.preview.expected_entries.push(ExpectedEntry {
+            relative_path: PathBuf::from("assets"),
+            kind: ManifestEntryKind::Directory,
+            executable: false,
+            bytes: Vec::new(),
+        });
+        let recovery = replacement::removed_backup_path(&plan.staging, Path::new("assets"));
+        assert!(
+            plan.lines()
+                .iter()
+                .any(|line| line == &format!("Retain removed file at: {}", recovery.display()))
+        );
+        assert!(plan.lines().iter().any(|line| line
+            == &format!(
+                "Create directory: {}",
+                plan.preview.skill.join("assets").display()
+            )));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn postwrite_guards_classify_live_marker_and_unavailable_observations() {
+        let (temporary, _store, preview) = super::super::tests::apply_fixture();
+        let data = temporary.path().join("data");
+        let plan = plan_apply(&preview, &data).expect("live plan");
+        let request = plan.preview.request.as_deref().expect("request");
+        let git_dir = plan
+            .repository
+            .as_ref()
+            .expect("repository state")
+            .git_dir
+            .clone();
+
+        let marker = git_dir.join("MERGE_HEAD");
+        fs::write(&marker, "in progress\n").expect("operation marker");
+        let changed = stable_guards(&plan, request);
+        fs::remove_file(&marker).expect("remove operation marker");
+        assert!(matches!(changed, Err(StableGuardFailure::Changed(_))));
+        let mut changed_outcome = ApplyOutcome {
+            status: ApplyStatus::VerificationIncomplete,
+            details: vec![],
+            metadata: MetadataAvailability::Available,
+        };
+        assert!(classify_postwrite_guards(changed, &mut changed_outcome).is_err());
+        assert_eq!(changed_outcome.status, ApplyStatus::VerificationFailed);
+
+        use std::os::unix::fs::PermissionsExt;
+        let original_permissions = fs::metadata(&git_dir)
+            .expect("git directory metadata")
+            .permissions();
+        let mut unavailable_permissions = original_permissions.clone();
+        unavailable_permissions.set_mode(0o000);
+        fs::set_permissions(&git_dir, unavailable_permissions).expect("hide git directory");
+        let unavailable = stable_guards(&plan, request);
+        fs::set_permissions(&git_dir, original_permissions).expect("restore git directory");
+        assert!(matches!(
+            unavailable,
+            Err(StableGuardFailure::Unavailable(_))
+        ));
+        let mut unavailable_outcome = ApplyOutcome {
+            status: ApplyStatus::VerificationIncomplete,
+            details: vec![],
+            metadata: MetadataAvailability::Available,
+        };
+        assert!(classify_postwrite_guards(unavailable, &mut unavailable_outcome).is_err());
+        assert_eq!(
+            unavailable_outcome.status,
+            ApplyStatus::VerificationIncomplete
         );
     }
 }
