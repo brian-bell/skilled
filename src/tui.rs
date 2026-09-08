@@ -188,7 +188,14 @@ pub fn render(frame: &mut Frame<'_>, app: &SkilledApp) -> RenderFeedback {
             app.update_preview_fully_seen() || update_preview_seen == Some(true),
         );
     } else if let Some(prompt) = app.pending_vendored() {
-        render_vendored_prompt(frame, area, prompt, app.detail_scroll(), detail_extent);
+        render_vendored_prompt(
+            frame,
+            area,
+            prompt,
+            app.detail_scroll(),
+            detail_extent,
+            app.vendored_preview_fully_seen(),
+        );
     } else if let Some(prompt) = app.pending_adoption() {
         render_adoption_prompt(
             frame,
@@ -691,7 +698,15 @@ fn keyboard_owner(app: &SkilledApp) -> Option<(String, &'static str)> {
         return Some(("Keyboard reference".to_owned(), DIALOG_NOTE));
     }
     if app.pending_vendored().is_some() {
-        return Some(("Skill update preview".to_owned(), DIALOG_NOTE));
+        let title = match app.pending_vendored() {
+            Some(crate::app::VendoredPrompt::Checking) => "Checking skill origin",
+            Some(crate::app::VendoredPrompt::Preview(_)) => "Apply skill update",
+            Some(crate::app::VendoredPrompt::Applying) => "Applying skill update",
+            Some(crate::app::VendoredPrompt::Report(_)) => "Skill update report",
+            Some(crate::app::VendoredPrompt::Failed(_)) => "Skill check needs attention",
+            None => unreachable!(),
+        };
+        return Some((title.to_owned(), DIALOG_NOTE));
     }
     if app.pending_adoption().is_some() {
         return Some(("Confirm origin".to_owned(), DIALOG_NOTE));
@@ -4004,14 +4019,20 @@ fn vendored_prompt_lines(prompt: &crate::app::VendoredPrompt) -> Vec<Line<'stati
     let lines = match prompt {
         VendoredPrompt::Checking => vec![
             "Checking the confirmed origin and reading its selected subtree.".to_owned(),
-            "Only the application cache is written. Skill content and provenance remain unchanged."
+            "No skill content or provenance is changed until a complete replacement plan is confirmed."
                 .to_owned(),
             "Esc cancels this check.".to_owned(),
         ],
-        VendoredPrompt::Preview(preview) => preview.lines(),
+        VendoredPrompt::Preview(plan) => plan.lines(),
+        VendoredPrompt::Applying => vec![
+            "Applying the confirmed replacement plan.".to_owned(),
+            "Replacement is in progress and cannot be cancelled.".to_owned(),
+            "Skilled will rescan the catalog and installations before reporting the result.".to_owned(),
+        ],
+        VendoredPrompt::Report(outcome) => outcome.lines(),
         VendoredPrompt::Failed(failure) => vec![
             format!("Check blocked: {}", failure.message),
-            "No skill content or provenance was changed.".to_owned(),
+            "No replacement was started.".to_owned(),
         ],
     };
     lines
@@ -4026,22 +4047,48 @@ fn render_vendored_prompt(
     prompt: &crate::app::VendoredPrompt,
     scroll: usize,
     extent: Option<usize>,
+    fully_seen: bool,
 ) {
     use crate::app::VendoredPrompt;
-    let checking = matches!(prompt, VendoredPrompt::Checking);
     let title = match prompt {
         VendoredPrompt::Checking => "Checking skill origin",
-        VendoredPrompt::Preview(preview) if preview.is_noop() => "Skill is up to date",
-        VendoredPrompt::Preview(_) => "Skill update preview",
+        VendoredPrompt::Preview(plan) if plan.is_noop() => "Skill is up to date",
+        VendoredPrompt::Preview(plan) if !plan.can_apply() => "Skill update preview",
+        VendoredPrompt::Preview(_) => "Apply skill update",
+        VendoredPrompt::Applying => "Applying skill update",
+        VendoredPrompt::Report(_) => "Skill update report",
         VendoredPrompt::Failed(_) => "Skill check needs attention",
+    };
+    let scope = match prompt {
+        VendoredPrompt::Preview(plan) if !plan.can_apply() => "read-only origin preview",
+        VendoredPrompt::Preview(_) => "guarded replacement plan",
+        VendoredPrompt::Applying | VendoredPrompt::Report(_) => "replacement outcome",
+        VendoredPrompt::Checking | VendoredPrompt::Failed(_) => "origin check",
     };
     let popup = install_prompt_popup(area);
     frame.render_widget(Clear, popup);
-    frame.render_widget(components::dialog_frame(title, "read-only preview"), popup);
-    let actions = Line::from(vec![
-        Span::styled("Esc", theme::key_cap()),
-        Span::raw(if checking { " Cancel" } else { " Close" }),
-    ]);
+    frame.render_widget(components::dialog_frame(title, scope), popup);
+    let actions = match prompt {
+        VendoredPrompt::Checking => Line::from(vec![
+            Span::styled("Esc", theme::key_cap()),
+            Span::raw(" Cancel"),
+        ]),
+        VendoredPrompt::Preview(plan) if plan.can_apply() && fully_seen => Line::from(vec![
+            Span::styled("Enter", theme::key_cap()),
+            Span::raw(" Apply · "),
+            Span::styled("Esc", theme::key_cap()),
+            Span::raw(" Cancel"),
+        ]),
+        VendoredPrompt::Preview(_) => Line::from(vec![
+            Span::styled("Esc", theme::key_cap()),
+            Span::raw(" Close"),
+        ]),
+        VendoredPrompt::Applying => Line::raw("Applying"),
+        VendoredPrompt::Report(_) | VendoredPrompt::Failed(_) => Line::from(vec![
+            Span::styled("Esc", theme::key_cap()),
+            Span::raw(" Close"),
+        ]),
+    };
     let regions = install_prompt_regions(area, actions.width() as u16);
     let rows = visual_rows(vendored_prompt_lines(prompt), regions.body.width);
     let end = scroll
@@ -4053,12 +4100,27 @@ fn render_vendored_prompt(
         Paragraph::new(components::rule(regions.divider.width)),
         regions.divider,
     );
-    let status = if extent.is_some_and(|max| scroll < max) {
-        "Preview continues below — j/k to scroll"
-    } else if checking {
-        "Checking — no skill files are written"
-    } else {
-        "Read-only result — no changes applied"
+    let status = match prompt {
+        VendoredPrompt::Preview(plan) if plan.can_apply() && !fully_seen => {
+            "Complete plan continues below — j/k to read before applying"
+        }
+        VendoredPrompt::Preview(plan) if plan.can_apply() => {
+            "Complete plan shown — Enter applies it"
+        }
+        VendoredPrompt::Preview(plan) if !plan.is_noop() => {
+            "Read-only preview — replacement unavailable on this platform"
+        }
+        VendoredPrompt::Preview(_) => "No replacement is needed",
+        VendoredPrompt::Checking => "Checking — no skill files are written",
+        VendoredPrompt::Applying => "Applying confirmed replacement — please wait",
+        VendoredPrompt::Report(outcome) if !outcome.metadata_available() => {
+            "Replacement reported with incomplete metadata verification"
+        }
+        VendoredPrompt::Report(_) => "Replacement result shown",
+        VendoredPrompt::Failed(_) if extent.is_some_and(|max| scroll < max) => {
+            "Result continues below — j/k to scroll"
+        }
+        VendoredPrompt::Failed(_) => "Check blocked — no replacement was started",
     };
     frame.render_widget(
         Paragraph::new(Span::styled(status, theme::key_label())),
@@ -7909,14 +7971,21 @@ fn context_key_hints(
         if detail_extent.is_some_and(|extent| extent > 0) {
             hints.push(KeyHint::essential("j/k", "Scroll"));
         }
-        hints.push(KeyHint::essential(
-            "Esc",
-            if matches!(prompt, crate::app::VendoredPrompt::Checking) {
-                "Cancel"
-            } else {
-                "Close"
-            },
-        ));
+        if matches!(prompt, crate::app::VendoredPrompt::Preview(_))
+            && app.vendored_preview_fully_seen()
+        {
+            hints.push(KeyHint::essential("Enter", "Apply"));
+        }
+        if !matches!(prompt, crate::app::VendoredPrompt::Applying) {
+            hints.push(KeyHint::essential(
+                "Esc",
+                if matches!(prompt, crate::app::VendoredPrompt::Checking) {
+                    "Cancel"
+                } else {
+                    "Close"
+                },
+            ));
+        }
         hints.push(KeyHint::new("Ctrl-C", "Quit"));
         return hints;
     }
@@ -8307,21 +8376,36 @@ mod tests {
     }
 
     #[test]
-    fn vendored_check_dialogs_are_read_only_in_text_and_cell_styles() {
+    fn vendored_dialogs_gate_apply_and_distinguish_the_outcome_in_text_and_cell_styles() {
         use crate::app::VendoredPrompt;
         use ratatui::{Terminal, backend::TestBackend};
-        for (name, prompt, heading, action) in [
+        for (name, prompt, heading, scope, action, fully_seen, status) in [
             (
                 "preview",
-                VendoredPrompt::Preview(Box::new(crate::vendored::Preview::fixture())),
+                VendoredPrompt::Preview(Box::new(crate::vendored::ApplyPlan::fixture())),
+                "Apply skill update",
+                "guarded replacement plan",
+                "Apply",
+                true,
+                "Complete plan shown",
+            ),
+            (
+                "readonly",
+                VendoredPrompt::Preview(Box::new(crate::vendored::ApplyPlan::readonly_fixture())),
                 "Skill update preview",
+                "read-only origin preview",
                 "Close",
+                true,
+                "Read-only preview — replacement",
             ),
             (
                 "checking",
                 VendoredPrompt::Checking,
                 "Checking skill origin",
+                "origin check",
                 "Cancel",
+                false,
+                "Checking — no skill files",
             ),
             (
                 "blocked",
@@ -8329,13 +8413,27 @@ mod tests {
                     "Modified skill: content differs from the adopted baseline".into(),
                 ),
                 "Skill check needs attention",
+                "origin check",
                 "Close",
+                false,
+                "Check blocked — no replacement",
+            ),
+            (
+                "report",
+                VendoredPrompt::Report(crate::vendored::ApplyOutcome::fixture()),
+                "Skill update report",
+                "replacement outcome",
+                "Close",
+                false,
+                "Replacement result shown",
             ),
         ] {
             for (width, height) in [(80, 24), (120, 40)] {
                 let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
                 terminal
-                    .draw(|frame| render_vendored_prompt(frame, frame.area(), &prompt, 0, Some(0)))
+                    .draw(|frame| {
+                        render_vendored_prompt(frame, frame.area(), &prompt, 0, Some(0), fully_seen)
+                    })
                     .unwrap();
                 let buffer = terminal.backend().buffer();
                 let rows = (0..height)
@@ -8351,15 +8449,13 @@ mod tests {
                     .collect::<Vec<_>>()
                     .join("\n");
                 assert!(screen.contains(heading));
-                assert!(screen.contains("read-only preview"));
+                assert!(screen.contains(scope));
                 assert!(screen.contains(action));
-                assert!(!screen.contains("Enter"));
-                assert!(!screen.contains("Apply"));
-                let status = if name == "checking" {
-                    "Checking — no skill files"
+                if name == "preview" {
+                    assert!(screen.contains("Enter"));
                 } else {
-                    "Read-only result"
-                };
+                    assert!(!screen.contains("Enter Apply"));
+                }
                 let status_row = rows.iter().position(|row| row.contains(status)).unwrap();
                 let status_byte = rows[status_row].find(status).unwrap();
                 let status_column = rows[status_row][..status_byte].chars().count();
@@ -8379,6 +8475,45 @@ mod tests {
                         insta::assert_snapshot!(format!("vendored_{name}"), screen);
                     });
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn vendored_apply_and_incomplete_report_state_their_distinct_outcomes() {
+        use crate::{app::VendoredPrompt, vendored::ApplyStatus};
+        use ratatui::{Terminal, backend::TestBackend};
+
+        let mut incomplete = crate::vendored::ApplyOutcome::fixture();
+        incomplete.status = ApplyStatus::VerificationIncomplete;
+        for (prompt, required, forbidden) in [
+            (
+                VendoredPrompt::Applying,
+                "Replacement is in progress and cannot be cancelled.",
+                "Esc",
+            ),
+            (
+                VendoredPrompt::Report(incomplete),
+                "Skill update verification is incomplete.",
+                "Enter Apply",
+            ),
+        ] {
+            for (width, height) in [(80, 24), (120, 40)] {
+                let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+                terminal
+                    .draw(|frame| {
+                        render_vendored_prompt(frame, frame.area(), &prompt, 0, Some(0), false)
+                    })
+                    .unwrap();
+                let screen = terminal
+                    .backend()
+                    .buffer()
+                    .content
+                    .iter()
+                    .map(|cell| cell.symbol())
+                    .collect::<String>();
+                assert!(screen.contains(required), "{screen}");
+                assert!(!screen.contains(forbidden), "{screen}");
             }
         }
     }

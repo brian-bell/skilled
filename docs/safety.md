@@ -210,16 +210,42 @@ material refuse the candidate. The preview lists absolute
 file destinations, the pinned revision, baseline comparison, notice decisions,
 and installations that resolve to the selected variant, including aliases.
 
-The preview has no apply action. Source files, installation links, provenance,
-HEAD, and index remain unchanged. Esc cancels a check, and a cancelled worker's
-result cannot replace a newer dialog. Cache directories are retained after the
-read; automatic cache reclamation is outside this check-and-preview slice.
-Filesystem and metadata observations remain best-effort reads of external
-state; a preview is not a lock on concurrent edits or authorization to apply
-without fresh guards. The future replacement executor must stage on the
-destination volume and verify filesystem aliases, including Unicode
-normalization, before accepting the materialized baseline. A cache on another
-volume cannot establish those naming semantics.
+Esc cancels a check, and a cancelled worker's result cannot replace a newer
+dialog. Cache directories are retained after the read; automatic reclamation is
+outside the update operation. A preview is not a lock on concurrent edits.
+
+### Confirmed vendored replacement
+
+On Linux and macOS, Enter becomes available only after the complete non-noop
+apply plan has been displayed. It discloses all changed files, new directories,
+absolute staging and recovery paths, the SQLite database, and the revision to
+record. Other platforms refuse replacement because the atomic exchange and
+no-clobber rename primitives are not implemented there.
+
+The executor holds SQLite's immediate mutation guard while rechecking the
+registration, exact adopted record, source and ancestor identities, complete
+installation observations (including raw link targets), HEAD, index, operation
+markers, and tracked cleanliness. It stages the expected tree in a private
+directory beside the checkout, verifies that it shares the destination volume,
+and verifies its baseline and raw
+entry spellings, including filesystem alias behavior. It repeats preconditions
+before the first live write and source/link/repository guards between writes.
+
+Files are individually exchanged, added without clobbering, or moved into
+retained recovery paths. Descriptor-relative operations refuse redirected
+ancestors. Neither the skill root nor directories are recursively removed;
+repository-root catalogs use the same executor and `.git` remains untouched.
+The first failed precondition stops further work, with completed, failed,
+unattempted, and retained paths reported. Applying cannot be cancelled, and
+exiting joins the mutating worker.
+
+Fresh catalogs and installations are scanned after every replacement attempt.
+The exact expected manifest and unchanged repository/link state must be proven
+before advancing the baseline and origin revision in the same transaction.
+Filesystem success followed by a metadata failure is partial, not an adopted
+new baseline. After commit, independent reads verify the saved record and
+filesystem again; failed and incomplete verification remain distinct from
+success. Recovery files remain disclosed and retained even after success.
 
 ## Repository updates
 

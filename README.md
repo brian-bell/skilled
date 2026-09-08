@@ -16,15 +16,15 @@ version is 0.2.0. It currently supports:
   incorrect or dangling links, guarded uninstall, and metadata-only Forget Source.
 - Explicit repository update checks and confirmed fast-forwards to the exact
   previewed revision, followed by a rescan and verification.
-- Explicit origin adoption and read-only vendored-skill update previews from
-  a confirmed origin; modified skills block before fetching.
+- Explicit origin adoption and guarded vendored-skill updates from a confirmed
+  origin on Linux and macOS; modified skills block before fetching.
 - Read-only inventory when private metadata is unavailable, with unknown state
   stated explicitly.
 
 Skilled never adopts unproven links. Install refuses occupied paths; repair and
 uninstall act only on links proven by ownership receipts; Forget Source leaves
-checkout content intact. Vendored checks write only their private cache; applying
-those updates remains future work. See the
+checkout content intact. Vendored checks write only their private cache; confirmed updates replace
+planned files and retain displaced files for recovery. See the
 [user guide](docs/usage.md) for operation limits and update behavior.
 
 ## Requirements

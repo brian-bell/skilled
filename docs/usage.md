@@ -77,7 +77,7 @@ Skilled first compares the current skill with its saved baseline. Modified or
 unreadable content blocks the check. An explicit check fetches the confirmed
 tracking branch into a private application cache, pins the fetched revision,
 and shows the selected subtree's file changes and proposed baseline.
-`j` / `k` scroll the complete read-only preview; Esc cancels a running check or
+`j` / `k` scroll the complete preview; Esc cancels a running check or
 closes its result. Nothing fetches merely because Sources is opened.
 
 The preview names absolute destinations, affected installations, and preserved
@@ -86,8 +86,10 @@ notice material. Recognized notice names are `LICENSE`, `LICENCE`, `COPYING`,
 hyphen suffixes. Applicable notices from upstream parent directories are carried
 into the skill; existing skill notices are retained. Conflicting notices and unsupported paths or entry types block
 the preview. Checks leave skill content, provenance metadata, installation links,
-HEAD, and the index unchanged. Replacing skill content and `update --skill`
-remain future work; this preview has no Apply action.
+HEAD, and the index unchanged. Replacing skill content in Sources is guarded by a separate confirmation on Linux and macOS. Read the complete
+plan, including staging and retained recovery paths, then press Enter to apply.
+Applying cannot be cancelled. The report distinguishes partial writes, failed or
+incomplete verification, and verified success; displaced files are retained.
 
 In Sources, press `i` on a skill variant to preview installing it. The dialog
 names every agent, what would happen to it, and the exact absolute path

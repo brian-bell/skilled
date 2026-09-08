@@ -88,6 +88,7 @@ pub struct OriginRecord {
     pub origin: Origin,
     pub update_ref: String,
     pub baseline: Baseline,
+    pub proven_revision: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -277,6 +278,7 @@ pub(crate) fn plan(draft: &AdoptionDraft, store: &Store) -> Result<AdoptionPlan,
             origin,
             update_ref,
             baseline: observation.baseline.clone(),
+            proven_revision: None,
         },
         variant: draft.variant.clone(),
         checkout: draft.checkout.clone(),

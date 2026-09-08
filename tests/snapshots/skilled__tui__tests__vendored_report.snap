@@ -3,12 +3,12 @@ source: src/tui.rs
 expression: screen
 ---
 
-  ┌ Checking skill origin ───────────────────────────────────── origin check ┐
+  ┌ Skill update report ──────────────────────────────── replacement outcome ┐
   │                                                                          │
-  │  Checking the confirmed origin and reading its selected subtree.         │
-  │  No skill content or provenance is changed until a complete replacement  │
-  │   plan is confirmed.                                                     │
-  │  Esc cancels this check.                                                 │
+  │  Skill update verified; provenance saved.                                │
+  │  Source HEAD and index unchanged.                                        │
+  │                                                                          │
+  │                                                                          │
   │                                                                          │
   │                                                                          │
   │                                                                          │
@@ -22,6 +22,6 @@ expression: screen
   │                                                                          │
   │                                                                          │
   │  ──────────────────────────────────────────────────────────────────────  │
-  │  Checking — no skill files are written                       Esc Cancel  │
+  │  Replacement result shown                                     Esc Close  │
   │                                                                          │
   └──────────────────────────────────────────────────────────────────────────┘

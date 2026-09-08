@@ -3,10 +3,9 @@ source: src/tui.rs
 expression: screen
 ---
 
-  ┌ Apply skill update ──────────────────────────── guarded replacement plan ┐
+  ┌ Skill update preview ────────────────────────── read-only origin preview ┐
   │                                                                          │
-  │  Confirming replaces only this skill's planned files and advances its p  │
-  │  rovenance.                                                              │
+  │  Check complete; this preview does not write files or metadata.          │
   │  Source: /source                                                         │
   │  Skill: /source/skills/demo                                              │
   │  Origin: https://github.com/example/demo                                 │
@@ -21,7 +20,8 @@ expression: screen
   │  Planned file changes:                                                   │
   │  /source/skills/demo/SKILL.md: modify 12 → 18 bytes, 3 → 4 lines         │
   │  Affected installations:                                                 │
+  │  Codex: /installed/demo                                                  │
   │  ──────────────────────────────────────────────────────────────────────  │
-  │  Complete plan shown — Enter applies it        Enter Apply · Esc Cancel  │
+  │  Read-only preview — replacement unavailable on this platform Esc Close  │
   │                                                                          │
   └──────────────────────────────────────────────────────────────────────────┘

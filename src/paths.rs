@@ -65,7 +65,7 @@ impl SessionIdentity {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AppEnvironment {
     pub home_dir: PathBuf,
     pub data_dir: PathBuf,
