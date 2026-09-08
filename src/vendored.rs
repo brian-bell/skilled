@@ -47,6 +47,15 @@ pub(crate) struct CheckRequest {
     affected_installations: Vec<AffectedInstallation>,
     environment: crate::AppEnvironment,
     selected_agents: [bool; 3],
+    require_unique_name: bool,
+}
+
+impl CheckRequest {
+    /// CLI name selection must remain unique through the guarded write.
+    pub(crate) fn requiring_unique_name(mut self) -> Self {
+        self.require_unique_name = true;
+        self
+    }
 }
 
 /// An installation that resolves to the checked variant.  Aliases are kept as
@@ -290,6 +299,7 @@ pub(crate) fn prepare(
     affected_installations.sort_by(|left, right| left.path.cmp(&right.path));
     Ok(CheckRequest {
         source: source.clone(),
+        require_unique_name: false,
         variant,
         record,
         checkout,
@@ -440,6 +450,25 @@ fn inspect_installations_from_sources(
     Ok(())
 }
 
+fn recheck_unique_name(
+    request: &CheckRequest,
+    sources: &[RegisteredSource],
+) -> Result<(), AdoptionFailure> {
+    if request.require_unique_name {
+        let variants = crate::resolution::variants_by_name(sources);
+        if variants
+            .get(request.variant.skill_name())
+            .map(Vec::as_slice)
+            != Some(std::slice::from_ref(&request.variant))
+        {
+            return Err(
+                "The skill name no longer resolves uniquely to the selected variant".into(),
+            );
+        }
+    }
+    Ok(())
+}
+
 fn recheck_request(request: &CheckRequest, data_dir: &Path) -> Result<(), AdoptionFailure> {
     let store = Store::open(data_dir).map_err(metadata_failure)?;
     let current = store
@@ -458,6 +487,10 @@ fn recheck_request(request: &CheckRequest, data_dir: &Path) -> Result<(), Adopti
         .any(|source| registration_matches(source, &request.source, &request.variant))
     {
         return Err("The selected source registration changed after the update check began".into());
+    }
+    if request.require_unique_name {
+        recheck_installations_from_sources(request, &sources)?;
+        recheck_unique_name(request, &sources)?;
     }
     let directories =
         adoption::directories(&request.checkout, request.variant.variant_relative_path())
@@ -1491,6 +1524,85 @@ mod tests {
             assert!(plan.lines().iter().any(|line| line.contains("up to date")));
             assert_eq!(apply(&plan, &data).status, ApplyStatus::NoOp);
         }
+    }
+
+    #[test]
+    fn name_selected_update_rechecks_new_catalog_candidates() {
+        let (temporary, store, mut preview) = apply_fixture();
+        let data = temporary.path().join("data");
+        let other = temporary.path().join("other");
+        fs::create_dir_all(other.join("skills/other")).unwrap();
+        fs::write(
+            other.join("skills/other/SKILL.md"),
+            "---\nname: other\ndescription: Fixture\n---\n",
+        )
+        .unwrap();
+        assert!(
+            Command::new("git")
+                .arg("-C")
+                .arg(&other)
+                .args(["init", "-b", "main"])
+                .output()
+                .unwrap()
+                .status
+                .success()
+        );
+        for args in [
+            vec!["add", "."],
+            vec![
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.test",
+                "commit",
+                "-m",
+                "initial",
+            ],
+        ] {
+            assert!(
+                Command::new("git")
+                    .arg("-C")
+                    .arg(&other)
+                    .args(args)
+                    .output()
+                    .unwrap()
+                    .status
+                    .success()
+            );
+        }
+        let mut app = SkilledApp::open(environment(&temporary)).unwrap();
+        app.confirm_source(app.preview_source(&other).unwrap())
+            .unwrap();
+        preview.request.as_mut().unwrap().require_unique_name = true;
+        let plan = plan_apply(&preview, &data).unwrap();
+        fs::create_dir_all(other.join("skills/demo")).unwrap();
+        fs::write(
+            other.join("skills/demo/SKILL.md"),
+            "---\nname: demo\ndescription: Competing\n---\n",
+        )
+        .unwrap();
+        let request = preview.request.as_deref().unwrap();
+        let error = recheck_request(request, &data).unwrap_err();
+        assert!(error.to_string().contains("uniquely"), "{error}");
+        let outcome = apply(&plan, &data);
+        assert_eq!(
+            outcome.status,
+            ApplyStatus::Blocked,
+            "{:?}",
+            outcome.lines()
+        );
+        assert_eq!(
+            observe_directory_manifest(&preview.skill).unwrap(),
+            request.local
+        );
+        assert_eq!(
+            store.origin_records(request.variant.source_id()).unwrap(),
+            vec![request.record.clone()]
+        );
+        // An explicitly selected UI variant remains valid despite name ambiguity.
+        let mut explicit = request.clone();
+        explicit.require_unique_name = false;
+        recheck_request(&explicit, &data).unwrap();
     }
 
     #[test]

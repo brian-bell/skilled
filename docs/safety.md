@@ -247,6 +247,15 @@ new baseline. After commit, independent reads verify the saved record and
 filesystem again; failed and incomplete verification remain distinct from
 success. Recovery files remain disclosed and retained even after success.
 
+The CLI `update --skill <name> [--yes]` runs the same check, plan, apply, and
+verification. It requires complete registration and installation observations
+and exactly one registered variant; mixed repository/skill targets are refused.
+The complete plan is written and flushed before confirmation. `--yes` skips
+only the prompt, and cannot adopt an origin or bypass guards. No-op checks stay
+read-only, and unsupported platforms show a read-only preview without applying.
+Partial writes retain exit status 4 even if their provenance save failed; failed
+and incomplete postconditions retain statuses 5 and 6.
+
 ## Repository updates
 
 ### Checkout identity and process binding

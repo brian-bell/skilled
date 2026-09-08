@@ -81,6 +81,7 @@ cargo run -- install --source <id-or-path> --skill <name> --agents claude-code
 cargo run -- repair --skill <name> --agent claude-code
 cargo run -- uninstall --skill <name> --agent claude-code
 cargo run -- update --source <id-or-path>
+cargo run -- update --skill <name>
 ```
 
 Commands print a plan and ask for confirmation. `--yes` skips the prompt only;

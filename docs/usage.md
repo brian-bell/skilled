@@ -86,7 +86,7 @@ notice material. Recognized notice names are `LICENSE`, `LICENCE`, `COPYING`,
 hyphen suffixes. Applicable notices from upstream parent directories are carried
 into the skill; existing skill notices are retained. Conflicting notices and unsupported paths or entry types block
 the preview. Checks leave skill content, provenance metadata, installation links,
-HEAD, and the index unchanged. Replacing skill content in Sources is guarded by a separate confirmation on Linux and macOS. Read the complete
+HEAD, and the index unchanged. Replacing skill content in Sources or with `update --skill` is guarded by a separate confirmation on Linux and macOS. Read the complete
 plan, including staging and retained recovery paths, then press Enter to apply.
 Applying cannot be cancelled. The report distinguishes partial writes, failed or
 incomplete verification, and verified success; displaced files are retained.
@@ -153,6 +153,7 @@ skilled install --source <id-or-path> --skill <name> \
 skilled repair --skill <name> --agent <agent> [--yes]
 skilled uninstall --skill <name> --agent <agent> [--yes]
 skilled update --source <id-or-path> [--yes]
+skilled update --skill <name> [--yes]
 ```
 
 `--source` accepts a registered source identifier or its checkout path.
@@ -160,13 +161,20 @@ Agent names are `claude-code`, `codex`, and `opencode`. Install defaults to all
 configured agents when `--agents` is omitted. Repair and uninstall accept
 exactly one agent. Source registration and Forget Source are interactive only.
 
+`update --skill` requires exactly one usable registered variant with that name.
+Ambiguous names list their candidate sources and paths. Adopt its origin in
+Sources first; the CLI cannot adopt or bypass a modified baseline. `--source`
+continues to update a whole repository, and cannot be combined with `--skill`.
+
 Each command prints a plan and asks `Proceed? [y/N]`; declining writes no
 planned mutation. The update command performs its explicit check before that
-prompt, so objects and the remote-tracking ref can already have been updated.
+prompt. Repository checks can update objects and the remote-tracking ref;
+vendored checks write their private origin cache. Declining a vendored update
+leaves the skill and its provenance baseline unchanged.
 
 `--yes` skips only confirmation. Install then requires explicit `--source`,
 `--skill`, and `--agents`; repair and uninstall require `--skill` and `--agent`;
-update requires `--source`. Every ownership, collision, path, apply, rescan,
+update requires exactly one of `--source` or `--skill`. Every ownership, collision, path, apply, rescan,
 and verification guard still runs. These commands use the same operation
 pipelines as the interactive screens.
 
@@ -182,7 +190,9 @@ pipelines as the interactive screens.
 
 A deselected root alone does not cause status `6`. Uninstall reports success
 when its unlink was verified even if the inert receipt could not be deleted;
-the printed report still states that metadata failure.
+the printed report still states that metadata failure. A vendored replacement
+whose filesystem writes succeed but provenance cannot be saved exits with
+status `4`; it does not silently adopt the changed content.
 
 ## Inventory and ownership
 

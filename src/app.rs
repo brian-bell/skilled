@@ -1331,6 +1331,32 @@ impl SkilledApp {
         self.vendored_check_run.is_some()
     }
 
+    /// Prepare the same guarded origin check used by Sources for a variant a
+    /// non-interactive caller resolved explicitly. The installation snapshot
+    /// is refreshed at the effect boundary before it can become part of the
+    /// request and its later verification.
+    pub(crate) fn prepare_vendored_check_for(
+        &mut self,
+        variant: VariantRef,
+    ) -> std::result::Result<crate::vendored::CheckRequest, crate::adoption::AdoptionFailure> {
+        self.rescan_installations();
+        let source = self
+            .sources
+            .iter()
+            .find(|source| source.id() == variant.source_id())
+            .ok_or_else(|| {
+                crate::adoption::AdoptionFailure::from("No registered source selected")
+            })?;
+        crate::vendored::prepare(
+            source,
+            variant,
+            self.store()
+                .map_err(crate::adoption::AdoptionFailure::metadata)?,
+            &self.inventory,
+            &self.environment,
+        )
+    }
+
     pub fn vendored_apply_in_flight(&self) -> bool {
         self.vendored_apply_run.is_some()
     }

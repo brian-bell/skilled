@@ -13,10 +13,13 @@
 use std::{
     io::{BufRead, Write},
     path::{Path, PathBuf},
+    process::Child,
+    sync::{Mutex, atomic::AtomicBool},
 };
 
 use crate::{
     AgentKind, AppEnvironment, SkilledApp, View,
+    adoption::MetadataAvailability,
     agents::adapter,
     app::PlanRequestFailure,
     components::{metadata_failure_text, terminal_safe},
@@ -26,7 +29,9 @@ use crate::{
         RepairStepOutcome, StepOutcome, TargetDisposition, UninstallDisposition, UninstallOutcome,
         UninstallPlan, UninstallStatus, VerifyReport, locate_variant,
     },
+    resolution::variants_by_name,
     updates::RepositoryUpdatePlan,
+    vendored::{self, ApplyOutcome, ApplyStatus},
 };
 
 /// How the command ended.
@@ -84,21 +89,25 @@ usage: skilled install --source <id-or-path> --skill <name> \
 [--agents claude-code,codex,opencode] [--yes]
        skilled uninstall --skill <name> --agent <agent> [--yes]
        skilled repair --skill <name> --agent <agent> [--yes]
-       skilled update --source <id-or-path> [--yes]
+       skilled update (--source <id-or-path> | --skill <name>) [--yes]
 
   --source   a registered source, by the identifier Skilled gave it or by its
              checkout path
-  --skill    the skill directory name to install
+  --skill    the skill directory name to install or update
   --agents   which agents to install for; defaults to every configured agent
   --yes      skip the confirmation. Install requires --source, --skill, and
              --agents explicitly; repair requires --skill and --agent; update
-             requires --source. Every safety check still runs.
+             requires exactly one of --source or --skill. Every safety check
+             still runs.
 
 Repair re-resolves the named skill from the live registry. It replaces only a
 symbolic link whose recorded target exactly matches a Skilled receipt.
 
 Update checks the registered checkout for new upstream commits and applies
 them only as a fast-forward of the exact revision it previewed.
+
+Update --skill checks and replaces exactly one adopted vendored skill. If
+several registered variants have that name, update the chosen variant in Sources.
 
 Uninstall removes only an exact matching Skilled-managed link. Its --agent is
 singular and every receipt, object-type, target, containment, and verification
@@ -237,8 +246,13 @@ struct RepairRequest {
     assume_yes: bool,
 }
 
+enum UpdateTarget {
+    Source(String),
+    Skill(String),
+}
+
 struct UpdateRequest {
-    source: String,
+    target: UpdateTarget,
     assume_yes: bool,
 }
 
@@ -357,6 +371,7 @@ fn parse_agent(value: &str) -> Result<AgentKind, String> {
 
 fn parse_update<'a>(mut arguments: impl Iterator<Item = &'a String>) -> Result<Parsed, String> {
     let mut source = None;
+    let mut skill = None;
     let mut assume_yes = false;
     while let Some(flag) = arguments.next() {
         let mut value = |flag: &str| match arguments.next() {
@@ -365,21 +380,22 @@ fn parse_update<'a>(mut arguments: impl Iterator<Item = &'a String>) -> Result<P
         };
         match flag.as_str() {
             "--source" => source = Some(value("--source")?),
-            // An install flag on an update request is a request nobody wrote,
-            // and naming the command it belongs to says so plainly.
-            "--skill" | "--agents" => return Err(format!("{flag} is only valid for install")),
+            "--skill" => skill = Some(value("--skill")?),
+            "--agents" => return Err("--agents is only valid for install".to_owned()),
             "--yes" => assume_yes = true,
             "--help" | "-h" => return Ok(Parsed::Usage),
             other => return Err(format!("unknown option {other}")),
         }
     }
-    // `--source` is required with or without `--yes`, so the fail-closed rule
-    // install states has nothing left to add here: an update names the one
-    // checkout it acts on or it is not a request.
-    Ok(Parsed::Update(UpdateRequest {
-        source: source.ok_or("--source is required")?,
-        assume_yes,
-    }))
+    let target = match (source, skill) {
+        (Some(source), None) => UpdateTarget::Source(source),
+        (None, Some(skill)) => UpdateTarget::Skill(skill),
+        (Some(_), Some(_)) => {
+            return Err("update takes either --source or --skill, not both".to_owned());
+        }
+        (None, None) => return Err("update requires --source or --skill".to_owned()),
+    };
+    Ok(Parsed::Update(UpdateRequest { target, assume_yes }))
 }
 
 fn parse_agents(value: &str) -> Result<[bool; 3], String> {
@@ -733,11 +749,28 @@ fn execute_update(
     input: &mut dyn BufRead,
     output: &mut dyn Write,
 ) -> Result<ExitCodeKind, String> {
+    match &request.target {
+        UpdateTarget::Source(source) => {
+            execute_repository_update(source, request.assume_yes, environment, input, output)
+        }
+        UpdateTarget::Skill(skill) => {
+            execute_vendored_update(skill, request.assume_yes, environment, input, output)
+        }
+    }
+}
+
+fn execute_repository_update(
+    source_name: &str,
+    assume_yes: bool,
+    environment: AppEnvironment,
+    input: &mut dyn BufRead,
+    output: &mut dyn Write,
+) -> Result<ExitCodeKind, String> {
     let mut app = SkilledApp::open(environment).map_err(|error| error.to_string())?;
-    let Some(source_id) = resolve_source(&app, &request.source) else {
+    let Some(source_id) = resolve_source(&app, source_name) else {
         return Ok(refuse(
             output,
-            &format!("no registered source matches {}", request.source),
+            &format!("no registered source matches {source_name}"),
         ));
     };
     if let Some(error) = app
@@ -761,7 +794,7 @@ fn execute_update(
         let _ = writeln!(output, "\nNothing to do.");
         return Ok(ExitCodeKind::Success);
     }
-    if !request.assume_yes && !confirmed(input, output)? {
+    if !assume_yes && !confirmed(input, output)? {
         let _ = writeln!(output, "Cancelled. Nothing was written.");
         return Ok(ExitCodeKind::Success);
     }
@@ -835,6 +868,150 @@ fn execute_update(
     } else {
         ExitCodeKind::Success
     })
+}
+
+fn execute_vendored_update(
+    skill_name: &str,
+    assume_yes: bool,
+    environment: AppEnvironment,
+    input: &mut dyn BufRead,
+    output: &mut dyn Write,
+) -> Result<ExitCodeKind, String> {
+    let data_dir = environment.data_dir.clone();
+    let mut app = SkilledApp::open(environment).map_err(|error| error.to_string())?;
+    if let Some(failure) = app.metadata_failure() {
+        return Err(metadata_failure_text(failure));
+    }
+    // `variants_by_name` deliberately omits unreadable sources and catalogs:
+    // it is used for ordinary display where an incomplete list must not invent
+    // a candidate. A command that is about to mutate cannot call a surviving
+    // entry unique while that omission might be hiding another one.
+    if !app.inventory().registry_is_complete() {
+        return vendored_refusal(
+            output,
+            "registered sources or catalogs could not be fully read; cannot resolve one variant"
+                .into(),
+        );
+    }
+    if !app.inventory().counts_are_complete() {
+        return vendored_refusal(
+            output,
+            "installation scan is incomplete; affected installations cannot be verified".into(),
+        );
+    }
+    let mut candidates = variants_by_name(app.sources())
+        .remove(skill_name)
+        .unwrap_or_default();
+    let variant = match candidates.len() {
+        0 => {
+            return Ok(refuse(
+                output,
+                &format!("no registered source offers a usable variant named {skill_name}"),
+            ));
+        }
+        1 => candidates.remove(0),
+        _ => {
+            let evidence = candidates
+                .iter()
+                .map(|variant| safe(&variant.evidence_label()))
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Ok(refuse(
+                output,
+                &format!(
+                    "{skill_name} names {} registered variants: {evidence}",
+                    candidates.len()
+                ),
+            ));
+        }
+    };
+    let request = match app.prepare_vendored_check_for(variant) {
+        Ok(request) => request,
+        Err(failure) => return vendored_refusal(output, failure),
+    };
+    let cancelled = AtomicBool::new(false);
+    let child = Mutex::<Option<Child>>::new(None);
+    let preview = match vendored::check(
+        request.requiring_unique_name(),
+        &data_dir,
+        &cancelled,
+        &child,
+    ) {
+        Ok(Some(preview)) => preview,
+        Ok(None) => return Err("vendored origin check ended without a result".to_owned()),
+        Err(failure) => return vendored_refusal(output, failure),
+    };
+    let plan = match vendored::plan_apply(&preview, &data_dir) {
+        Ok(plan) => plan,
+        Err(failure) => return vendored_refusal(output, failure),
+    };
+    write_vendored_plan(output, &plan).map_err(|error| error.to_string())?;
+    // A full plan must reach the output stream before either an unattended
+    // confirmation or an apply can proceed. `--yes` answers only the prompt.
+    output.flush().map_err(|error| error.to_string())?;
+    if plan.is_noop() {
+        let _ = writeln!(output, "\nNothing to do.");
+        return Ok(ExitCodeKind::Success);
+    }
+    if !plan.can_apply() {
+        let _ = writeln!(
+            output,
+            "\nBlocked: guarded replacement is unavailable on this platform. Nothing was written."
+        );
+        return Ok(ExitCodeKind::Blocked);
+    }
+    if !assume_yes && !confirmed(input, output)? {
+        let _ = writeln!(output, "Cancelled. Nothing was written.");
+        return Ok(ExitCodeKind::Success);
+    }
+    let outcome = vendored::apply(&plan, &data_dir);
+    write_vendored_report(output, &outcome).map_err(|error| error.to_string())?;
+    Ok(exit_code_for_vendored(&outcome))
+}
+
+fn vendored_refusal(
+    output: &mut dyn Write,
+    failure: crate::adoption::AdoptionFailure,
+) -> Result<ExitCodeKind, String> {
+    if failure.metadata == MetadataAvailability::Unavailable {
+        return Err(failure.message);
+    }
+    writeln!(
+        output,
+        "Blocked: nothing was written. {}",
+        safe(&failure.message)
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(ExitCodeKind::Blocked)
+}
+
+fn write_vendored_plan(output: &mut dyn Write, plan: &vendored::ApplyPlan) -> std::io::Result<()> {
+    for line in plan.lines() {
+        writeln!(output, "{}", safe(&line))?;
+    }
+    Ok(())
+}
+
+fn write_vendored_report(output: &mut dyn Write, outcome: &ApplyOutcome) -> std::io::Result<()> {
+    writeln!(output)?;
+    for line in outcome.lines() {
+        writeln!(output, "{}", safe(&line))?;
+    }
+    Ok(())
+}
+
+fn exit_code_for_vendored(outcome: &ApplyOutcome) -> ExitCodeKind {
+    match outcome.status {
+        ApplyStatus::NoOp | ApplyStatus::Verified if outcome.metadata_available() => {
+            ExitCodeKind::Success
+        }
+        ApplyStatus::Blocked if !outcome.metadata_available() => ExitCodeKind::InternalError,
+        ApplyStatus::Blocked => ExitCodeKind::Blocked,
+        ApplyStatus::Partial => ExitCodeKind::PartialApply,
+        ApplyStatus::VerificationFailed => ExitCodeKind::VerificationFailed,
+        ApplyStatus::VerificationIncomplete => ExitCodeKind::VerificationIncomplete,
+        ApplyStatus::NoOp | ApplyStatus::Verified => ExitCodeKind::InternalError,
+    }
 }
 
 fn write_repository_update_plan(
@@ -1272,6 +1449,282 @@ fn write_report(output: &mut dyn Write, outcome: &InstallOutcome) -> std::io::Re
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use std::{
+        ffi::OsString,
+        fs,
+        io::Cursor,
+        panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
+        process::Command,
+    };
+
+    #[cfg(unix)]
+    use crate::{
+        adoption, agents::adapter, git::TEST_GIT_CONFIG_GLOBAL, resolution::VariantRef,
+        store::Store,
+    };
+
+    struct FailingWriter;
+
+    impl Write for FailingWriter {
+        fn write(&mut self, _buffer: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("fixture output failure"))
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[cfg(unix)]
+    fn git(repository: &Path, arguments: &[&str]) -> String {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(repository)
+            .args(arguments)
+            .output()
+            .expect("run git");
+        assert!(
+            output.status.success(),
+            "git {arguments:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_owned()
+    }
+
+    #[cfg(unix)]
+    fn commit(repository: &Path, message: &str) {
+        git(repository, &["add", "."]);
+        git(
+            repository,
+            &[
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.test",
+                "commit",
+                "-m",
+                message,
+            ],
+        );
+    }
+
+    #[cfg(unix)]
+    struct VendoredCliFixture {
+        temporary: tempfile::TempDir,
+        environment: AppEnvironment,
+        remote: PathBuf,
+        seed: PathBuf,
+        checkout: PathBuf,
+        source_id: i64,
+        catalog: PathBuf,
+        variant: PathBuf,
+        adopted_baseline: crate::provenance::Baseline,
+    }
+
+    #[cfg(unix)]
+    impl VendoredCliFixture {
+        fn new() -> Self {
+            let temporary = tempfile::tempdir().expect("temporary directory");
+            let remote = temporary.path().join("remote.git");
+            let seed = temporary.path().join("seed");
+            let checkout = temporary.path().join("checkout");
+            Command::new("git")
+                .args(["init", "--bare"])
+                .arg(&remote)
+                .output()
+                .expect("bare remote");
+            Command::new("git")
+                .args(["init", "-b", "main"])
+                .arg(&seed)
+                .output()
+                .expect("seed repository");
+            let skill = seed.join("skills/demo");
+            fs::create_dir_all(&skill).expect("skill directory");
+            fs::write(
+                skill.join("SKILL.md"),
+                "---\nname: demo\ndescription: initial\n---\n",
+            )
+            .expect("skill document");
+            fs::write(skill.join("LICENSE"), "retained notice\n").expect("notice");
+            commit(&seed, "initial");
+            git(
+                &seed,
+                &[
+                    "remote",
+                    "add",
+                    "origin",
+                    remote.to_str().expect("utf-8 remote"),
+                ],
+            );
+            git(&seed, &["push", "-u", "origin", "main"]);
+            Command::new("git")
+                .args(["clone", "--branch", "main"])
+                .arg(&remote)
+                .arg(&checkout)
+                .output()
+                .expect("clone checkout");
+            let environment = AppEnvironment::new(
+                temporary.path().join("home"),
+                temporary.path().join("data"),
+                "",
+            );
+            Store::open(&environment.data_dir)
+                .expect("open store")
+                .complete_setup([true; 3])
+                .expect("complete setup");
+            let mut app = SkilledApp::open(environment.clone()).expect("open app");
+            app.confirm_source(app.preview_source(&checkout).expect("preview source"))
+                .expect("register source");
+            let source = app.sources()[0].clone();
+            let catalog = source
+                .catalogs()
+                .iter()
+                .find(|catalog| !catalog.candidates().is_empty())
+                .expect("catalog");
+            let variant = VariantRef::of(&source, catalog, &catalog.candidates()[0]);
+            let mut store = Store::open(&environment.data_dir).expect("open store");
+            let mut draft =
+                adoption::begin(&source, variant.clone(), &store).expect("begin adoption");
+            draft.repository = "https://github.com/example/demo".to_owned();
+            draft.subdirectory = "skills/demo".to_owned();
+            draft.update_ref = "refs/heads/main".to_owned();
+            let plan = adoption::plan(&draft, &store).expect("plan adoption");
+            adoption::apply(&plan, &mut store).expect("save adoption");
+            let adopted_baseline = store
+                .origin_record(
+                    source.id(),
+                    variant.catalog_relative_path(),
+                    variant.variant_relative_path(),
+                )
+                .expect("read origin")
+                .expect("saved origin")
+                .baseline;
+            for agent in AgentKind::ALL {
+                let link = environment
+                    .home_dir
+                    .join(adapter(agent).native_skill_root())
+                    .join("demo");
+                fs::create_dir_all(link.parent().expect("agent root")).expect("agent root");
+                std::os::unix::fs::symlink(checkout.join("skills/demo"), link)
+                    .expect("installed link");
+            }
+            Self {
+                temporary,
+                environment,
+                remote,
+                seed,
+                checkout,
+                source_id: source.id(),
+                catalog: variant.catalog_relative_path().to_path_buf(),
+                variant: variant.variant_relative_path().to_path_buf(),
+                adopted_baseline,
+            }
+        }
+
+        fn update_origin(&self) {
+            fs::write(
+                self.seed.join("skills/demo/SKILL.md"),
+                "---\nname: demo\ndescription: updated\n---\n",
+            )
+            .expect("updated skill");
+            fs::remove_file(self.seed.join("skills/demo/LICENSE")).expect("remove origin notice");
+            commit(&self.seed, "upstream update");
+            git(&self.seed, &["push"]);
+        }
+
+        fn with_rewritten_origin<T>(&self, operation: impl FnOnce() -> T) -> T {
+            let config = self.temporary.path().join("test.gitconfig");
+            fs::write(
+                &config,
+                format!(
+                    "[url \"file://{}\"]\n\tinsteadOf = https://github.com/example/demo\n",
+                    self.remote.display()
+                ),
+            )
+            .expect("test git config");
+            TEST_GIT_CONFIG_GLOBAL.with(|value| {
+                *value.borrow_mut() = Some(OsString::from(config));
+            });
+            let result = catch_unwind(AssertUnwindSafe(operation));
+            TEST_GIT_CONFIG_GLOBAL.with(|value| *value.borrow_mut() = None);
+            match result {
+                Ok(result) => result,
+                Err(payload) => resume_unwind(payload),
+            }
+        }
+
+        fn run_rewritten(&self, arguments: &[&str], answer: &str) -> (ExitCodeKind, String) {
+            self.with_rewritten_origin(|| {
+                let arguments = arguments
+                    .iter()
+                    .map(|argument| (*argument).to_owned())
+                    .collect::<Vec<_>>();
+                let mut input = Cursor::new(answer.as_bytes().to_vec());
+                let mut output = Vec::new();
+                let code = run(
+                    &arguments,
+                    self.environment.clone(),
+                    &mut input,
+                    &mut output,
+                );
+                (code, String::from_utf8(output).expect("utf-8 output"))
+            })
+        }
+
+        fn origin_baseline(&self) -> crate::provenance::Baseline {
+            Store::open(&self.environment.data_dir)
+                .expect("open store")
+                .origin_record(self.source_id, &self.catalog, &self.variant)
+                .expect("read origin")
+                .expect("saved origin")
+                .baseline
+        }
+    }
+
+    #[cfg(unix)]
+    struct RegisterDuringConfirmation {
+        input: Cursor<Vec<u8>>,
+        environment: AppEnvironment,
+        duplicate: PathBuf,
+        registered: bool,
+    }
+
+    #[cfg(unix)]
+    impl RegisterDuringConfirmation {
+        fn register(&mut self) {
+            if self.registered {
+                return;
+            }
+            let mut app = SkilledApp::open(self.environment.clone()).expect("open app");
+            app.confirm_source(
+                app.preview_source(&self.duplicate)
+                    .expect("preview duplicate"),
+            )
+            .expect("register duplicate");
+            self.registered = true;
+        }
+    }
+
+    #[cfg(unix)]
+    impl std::io::Read for RegisterDuringConfirmation {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            self.register();
+            self.input.read(buffer)
+        }
+    }
+
+    #[cfg(unix)]
+    impl BufRead for RegisterDuringConfirmation {
+        fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
+            self.register();
+            self.input.fill_buf()
+        }
+
+        fn consume(&mut self, amount: usize) {
+            self.input.consume(amount);
+        }
+    }
 
     #[test]
     fn a_residual_root_is_stated_in_the_command_report() {
@@ -1281,5 +1734,305 @@ mod tests {
             )),
             "skill root created, but the link was not: permission denied"
         );
+    }
+
+    #[test]
+    fn update_skill_and_source_are_mutually_exclusive() {
+        let arguments = [
+            "update".to_owned(),
+            "--source".to_owned(),
+            "1".to_owned(),
+            "--skill".to_owned(),
+            "demo".to_owned(),
+        ];
+        assert!(matches!(
+            parse(&arguments),
+            Err(message) if message.contains("either --source or --skill")
+        ));
+    }
+
+    #[test]
+    fn update_skill_requires_a_target_and_rejects_install_agents() {
+        assert!(matches!(
+            parse(&["update".to_owned()]),
+            Err(message) if message.contains("requires --source or --skill")
+        ));
+        assert!(matches!(
+            parse(&[
+                "update".to_owned(),
+                "--skill".to_owned(),
+                "demo".to_owned(),
+                "--agents".to_owned(),
+                "codex".to_owned(),
+            ]),
+            Err(message) if message.contains("--agents is only valid for install")
+        ));
+    }
+
+    #[test]
+    fn update_source_and_skill_targets_remain_distinct() {
+        let source = parse(&["update".to_owned(), "--source".to_owned(), "42".to_owned()]);
+        assert!(matches!(
+            source,
+            Ok(Parsed::Update(UpdateRequest {
+                target: UpdateTarget::Source(value),
+                assume_yes: false,
+            })) if value == "42"
+        ));
+        let skill = parse(&[
+            "update".to_owned(),
+            "--skill".to_owned(),
+            "demo".to_owned(),
+            "--yes".to_owned(),
+        ]);
+        assert!(matches!(
+            skill,
+            Ok(Parsed::Update(UpdateRequest {
+                target: UpdateTarget::Skill(value),
+                assume_yes: true,
+            })) if value == "demo"
+        ));
+    }
+
+    #[test]
+    fn a_plan_output_failure_stops_before_confirmation_or_apply() {
+        let plan = vendored::ApplyPlan::fixture();
+        assert!(write_vendored_plan(&mut FailingWriter, &plan).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn vendored_skill_update_replaces_all_agent_links_and_advances_saved_provenance() {
+        let fixture = VendoredCliFixture::new();
+        fixture.update_origin();
+        let head_before = git(&fixture.checkout, &["rev-parse", "HEAD"]);
+        let index_before = git(&fixture.checkout, &["diff", "--cached", "--name-only"]);
+
+        let (code, output) = fixture.run_rewritten(&["update", "--skill", "demo", "--yes"], "");
+
+        assert_eq!(code, ExitCodeKind::Success, "{output}");
+        assert!(
+            fs::read_to_string(fixture.checkout.join("skills/demo/SKILL.md"))
+                .expect("updated skill")
+                .contains("updated")
+        );
+        assert_eq!(
+            fs::read_to_string(fixture.checkout.join("skills/demo/LICENSE"))
+                .expect("retained notice"),
+            "retained notice\n"
+        );
+        for agent in AgentKind::ALL {
+            let link = fixture
+                .environment
+                .home_dir
+                .join(adapter(agent).native_skill_root())
+                .join("demo");
+            assert_eq!(
+                fs::read_link(link).expect("agent link"),
+                fixture.checkout.join("skills/demo")
+            );
+        }
+        assert_eq!(git(&fixture.checkout, &["rev-parse", "HEAD"]), head_before);
+        assert_eq!(
+            git(&fixture.checkout, &["diff", "--cached", "--name-only"]),
+            index_before
+        );
+        assert_ne!(fixture.origin_baseline(), fixture.adopted_baseline);
+        assert!(output.contains("preserve existing notice"), "{output}");
+        assert!(
+            output.contains("HEAD, index, and installation links must stay unchanged."),
+            "{output}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn vendored_skill_update_decline_leaves_the_checkout_and_origin_unchanged() {
+        let fixture = VendoredCliFixture::new();
+        fixture.update_origin();
+        let before = fs::read(fixture.checkout.join("skills/demo/SKILL.md")).expect("skill");
+
+        let (code, output) = fixture.run_rewritten(&["update", "--skill", "demo"], "n\n");
+
+        assert_eq!(code, ExitCodeKind::Success, "{output}");
+        assert_eq!(
+            fs::read(fixture.checkout.join("skills/demo/SKILL.md")).expect("skill"),
+            before
+        );
+        assert_eq!(fixture.origin_baseline(), fixture.adopted_baseline);
+        assert!(
+            output.contains("Cancelled. Nothing was written."),
+            "{output}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_modified_vendored_skill_refuses_before_fetching_the_origin() {
+        let fixture = VendoredCliFixture::new();
+        fs::write(
+            fixture.checkout.join("skills/demo/local-change"),
+            "changed\n",
+        )
+        .expect("local modification");
+
+        let (code, output) = fixture.run_rewritten(&["update", "--skill", "demo", "--yes"], "");
+
+        assert_eq!(code, ExitCodeKind::Blocked, "{output}");
+        assert!(
+            output.contains("differs from its adopted baseline"),
+            "{output}"
+        );
+        assert!(
+            !fixture
+                .environment
+                .data_dir
+                .join("vendored-origin-cache")
+                .exists()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unknown_and_ambiguous_vendored_skill_names_are_refused() {
+        let fixture = VendoredCliFixture::new();
+        let (unknown, unknown_output) =
+            fixture.run_rewritten(&["update", "--skill", "missing", "--yes"], "");
+        assert_eq!(unknown, ExitCodeKind::InvalidRequest, "{unknown_output}");
+        assert!(
+            unknown_output.contains("no registered source offers"),
+            "{unknown_output}"
+        );
+
+        let duplicate = fixture.temporary.path().join("duplicate");
+        Command::new("git")
+            .args(["init", "-b", "main"])
+            .arg(&duplicate)
+            .output()
+            .expect("duplicate repository");
+        fs::create_dir_all(duplicate.join("skills/demo")).expect("duplicate skill directory");
+        fs::write(
+            duplicate.join("skills/demo/SKILL.md"),
+            "---\nname: demo\ndescription: duplicate\n---\n",
+        )
+        .expect("duplicate skill");
+        commit(&duplicate, "duplicate");
+        let mut app = SkilledApp::open(fixture.environment.clone()).expect("open app");
+        app.confirm_source(app.preview_source(&duplicate).expect("preview duplicate"))
+            .expect("register duplicate");
+
+        let (ambiguous, ambiguous_output) =
+            fixture.run_rewritten(&["update", "--skill", "demo", "--yes"], "");
+        assert_eq!(
+            ambiguous,
+            ExitCodeKind::InvalidRequest,
+            "{ambiguous_output}"
+        );
+        assert!(
+            ambiguous_output.contains("names 2 registered variants"),
+            "{ambiguous_output}"
+        );
+        assert!(ambiguous_output.contains("checkout"), "{ambiguous_output}");
+        assert!(ambiguous_output.contains("duplicate"), "{ambiguous_output}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_variant_that_becomes_ambiguous_during_confirmation_is_not_applied() {
+        let fixture = VendoredCliFixture::new();
+        fixture.update_origin();
+        let before = fs::read(fixture.checkout.join("skills/demo/SKILL.md")).expect("skill");
+        let duplicate = fixture.temporary.path().join("confirmation-race");
+        Command::new("git")
+            .args(["init", "-b", "main"])
+            .arg(&duplicate)
+            .output()
+            .expect("duplicate repository");
+        fs::create_dir_all(duplicate.join("skills/demo")).expect("duplicate skill directory");
+        fs::write(
+            duplicate.join("skills/demo/SKILL.md"),
+            "---\nname: demo\ndescription: duplicate\n---\n",
+        )
+        .expect("duplicate skill");
+        commit(&duplicate, "duplicate");
+        let mut input = RegisterDuringConfirmation {
+            input: Cursor::new(b"y\n".to_vec()),
+            environment: fixture.environment.clone(),
+            duplicate,
+            registered: false,
+        };
+
+        let (code, output) = fixture.with_rewritten_origin(|| {
+            let arguments = vec!["update".to_owned(), "--skill".to_owned(), "demo".to_owned()];
+            let mut output = Vec::new();
+            let code = run(
+                &arguments,
+                fixture.environment.clone(),
+                &mut input,
+                &mut output,
+            );
+            (code, String::from_utf8(output).expect("utf-8 output"))
+        });
+
+        assert_eq!(code, ExitCodeKind::Blocked, "{output}");
+        assert!(input.registered, "confirmation did not run");
+        assert_eq!(
+            fs::read(fixture.checkout.join("skills/demo/SKILL.md")).expect("skill"),
+            before
+        );
+        assert_eq!(fixture.origin_baseline(), fixture.adopted_baseline);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn incomplete_installation_evidence_blocks_a_vendored_skill_update() {
+        let fixture = VendoredCliFixture::new();
+        Store::open(&fixture.environment.data_dir)
+            .expect("open store")
+            .set_setup_complete(false)
+            .expect("mark setup incomplete");
+
+        let (code, output) = fixture.run_rewritten(&["update", "--skill", "demo", "--yes"], "");
+
+        assert_eq!(code, ExitCodeKind::Blocked, "{output}");
+        assert!(
+            output.contains("installation scan is incomplete"),
+            "{output}"
+        );
+        assert!(output.contains("nothing was written"), "{output}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_up_to_date_vendored_skill_reports_a_noop_without_prompting() {
+        let fixture = VendoredCliFixture::new();
+        let (code, output) = fixture.run_rewritten(&["update", "--skill", "demo", "--yes"], "");
+
+        assert_eq!(code, ExitCodeKind::Success, "{output}");
+        assert!(output.contains("Nothing to do."), "{output}");
+        assert_eq!(fixture.origin_baseline(), fixture.adopted_baseline);
+    }
+
+    #[test]
+    fn vendored_exit_codes_keep_partial_and_verification_distinct() {
+        let cases = [
+            (ApplyStatus::NoOp, ExitCodeKind::Success),
+            (ApplyStatus::Blocked, ExitCodeKind::Blocked),
+            (ApplyStatus::Partial, ExitCodeKind::PartialApply),
+            (
+                ApplyStatus::VerificationFailed,
+                ExitCodeKind::VerificationFailed,
+            ),
+            (
+                ApplyStatus::VerificationIncomplete,
+                ExitCodeKind::VerificationIncomplete,
+            ),
+            (ApplyStatus::Verified, ExitCodeKind::Success),
+        ];
+        for (status, expected) in cases {
+            let mut outcome = ApplyOutcome::fixture();
+            outcome.status = status;
+            assert_eq!(exit_code_for_vendored(&outcome), expected);
+        }
     }
 }
