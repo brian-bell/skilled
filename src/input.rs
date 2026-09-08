@@ -47,12 +47,38 @@ pub fn action_for_app_key(app: &SkilledApp, key: KeyEvent) -> Option<Action> {
             _ => action,
         };
     }
-    if app.pending_vendored().is_some() {
-        let action = match key.code {
-            KeyCode::Esc => Some(Action::DismissVendoredCheck),
-            KeyCode::Up | KeyCode::Char('k') => Some(Action::ScrollDetail(-1)),
-            KeyCode::Down | KeyCode::Char('j') => Some(Action::ScrollDetail(1)),
-            _ => None,
+    if let Some(prompt) = app.pending_vendored() {
+        let action = match prompt {
+            crate::app::VendoredPrompt::Checking => match key.code {
+                KeyCode::Esc => Some(Action::DismissVendoredCheck),
+                KeyCode::Up | KeyCode::Char('k') => Some(Action::ScrollDetail(-1)),
+                KeyCode::Down | KeyCode::Char('j') => Some(Action::ScrollDetail(1)),
+                _ => None,
+            },
+            crate::app::VendoredPrompt::Preview(_) => match key.code {
+                KeyCode::Enter if app.vendored_preview_fully_seen() => {
+                    Some(Action::ConfirmVendoredApply)
+                }
+                KeyCode::Esc => Some(Action::DismissVendoredCheck),
+                KeyCode::Up | KeyCode::Char('k') => Some(Action::ScrollDetail(-1)),
+                KeyCode::Down | KeyCode::Char('j') => Some(Action::ScrollDetail(1)),
+                _ => None,
+            },
+            // The write has crossed its confirmation boundary. It must finish
+            // and report; Esc cannot abandon an unknown staging state.
+            crate::app::VendoredPrompt::Applying => match key.code {
+                KeyCode::Up | KeyCode::Char('k') => Some(Action::ScrollDetail(-1)),
+                KeyCode::Down | KeyCode::Char('j') => Some(Action::ScrollDetail(1)),
+                _ => None,
+            },
+            crate::app::VendoredPrompt::Report(_) | crate::app::VendoredPrompt::Failed(_) => {
+                match key.code {
+                    KeyCode::Esc => Some(Action::DismissVendoredCheck),
+                    KeyCode::Up | KeyCode::Char('k') => Some(Action::ScrollDetail(-1)),
+                    KeyCode::Down | KeyCode::Char('j') => Some(Action::ScrollDetail(1)),
+                    _ => None,
+                }
+            }
         };
         return match (key.kind, action) {
             (KeyEventKind::Repeat, Some(Action::ScrollDetail(_))) => action,

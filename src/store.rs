@@ -21,7 +21,7 @@ use crate::{
     validation::InspectionBudget,
 };
 
-const SCHEMA_VERSION: i64 = 12;
+const SCHEMA_VERSION: i64 = 13;
 const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 /// Record one check, unless the stored row was written under a later
 /// generation.
@@ -104,6 +104,7 @@ pub(crate) enum MetadataOperation {
     ReadSources,
     ReadReceipts,
     RecordReceipt,
+    AdvanceOrigin,
 }
 
 /// One cross-process metadata mutation guard.
@@ -788,10 +789,23 @@ impl Store {
         inspection: SourceInspection,
         uninspected: Option<&Path>,
     ) -> Result<Vec<RegisteredSource>> {
-        let refresh = inspection == SourceInspection::Refreshed;
         #[cfg(test)]
         self.fail_if(MetadataOperation::ReadSources)?;
-        let mut statement = self.connection.prepare(
+        Self::load_sources_on(&self.connection, inspection, uninspected)
+    }
+
+    /// Build fresh catalog observations through the connection that owns the
+    /// current metadata transaction. This is deliberately connection-based:
+    /// opening a second `Store` while an immediate mutation guard is held
+    /// asks SQLite for a competing writer and can turn a post-write rescan
+    /// into a lock failure.
+    fn load_sources_on(
+        connection: &Connection,
+        inspection: SourceInspection,
+        uninspected: Option<&Path>,
+    ) -> Result<Vec<RegisteredSource>> {
+        let refresh = inspection == SourceInspection::Refreshed;
+        let mut statement = connection.prepare(
             "SELECT id, label, canonical_path, remote_url, branch, head_revision, dirty, dirty_known,
                     last_scan_at, repository_identity
              FROM source_repositories ORDER BY label, canonical_path",
@@ -910,7 +924,7 @@ impl Store {
                             // registered repository for every later update.
                             // Re-registration is the only way an identity is
                             // recorded (skilled-t0f).
-                            self.connection.execute(
+                            connection.execute(
                                 "UPDATE source_repositories SET
                                 remote_url = ?1,
                                 branch = ?2,
@@ -962,7 +976,7 @@ impl Store {
             } else {
                 inspected
             };
-            let mut catalog_statement = self.connection.prepare(
+            let mut catalog_statement = connection.prepare(
                 "SELECT relative_path, classification, claude_code, codex, opencode
                  FROM catalog_roots WHERE source_id = ?1 ORDER BY relative_path",
             )?;
@@ -1088,6 +1102,60 @@ impl Mutation<'_> {
             return Err(Error::SourceChangedAfterPreview);
         }
         Ok(())
+    }
+
+    /// Advance only the exact adopted baseline protected by this mutation.
+    /// The association continues to describe initial adoption; the revision
+    /// describes the content proven after replacement, never earlier history.
+    pub(crate) fn advance_origin(
+        &self,
+        expected: &OriginRecord,
+        baseline: &crate::provenance::Baseline,
+        revision: &str,
+    ) -> Result<()> {
+        #[cfg(test)]
+        self.fail_if(MetadataOperation::AdvanceOrigin)?;
+        validate_origin_revision(revision)?;
+        if baseline.version != 1 || !is_sha256_digest(&baseline.digest) {
+            return Err(invalid_origin_metadata("invalid replacement baseline"));
+        }
+        let current = origin_record_on(
+            &self.transaction,
+            expected.source_id,
+            &expected.catalog_relative_path,
+            &expected.variant_relative_path,
+        )?;
+        if current.as_ref() != Some(expected) {
+            return Err(Error::SourceChangedAfterPreview);
+        }
+        let changed = self.transaction.execute(
+            "UPDATE origin_baselines SET baseline_version=?1, baseline_digest=?2, proven_revision=?3 WHERE source_id=?4 AND catalog_relative_path=?5 AND variant_relative_path=?6",
+            params![baseline.version, baseline.digest, revision, expected.source_id, stored_path(&expected.catalog_relative_path)?, stored_path(&expected.variant_relative_path)?],
+        )?;
+        if changed != 1 {
+            return Err(Error::SourceChangedAfterPreview);
+        }
+        Ok(())
+    }
+
+    /// Refresh source and catalog observations under this mutation guard.
+    ///
+    /// The selected checkout is intentionally left uninspected: callers use
+    /// this after a replacement that may have run repository programs, so the
+    /// stored Git observation remains the safe one while its catalog is read
+    /// from disk. Other registered repositories retain ordinary refreshed
+    /// inspection.
+    pub(crate) fn registered_sources_leaving_uninspected(
+        &self,
+        uninspected: &Path,
+    ) -> Result<Vec<RegisteredSource>> {
+        #[cfg(test)]
+        self.fail_if(MetadataOperation::ReadSources)?;
+        Store::load_sources_on(
+            &self.transaction,
+            SourceInspection::Refreshed,
+            Some(uninspected),
+        )
     }
 
     /// Record ownership in the transaction that already covers link creation.
@@ -1595,6 +1663,19 @@ fn stored_path(path: &Path) -> Result<String> {
 /// An origin baseline states an intentional user association, so malformed
 /// persisted fields are metadata corruption rather than a second, silently
 /// different provenance answer.
+fn validate_origin_revision(revision: &str) -> Result<()> {
+    if !matches!(revision.len(), 40 | 64)
+        || !revision
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(invalid_origin_metadata(
+            "verified origin revision is not a full lowercase object ID",
+        ));
+    }
+    Ok(())
+}
+
 fn origin_record_on(
     connection: &Connection,
     source_id: i64,
@@ -1630,10 +1711,8 @@ fn origin_record_on(
     else {
         return Ok(None);
     };
-    if proven_revision.is_some() {
-        return Err(invalid_origin_metadata(
-            "an explicit-current-content association must not name a historical revision",
-        ));
+    if let Some(revision) = &proven_revision {
+        validate_origin_revision(revision)?;
     }
     if association != "explicit-current-content" {
         return Err(invalid_origin_metadata("unknown association method"));
@@ -1658,6 +1737,7 @@ fn origin_record_on(
         origin,
         update_ref,
         baseline: crate::provenance::Baseline { version, digest },
+        proven_revision,
     }))
 }
 
@@ -1729,6 +1809,36 @@ mod tests {
 
     use super::*;
 
+    fn adopted_origin_record(store: &Store) -> OriginRecord {
+        store
+            .connection
+            .execute_batch(
+                "INSERT INTO source_repositories
+                    (id, label, canonical_path, head_revision, dirty, dirty_known, last_scan_at)
+                 VALUES (1, 'source', '/source', 'head', 0, 1, 0);
+                 INSERT INTO catalog_roots
+                    (source_id, relative_path, classification, claude_code, codex, opencode)
+                 VALUES (1, '.agents/skills', 'common', 1, 1, 1);",
+            )
+            .expect("source fixture");
+        OriginRecord {
+            source_id: 1,
+            catalog_relative_path: PathBuf::from(".agents/skills"),
+            variant_relative_path: PathBuf::from("format"),
+            origin: crate::provenance::Origin::new(
+                "https://github.com/acme/skills".to_owned(),
+                "skills/format".to_owned(),
+            )
+            .expect("origin fixture"),
+            update_ref: "refs/heads/main".to_owned(),
+            proven_revision: None,
+            baseline: crate::provenance::Baseline {
+                version: 1,
+                digest: "a".repeat(64),
+            },
+        }
+    }
+
     #[test]
     fn registry_fingerprints_distinguish_separators_inside_source_fields() {
         let first = source_fingerprint_record(1, "library", "/one\u{1f}/two");
@@ -1789,6 +1899,7 @@ mod tests {
             )
             .unwrap(),
             update_ref: "refs/heads/main".to_owned(),
+            proven_revision: None,
             baseline: crate::provenance::Baseline {
                 version: 1,
                 digest: "a".repeat(64),
@@ -1834,6 +1945,108 @@ mod tests {
     }
 
     #[test]
+    fn advancing_an_origin_replaces_only_the_expected_baseline() {
+        let temporary = tempfile::tempdir().expect("temporary data directory");
+        let mut store = Store::open(&temporary.path().join("data")).expect("open store");
+        let record = adopted_origin_record(&store);
+        let mutation = store.begin_mutation().expect("begin adoption");
+        mutation.record_origin(&record).expect("record adoption");
+        mutation.commit().expect("commit adoption");
+
+        let baseline = crate::provenance::Baseline {
+            version: 1,
+            digest: "b".repeat(64),
+        };
+        let revision = "c".repeat(40);
+        let mutation = store.begin_mutation().expect("begin advancement");
+        mutation
+            .advance_origin(&record, &baseline, &revision)
+            .expect("advance origin");
+        mutation.commit().expect("commit advancement");
+
+        assert_eq!(
+            store
+                .origin_record(1, Path::new(".agents/skills"), Path::new("format"))
+                .expect("read advanced origin"),
+            Some(OriginRecord {
+                baseline,
+                proven_revision: Some(revision),
+                ..record
+            })
+        );
+    }
+
+    #[test]
+    fn stale_origin_advancement_rolls_back_without_changing_the_record() {
+        let temporary = tempfile::tempdir().expect("temporary data directory");
+        let mut store = Store::open(&temporary.path().join("data")).expect("open store");
+        let record = adopted_origin_record(&store);
+        let mutation = store.begin_mutation().expect("begin adoption");
+        mutation.record_origin(&record).expect("record adoption");
+        mutation.commit().expect("commit adoption");
+
+        let stale = OriginRecord {
+            baseline: crate::provenance::Baseline {
+                version: 1,
+                digest: "d".repeat(64),
+            },
+            ..record.clone()
+        };
+        let mutation = store.begin_mutation().expect("begin stale advancement");
+        assert!(matches!(
+            mutation.advance_origin(
+                &stale,
+                &crate::provenance::Baseline {
+                    version: 1,
+                    digest: "b".repeat(64),
+                },
+                &"c".repeat(40),
+            ),
+            Err(Error::SourceChangedAfterPreview)
+        ));
+        mutation.commit().expect("commit refused advancement");
+
+        assert_eq!(
+            store
+                .origin_record(1, Path::new(".agents/skills"), Path::new("format"))
+                .expect("read unchanged origin"),
+            Some(record)
+        );
+    }
+
+    #[test]
+    fn injected_origin_advancement_failure_leaves_the_record_unchanged() {
+        let temporary = tempfile::tempdir().expect("temporary data directory");
+        let mut store = Store::open(&temporary.path().join("data")).expect("open store");
+        let record = adopted_origin_record(&store);
+        let mutation = store.begin_mutation().expect("begin adoption");
+        mutation.record_origin(&record).expect("record adoption");
+        mutation.commit().expect("commit adoption");
+
+        store.fail_next(MetadataOperation::AdvanceOrigin);
+        let mutation = store.begin_mutation().expect("begin injected failure");
+        assert!(matches!(
+            mutation.advance_origin(
+                &record,
+                &crate::provenance::Baseline {
+                    version: 1,
+                    digest: "b".repeat(64),
+                },
+                &"c".repeat(40),
+            ),
+            Err(Error::Database(rusqlite::Error::InvalidQuery))
+        ));
+        mutation.commit().expect("commit no-op failure");
+
+        assert_eq!(
+            store
+                .origin_record(1, Path::new(".agents/skills"), Path::new("format"))
+                .expect("read unchanged origin"),
+            Some(record)
+        );
+    }
+
+    #[test]
     fn invalid_persisted_origin_fields_fail_closed() {
         let temporary = tempfile::tempdir().expect("temporary data directory");
         let store = Store::open(&temporary.path().join("data")).expect("open store");
@@ -1863,19 +2076,24 @@ mod tests {
             .connection
             .execute(
                 "UPDATE origin_baselines SET baseline_version = 1,
-                     baseline_digest = 'not-a-digest', proven_revision = 'deadbeef'",
+                     baseline_digest = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                     proven_revision = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'",
                 [],
             )
-            .expect("historical claim fixture");
-        let invalid = store.origin_record(1, Path::new(".agents/skills"), Path::new("format"));
-        assert!(matches!(
-            invalid,
-            Err(Error::InvalidSetupMetadata(message)) if message.contains("historical revision")
-        ));
+            .expect("verified revision fixture");
+        assert!(
+            store
+                .origin_record(1, Path::new(".agents/skills"), Path::new("format"))
+                .expect("a full verified revision is valid")
+                .is_some()
+        );
 
         store
             .connection
-            .execute("UPDATE origin_baselines SET proven_revision = NULL", [])
+            .execute(
+                "UPDATE origin_baselines SET proven_revision = NULL, baseline_digest = 'not-a-digest'",
+                [],
+            )
             .expect("invalid digest fixture");
         let invalid = store.origin_record(1, Path::new(".agents/skills"), Path::new("format"));
         assert!(matches!(
@@ -1918,6 +2136,7 @@ mod tests {
             )
             .unwrap(),
             update_ref: "refs/heads/main".to_owned(),
+            proven_revision: None,
             baseline: crate::provenance::Baseline {
                 version: 1,
                 digest: "a".repeat(64),
@@ -2429,6 +2648,13 @@ const MIGRATIONS: &[Migration] = &[
                 PRIMARY KEY (source_id, catalog_relative_path, variant_relative_path)
               );",
     },
+    Migration {
+        version: 13,
+        destructive: false,
+        // Schema 13 recognizes verified replacement revisions in the existing
+        // nullable column. Older binaries must refuse these newer semantics.
+        sql: "SELECT 1;",
+    },
 ];
 
 fn migrate(connection: &mut Connection, database_path: &Path) -> Result<()> {
@@ -2816,7 +3042,7 @@ mod migration_tests {
             )
             .expect("seed schema 11 registration");
 
-        migrate_with(&mut connection, &database, MIGRATIONS).expect("migrate to schema 12");
+        migrate_with(&mut connection, &database, MIGRATIONS).expect("migrate to schema 13");
         connection
             .execute_batch(
                 "INSERT INTO origin_baselines
@@ -2841,7 +3067,7 @@ mod migration_tests {
             connection
                 .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                 .expect("read migrated version"),
-            12
+            13
         );
         assert_eq!(
             connection

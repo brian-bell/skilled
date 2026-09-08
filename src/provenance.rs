@@ -7,8 +7,9 @@ mod baseline;
 use baseline::open_file_without_following;
 pub use baseline::{Baseline, directory_hash};
 pub(crate) use baseline::{
-    DirectoryManifest, ManifestEntryKind, baseline_from_regular_entries_with_directory_modes,
-    observe_directory_hash, observe_directory_manifest,
+    DirectoryManifest, ManifestEntry, ManifestEntryKind,
+    baseline_from_regular_entries_with_directory_modes, observe_directory_hash,
+    observe_directory_manifest,
 };
 
 use std::{

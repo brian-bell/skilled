@@ -4,6 +4,11 @@
 //! captures the local tree before contacting the origin, refuses drift, and
 //! builds the complete expected tree from a pinned origin snapshot.
 
+mod apply;
+mod replacement;
+pub use apply::{ApplyOutcome, ApplyPlan, ApplyStatus};
+pub(crate) use apply::{apply, plan_apply};
+
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
@@ -30,7 +35,7 @@ use crate::{
 /// Everything a worker needs after the UI has explicitly requested a check.
 /// The local manifest was captured before any network work and is rechecked on
 /// both sides of the fetch.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct CheckRequest {
     source: RegisteredSource,
     variant: VariantRef,
@@ -55,6 +60,7 @@ pub(crate) struct AffectedInstallation {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Preview {
+    request: Option<Box<CheckRequest>>,
     revision: String,
     origin_repository: String,
     origin_subdirectory: String,
@@ -108,7 +114,7 @@ impl Preview {
     }
 
     /// All filesystem targets are shown as absolute paths. This is a
-    /// read-only preview; applying it belongs to the later executor slice.
+    /// read-only preview; the guarded apply plan adds staging and recovery paths.
     pub fn lines(&self) -> Vec<String> {
         let mut lines = vec![
             "Check complete; this preview does not write files or metadata.".into(),
@@ -192,6 +198,7 @@ impl Preview {
             digest: "2".repeat(64),
         };
         Self {
+            request: None,
             revision: "0123456789abcdef0123456789abcdef01234567".into(),
             origin_repository: "https://github.com/example/demo".into(),
             origin_subdirectory: "skills/demo".into(),
@@ -357,6 +364,7 @@ pub(crate) fn check(
         })
         .collect();
     Ok(Some(Preview {
+        request: Some(Box::new(request.clone())),
         revision: snapshot.revision,
         origin_repository: request.record.origin.repository().to_owned(),
         origin_subdirectory: request.record.origin.subdirectory().to_owned(),
@@ -379,22 +387,55 @@ fn recheck_affected_installations(
 ) -> Result<(), AdoptionFailure> {
     let store = Store::open(data_dir).map_err(metadata_failure)?;
     let sources = store.registered_sources().map_err(metadata_failure)?;
+    recheck_installations_from_sources(request, &sources)
+}
+
+#[derive(Debug)]
+enum InstallationRecheckFailure {
+    Incomplete,
+    Changed,
+}
+
+impl From<InstallationRecheckFailure> for AdoptionFailure {
+    fn from(value: InstallationRecheckFailure) -> Self {
+        match value {
+            InstallationRecheckFailure::Incomplete => {
+                "Installation scan became incomplete during the origin check".into()
+            }
+            InstallationRecheckFailure::Changed => {
+                "Affected installations changed during the origin check".into()
+            }
+        }
+    }
+}
+
+fn recheck_installations_from_sources(
+    request: &CheckRequest,
+    sources: &[RegisteredSource],
+) -> Result<(), AdoptionFailure> {
+    inspect_installations_from_sources(request, sources).map_err(Into::into)
+}
+
+fn inspect_installations_from_sources(
+    request: &CheckRequest,
+    sources: &[RegisteredSource],
+) -> Result<(), InstallationRecheckFailure> {
     let mut agents = crate::agents::detect_agents(&request.environment);
     for agent in &mut agents {
         agent.set_selected(request.selected_agents[agent.kind().index()]);
     }
     let refreshed = crate::inventory::scan_installations(
         &agents,
-        &sources,
+        sources,
         crate::inventory::RegistryAvailability::Readable,
     );
     if !refreshed.counts_are_complete() || !refreshed.registry_is_complete() {
-        return Err("Installation scan became incomplete during the origin check".into());
+        return Err(InstallationRecheckFailure::Incomplete);
     }
     let mut refreshed_affected = affected_installations(&refreshed, &request.variant);
     refreshed_affected.sort_by(|left, right| left.path.cmp(&right.path));
     if refreshed_affected != request.affected_installations {
-        return Err("Affected installations changed during the origin check".into());
+        return Err(InstallationRecheckFailure::Changed);
     }
     Ok(())
 }
@@ -791,11 +832,30 @@ mod tests {
         VariantRef,
         InventorySnapshot,
     ) {
+        adopted_fixture_at(false)
+    }
+
+    fn adopted_fixture_at(
+        repository_root: bool,
+    ) -> (
+        tempfile::TempDir,
+        Store,
+        RegisteredSource,
+        VariantRef,
+        InventorySnapshot,
+    ) {
         let temporary = tempfile::tempdir().unwrap();
-        let root = temporary.path().join("source");
-        fs::create_dir_all(root.join("skills/demo")).unwrap();
+        let root = temporary
+            .path()
+            .join(if repository_root { "demo" } else { "source" });
+        let skill = if repository_root {
+            root.clone()
+        } else {
+            root.join("skills/demo")
+        };
+        fs::create_dir_all(&skill).unwrap();
         fs::write(
-            root.join("skills/demo/SKILL.md"),
+            skill.join("SKILL.md"),
             "---\nname: demo\ndescription: Fixture\n---\n",
         )
         .unwrap();
@@ -1288,6 +1348,254 @@ mod tests {
         );
         assert_eq!(fs::read_link(codex.join("demo")).unwrap(), target);
         assert_eq!(fs::read_link(claude.join("demo")).unwrap(), target);
+
+        let plan = plan_apply(&preview, &environment.data_dir).unwrap();
+        let result = apply(&plan, &environment.data_dir);
+        assert_eq!(result.status, ApplyStatus::Verified, "{:?}", result.lines());
+        let saved = store
+            .origin_record(
+                variant.source_id(),
+                variant.catalog_relative_path(),
+                variant.variant_relative_path(),
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved.baseline, preview.proposed_baseline);
+        assert_eq!(
+            saved.proven_revision.as_deref(),
+            Some(preview.revision.as_str())
+        );
+        assert_eq!(
+            fs::read(source_root.join("skills/demo/LICENSE")).unwrap(),
+            b"upstream license\n"
+        );
+        assert_eq!(fs::read_link(codex.join("demo")).unwrap(), target);
+        assert_eq!(fs::read_link(claude.join("demo")).unwrap(), target);
+    }
+
+    pub(super) fn apply_fixture() -> (tempfile::TempDir, Store, Preview) {
+        apply_fixture_at(false)
+    }
+
+    fn apply_fixture_at(repository_root: bool) -> (tempfile::TempDir, Store, Preview) {
+        let (temporary, store, source, variant, inventory) = adopted_fixture_at(repository_root);
+        let request = prepare(
+            &source,
+            variant,
+            &store,
+            &inventory,
+            &environment(&temporary),
+        )
+        .unwrap();
+        let manifest = final_manifest(
+            &request.local,
+            &[
+                entry("SKILL.md", b"---\nname: demo\ndescription: Updated\n---\n"),
+                entry("extra/info.txt", b"new content\n"),
+            ],
+            &[],
+            "demo",
+        )
+        .unwrap()
+        .manifest;
+        let mut preview = Preview::fixture();
+        preview.revision = "a".repeat(40);
+        preview.checkout = request.checkout.clone();
+        preview.skill = request
+            .checkout
+            .join(request.variant.variant_relative_path());
+        preview.old_baseline = request.record.baseline.clone();
+        preview.proposed_baseline = manifest.baseline;
+        preview.changes = changes(
+            &request.local,
+            &DirectoryManifest {
+                baseline: preview.proposed_baseline.clone(),
+                entries: manifest.entries.clone(),
+            },
+            &request.checkout,
+            request.variant.variant_relative_path(),
+        );
+        preview.expected_entries = manifest
+            .entries
+            .into_iter()
+            .map(|entry| ExpectedEntry {
+                relative_path: entry.relative_path,
+                kind: entry.kind,
+                executable: entry.executable,
+                bytes: entry.bytes,
+            })
+            .collect();
+        preview.affected_installations = request.affected_installations.clone();
+        preview.request = Some(Box::new(request));
+        (temporary, store, preview)
+    }
+
+    #[test]
+    fn repository_root_catalog_uses_the_same_guarded_apply() {
+        let (temporary, _store, preview) = apply_fixture_at(true);
+        assert_eq!(preview.skill, preview.checkout);
+        let data = temporary.path().join("data");
+        let head = fs::read(preview.checkout.join(".git/HEAD")).unwrap();
+        let index = fs::read(preview.checkout.join(".git/index")).unwrap();
+        let plan = plan_apply(&preview, &data).unwrap();
+        let outcome = apply(&plan, &data);
+        assert_eq!(
+            outcome.status,
+            ApplyStatus::Verified,
+            "{:?}",
+            outcome.lines()
+        );
+        assert_eq!(fs::read(preview.checkout.join(".git/HEAD")).unwrap(), head);
+        assert_eq!(
+            fs::read(preview.checkout.join(".git/index")).unwrap(),
+            index
+        );
+    }
+
+    #[test]
+    fn noop_check_does_not_require_a_clean_attached_checkout() {
+        for detached in [false, true] {
+            let (temporary, _store, mut preview) = apply_fixture();
+            let local = &preview.request.as_ref().unwrap().local;
+            preview.proposed_baseline = local.baseline.clone();
+            preview.expected_entries = local
+                .entries
+                .iter()
+                .map(|e| ExpectedEntry {
+                    relative_path: e.relative_path.clone(),
+                    kind: e.kind,
+                    executable: e.executable,
+                    bytes: e.bytes.clone(),
+                })
+                .collect();
+            preview.changes.clear();
+            let args = if detached {
+                vec!["checkout", "--detach", "HEAD"]
+            } else {
+                fs::write(preview.checkout.join("outside.txt"), "unrelated work").unwrap();
+                vec!["add", "outside.txt"]
+            };
+            assert!(
+                Command::new("git")
+                    .arg("-C")
+                    .arg(&preview.checkout)
+                    .args(args)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+            let data = temporary.path().join("data");
+            let plan = plan_apply(&preview, &data).unwrap();
+            assert!(plan.is_noop());
+            assert!(!plan.can_apply());
+            assert!(plan.lines().iter().any(|line| line.contains("up to date")));
+            assert_eq!(apply(&plan, &data).status, ApplyStatus::NoOp);
+        }
+    }
+
+    #[test]
+    fn apply_rechecks_local_content_without_rebaselining() {
+        let (temporary, store, preview) = apply_fixture();
+        let data = temporary.path().join("data");
+        let plan = plan_apply(&preview, &data).unwrap();
+        fs::write(preview.skill.join("unexpected"), "local work").unwrap();
+        let outcome = apply(&plan, &data);
+        assert_eq!(
+            outcome.status,
+            ApplyStatus::Blocked,
+            "{:?}",
+            outcome.lines()
+        );
+        assert!(!preview.skill.join("extra").exists());
+        let request = preview.request.unwrap();
+        assert_eq!(
+            store.origin_records(request.variant.source_id()).unwrap(),
+            vec![request.record]
+        );
+    }
+
+    #[test]
+    fn apply_refuses_changed_index_and_operation_markers() {
+        for marker in ["index", "MERGE_HEAD"] {
+            let (temporary, _store, preview) = apply_fixture();
+            let data = temporary.path().join("data");
+            let plan = plan_apply(&preview, &data).unwrap();
+            fs::write(preview.checkout.join(".git").join(marker), "changed").unwrap();
+            let outcome = apply(&plan, &data);
+            assert_eq!(
+                outcome.status,
+                ApplyStatus::Blocked,
+                "{:?}",
+                outcome.lines()
+            );
+            assert!(!preview.skill.join("extra").exists());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn apply_refuses_a_new_alias_after_preview() {
+        let (temporary, _store, preview) = apply_fixture();
+        let data = temporary.path().join("data");
+        let plan = plan_apply(&preview, &data).unwrap();
+        let root = temporary
+            .path()
+            .join("home")
+            .join(crate::agents::adapter(crate::AgentKind::Codex).native_skill_root());
+        fs::create_dir_all(&root).unwrap();
+        std::os::unix::fs::symlink(&preview.skill, root.join("alias")).unwrap();
+        let outcome = apply(&plan, &data);
+        assert_eq!(
+            outcome.status,
+            ApplyStatus::Blocked,
+            "{:?}",
+            outcome.lines()
+        );
+        assert!(!preview.skill.join("extra").exists());
+    }
+
+    #[test]
+    fn apply_advances_baseline_only_once_and_preserves_git_state() {
+        let (temporary, store, preview) = apply_fixture();
+        let data = temporary.path().join("data");
+        let plan = plan_apply(&preview, &data).unwrap();
+        let index = fs::read(preview.checkout.join(".git/index")).unwrap();
+        let head = fs::read(preview.checkout.join(".git/HEAD")).unwrap();
+        let outcome = apply(&plan, &data);
+        assert_eq!(
+            outcome.status,
+            ApplyStatus::Verified,
+            "{:?}",
+            outcome.lines()
+        );
+        assert_eq!(
+            fs::read(preview.skill.join("extra/info.txt")).unwrap(),
+            b"new content\n"
+        );
+        assert_eq!(
+            fs::read(preview.checkout.join(".git/index")).unwrap(),
+            index
+        );
+        assert_eq!(fs::read(preview.checkout.join(".git/HEAD")).unwrap(), head);
+        let request = preview.request.as_deref().unwrap();
+        let saved = store
+            .origin_records(request.variant.source_id())
+            .unwrap()
+            .remove(0);
+        assert_eq!(saved.proven_revision, Some(preview.revision.clone()));
+        assert_eq!(saved.baseline, preview.proposed_baseline);
+        let sources = store.registered_sources().unwrap();
+        let candidates: Vec<_> = sources[0]
+            .catalogs()
+            .iter()
+            .flat_map(|catalog| catalog.candidates())
+            .collect();
+        assert_eq!(
+            candidates.len(),
+            1,
+            "retained staging must not become a catalog candidate"
+        );
+        assert_eq!(apply(&plan, &data).status, ApplyStatus::Blocked);
     }
 
     #[test]

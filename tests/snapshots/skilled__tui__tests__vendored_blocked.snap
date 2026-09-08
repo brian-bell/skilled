@@ -3,11 +3,11 @@ source: src/tui.rs
 expression: screen
 ---
 
-  ┌ Skill check needs attention ────────────────────────── read-only preview ┐
+  ┌ Skill check needs attention ─────────────────────────────── origin check ┐
   │                                                                          │
   │  Check blocked: Modified skill: content differs from the adopted baseli  │
   │  ne                                                                      │
-  │  No skill content or provenance was changed.                             │
+  │  No replacement was started.                                             │
   │                                                                          │
   │                                                                          │
   │                                                                          │
@@ -22,6 +22,6 @@ expression: screen
   │                                                                          │
   │                                                                          │
   │  ──────────────────────────────────────────────────────────────────────  │
-  │  Read-only result — no changes applied                        Esc Close  │
+  │  Check blocked — no replacement was started                   Esc Close  │
   │                                                                          │
   └──────────────────────────────────────────────────────────────────────────┘

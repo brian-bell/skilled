@@ -20,6 +20,7 @@ pub fn run(environment: AppEnvironment) -> Result<()> {
 
     loop {
         app.drain_vendored_check();
+        app.drain_vendored_apply();
         let effects = app.drain_update_check();
         app.perform_effects(&effects)?;
         // The frame measures what the reducer cannot see, so its report is
@@ -38,7 +39,10 @@ pub fn run(environment: AppEnvironment) -> Result<()> {
         }
         app.note_detail_max_scroll(feedback.detail_max_scroll());
         app.note_update_preview_fully_seen(feedback.update_preview_fully_seen());
-        let event = if app.update_check_in_flight() || app.vendored_check_in_flight() {
+        let event = if app.update_check_in_flight()
+            || app.vendored_check_in_flight()
+            || app.vendored_apply_in_flight()
+        {
             event::poll(Duration::from_millis(100))?
                 .then(event::read)
                 .transpose()?

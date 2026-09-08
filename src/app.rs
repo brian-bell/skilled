@@ -43,22 +43,32 @@ use crate::{
     validation::valid_skill_name,
 };
 
-/// An explicit origin check never writes the selected skill. Its completed
-/// preview is informational until a separate apply workflow is implemented.
+/// The explicit origin flow owns the keyboard from its cancellable check
+/// through the guarded replacement report. The replacement itself is never
+/// cancellable: once it has started, it must finish and account for the
+/// filesystem state it leaves behind.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum VendoredPrompt {
     Checking,
-    Preview(Box<crate::vendored::Preview>),
+    Preview(Box<crate::vendored::ApplyPlan>),
+    Applying,
+    Report(crate::vendored::ApplyOutcome),
     Failed(crate::adoption::AdoptionFailure),
 }
 
 struct VendoredCheckRun {
     receiver: Receiver<
-        std::result::Result<Option<crate::vendored::Preview>, crate::adoption::AdoptionFailure>,
+        std::result::Result<Option<crate::vendored::ApplyPlan>, crate::adoption::AdoptionFailure>,
     >,
     handle: JoinHandle<()>,
     cancelled: Arc<AtomicBool>,
     child: Arc<Mutex<Option<Child>>>,
+}
+
+struct VendoredApplyRun {
+    receiver: Receiver<crate::vendored::ApplyOutcome>,
+    handle: JoinHandle<()>,
+    confirmed_plan: Vec<String>,
 }
 
 /// The editable origin declaration; focus and errors belong to the UI session.
@@ -267,6 +277,7 @@ pub enum Action {
     /// Nothing is written by this, and nothing is written by anything until
     /// [`Action::ConfirmOperation`] is applied to the preview it produces.
     BeginVendoredCheck,
+    ConfirmVendoredApply,
     DismissVendoredCheck,
     BeginAdoption,
     AppendAdoptionCharacter(char),
@@ -319,6 +330,7 @@ pub enum Effect {
     /// carries no roots.
     CheckVendoredOrigin,
     CancelVendoredCheck,
+    ApplyVendored,
     BeginAdoption,
     PreviewAdoption,
     ApplyAdoption,
@@ -785,6 +797,7 @@ pub struct SkilledApp {
     focused_update: usize,
     pending_vendored: Option<VendoredPrompt>,
     vendored_check_run: Option<VendoredCheckRun>,
+    vendored_apply_run: Option<VendoredApplyRun>,
     pending_adoption: Option<crate::adoption::AdoptionPrompt>,
     pending_update: Option<RepositoryUpdatePrompt>,
     update_preview_fully_seen: bool,
@@ -914,6 +927,7 @@ impl SkilledApp {
             focused_update: 0,
             pending_vendored: None,
             vendored_check_run: None,
+            vendored_apply_run: None,
             pending_adoption: None,
             pending_update: None,
             update_preview_fully_seen: false,
@@ -1305,6 +1319,7 @@ impl SkilledApp {
     pub fn can_check_vendored_selection(&self) -> bool {
         self.can_install_selection()
             && self.vendored_check_run.is_none()
+            && self.vendored_apply_run.is_none()
             && !self.update_check_in_flight()
     }
 
@@ -1314,6 +1329,18 @@ impl SkilledApp {
 
     pub fn vendored_check_in_flight(&self) -> bool {
         self.vendored_check_run.is_some()
+    }
+
+    pub fn vendored_apply_in_flight(&self) -> bool {
+        self.vendored_apply_run.is_some()
+    }
+
+    /// A guarded replacement is available only after the complete, rendered
+    /// mutation plan has been seen. A no-op has nothing to confirm.
+    pub fn vendored_preview_fully_seen(&self) -> bool {
+        matches!(self.pending_vendored, Some(VendoredPrompt::Preview(ref plan)) if plan.can_apply())
+            && self.detail_measured
+            && self.detail_scroll >= self.detail_max_scroll
     }
 
     fn vendored_failure(&mut self, failure: crate::adoption::AdoptionFailure) {
@@ -1364,7 +1391,12 @@ impl SkilledApp {
         let data_dir = self.environment.data_dir.clone();
         let handle = std::thread::spawn(move || {
             let result =
-                crate::vendored::check(request, &data_dir, &worker_cancelled, &worker_child);
+                crate::vendored::check(request, &data_dir, &worker_cancelled, &worker_child)
+                    .and_then(|preview| {
+                        preview
+                            .map(|preview| crate::vendored::plan_apply(&preview, &data_dir))
+                            .transpose()
+                    });
             let _ = sender.send(result);
         });
         self.vendored_check_run = Some(VendoredCheckRun {
@@ -1393,9 +1425,7 @@ impl SkilledApp {
             self.retire_update_worker(run.handle);
         }
         match result {
-            Ok(Some(preview)) => {
-                self.pending_vendored = Some(VendoredPrompt::Preview(Box::new(preview)))
-            }
+            Ok(Some(plan)) => self.pending_vendored = Some(VendoredPrompt::Preview(Box::new(plan))),
             Ok(None) => self.pending_vendored = None,
             Err(failure) => self.vendored_failure(failure),
         }
@@ -1416,6 +1446,80 @@ impl SkilledApp {
             self.retire_update_worker(run.handle);
         }
         self.pending_vendored = None;
+        self.reset_detail_scroll();
+    }
+
+    fn start_vendored_apply(&mut self) {
+        if self.vendored_apply_run.is_some() || !self.vendored_preview_fully_seen() {
+            return;
+        }
+        let Some(VendoredPrompt::Preview(plan)) = self.pending_vendored.as_ref() else {
+            return;
+        };
+        let plan = (**plan).clone();
+        let data_dir = self.environment.data_dir.clone();
+        let confirmed_plan = plan.lines();
+        let (sender, receiver) = mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            let _ = sender.send(crate::vendored::apply(&plan, &data_dir));
+        });
+        self.vendored_apply_run = Some(VendoredApplyRun {
+            receiver,
+            handle,
+            confirmed_plan,
+        });
+        self.pending_vendored = Some(VendoredPrompt::Applying);
+        self.reset_detail_scroll();
+    }
+
+    /// Finish a replacement at the event-loop boundary. The filesystem and
+    /// metadata work happens on the worker; the state it left behind is then
+    /// restated before its report is shown.
+    pub fn drain_vendored_apply(&mut self) {
+        let Some(run) = self.vendored_apply_run.as_ref() else {
+            return;
+        };
+        let outcome = match run.receiver.try_recv() {
+            Ok(outcome) => outcome,
+            Err(TryRecvError::Empty) => return,
+            Err(TryRecvError::Disconnected) => {
+                let confirmed_plan = self
+                    .vendored_apply_run
+                    .take()
+                    .map(|run| {
+                        let _ = run.handle.join();
+                        run.confirmed_plan
+                    })
+                    .unwrap_or_default();
+                // Losing the report does not prove that the worker made no
+                // writes. Use the normal refresh path and withhold success.
+                crate::vendored::ApplyOutcome::unreported(confirmed_plan)
+            }
+        };
+        if let Some(run) = self.vendored_apply_run.take() {
+            self.retire_update_worker(run.handle);
+        }
+        // The result is an account of a write attempt. Re-read the catalog and
+        // agent roots even after a failed attempt so the dialog never claims
+        // the pre-apply state is still current.
+        if outcome.metadata_available() {
+            match self.store().and_then(Store::registered_sources) {
+                Ok(sources) => self.sources = sources,
+                Err(error) => {
+                    self.set_degraded(MetadataFailure::new(
+                        self.metadata_database_path(),
+                        error.to_string(),
+                    ));
+                }
+            }
+        } else {
+            self.set_degraded(MetadataFailure::new(
+                self.metadata_database_path(),
+                "vendored replacement metadata could not be verified",
+            ));
+        }
+        self.rescan_installations();
+        self.pending_vendored = Some(VendoredPrompt::Report(outcome));
         self.reset_detail_scroll();
     }
 
@@ -1853,7 +1957,20 @@ impl SkilledApp {
         if self.pending_vendored.is_some() {
             let effects = match action {
                 Action::Quit => return self.quit_result(),
-                Action::DismissVendoredCheck => vec![Effect::CancelVendoredCheck],
+                Action::ConfirmVendoredApply if self.vendored_preview_fully_seen() => {
+                    vec![Effect::ApplyVendored]
+                }
+                Action::DismissVendoredCheck
+                    if !matches!(self.pending_vendored, Some(VendoredPrompt::Applying)) =>
+                {
+                    if matches!(self.pending_vendored, Some(VendoredPrompt::Checking)) {
+                        vec![Effect::CancelVendoredCheck]
+                    } else {
+                        self.pending_vendored = None;
+                        self.reset_detail_scroll();
+                        Vec::new()
+                    }
+                }
                 Action::ScrollDetail(delta) => {
                     self.scroll_detail(delta);
                     Vec::new()
@@ -2299,6 +2416,7 @@ impl SkilledApp {
             | Action::ConfirmAdoption
             | Action::DismissAdoption
             | Action::DismissVendoredCheck
+            | Action::ConfirmVendoredApply
             | Action::BeginVendoredCheck => Vec::new(),
             Action::BeginInstall => {
                 if self.pending_repair.is_none() && self.can_install_selection() {
@@ -2445,6 +2563,7 @@ impl SkilledApp {
                 Effect::ScanInstallations => self.rescan_installations(),
                 Effect::CheckVendoredOrigin => self.start_vendored_check(),
                 Effect::CancelVendoredCheck => self.cancel_vendored_check(),
+                Effect::ApplyVendored => self.start_vendored_apply(),
                 Effect::BeginAdoption => self.begin_adoption(),
                 Effect::PreviewAdoption => self.preview_adoption(),
                 Effect::ApplyAdoption => self.apply_adoption(),
@@ -4181,6 +4300,12 @@ fn publish_update_worker_failure(
 impl Drop for SkilledApp {
     fn drop(&mut self) {
         self.cancel_vendored_check();
+        // A replacement cannot be cancelled once it starts: staging and the
+        // final replacement must run to their own verification boundary.
+        // Joining here keeps that account tied to this application lifetime.
+        if let Some(run) = self.vendored_apply_run.take() {
+            let _ = run.handle.join();
+        }
         // Cancelled workers have already received their cancellation signal.
         // Join them here so no origin fetch outlives the application.
         for handle in self.retired_update_workers.drain(..) {
@@ -4380,10 +4505,13 @@ mod tests {
     }
 
     #[test]
-    fn vendored_preview_owns_scrolling_and_cannot_apply_or_navigate() {
+    fn vendored_preview_requires_the_complete_plan_and_owns_the_keyboard() {
         let (_temporary, mut app) = test_app();
-        app.pending_vendored = Some(VendoredPrompt::Checking);
+        app.pending_vendored = Some(VendoredPrompt::Preview(Box::new(
+            crate::vendored::ApplyPlan::fixture(),
+        )));
         app.detail_max_scroll = 4;
+        app.detail_measured = true;
         app.update(Action::ScrollDetail(1));
         assert_eq!(app.detail_scroll(), 1);
         for action in [
@@ -4393,11 +4521,133 @@ mod tests {
             Action::BeginInstall,
         ] {
             assert!(app.update(action).effects().is_empty());
-            assert_eq!(app.pending_vendored, Some(VendoredPrompt::Checking));
+            assert!(matches!(
+                app.pending_vendored,
+                Some(VendoredPrompt::Preview(_))
+            ));
         }
+        assert!(
+            app.update(Action::ConfirmVendoredApply)
+                .effects()
+                .is_empty()
+        );
+        app.detail_scroll = app.detail_max_scroll;
+        assert_eq!(
+            app.update(Action::ConfirmVendoredApply).effects(),
+            [Effect::ApplyVendored]
+        );
         let update = app.update(Action::DismissVendoredCheck);
         app.perform_effects(update.effects()).unwrap();
         assert!(app.pending_vendored().is_none());
+    }
+
+    #[test]
+    fn vendored_readonly_platform_never_offers_apply() {
+        let (_temporary, mut app) = test_app();
+        app.pending_vendored = Some(VendoredPrompt::Preview(Box::new(
+            crate::vendored::ApplyPlan::readonly_fixture(),
+        )));
+        app.detail_measured = true;
+        app.detail_scroll = app.detail_max_scroll;
+        assert!(!app.vendored_preview_fully_seen());
+        assert!(
+            app.update(Action::ConfirmVendoredApply)
+                .effects()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn disconnected_vendored_apply_reports_unknown_writes_and_rescans() {
+        let (_temporary, mut app) = test_app();
+        for agent in &mut app.agents {
+            agent.set_selected(true);
+        }
+        let root = app
+            .environment
+            .home_dir
+            .join(crate::agents::adapter(AgentKind::Codex).native_skill_root())
+            .join("appeared");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join("SKILL.md"),
+            "---\nname: appeared\ndescription: after worker write\n---\n",
+        )
+        .unwrap();
+        let (sender, receiver) = mpsc::channel();
+        drop(sender);
+        app.vendored_apply_run = Some(VendoredApplyRun {
+            receiver,
+            handle: std::thread::spawn(|| {}),
+            confirmed_plan: vec!["Staging: /source/.skilled-update-fixture".into()],
+        });
+        app.pending_vendored = Some(VendoredPrompt::Applying);
+        assert!(
+            !app.inventory
+                .rows()
+                .iter()
+                .any(|row| row.name() == "appeared")
+        );
+        app.drain_vendored_apply();
+        assert!(app.vendored_apply_run.is_none());
+        assert!(
+            app.inventory
+                .rows()
+                .iter()
+                .any(|row| row.name() == "appeared")
+        );
+        let Some(VendoredPrompt::Report(outcome)) = app.pending_vendored() else {
+            panic!("an unknown write outcome must remain a report");
+        };
+        assert_eq!(
+            outcome.status,
+            crate::vendored::ApplyStatus::VerificationIncomplete
+        );
+        let lines = outcome.lines().join("\n");
+        assert!(lines.contains("Files may have changed"));
+        assert!(lines.contains("/source/.skilled-update-fixture"));
+        assert!(!lines.contains("blocked before") && !lines.contains("Update written"));
+    }
+
+    #[test]
+    fn vendored_apply_cannot_be_cancelled_once_started() {
+        let (_temporary, mut app) = test_app();
+        app.pending_vendored = Some(VendoredPrompt::Applying);
+
+        assert!(
+            app.update(Action::DismissVendoredCheck)
+                .effects()
+                .is_empty()
+        );
+        assert_eq!(app.pending_vendored, Some(VendoredPrompt::Applying));
+    }
+
+    #[test]
+    fn vendored_input_withholds_enter_until_the_plan_is_seen_and_locks_apply_escape() {
+        use crossterm::event::{KeyCode, KeyEvent};
+
+        let (_temporary, mut app) = test_app();
+        app.pending_vendored = Some(VendoredPrompt::Preview(Box::new(
+            crate::vendored::ApplyPlan::fixture(),
+        )));
+        app.detail_max_scroll = 1;
+        assert_eq!(
+            crate::input::action_for_app_key(&app, KeyEvent::from(KeyCode::Enter)),
+            None
+        );
+
+        app.detail_measured = true;
+        app.detail_scroll = 1;
+        assert_eq!(
+            crate::input::action_for_app_key(&app, KeyEvent::from(KeyCode::Enter)),
+            Some(Action::ConfirmVendoredApply)
+        );
+
+        app.pending_vendored = Some(VendoredPrompt::Applying);
+        assert_eq!(
+            crate::input::action_for_app_key(&app, KeyEvent::from(KeyCode::Esc)),
+            None
+        );
     }
 
     #[test]
