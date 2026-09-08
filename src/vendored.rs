@@ -41,6 +41,7 @@ pub(crate) struct CheckRequest {
     local: DirectoryManifest,
     affected_installations: Vec<AffectedInstallation>,
     environment: crate::AppEnvironment,
+    selected_agents: [bool; 3],
 }
 
 /// An installation that resolves to the checked variant.  Aliases are kept as
@@ -290,6 +291,12 @@ pub(crate) fn prepare(
         local,
         affected_installations,
         environment: environment.clone(),
+        selected_agents: crate::AgentKind::ALL.map(|agent| {
+            !matches!(
+                inventory.root(agent).status(),
+                crate::inventory::RootStatus::NotSelected
+            )
+        }),
     })
 }
 
@@ -372,7 +379,10 @@ fn recheck_affected_installations(
 ) -> Result<(), AdoptionFailure> {
     let store = Store::open(data_dir).map_err(metadata_failure)?;
     let sources = store.registered_sources().map_err(metadata_failure)?;
-    let agents = crate::agents::detect_agents(&request.environment);
+    let mut agents = crate::agents::detect_agents(&request.environment);
+    for agent in &mut agents {
+        agent.set_selected(request.selected_agents[agent.kind().index()]);
+    }
     let refreshed = crate::inventory::scan_installations(
         &agents,
         &sources,
@@ -746,11 +756,7 @@ fn is_notice(path: &Path) -> bool {
 
 fn line_count(bytes: &[u8]) -> Option<usize> {
     let text = std::str::from_utf8(bytes).ok()?;
-    Some(if text.is_empty() {
-        0
-    } else {
-        text.bytes().filter(|byte| *byte == b'\n').count() + 1
-    })
+    Some(text.lines().count())
 }
 
 fn normalized_executable(executable: bool) -> bool {
@@ -1026,6 +1032,51 @@ mod tests {
                 .contains("changed after the update check began")
         );
         assert!(!temporary.path().join("data/vendored-origin-cache").exists());
+    }
+
+    #[test]
+    fn preview_counts_logical_lines() {
+        for (bytes, expected) in [
+            (&b""[..], Some(0)),
+            (&b"hello"[..], Some(1)),
+            (&b"hello\n"[..], Some(1)),
+            (&b"hello\r\n"[..], Some(1)),
+            (&b"hello\nworld"[..], Some(2)),
+            (&b"hello\n\n"[..], Some(2)),
+            (&b"\xff"[..], None),
+        ] {
+            assert_eq!(line_count(bytes), expected, "{bytes:?}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn post_fetch_rescan_keeps_deselected_roots_out_of_scope() {
+        use std::os::unix::fs::symlink;
+        let (temporary, store, source, variant, _) = adopted_fixture();
+        let environment = environment(&temporary);
+        let root = environment
+            .home_dir
+            .join(crate::agents::adapter(crate::AgentKind::Codex).native_skill_root());
+        fs::create_dir_all(&root).unwrap();
+        let installed = root.join("demo");
+        symlink(temporary.path().join("source/skills/demo"), &installed).unwrap();
+        let mut agents = crate::agents::detect_agents(&environment);
+        agents[crate::AgentKind::Codex.index()].set_selected(false);
+        let inventory = crate::inventory::scan_installations(
+            &agents,
+            std::slice::from_ref(&source),
+            RegistryAvailability::Readable,
+        );
+        let request = prepare(&source, variant, &store, &inventory, &environment).unwrap();
+        assert!(request.affected_installations.is_empty());
+        recheck_affected_installations(&request, &environment.data_dir).unwrap();
+        // An invalid root must also remain unobserved, rather than making an
+        // otherwise complete selected-agent inventory fail after the fetch.
+        fs::remove_file(installed).unwrap();
+        fs::remove_dir(&root).unwrap();
+        fs::write(&root, "not a directory").unwrap();
+        recheck_affected_installations(&request, &environment.data_dir).unwrap();
     }
 
     #[cfg(unix)]
