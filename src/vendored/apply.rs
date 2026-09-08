@@ -653,7 +653,12 @@ fn verify_installations(
         {
             outcome.status = ApplyStatus::VerificationFailed;
         }
-        failure.into()
+        AdoptionFailure::from(failure)
+    })?;
+    recheck_unique_name(request, sources).inspect_err(|_| {
+        if outcome.status == ApplyStatus::VerificationIncomplete {
+            outcome.status = ApplyStatus::VerificationFailed;
+        }
     })
 }
 
@@ -683,7 +688,8 @@ fn rescan_under_guard(
     {
         return Err("Selected source registration changed after preview".into());
     }
-    recheck_installations_from_sources(request, &sources)
+    recheck_installations_from_sources(request, &sources)?;
+    recheck_unique_name(request, &sources)
 }
 
 fn recheck_under_guard(
