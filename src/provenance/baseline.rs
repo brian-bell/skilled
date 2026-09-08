@@ -188,12 +188,28 @@ pub(crate) fn baseline_from_regular_entries_with_directory_modes(
     // Empty directories have no Git tree entry but are content the local
     // baseline observed. A preview which promises to retain them must include
     // them in its expected digest rather than accidentally advertising a noop.
-    paths.extend(executable_directories.keys().cloned());
+    for directory in executable_directories.keys() {
+        paths.extend(directory.ancestors().map(Path::to_path_buf));
+    }
     for (path, _, _) in files {
         let mut parent = path.parent();
         while let Some(directory) = parent {
             paths.insert(directory.to_path_buf());
             parent = directory.parent();
+        }
+    }
+    // Validate the complete tree, including retained empty directories and
+    // implicit parents. A file cannot occupy a directory's path or ancestor.
+    let directory_names = paths
+        .iter()
+        .map(|path| path.to_string_lossy().to_lowercase())
+        .collect::<BTreeSet<_>>();
+    for (file, _, _) in files {
+        if directory_names.contains(&file.to_string_lossy().to_lowercase()) {
+            return Err(format!(
+                "candidate manifest has a file/directory collision: {}",
+                file.display()
+            ));
         }
     }
     let mut entries = Vec::with_capacity(paths.len() + files.len());

@@ -1291,6 +1291,34 @@ mod tests {
     }
 
     #[test]
+    fn retained_directories_cannot_collide_with_candidate_files() {
+        let temporary = tempfile::tempdir().unwrap();
+        fs::write(
+            temporary.path().join("SKILL.md"),
+            "---\nname: demo\ndescription: old\n---\n",
+        )
+        .unwrap();
+        fs::create_dir_all(temporary.path().join("foo/empty")).unwrap();
+        let local = observe_directory_manifest(temporary.path()).unwrap();
+        for file in ["foo", "foo/empty", "FOO"] {
+            let failure = final_manifest(
+                &local,
+                &[
+                    entry("SKILL.md", b"---\nname: demo\ndescription: new\n---\n"),
+                    entry(file, b"replacement"),
+                ],
+                &[],
+                "demo",
+            )
+            .unwrap_err();
+            assert!(
+                failure.message.contains("file/directory collision"),
+                "{failure:?}"
+            );
+        }
+    }
+
+    #[test]
     fn rejects_case_and_file_descendant_conflicts() {
         let local = local(&[("SKILL.md", b"---\nname: demo\ndescription: old\n---\n")]);
         let case_error = final_manifest(
