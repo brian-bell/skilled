@@ -615,3 +615,19 @@ fn a_concurrent_adoption_cannot_replace_the_first_baseline() {
     assert!(app.metadata_failure().is_none());
     assert_eq!(count(&temp), 1);
 }
+
+#[test]
+fn a_vendored_check_requires_explicit_adoption_before_any_cache_write() {
+    let (temp, mut app) = fixture();
+    assert!(app.can_check_vendored_selection());
+    assert!(!temp.path().join("data/vendored-origin-cache").exists());
+    dispatch(&mut app, Action::BeginVendoredCheck);
+    assert!(
+        matches!(app.pending_vendored(), Some(skilled::app::VendoredPrompt::Failed(failure)) if failure.message.contains("no adopted origin"))
+    );
+    assert!(!app.vendored_check_in_flight());
+    assert!(!temp.path().join("data/vendored-origin-cache").exists());
+    assert_eq!(count(&temp), 0);
+    dispatch(&mut app, Action::DismissVendoredCheck);
+    assert!(app.pending_vendored().is_none());
+}

@@ -546,6 +546,34 @@ fn adoption_owns_keys_and_does_not_repeat_confirmation() {
     app.update(Action::AdvanceSourcesPane);
 
     assert_eq!(
+        action_for_app_key(&app, key(KeyCode::Char('u'))),
+        Some(Action::BeginVendoredCheck)
+    );
+    assert_eq!(action_for_app_key(&app, repeat(KeyCode::Char('u'))), None);
+    let update = app.update(Action::BeginVendoredCheck);
+    app.perform_effects(update.effects())
+        .expect("refuse check before adoption");
+    for code in [
+        KeyCode::Enter,
+        KeyCode::Char('1'),
+        KeyCode::Char('u'),
+        KeyCode::Tab,
+    ] {
+        assert_eq!(action_for_app_key(&app, key(code)), None);
+    }
+    assert_eq!(
+        action_for_app_key(&app, repeat(KeyCode::Down)),
+        Some(Action::ScrollDetail(1))
+    );
+    assert_eq!(
+        action_for_app_key(&app, key(KeyCode::Esc)),
+        Some(Action::DismissVendoredCheck)
+    );
+    assert_eq!(action_for_app_key(&app, repeat(KeyCode::Esc)), None);
+    let update = app.update(Action::DismissVendoredCheck);
+    app.perform_effects(update.effects()).unwrap();
+
+    assert_eq!(
         action_for_app_key(&app, key(KeyCode::Char('p'))),
         Some(Action::BeginAdoption)
     );

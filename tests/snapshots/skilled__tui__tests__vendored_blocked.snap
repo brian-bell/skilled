@@ -1,0 +1,27 @@
+---
+source: src/tui.rs
+expression: screen
+---
+
+  ┌ Skill check needs attention ────────────────────────── read-only preview ┐
+  │                                                                          │
+  │  Check blocked: Modified skill: content differs from the adopted baseli  │
+  │  ne                                                                      │
+  │  No skill content or provenance was changed.                             │
+  │                                                                          │
+  │                                                                          │
+  │                                                                          │
+  │                                                                          │
+  │                                                                          │
+  │                                                                          │
+  │                                                                          │
+  │                                                                          │
+  │                                                                          │
+  │                                                                          │
+  │                                                                          │
+  │                                                                          │
+  │                                                                          │
+  │  ──────────────────────────────────────────────────────────────────────  │
+  │  Read-only result — no changes applied                        Esc Close  │
+  │                                                                          │
+  └──────────────────────────────────────────────────────────────────────────┘

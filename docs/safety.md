@@ -185,6 +185,42 @@ comparable only on the same supported platform family. Concurrent filesystem
 changes observed during the walk refuse the baseline; unchanged observations
 remain a best-effort read rather than a lock on another editor.
 
+## Vendored skill checks
+
+A Sources `u` check is explicit and read-only for the registered checkout. A
+confirmed origin and current baseline are required before fetching. The check
+captures the existing bounded, no-follow baseline walk as a transient manifest;
+ordinary hash callers retain their streaming behavior and baseline format.
+Modified content, incomplete installation observations, changed source identity,
+or a changed origin record refuses a preview. Source and baseline observations
+are repeated around the fetch, affected installations are rescanned afterward,
+and the target revision comes from the fetch's reported object, never a later
+reading of a moving branch.
+
+Origin objects are fetched shallowly into a fresh private application cache.
+Fetch retains a pack instead of unpacking loose objects. A 32 MiB cache budget
+is monitored every 10 ms while output is drained; crossing it cancels the
+fetch, and a final size check covers transfers that finish between polls.
+The cache can temporarily exceed that threshold between observations. Unix
+also imposes a hard 32 MiB per-file limit on the fetch and its children.
+No checkout, smudge filter, external diff, or selected-skill replacement runs.
+Tree listings have a 2 MiB aggregate metadata budget; blob reads are bounded.
+Unsupported modes, symlinks, gitlinks, unsafe paths, and conflicting notice
+material refuse the candidate. The preview lists absolute
+file destinations, the pinned revision, baseline comparison, notice decisions,
+and installations that resolve to the selected variant, including aliases.
+
+The preview has no apply action. Source files, installation links, provenance,
+HEAD, and index remain unchanged. Esc cancels a check, and a cancelled worker's
+result cannot replace a newer dialog. Cache directories are retained after the
+read; automatic cache reclamation is outside this check-and-preview slice.
+Filesystem and metadata observations remain best-effort reads of external
+state; a preview is not a lock on concurrent edits or authorization to apply
+without fresh guards. The future replacement executor must stage on the
+destination volume and verify filesystem aliases, including Unicode
+normalization, before accepting the materialized baseline. A cache on another
+volume cannot establish those naming semantics.
+
 ## Repository updates
 
 ### Checkout identity and process binding
