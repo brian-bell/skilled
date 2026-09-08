@@ -576,10 +576,23 @@ impl Stage {
         before: &ManifestEntry,
         after: &ManifestEntry,
     ) -> Result<FileOutcome, FileError> {
+        self.replace_file_with(relative, before, after, exchange_between)
+    }
+
+    /// The exchange boundary is injectable so a regression can replace the
+    /// private staged pathname in the narrow gap after its first proof.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn replace_file_with(
+        &self,
+        relative: &Path,
+        before: &ManifestEntry,
+        after: &ManifestEntry,
+        mut exchange: impl FnMut(&fs::File, &CString, &fs::File, &CString) -> io::Result<()>,
+    ) -> Result<FileOutcome, FileError> {
         let (destination_parent, destination_name) =
             pinned_parent_from(&self.skill_directory, relative)?;
         let (staging_parent, staging_name) = pinned_parent_from(&self.staging_directory, relative)?;
-        let original_mode = prove_regular(&destination_parent, &destination_name, before)?;
+        let original_mode = prove_regular(&destination_parent, &destination_name, before)?.mode;
         prove_regular(&staging_parent, &staging_name, after).map_err(|error| {
             format!("the staged candidate changed after it was verified: {error}")
         })?;
@@ -587,70 +600,94 @@ impl Stage {
         set_entry_mode(&staging_parent, &staging_name, after, candidate_mode).map_err(|error| {
             format!("the staged candidate could not retain destination permissions: {error}")
         })?;
-        exchange_between(
+        // Keep the final proven staged identity across the pathname exchange.
+        // If the name changes after this point, recovery must not move a later
+        // public arrival merely because its contents fail validation.
+        let candidate = prove_regular(&staging_parent, &staging_name, after)
+            .map_err(|error| format!("the staged candidate changed before exchange: {error}"))?;
+        exchange(
             &staging_parent,
             &staging_name,
             &destination_parent,
             &destination_name,
         )
         .map_err(exchange_error)?;
-        // The old object is now held in the private staging tree.  Refuse to
-        // call it a successful replacement unless it is exactly the object the
-        // confirmation guarded.  A mismatch is exchanged back, preserving the
-        // arrival at the public name if a second race made restoration unsafe.
-        if let Err(mismatch) = prove_regular(&staging_parent, &staging_name, before) {
-            let residue = self.staging_root.join(relative);
-            if let Err(observed) = prove_regular(&destination_parent, &destination_name, after) {
-                return Err(FileError {
-                    detail: format!(
-                        "the destination changed during replacement ({mismatch}); it no longer holds the staged candidate ({observed}), so it was not exchanged back; retained residue is at {}",
-                        residue.display()
-                    ),
-                    wrote: true,
-                    residue: Some(residue),
-                });
+        // The exchange is pathname-based. Re-prove both objects afterwards:
+        // an attacker can replace the private staged name between its first
+        // proof and this syscall. Never publish that arrival as success.
+        let displaced = prove_regular(&staging_parent, &staging_name, before);
+        let published = prove_regular(&destination_parent, &destination_name, after);
+        match (displaced, published) {
+            (Ok(_), Ok(published)) if published.identity == candidate.identity => {
+                Ok(FileOutcome::Changed(Some(self.staging_root.join(relative))))
             }
-            match exchange_between(
-                &staging_parent,
-                &staging_name,
-                &destination_parent,
-                &destination_name,
-            ) {
-                Ok(()) => {
-                    return Err(FileError::from(format!(
-                        "the destination changed during replacement ({mismatch}); it was restored"
-                    )));
-                }
-                Err(restore) => {
-                    return Err(FileError {
-                        detail: format!(
-                            "the destination changed during replacement ({mismatch}) and could not be restored ({restore}); staged residue remains at {}",
-                            residue.display()
-                        ),
-                        wrote: true,
-                        residue: Some(residue),
-                    });
-                }
-            }
+            (Ok(_), Ok(_)) => Err(FileError {
+                detail: format!(
+                    "the destination now names a different file than the staged candidate after exchange; it was left untouched and the proven old file remains at {}",
+                    self.staging_root.join(relative).display()
+                ),
+                wrote: true,
+                residue: Some(self.staging_root.join(relative)),
+            }),
+            (Ok(_), Err(published)) => Err(FileError {
+                detail: format!(
+                    "the published candidate could not be verified ({published}); the public object was left untouched and the proven old file remains at {}",
+                    self.staging_root.join(relative).display()
+                ),
+                wrote: true,
+                residue: Some(self.staging_root.join(relative)),
+            }),
+            (Err(displaced), Ok(_)) => Err(FileError {
+                detail: format!(
+                    "the displaced destination could not be verified ({displaced}); the public object and retained staging entry were left untouched"
+                ),
+                wrote: true,
+                residue: Some(self.staging_root.join(relative)),
+            }),
+            (Err(displaced), Err(published)) => Err(FileError {
+                detail: format!(
+                    "both the displaced destination ({displaced}) and published candidate ({published}) changed during replacement; the public path was left untouched and staging residue is at {}",
+                    self.staging_root.join(relative).display()
+                ),
+                wrote: true,
+                residue: Some(self.staging_root.join(relative)),
+            }),
         }
-        Ok(FileOutcome::Changed(Some(self.staging_root.join(relative))))
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn add_file(&self, relative: &Path, after: &ManifestEntry) -> Result<FileOutcome, FileError> {
+        self.add_file_with(relative, after, rename_no_replace)
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn add_file_with(
+        &self,
+        relative: &Path,
+        after: &ManifestEntry,
+        mut rename: impl FnMut(&fs::File, &CString, &fs::File, &CString) -> io::Result<()>,
+    ) -> Result<FileOutcome, FileError> {
         let (destination_parent, destination_name) =
             pinned_parent_from(&self.skill_directory, relative)?;
         let (staging_parent, staging_name) = pinned_parent_from(&self.staging_directory, relative)?;
-        prove_regular(&staging_parent, &staging_name, after).map_err(|error| {
+        let candidate = prove_regular(&staging_parent, &staging_name, after).map_err(|error| {
             format!("the staged candidate changed after it was verified: {error}")
         })?;
-        rename_no_replace(
+        rename(
             &staging_parent,
             &staging_name,
             &destination_parent,
             &destination_name,
         )
         .map_err(|error| format!("refused to add over an occupied destination: {error}"))?;
+        match prove_regular(&destination_parent, &destination_name, after) {
+            Ok(published) if published.identity == candidate.identity => {}
+            _ => return Err(FileError {
+                detail: "the published file could not be proven to be the staged candidate; the current public object was left untouched".into(),
+                wrote: true,
+                residue: None,
+            }),
+        }
         Ok(FileOutcome::Changed(None))
     }
 
@@ -1074,11 +1111,26 @@ fn same_directory(left: &fs::File, right: &fs::File) -> bool {
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct FileIdentity {
+    device: u64,
+    inode: u64,
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+struct VerifiedRegular {
+    // Retain the inode so a removed staged file cannot be recycled during publication.
+    _file: fs::File,
+    mode: u32,
+    identity: FileIdentity,
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn prove_regular(
     parent: &fs::File,
     name: &CString,
     expected: &ManifestEntry,
-) -> Result<u32, String> {
+) -> Result<VerifiedRegular, String> {
     use std::os::fd::{AsRawFd, FromRawFd};
     assert_raw_entry(parent, name, false)?;
     let fd = unsafe {
@@ -1108,19 +1160,27 @@ fn prove_regular(
         return Err("the confirmed file exceeds the previewed byte bound".into());
     }
     let mut bytes = Vec::new();
-    file.take(maximum as u64)
+    (&file)
+        .take(maximum as u64)
         .read_to_end(&mut bytes)
         .map_err(|error| error.to_string())?;
     if bytes.len() > expected.bytes.len() {
         return Err("the confirmed file grew beyond its previewed bytes".into());
     }
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
     let mode = metadata.permissions().mode() & 0o777;
     let executable = mode & 0o111 != 0;
     if bytes != expected.bytes || executable != expected.executable {
         return Err("the confirmed file bytes or executable bit changed".into());
     }
-    Ok(mode)
+    Ok(VerifiedRegular {
+        _file: file,
+        mode,
+        identity: FileIdentity {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        },
+    })
 }
 
 /// Replacements keep the current file's read/write visibility. Git records
@@ -1831,5 +1891,162 @@ mod tests {
         assert_eq!(report.failed.len(), 1);
         assert_eq!(report.failed[0].path, root.join("new-directory"));
         assert_eq!(report.unattempted, vec![root.join("new-directory/file.md")]);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn staged_symlink_swap_is_not_reported_as_a_completed_replacement() {
+        use std::os::unix::fs::symlink;
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("skill");
+        write(&root.join("SKILL.md"), b"old\n");
+        let original = observe_directory_manifest(&root).unwrap();
+        let expected = manifest(&[("SKILL.md", false, b"new\n")]);
+        let stage_path = temporary.path().join(".stage");
+        let stage = Stage::prepare(&root, &stage_path, &expected).unwrap();
+        let mut old_entries = regular_files(&original);
+        let mut expected_entries = regular_files(&expected);
+        let before = old_entries.remove(Path::new("SKILL.md")).unwrap();
+        let after = expected_entries.remove(Path::new("SKILL.md")).unwrap();
+        let mut swapped = false;
+        let result =
+            stage.replace_file_with(Path::new("SKILL.md"), &before, &after, |sp, sn, dp, dn| {
+                if !swapped {
+                    fs::remove_file(stage_path.join("SKILL.md")).unwrap();
+                    symlink("/untrusted", stage_path.join("SKILL.md")).unwrap();
+                    swapped = true;
+                }
+                exchange_between(sp, sn, dp, dn)
+            });
+        let Err(result) = result else {
+            panic!("an unverified staged swap must not be completed");
+        };
+        assert!(result.wrote);
+        assert!(
+            fs::symlink_metadata(root.join("SKILL.md"))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(fs::read(stage_path.join("SKILL.md")).unwrap(), b"old\n");
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn staged_swap_is_not_reported_as_a_completed_addition() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("skill");
+        fs::create_dir(&root).unwrap();
+        let expected = manifest(&[("new.md", false, b"expected\n")]);
+        let stage_path = temporary.path().join(".stage");
+        let stage = Stage::prepare(&root, &stage_path, &expected).unwrap();
+        let mut expected_entries = regular_files(&expected);
+        let after = expected_entries.remove(Path::new("new.md")).unwrap();
+        let mut swapped = false;
+        let result = stage.add_file_with(Path::new("new.md"), &after, |sp, sn, dp, dn| {
+            if !swapped {
+                fs::remove_file(stage_path.join("new.md")).unwrap();
+                fs::write(stage_path.join("new.md"), b"unverified\n").unwrap();
+                swapped = true;
+            }
+            rename_no_replace(sp, sn, dp, dn)
+        });
+        let Err(result) = result else {
+            panic!("an unverified staged swap must not be completed");
+        };
+        assert!(result.wrote);
+        assert_eq!(fs::read(root.join("new.md")).unwrap(), b"unverified\n");
+        assert!(!stage_path.join("new.md").exists());
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn unverified_displaced_file_is_not_published_by_recovery() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("skill");
+        write(&root.join("SKILL.md"), b"old\n");
+        let original = observe_directory_manifest(&root).unwrap();
+        let expected = manifest(&[("SKILL.md", false, b"new\n")]);
+        let stage_path = temporary.path().join(".stage");
+        let stage = Stage::prepare(&root, &stage_path, &expected).unwrap();
+        let before = regular_files(&original)
+            .remove(Path::new("SKILL.md"))
+            .unwrap();
+        let after = regular_files(&expected)
+            .remove(Path::new("SKILL.md"))
+            .unwrap();
+        let result =
+            stage.replace_file_with(Path::new("SKILL.md"), &before, &after, |sp, sn, dp, dn| {
+                exchange_between(sp, sn, dp, dn)?;
+                fs::remove_file(stage_path.join("SKILL.md"))?;
+                fs::write(stage_path.join("SKILL.md"), b"later arrival\n")?;
+                Ok(())
+            });
+        let Err(result) = result else {
+            panic!("a later arrival must block completion");
+        };
+        assert!(result.wrote);
+        assert_eq!(fs::read(root.join("SKILL.md")).unwrap(), b"new\n");
+        assert_eq!(
+            fs::read(stage_path.join("SKILL.md")).unwrap(),
+            b"later arrival\n"
+        );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn later_arrival_is_not_moved_by_failed_replacement_proof() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("skill");
+        write(&root.join("SKILL.md"), b"old\n");
+        let original = observe_directory_manifest(&root).unwrap();
+        let expected = manifest(&[("SKILL.md", false, b"new\n")]);
+        let stage_path = temporary.path().join(".stage");
+        let stage = Stage::prepare(&root, &stage_path, &expected).unwrap();
+        let before = regular_files(&original)
+            .remove(Path::new("SKILL.md"))
+            .unwrap();
+        let after = regular_files(&expected)
+            .remove(Path::new("SKILL.md"))
+            .unwrap();
+        let result =
+            stage.replace_file_with(Path::new("SKILL.md"), &before, &after, |sp, sn, dp, dn| {
+                exchange_between(sp, sn, dp, dn)?;
+                fs::remove_file(root.join("SKILL.md"))?;
+                fs::write(root.join("SKILL.md"), b"later arrival\n")?;
+                Ok(())
+            });
+        let Err(result) = result else {
+            panic!("a later arrival must block completion");
+        };
+        assert!(result.wrote);
+        assert_eq!(fs::read(root.join("SKILL.md")).unwrap(), b"later arrival\n");
+        assert_eq!(fs::read(stage_path.join("SKILL.md")).unwrap(), b"old\n");
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn later_arrival_is_not_moved_by_failed_add_proof() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("skill");
+        fs::create_dir(&root).unwrap();
+        let expected = manifest(&[("new.md", false, b"expected\n")]);
+        let stage_path = temporary.path().join(".stage");
+        let stage = Stage::prepare(&root, &stage_path, &expected).unwrap();
+        let after = regular_files(&expected)
+            .remove(Path::new("new.md"))
+            .unwrap();
+        let result = stage.add_file_with(Path::new("new.md"), &after, |sp, sn, dp, dn| {
+            rename_no_replace(sp, sn, dp, dn)?;
+            fs::remove_file(root.join("new.md"))?;
+            fs::write(root.join("new.md"), b"later arrival\n")?;
+            Ok(())
+        });
+        let Err(result) = result else {
+            panic!("a later arrival must block completion");
+        };
+        assert!(result.wrote);
+        assert_eq!(fs::read(root.join("new.md")).unwrap(), b"later arrival\n");
+        assert!(!stage_path.join("new.md").exists());
     }
 }
