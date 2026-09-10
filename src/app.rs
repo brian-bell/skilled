@@ -1416,14 +1416,18 @@ impl SkilledApp {
         let worker_child = child.clone();
         let data_dir = self.environment.data_dir.clone();
         let handle = std::thread::spawn(move || {
-            let result =
+            let result = crate::terminal::catch_update_worker_panic(|| {
                 crate::vendored::check(request, &data_dir, &worker_cancelled, &worker_child)
                     .and_then(|preview| {
                         preview
                             .map(|preview| crate::vendored::plan_apply(&preview, &data_dir))
                             .transpose()
-                    });
-            let _ = sender.send(result);
+                    })
+            });
+            let _ = sender.send(match result {
+                Ok(value) => value,
+                Err(_) => Err("Origin check ended before completing".into()),
+            });
         });
         self.vendored_check_run = Some(VendoredCheckRun {
             receiver,
@@ -1486,8 +1490,15 @@ impl SkilledApp {
         let data_dir = self.environment.data_dir.clone();
         let confirmed_plan = plan.lines();
         let (sender, receiver) = mpsc::channel();
+        let worker_plan = confirmed_plan.clone();
         let handle = std::thread::spawn(move || {
-            let _ = sender.send(crate::vendored::apply(&plan, &data_dir));
+            let result = crate::terminal::catch_update_worker_panic(|| {
+                crate::vendored::apply(&plan, &data_dir)
+            });
+            let _ = sender.send(match result {
+                Ok(outcome) => outcome,
+                Err(_) => crate::vendored::ApplyOutcome::unreported(worker_plan),
+            });
         });
         self.vendored_apply_run = Some(VendoredApplyRun {
             receiver,
@@ -4636,6 +4647,73 @@ mod tests {
     }
 
     #[test]
+    fn a_panicking_vendored_apply_worker_reports_unknown_writes_and_rescans() {
+        let (_temporary, mut app) = test_app();
+        for agent in &mut app.agents {
+            agent.set_selected(true);
+        }
+        let root = app
+            .environment
+            .home_dir
+            .join(crate::agents::adapter(AgentKind::Codex).native_skill_root())
+            .join("appeared");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join("SKILL.md"),
+            "---\nname: appeared\ndescription: after worker write\n---\n",
+        )
+        .unwrap();
+        let confirmed_plan = vec!["Staging: /source/.skilled-update-fixture".into()];
+        let (sender, receiver) = mpsc::channel();
+        let worker_plan = confirmed_plan.clone();
+        let handle = std::thread::spawn(move || {
+            let result =
+                crate::terminal::catch_update_worker_panic(|| -> crate::vendored::ApplyOutcome {
+                    panic!("injected vendored apply panic")
+                });
+            let _ = sender.send(match result {
+                Ok(outcome) => outcome,
+                Err(_) => crate::vendored::ApplyOutcome::unreported(worker_plan),
+            });
+        });
+        app.vendored_apply_run = Some(VendoredApplyRun {
+            receiver,
+            handle,
+            confirmed_plan,
+        });
+        app.pending_vendored = Some(VendoredPrompt::Applying);
+        assert!(
+            !app.inventory
+                .rows()
+                .iter()
+                .any(|row| row.name() == "appeared")
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        while app.vendored_apply_in_flight() && std::time::Instant::now() < deadline {
+            app.drain_vendored_apply();
+            std::thread::yield_now();
+        }
+        assert!(app.vendored_apply_run.is_none());
+        assert!(
+            app.inventory
+                .rows()
+                .iter()
+                .any(|row| row.name() == "appeared")
+        );
+        let Some(VendoredPrompt::Report(outcome)) = app.pending_vendored() else {
+            panic!("an unknown write outcome must remain a report");
+        };
+        assert_eq!(
+            outcome.status,
+            crate::vendored::ApplyStatus::VerificationIncomplete
+        );
+        let lines = outcome.lines().join("\n");
+        assert!(lines.contains("Files may have changed"));
+        assert!(lines.contains("/source/.skilled-update-fixture"));
+        assert!(!lines.contains("blocked before") && !lines.contains("Update written"));
+    }
+
+    #[test]
     fn vendored_apply_cannot_be_cancelled_once_started() {
         let (_temporary, mut app) = test_app();
         app.pending_vendored = Some(VendoredPrompt::Applying);
@@ -4719,6 +4797,40 @@ mod tests {
         });
         app.pending_vendored = Some(VendoredPrompt::Checking);
         app.drain_vendored_check();
+        assert!(
+            matches!(app.pending_vendored(), Some(VendoredPrompt::Failed(failure)) if failure.message.contains("before completing"))
+        );
+        assert!(!app.vendored_check_in_flight());
+    }
+
+    #[test]
+    fn a_panicking_vendored_check_worker_is_reported_as_failed() {
+        let (_temporary, mut app) = test_app();
+        let (sender, receiver) = mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            let result = crate::terminal::catch_update_worker_panic(
+                || -> std::result::Result<
+                    Option<crate::vendored::ApplyPlan>,
+                    crate::adoption::AdoptionFailure,
+                > { panic!("injected vendored check panic") },
+            );
+            let _ = sender.send(match result {
+                Ok(value) => value,
+                Err(_) => Err("Origin check ended before completing".into()),
+            });
+        });
+        app.vendored_check_run = Some(VendoredCheckRun {
+            receiver,
+            handle,
+            cancelled: Arc::new(AtomicBool::new(false)),
+            child: Arc::new(Mutex::new(None)),
+        });
+        app.pending_vendored = Some(VendoredPrompt::Checking);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        while app.vendored_check_in_flight() && std::time::Instant::now() < deadline {
+            app.drain_vendored_check();
+            std::thread::yield_now();
+        }
         assert!(
             matches!(app.pending_vendored(), Some(VendoredPrompt::Failed(failure)) if failure.message.contains("before completing"))
         );

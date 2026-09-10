@@ -84,8 +84,8 @@ impl TerminalControl for CrosstermControl {
 ///
 /// Panic hooks are process-global and run before unwinding, so a worker panic
 /// must not tear down raw mode and the alternate screen under the still-live
-/// event loop. The prior process hook still receives every panic except an
-/// update-worker panic that its effect boundary catches and reports in-app.
+/// event loop. The prior process hook still receives every panic except a
+/// background-worker panic that its effect boundary catches and reports in-app.
 pub fn install_panic_restore_hook() {
     let terminal_thread = std::thread::current().id();
     let previous_hook = std::panic::take_hook();
@@ -108,7 +108,16 @@ fn should_chain_previous_hook(owns_terminal: bool, caught_worker: bool) -> bool 
 
 #[cfg(test)]
 mod tests {
-    use super::should_chain_previous_hook;
+    use super::{
+        catch_update_worker_panic, install_panic_restore_hook, should_chain_previous_hook,
+    };
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    };
+
+    static PANIC_HOOK_TEST: Mutex<()> = Mutex::new(());
+    type PreviousPanicHook = Box<dyn Fn(&std::panic::PanicHookInfo<'_>) + Send + Sync>;
 
     #[test]
     fn only_caught_non_terminal_worker_panics_skip_the_previous_printer() {
@@ -116,5 +125,48 @@ mod tests {
         assert!(should_chain_previous_hook(false, false));
         assert!(should_chain_previous_hook(true, true));
         assert!(should_chain_previous_hook(true, false));
+    }
+
+    #[test]
+    fn a_caught_worker_panic_does_not_invoke_the_previous_hook() {
+        let _guard = PANIC_HOOK_TEST
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let printed = Arc::new(AtomicBool::new(false));
+        let previous = std::panic::take_hook();
+        struct RestoreHook(Option<PreviousPanicHook>);
+        impl Drop for RestoreHook {
+            fn drop(&mut self) {
+                if let Some(previous) = self.0.take() {
+                    std::panic::set_hook(previous);
+                }
+            }
+        }
+        let _restore = RestoreHook(Some(previous));
+        {
+            let printed = Arc::clone(&printed);
+            std::panic::set_hook(Box::new(move |_| {
+                printed.store(true, Ordering::SeqCst);
+            }));
+        }
+        install_panic_restore_hook();
+
+        let caught = std::thread::spawn(|| {
+            let _ = catch_update_worker_panic(|| panic!("injected vendored worker panic"));
+        });
+        caught
+            .join()
+            .expect("caught worker panic stays on the worker");
+        assert!(
+            !printed.load(Ordering::SeqCst),
+            "a caught worker panic must not print through the previous hook"
+        );
+
+        let uncaught = std::thread::spawn(|| panic!("uncaught worker panic"));
+        assert!(uncaught.join().is_err());
+        assert!(
+            printed.load(Ordering::SeqCst),
+            "a panic outside the catch boundary must still reach the previous hook"
+        );
     }
 }
