@@ -1,0 +1,27 @@
+---
+source: src/tui.rs
+expression: screen
+---
+
+  ┌ Apply skill update ──────────────────────────── guarded replacement plan ┐
+  │                                                                          │
+  │  Confirming replaces only this skill's planned files and advances its p  │
+  │  rovenance.                                                              │
+  │  Source: /source                                                         │
+  │  Skill: /source/skills/demo                                              │
+  │  Origin: https://github.com/example/demo                                 │
+  │  Origin subdirectory: skills/demo                                        │
+  │  Tracking branch: refs/heads/main                                        │
+  │  Pinned origin revision: 0123456789abcdef0123456789abcdef01234567        │
+  │  Adopted baseline v1: 1111111111111111111111111111111111111111111111111  │
+  │  111111111111111                                                         │
+  │  Proposed baseline v1: 222222222222222222222222222222222222222222222222  │
+  │  2222222222222222                                                        │
+  │  Expected regular files: 1                                               │
+  │  Planned file changes:                                                   │
+  │  /source/skills/demo/SKILL.md: modify 12 → 18 bytes, 3 → 4 lines         │
+  │  Affected installations:                                                 │
+  │  ──────────────────────────────────────────────────────────────────────  │
+  │  Complete plan shown — Enter applies it        Enter Apply · Esc Cancel  │
+  │                                                                          │
+  └──────────────────────────────────────────────────────────────────────────┘

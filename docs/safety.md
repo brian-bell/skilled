@@ -112,13 +112,149 @@ that writes the checkout's worktree. Opening Updates never fetches.
   its link gone, or Forget Source has just established the described link
   inactive.
 
+- Native OpenCode repair may leave a proven standing conflict only when its
+  predicted canonical directories are a subset of those already visible. A
+  new directory is refused even if the number of directories stays the same.
+  The preview states the remaining conflict and the before/after slots and
+  targets. The supporting roots, entries, and usable content are rechecked
+  before replacement; the fresh scan must match the predicted root, slot, and
+  canonical-directory entries. A later external change can still race those
+  reads, so verification reports disagreement or unavailable evidence rather
+  than claiming a transaction across all agent roots.
+
 - Uninstall never removes an agent root or follows the link it removes. Object
   type, exact receipt, recorded target, and documented-root containment are
   rechecked immediately before unlinking; one failed target stops the run.
 
 - Forget Source removes private metadata only. Any active or unreadable
-  receipted link, or any receipt-set change between preview and confirmation,
+  receipted link, or any receipt or baseline change between preview and confirmation,
   blocks the transaction; checkout and skill directories are never deleted.
+
+## Origin adoption
+
+Adoption is an explicit metadata operation for one registered variant. Supported
+root attribution tables, per-skill bullets, pinned GitHub tree URLs, and compatible
+version-1 lock records supply hints. Bare repository attribution leaves the
+subdirectory unknown; moving refs and unspecified lock hashes prove no historical
+baseline. Lock metadata is never rewritten. Conflicting hints require an explicit
+exact origin choice, and incomplete evidence blocks adoption.
+
+The user supplies a repository, subdirectory, and fully qualified tracking branch.
+The separately confirmed preview names the absolute source, catalog, skill, and
+SQLite database paths, the baseline version and digest, and the limited meaning
+of the association. The record has a null proven revision and the association
+method `explicit-current-content`. Adoption cannot overwrite an existing record. Re-registering a replacement
+checkout at the same path is refused while the old source has baselines; they
+cannot be transferred by changing the source identity. Forget Source retains its
+existing inactive-link gates and lists each origin association and baseline in its
+confirmation preview before cascading their deletion. The exact baseline set is
+rechecked under the metadata mutation guard; unreadable or changed records refuse
+the operation. Verification also checks that the baseline metadata is gone.
+
+Before saving, the executor rechecks registered repository identity, physical
+skill ancestors, portable skill validation, evidence, full content hash, and the
+exact catalog registration. The registration check and insert share an immediate
+SQLite transaction. A second content check before commit rolls the metadata back
+if the observed content changed; post-commit checks report a saved-but-unverified
+baseline distinctly from success. The same observation routine captures preview
+content and performs every recheck, checking expected checkout and ancestor
+identities before reading skill content. A successful commit returns a saved
+outcome even if verification later fails. Observed disagreement is failed
+verification, including observed invalid evidence, unsupported entries, and
+exceeded content limits; an unavailable read is incomplete verification. The
+readers preserve this distinction before formatting errors. Guards retain their
+fail-fast order: incomplete verification makes no claim about later checks that
+were withheld. Neither result is
+inferred from message text, and unavailable private metadata still degrades the
+session. Filesystem reads and SQLite are not one atomic
+snapshot: an external writer can still change a file after the last reading.
+Adoption does not lock another editor's files or claim to prevent later changes.
+Metadata failures degrade the session to read-only operation.
+
+The adopted baseline is SHA-256 over a versioned, platform-scoped stream of
+sorted raw relative paths, entry type, executable bit, and entry bytes; it
+records raw symbolic-link targets without following them. It includes ordinary
+untracked and Git-ignored skill content, while excluding only `.git` metadata.
+Version 1 bounds the walk to 16,384 entries, 32 MiB of entry content, 32
+directory levels, 16 KiB paths and link targets, 1 MiB evidence files, and 128
+distinct origin candidates. A bound is a refusal, never a truncated result.
+Linux and macOS list held directories through descriptors and use no-follow,
+nonblocking opens; the portable fallback rechecks metadata but cannot promise
+the same descriptor-pinned traversal. The platform tag makes a v1 digest
+comparable only on the same supported platform family. Concurrent filesystem
+changes observed during the walk refuse the baseline; unchanged observations
+remain a best-effort read rather than a lock on another editor.
+
+## Vendored skill checks
+
+A Sources `u` check is explicit and read-only for the registered checkout. A
+confirmed origin and current baseline are required before fetching. The check
+captures the existing bounded, no-follow baseline walk as a transient manifest;
+ordinary hash callers retain their streaming behavior and baseline format.
+Modified content, incomplete installation observations, changed source identity,
+or a changed origin record refuses a preview. Source and baseline observations
+are repeated around the fetch, affected installations are rescanned afterward,
+and the target revision comes from the fetch's reported object, never a later
+reading of a moving branch.
+
+Origin objects are fetched shallowly into a fresh private application cache.
+Fetch retains a pack instead of unpacking loose objects. A 32 MiB cache budget
+is monitored every 10 ms while output is drained; crossing it cancels the
+fetch, and a final size check covers transfers that finish between polls.
+The cache can temporarily exceed that threshold between observations. Unix
+also imposes a hard 32 MiB per-file limit on the fetch and its children.
+No checkout, smudge filter, external diff, or selected-skill replacement runs.
+Tree listings have a 2 MiB aggregate metadata budget; blob reads are bounded.
+Unsupported modes, symlinks, gitlinks, unsafe paths, and conflicting notice
+material refuse the candidate. The preview lists absolute
+file destinations, the pinned revision, baseline comparison, notice decisions,
+and installations that resolve to the selected variant, including aliases.
+
+Esc cancels a check, and a cancelled worker's result cannot replace a newer
+dialog. Cache directories are retained after the read; automatic reclamation is
+outside the update operation. A preview is not a lock on concurrent edits.
+
+### Confirmed vendored replacement
+
+On Linux and macOS, Enter becomes available only after the complete non-noop
+apply plan has been displayed. It discloses all changed files, new directories,
+absolute staging and recovery paths, the SQLite database, and the revision to
+record. Other platforms refuse replacement because the atomic exchange and
+no-clobber rename primitives are not implemented there.
+
+The executor holds SQLite's immediate mutation guard while rechecking the
+registration, exact adopted record, source and ancestor identities, complete
+installation observations (including raw link targets), HEAD, index, operation
+markers, and tracked cleanliness. It stages the expected tree in a private
+directory beside the checkout, verifies that it shares the destination volume,
+and verifies its baseline and raw
+entry spellings, including filesystem alias behavior. It repeats preconditions
+before the first live write and source/link/repository guards between writes.
+
+Files are individually exchanged, added without clobbering, or moved into
+retained recovery paths. Descriptor-relative operations refuse redirected
+ancestors. Neither the skill root nor directories are recursively removed;
+repository-root catalogs use the same executor and `.git` remains untouched.
+The first failed precondition stops further work, with completed, failed,
+unattempted, and retained paths reported. Applying cannot be cancelled, and
+exiting joins the mutating worker.
+
+Fresh catalogs and installations are scanned after every replacement attempt.
+The exact expected manifest and unchanged repository/link state must be proven
+before advancing the baseline and origin revision in the same transaction.
+Filesystem success followed by a metadata failure is partial, not an adopted
+new baseline. After commit, independent reads verify the saved record and
+filesystem again; failed and incomplete verification remain distinct from
+success. Recovery files remain disclosed and retained even after success.
+
+The CLI `update --skill <name> [--yes]` runs the same check, plan, apply, and
+verification. It requires complete registration and installation observations
+and exactly one registered variant; mixed repository/skill targets are refused.
+The complete plan is written and flushed before confirmation. `--yes` skips
+only the prompt, and cannot adopt an origin or bypass guards. No-op checks stay
+read-only, and unsupported platforms show a read-only preview without applying.
+Partial writes retain exit status 4 even if their provenance save failed; failed
+and incomplete postconditions retain statuses 5 and 6.
 
 ## Repository updates
 

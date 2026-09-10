@@ -1,0 +1,27 @@
+---
+source: src/tui.rs
+expression: rendered
+---
+
+  ┌ Adoption needs attention ───────────────────────────── baseline recorded ┐
+  │                                                                          │
+  │  Baseline saved; verification failed: Skill content changed after the a  │
+  │  doption preview                                                         │
+  │                                                                          │
+  │                                                                          │
+  │                                                                          │
+  │                                                                          │
+  │                                                                          │
+  │                                                                          │
+  │                                                                          │
+  │                                                                          │
+  │                                                                          │
+  │                                                                          │
+  │                                                                          │
+  │                                                                          │
+  │                                                                          │
+  │                                                                          │
+  │  ──────────────────────────────────────────────────────────────────────  │
+  │  Baseline saved; verification failed                          Esc Close  │
+  │                                                                          │
+  └──────────────────────────────────────────────────────────────────────────┘

@@ -21,6 +21,7 @@ use std::{
 
 use crate::{
     AgentDetection, AgentKind, MetadataFailure,
+    adoption::OriginRecord,
     agents::{adapter, detection_at},
     inventory::{
         Finding, FindingSeverity, InstallationHealth, InstallationObject,
@@ -849,6 +850,36 @@ pub enum RepairDisposition {
     Blocked { finding: Finding },
 }
 
+// The exception is supported by complete root observations, not the coarse
+// Conflict label. Keep root/slot/directory identity for the post-write scan;
+// variant metadata is deliberately not identity (prediction only knows the
+// selected variant, whereas the inventory can classify every survivor).
+type ConflictEntries = Vec<(AgentKind, PathBuf, PathBuf)>;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct StandingRepairConflict {
+    before: [TargetProbe; 3],
+    after: ConflictEntries,
+}
+
+fn conflict_entries(resolution: &OpenCodeResolution) -> Option<ConflictEntries> {
+    match resolution {
+        OpenCodeResolution::Conflict { entries } => Some(
+            entries
+                .iter()
+                .map(|entry| {
+                    (
+                        entry.root(),
+                        entry.path().to_path_buf(),
+                        entry.canonical().to_path_buf(),
+                    )
+                })
+                .collect(),
+        ),
+        _ => None,
+    }
+}
+
 /// One immutable, single-target repair statement.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RepairPlan {
@@ -870,6 +901,7 @@ pub struct RepairPlan {
     disposition: RepairDisposition,
     warnings: Vec<String>,
     opencode_outlook: Option<OpenCodeOutlook>,
+    standing_conflict: Option<StandingRepairConflict>,
 }
 
 impl RepairPlan {
@@ -1170,13 +1202,39 @@ pub fn plan_repair(
         && plan.is_executable()
         && matches!(predicted, OpenCodeResolution::Conflict { .. })
     {
-        plan.disposition = blocked_repair(
-            "install.opencode_conflict",
-            format!(
-                "OpenCode would not resolve {} to this link: the roots it reads would hold more than one directory under that name",
-                plan.skill_name
-            ),
-        );
+        let before = conflict_entries(&current);
+        let after = conflict_entries(&predicted).expect("predicted conflict");
+        if before.as_ref().is_some_and(|before| {
+            after
+                .iter()
+                .all(|(_, _, directory)| before.iter().any(|(_, _, old)| old == directory))
+        }) {
+            plan.warnings.push(
+                "The existing OpenCode conflict remains; repairing this link does not resolve it."
+                    .to_owned(),
+            );
+            for (label, entries) in [("before", before.as_ref().unwrap()), ("after", &after)] {
+                for (_, path, directory) in entries {
+                    plan.warnings.push(format!(
+                        "OpenCode {label}: {} -> {}",
+                        path.display(),
+                        directory.display()
+                    ));
+                }
+            }
+            plan.standing_conflict = Some(StandingRepairConflict {
+                before: probe.targets.clone(),
+                after,
+            });
+        } else {
+            plan.disposition = blocked_repair(
+                "install.opencode_conflict",
+                format!(
+                    "OpenCode would not resolve {} to this link: the repair would introduce a new conflicting directory or an unchanged standing conflict could not be proven",
+                    plan.skill_name
+                ),
+            );
+        }
     } else if let OpenCodeResolution::Incomplete { roots } = &predicted {
         plan.warnings.push(format!(
             "what OpenCode would resolve {} to cannot be established: {}",
@@ -1224,6 +1282,7 @@ fn empty_repair_plan(
         },
         warnings: Vec::new(),
         opencode_outlook: None,
+        standing_conflict: None,
     }
 }
 
@@ -3329,6 +3388,25 @@ fn apply_repair_target(plan: &RepairPlan, store: &mut Store, home: &Path) -> Rep
     if let Err(reason) = repair_destination_unchanged(plan, root, home) {
         return RepairStepOutcome::Failed(reason);
     }
+    if let Some(conflict) = &plan.standing_conflict {
+        // These other roots justify the exception. Re-read after the metadata
+        // wait and before replacement. A later external race remains observable
+        // in verification; no cross-root filesystem transaction is claimed.
+        for expected in &conflict.before {
+            let root = expected.link_path.parent().expect("native slot parent");
+            let root_probe = probe_repair_root(&probe_root(root, home), root);
+            let unchanged = root_probe == expected.root && {
+                let entry = probe_entry(&expected.link_path);
+                entry == expected.entry
+                    && probe_content(&expected.link_path, &entry) == expected.content
+            };
+            if !unchanged {
+                return RepairStepOutcome::Failed(
+                    "the roots supporting the standing OpenCode conflict changed after preview, so nothing was written".to_owned()
+                );
+            }
+        }
+    }
     let replacement = match replace_directory_symlink(
         source_dir,
         &plan.link_path,
@@ -4652,7 +4730,9 @@ pub fn verify_repair(
             Some(resolution) => {
                 let actual = OpenCodeOutlook::of(resolution);
                 match plan.opencode_outlook() {
-                    Some(expected) if expected != &actual => failures.push(VerifyFailure {
+                    Some(expected) if expected != &actual || plan.standing_conflict.as_ref().is_some_and(|conflict| {
+                        conflict_entries(resolution).as_ref() != Some(&conflict.after)
+                    }) => failures.push(VerifyFailure {
                         agent: AgentKind::OpenCode,
                         postcondition: Postcondition::OpenCodeResolution,
                         observed: format!(
@@ -4729,6 +4809,17 @@ impl RepairOutcome {
     }
     pub fn verification(&self) -> &VerifyReport {
         &self.verification
+    }
+
+    /// The fresh scan matched the disclosed conflict, independently of the
+    /// repaired link's own outcome. Never state this from the plan alone.
+    pub(crate) fn verified_standing_conflict(&self) -> bool {
+        self.plan.standing_conflict.is_some()
+            && self
+                .verification
+                .held
+                .iter()
+                .any(|pass| pass.postcondition == Postcondition::OpenCodeResolution)
     }
 
     pub fn status(&self) -> RepairStatus {
@@ -5374,10 +5465,14 @@ impl ForgetReceipt {
 pub struct ForgetPlan {
     source: RegisteredSource,
     receipts: Vec<ForgetReceipt>,
+    origins: Vec<OriginRecord>,
     blocking_findings: Vec<Finding>,
 }
 
 impl ForgetPlan {
+    pub fn origins(&self) -> &[OriginRecord] {
+        &self.origins
+    }
     pub fn source(&self) -> &RegisteredSource {
         &self.source
     }
@@ -5400,6 +5495,7 @@ pub fn plan_forget(
     source: &RegisteredSource,
     receipts: &[Receipt],
     probe: &ForgetProbe,
+    origins: &[OriginRecord],
 ) -> ForgetPlan {
     let source_receipts: Vec<Receipt> = receipts
         .iter()
@@ -5446,6 +5542,11 @@ pub fn plan_forget(
     ForgetPlan {
         source: source.clone(),
         receipts: classified,
+        origins: origins
+            .iter()
+            .filter(|origin| origin.source_id == source.id())
+            .cloned()
+            .collect(),
         blocking_findings,
     }
 }
@@ -5455,6 +5556,7 @@ pub fn plan_forget_unreadable_receipts(source: &RegisteredSource, reason: String
     ForgetPlan {
         source: source.clone(),
         receipts: Vec::new(),
+        origins: Vec::new(),
         blocking_findings: vec![Finding::new(
             "forget.unreadable_receipts",
             FindingSeverity::Critical,
@@ -5525,7 +5627,7 @@ impl ForgetOutcome {
     }
 }
 
-/// Recheck the exact receipt multiset and every link immediately before deletion.
+/// Recheck the exact receipt and baseline sets and every link before deletion.
 ///
 /// The mutation guard begins before both checks and stays held through the
 /// transaction commit. Install and repair — the two operations that make a link
@@ -5600,6 +5702,20 @@ pub(crate) fn apply_forget(plan: &ForgetPlan, store: &mut Store) -> ForgetApply 
             ));
         }
     }
+    match mutation.origin_records(plan.source.id()) {
+        Ok(origins) if origins == plan.origins => {}
+        Ok(_) => {
+            return ForgetApply::Failed(
+                "the source's origin associations or baselines changed after the preview was shown"
+                    .into(),
+            );
+        }
+        Err(error) => {
+            return ForgetApply::Failed(format!(
+                "the origin associations and baselines could not be re-read: {error}"
+            ));
+        }
+    }
     let reprobe = probe_forget(&plan.source, &current);
     if reprobe
         .observations
@@ -5644,11 +5760,11 @@ pub(crate) fn apply_forget(plan: &ForgetPlan, store: &mut Store) -> ForgetApply 
 /// the check withheld, which is the inventory's own rule applied here.
 pub(crate) fn verify_forget(plan: &ForgetPlan, store: &Store) -> ForgetVerification {
     match store.verify_source_forgotten(plan.source.id()) {
-        Ok([true, true, true]) => {}
+        Ok([true, true, true, true]) => {}
         Ok(checks) => {
             return ForgetVerification::Failed(format!(
-                "metadata remained after forgetting (source: {}, catalogs: {}, receipts: {})",
-                !checks[0], !checks[1], !checks[2],
+                "metadata remained after forgetting (source: {}, catalogs: {}, receipts: {}, baselines: {})",
+                !checks[0], !checks[1], !checks[2], !checks[3],
             ));
         }
         Err(error) => {
@@ -7552,7 +7668,7 @@ mod raw_ownership_tests {
             .is_some()
         );
         let probe = probe_forget(&source, std::slice::from_ref(&receipt));
-        assert!(plan_forget(&source, std::slice::from_ref(&receipt), &probe).is_blocked());
+        assert!(plan_forget(&source, std::slice::from_ref(&receipt), &probe, &[]).is_blocked());
         let slot = TargetProbe {
             agent: receipt.agent(),
             link_path: link.clone(),

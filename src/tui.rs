@@ -10,7 +10,8 @@ use ratatui::{
 use crate::{
     AgentKind, DoctorItem, DoctorPane, InventoryPane, RegistryAvailability, SessionIdentity,
     SetupStep, SkilledApp, SourcesPane, UpdatesPane, View,
-    app::{MAX_INVENTORY_FILTER, SourceRow, catalog_rows},
+    adoption::{AdoptionPrompt, AdoptionVerification},
+    app::{ListWindow, MAX_INVENTORY_FILTER, SourceRow, catalog_rows},
     components::{self, KeyHint, terminal_safe},
     inventory::{
         Finding, FindingSeverity, InstallationHealth, InstallationObject,
@@ -45,11 +46,17 @@ pub const MINIMUM_HEIGHT: u16 = 24;
 /// filesystem work.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct RenderFeedback {
+    list_window_starts: [Option<usize>; 4],
     detail_max_scroll: Option<usize>,
     update_preview_fully_seen: Option<bool>,
 }
 
 impl RenderFeedback {
+    /// Entry offset used by a list this frame, or `None` when it was not drawn.
+    pub fn list_window_start(self, list: ListWindow) -> Option<usize> {
+        self.list_window_starts[list as usize]
+    }
+
     /// The furthest the Inventory detail region could be scrolled and still
     /// show rows that were not already visible: zero where it holds everything
     /// it has, and `None` where this frame did not draw it at all and so
@@ -122,14 +129,15 @@ pub fn render(frame: &mut Frame<'_>, app: &SkilledApp) -> RenderFeedback {
     // The grid's rules answer to the same height the chrome bars measure, so
     // the workspace and the bars agree about which terminal is tall.
     let airy = viewport::airy_rows(area.height);
+    let mut feedback = RenderFeedback::default();
     match app.view() {
         View::Setup(step) => render_setup(frame, body, app, step),
-        View::Inventory => render_inventory(frame, body, app, airy),
-        View::Sources => render_sources(frame, body, app),
-        View::Updates => render_updates(frame, body, app),
-        View::Doctor => render_doctor(frame, body, app, &findings),
+        View::Inventory => render_inventory(frame, body, app, airy, &mut feedback),
+        View::Sources => render_sources(frame, body, app, &mut feedback),
+        View::Updates => render_updates(frame, body, app, &mut feedback),
+        View::Doctor => render_doctor(frame, body, app, &findings, &mut feedback),
         View::Settings => {
-            render_inventory(frame, body, app, airy);
+            render_inventory(frame, body, app, airy, &mut feedback);
             render_settings(frame, body, app);
         }
     }
@@ -179,6 +187,25 @@ pub fn render(frame: &mut Frame<'_>, app: &SkilledApp) -> RenderFeedback {
             detail_extent,
             app.update_preview_fully_seen() || update_preview_seen == Some(true),
         );
+    } else if let Some(prompt) = app.pending_vendored() {
+        render_vendored_prompt(
+            frame,
+            area,
+            prompt,
+            app.detail_scroll(),
+            detail_extent,
+            app.vendored_preview_fully_seen(),
+        );
+    } else if let Some(prompt) = app.pending_adoption() {
+        render_adoption_prompt(
+            frame,
+            area,
+            prompt,
+            app.detail_scroll(),
+            detail_extent,
+            app.adoption_preview_fully_seen()
+                || detail_extent.is_some_and(|extent| app.detail_scroll() >= extent),
+        );
     } else if app.source_path_input_active() {
         render_source_path_entry(frame, area, app);
     } else if app.pending_source().is_some() && app.view() == View::Sources {
@@ -198,6 +225,7 @@ pub fn render(frame: &mut Frame<'_>, app: &SkilledApp) -> RenderFeedback {
     RenderFeedback {
         detail_max_scroll: detail_extent,
         update_preview_fully_seen: update_preview_seen,
+        ..feedback
     }
 }
 
@@ -325,6 +353,8 @@ fn session_status_on_nav_row(app: &SkilledApp, area: Rect) -> bool {
 fn overlay_open(app: &SkilledApp) -> bool {
     app.pending_operation().is_some()
         || app.pending_repair().is_some()
+        || app.pending_adoption().is_some()
+        || app.pending_vendored().is_some()
         || app.source_path_input_active()
         || (app.pending_source().is_some() && app.view() == View::Sources)
         || app.help_context().is_some()
@@ -666,6 +696,20 @@ fn keyboard_owner(app: &SkilledApp) -> Option<(String, &'static str)> {
 
     if app.help_context().is_some() {
         return Some(("Keyboard reference".to_owned(), DIALOG_NOTE));
+    }
+    if app.pending_vendored().is_some() {
+        let title = match app.pending_vendored() {
+            Some(crate::app::VendoredPrompt::Checking) => "Checking skill origin",
+            Some(crate::app::VendoredPrompt::Preview(_)) => "Apply skill update",
+            Some(crate::app::VendoredPrompt::Applying) => "Applying skill update",
+            Some(crate::app::VendoredPrompt::Report(_)) => "Skill update report",
+            Some(crate::app::VendoredPrompt::Failed(_)) => "Skill check needs attention",
+            None => unreachable!(),
+        };
+        return Some((title.to_owned(), DIALOG_NOTE));
+    }
+    if app.pending_adoption().is_some() {
+        return Some(("Confirm origin".to_owned(), DIALOG_NOTE));
     }
     if app.pending_update().is_some() {
         return Some(("Repository update".to_owned(), DIALOG_NOTE));
@@ -1017,14 +1061,20 @@ fn setup_lines(app: &SkilledApp, step: SetupStep, width: u16) -> Vec<Line<'stati
 /// A wide terminal shows the table and the detail region together; a compact
 /// one shows whichever region has focus, so `Enter` is a drill-in and `Esc`
 /// comes back.
-fn render_inventory(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp, airy: bool) {
+fn render_inventory(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &SkilledApp,
+    airy: bool,
+    feedback: &mut RenderFeedback,
+) {
     match viewport::workspace_regions(area) {
         (primary, Some(detail)) => {
-            render_inventory_skills(frame, primary, app, airy);
+            render_inventory_skills(frame, primary, app, airy, feedback);
             render_inventory_detail(frame, detail, app, true);
         }
         (primary, None) => match app.inventory_pane() {
-            InventoryPane::Skills => render_inventory_skills(frame, primary, app, airy),
+            InventoryPane::Skills => render_inventory_skills(frame, primary, app, airy, feedback),
             InventoryPane::Details => render_inventory_detail(frame, primary, app, false),
         },
     }
@@ -1187,7 +1237,13 @@ fn inventory_columns(width: u16) -> InventoryColumns {
     }
 }
 
-fn render_inventory_skills(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp, airy: bool) {
+fn render_inventory_skills(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &SkilledApp,
+    airy: bool,
+    feedback: &mut RenderFeedback,
+) {
     let rows = app.filtered_rows();
     // The prototype's pane header keeps clearance above its content as well
     // as beneath it (`.pane-header`, spec/tui-prototype.html:167: `min-height:
@@ -1271,6 +1327,7 @@ fn render_inventory_skills(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp, 
             components::empty_state("⌕", &headline, &explanation, region),
             region,
         );
+        feedback.list_window_starts[ListWindow::Inventory as usize] = Some(0);
         return;
     }
 
@@ -1300,7 +1357,13 @@ fn render_inventory_skills(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp, 
     } else {
         available
     };
-    let start = visible_window_start(app.focused_installation(), capacity);
+    let start = visible_window_start(
+        app.list_window_start(ListWindow::Inventory),
+        app.focused_installation(),
+        capacity,
+        rows.len(),
+    );
+    feedback.list_window_starts[ListWindow::Inventory as usize] = Some(start);
     for (index, row) in rows.iter().enumerate().skip(start).take(capacity) {
         lines.push(inventory_row_line(
             row,
@@ -1701,14 +1764,20 @@ fn inventory_empty_state(app: &SkilledApp) -> (String, String) {
 }
 
 /// Doctor: every finding the last scan holds, and what one of them is about.
-fn render_doctor(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp, findings: &[DoctorItem<'_>]) {
+fn render_doctor(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &SkilledApp,
+    findings: &[DoctorItem<'_>],
+    feedback: &mut RenderFeedback,
+) {
     match viewport::workspace_regions(area) {
         (primary, Some(detail)) => {
-            render_doctor_findings(frame, primary, app, findings);
+            render_doctor_findings(frame, primary, app, findings, feedback);
             render_doctor_detail(frame, detail, app, findings, true);
         }
         (primary, None) => match app.doctor_pane() {
-            DoctorPane::Findings => render_doctor_findings(frame, primary, app, findings),
+            DoctorPane::Findings => render_doctor_findings(frame, primary, app, findings, feedback),
             DoctorPane::Details => render_doctor_detail(frame, primary, app, findings, false),
         },
     }
@@ -1754,6 +1823,7 @@ fn render_doctor_findings(
     area: Rect,
     app: &SkilledApp,
     findings: &[DoctorItem<'_>],
+    feedback: &mut RenderFeedback,
 ) {
     let body = if let Some(line) = metadata_failure_line(app, area.width) {
         render_pane_scaffold_with_status(
@@ -1785,13 +1855,20 @@ fn render_doctor_findings(
             components::empty_state(glyph, &headline, &explanation, region),
             region,
         );
+        feedback.list_window_starts[ListWindow::Doctor as usize] = Some(0);
         return;
     }
 
     let columns = doctor_columns(body.width);
     let mut lines = vec![doctor_column_headings(columns)];
     let capacity = usize::from(body.height.max(1)).saturating_sub(1);
-    let start = visible_window_start(app.focused_finding(), capacity);
+    let start = visible_window_start(
+        app.list_window_start(ListWindow::Doctor),
+        app.focused_finding(),
+        capacity,
+        findings.len(),
+    );
+    feedback.list_window_starts[ListWindow::Doctor as usize] = Some(start);
     lines.extend(
         findings
             .iter()
@@ -2827,6 +2904,22 @@ fn detail_scroll_extent(
         let rows = update_prompt_rows(prompt, body.width).len();
         return Some(rows.saturating_sub(usize::from(body.height)));
     }
+    if let Some(prompt) = app.pending_vendored() {
+        let body = install_prompt_regions(area, 0).body;
+        if body.width == 0 {
+            return None;
+        }
+        let rows = visual_rows(vendored_prompt_lines(prompt), body.width).len();
+        return Some(rows.saturating_sub(usize::from(body.height)));
+    }
+    if let Some(prompt) = app.pending_adoption() {
+        let body = install_prompt_regions(area, 0).body;
+        if body.width == 0 {
+            return None;
+        }
+        let rows = adoption_prompt_rows(prompt, body.width).len();
+        return Some(rows.saturating_sub(usize::from(body.height)));
+    }
     let (primary, detail) = viewport::workspace_regions(workspace);
     // `padded` mirrors what each view's scaffold draws: the Inventory's
     // panes carry the header clearance, the Doctor's do not.
@@ -3438,20 +3531,30 @@ const VARIANTS_CONTENT_MAX_WIDTH: usize = 65;
 /// large registries retain the exact textual count instead.
 const UPDATE_PROGRESS_SEGMENT_BUDGET: usize = 12;
 
-fn render_updates(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
+fn render_updates(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &SkilledApp,
+    feedback: &mut RenderFeedback,
+) {
     match viewport::workspace_regions(area) {
         (primary, Some(detail)) => {
-            render_update_candidates(frame, primary, app);
+            render_update_candidates(frame, primary, app, feedback);
             render_update_details(frame, detail, app, true);
         }
         (primary, None) => match app.updates_pane() {
-            UpdatesPane::Candidates => render_update_candidates(frame, primary, app),
+            UpdatesPane::Candidates => render_update_candidates(frame, primary, app, feedback),
             UpdatesPane::Details => render_update_details(frame, primary, app, false),
         },
     }
 }
 
-fn render_update_candidates(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
+fn render_update_candidates(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &SkilledApp,
+    feedback: &mut RenderFeedback,
+) {
     let subtitle = app.stated_update_count().map_or_else(
         || "network access is explicit".to_owned(),
         |count| format!("{count} available · network access is explicit"),
@@ -3474,6 +3577,7 @@ fn render_update_candidates(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp)
             ),
             body,
         );
+        feedback.list_window_starts[ListWindow::Updates as usize] = Some(0);
         return;
     }
     let progress = app.update_check_progress();
@@ -3511,7 +3615,13 @@ fn render_update_candidates(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp)
         )));
     }
     let capacity = usize::from(body.height).saturating_sub(lines.len()).max(1);
-    let start = visible_window_start(app.focused_update(), capacity);
+    let start = visible_window_start(
+        app.list_window_start(ListWindow::Updates),
+        app.focused_update(),
+        capacity,
+        app.sources().len(),
+    );
+    feedback.list_window_starts[ListWindow::Updates as usize] = Some(start);
     for (index, source) in app.sources().iter().enumerate().skip(start).take(capacity) {
         let (status, tone, checked) = match app.update_check_for(source.id()) {
             None => ("not checked".to_owned(), Tone::Inactive, String::new()),
@@ -3904,13 +4014,351 @@ fn render_update_prompt(
     frame.render_widget(Paragraph::new(hint).right_aligned(), regions.actions);
 }
 
+fn vendored_prompt_lines(prompt: &crate::app::VendoredPrompt) -> Vec<Line<'static>> {
+    use crate::app::VendoredPrompt;
+    let lines = match prompt {
+        VendoredPrompt::Checking => vec![
+            "Checking the confirmed origin and reading its selected subtree.".to_owned(),
+            "No skill content or provenance is changed until a complete replacement plan is confirmed."
+                .to_owned(),
+            "Esc cancels this check.".to_owned(),
+        ],
+        VendoredPrompt::Preview(plan) => plan.lines(),
+        VendoredPrompt::Applying => vec![
+            "Applying the confirmed replacement plan.".to_owned(),
+            "Replacement is in progress and cannot be cancelled.".to_owned(),
+            "Skilled will rescan the catalog and installations before reporting the result.".to_owned(),
+        ],
+        VendoredPrompt::Report(outcome) => outcome.lines(),
+        VendoredPrompt::Failed(failure) => vec![
+            format!("Check blocked: {}", failure.message),
+            "No replacement was started.".to_owned(),
+        ],
+    };
+    lines
+        .into_iter()
+        .map(|line| Line::raw(terminal_safe(&line)))
+        .collect()
+}
+
+fn render_vendored_prompt(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    prompt: &crate::app::VendoredPrompt,
+    scroll: usize,
+    extent: Option<usize>,
+    fully_seen: bool,
+) {
+    use crate::app::VendoredPrompt;
+    let title = match prompt {
+        VendoredPrompt::Checking => "Checking skill origin",
+        VendoredPrompt::Preview(plan) if plan.is_noop() => "Skill is up to date",
+        VendoredPrompt::Preview(plan) if !plan.can_apply() => "Skill update preview",
+        VendoredPrompt::Preview(_) => "Apply skill update",
+        VendoredPrompt::Applying => "Applying skill update",
+        VendoredPrompt::Report(_) => "Skill update report",
+        VendoredPrompt::Failed(_) => "Skill check needs attention",
+    };
+    let scope = match prompt {
+        VendoredPrompt::Preview(plan) if !plan.can_apply() => "read-only origin preview",
+        VendoredPrompt::Preview(_) => "guarded replacement plan",
+        VendoredPrompt::Applying | VendoredPrompt::Report(_) => "replacement outcome",
+        VendoredPrompt::Checking | VendoredPrompt::Failed(_) => "origin check",
+    };
+    let popup = install_prompt_popup(area);
+    frame.render_widget(Clear, popup);
+    frame.render_widget(components::dialog_frame(title, scope), popup);
+    let actions = match prompt {
+        VendoredPrompt::Checking => Line::from(vec![
+            Span::styled("Esc", theme::key_cap()),
+            Span::raw(" Cancel"),
+        ]),
+        VendoredPrompt::Preview(plan) if plan.can_apply() && fully_seen => Line::from(vec![
+            Span::styled("Enter", theme::key_cap()),
+            Span::raw(" Apply · "),
+            Span::styled("Esc", theme::key_cap()),
+            Span::raw(" Cancel"),
+        ]),
+        VendoredPrompt::Preview(_) => Line::from(vec![
+            Span::styled("Esc", theme::key_cap()),
+            Span::raw(" Close"),
+        ]),
+        VendoredPrompt::Applying => Line::raw("Applying"),
+        VendoredPrompt::Report(_) | VendoredPrompt::Failed(_) => Line::from(vec![
+            Span::styled("Esc", theme::key_cap()),
+            Span::raw(" Close"),
+        ]),
+    };
+    let regions = install_prompt_regions(area, actions.width() as u16);
+    let rows = visual_rows(vendored_prompt_lines(prompt), regions.body.width);
+    let end = scroll
+        .saturating_add(usize::from(regions.body.height))
+        .min(rows.len());
+    let visible = rows.get(scroll.min(rows.len())..end).unwrap_or_default();
+    frame.render_widget(Paragraph::new(visible.to_vec()), regions.body);
+    frame.render_widget(
+        Paragraph::new(components::rule(regions.divider.width)),
+        regions.divider,
+    );
+    let status = match prompt {
+        VendoredPrompt::Preview(plan) if plan.can_apply() && !fully_seen => {
+            "Complete plan continues below — j/k to read before applying"
+        }
+        VendoredPrompt::Preview(plan) if plan.can_apply() => {
+            "Complete plan shown — Enter applies it"
+        }
+        VendoredPrompt::Preview(plan) if !plan.is_noop() => {
+            "Read-only preview — replacement unavailable on this platform"
+        }
+        VendoredPrompt::Preview(_) => "No replacement is needed",
+        VendoredPrompt::Checking => "Checking — no skill files are written",
+        VendoredPrompt::Applying => "Applying confirmed replacement — please wait",
+        VendoredPrompt::Report(outcome) if !outcome.metadata_available() => {
+            "Replacement reported with incomplete metadata verification"
+        }
+        VendoredPrompt::Report(_) => "Replacement result shown",
+        VendoredPrompt::Failed(_) if extent.is_some_and(|max| scroll < max) => {
+            "Result continues below — j/k to scroll"
+        }
+        VendoredPrompt::Failed(_) => "Check blocked — no replacement was started",
+    };
+    frame.render_widget(
+        Paragraph::new(Span::styled(status, theme::key_label())),
+        regions.status,
+    );
+    frame.render_widget(Paragraph::new(actions.right_aligned()), regions.actions);
+}
+
+/// Draw the declaration a user makes before Skilled can claim an existing
+/// installation as its own. The draft and plan are both read-only; only the
+/// explicit confirmation records the reviewed baseline.
+fn render_adoption_prompt(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    prompt: &AdoptionPrompt,
+    scroll: usize,
+    extent: Option<usize>,
+    fully_seen: bool,
+) {
+    let popup = install_prompt_popup(area);
+    frame.render_widget(Clear, popup);
+    let (title, scope) = adoption_prompt_heading(prompt);
+    let actions = adoption_prompt_actions(prompt, fully_seen, extent.is_some_and(|max| max > 0));
+    let regions = install_prompt_regions(area, u16::try_from(actions.width()).unwrap_or(u16::MAX));
+    frame.render_widget(components::dialog_frame(title, scope), popup);
+    let rows = adoption_prompt_rows(prompt, regions.body.width);
+    let end = scroll
+        .saturating_add(usize::from(regions.body.height))
+        .min(rows.len());
+    let visible = rows.get(scroll.min(rows.len())..end).unwrap_or_default();
+    frame.render_widget(Paragraph::new(visible.to_vec()), regions.body);
+    frame.render_widget(
+        Paragraph::new(components::rule(regions.divider.width)),
+        regions.divider,
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            adoption_prompt_status(prompt, scroll, extent, fully_seen),
+            theme::key_label(),
+        ))),
+        regions.status,
+    );
+    frame.render_widget(Paragraph::new(actions.right_aligned()), regions.actions);
+}
+
+fn adoption_prompt_heading(prompt: &AdoptionPrompt) -> (&'static str, &'static str) {
+    match prompt {
+        AdoptionPrompt::Editing(_) | AdoptionPrompt::Preview(_) => {
+            ("Confirm origin", "nothing written yet")
+        }
+        AdoptionPrompt::Report(AdoptionVerification::Verified) => {
+            ("Origin established", "baseline recorded")
+        }
+        AdoptionPrompt::Report(_) => ("Adoption needs attention", "baseline recorded"),
+        AdoptionPrompt::Failed(_) => ("Adoption needs attention", "nothing written"),
+    }
+}
+
+fn adoption_prompt_actions(
+    prompt: &AdoptionPrompt,
+    fully_seen: bool,
+    scrollable: bool,
+) -> Line<'static> {
+    let mut spans = match prompt {
+        AdoptionPrompt::Editing(_) => vec![
+            Span::styled("Tab", theme::key_cap()),
+            Span::raw(" Next field   "),
+            Span::styled("Enter", theme::key_cap()),
+            Span::raw(" Review   "),
+            Span::styled("Esc", theme::key_cap()),
+            Span::raw(" Cancel"),
+        ],
+        AdoptionPrompt::Preview(_) if fully_seen => vec![
+            Span::styled("Enter", theme::key_cap()),
+            Span::raw(" Confirm   "),
+            Span::styled("Esc", theme::key_cap()),
+            Span::raw(" Cancel"),
+        ],
+        AdoptionPrompt::Preview(_) => vec![
+            Span::styled("j/k", theme::key_cap()),
+            Span::raw(" Read plan   "),
+            Span::styled("Esc", theme::key_cap()),
+            Span::raw(" Cancel"),
+        ],
+        AdoptionPrompt::Report(_) | AdoptionPrompt::Failed(_) => {
+            vec![Span::styled("Esc", theme::key_cap()), Span::raw(" Close")]
+        }
+    };
+    if scrollable && !matches!(prompt, AdoptionPrompt::Preview(_)) {
+        let key = if matches!(prompt, AdoptionPrompt::Editing(_)) {
+            "Up/Down"
+        } else {
+            "j/k"
+        };
+        spans.splice(
+            0..0,
+            [Span::styled(key, theme::key_cap()), Span::raw(" Scroll   ")],
+        );
+    }
+    Line::from(spans)
+}
+
+fn adoption_prompt_status(
+    prompt: &AdoptionPrompt,
+    scroll: usize,
+    extent: Option<usize>,
+    fully_seen: bool,
+) -> String {
+    match prompt {
+        AdoptionPrompt::Editing(_) => match extent {
+            Some(max) if scroll > 0 && scroll < max => {
+                "Origin evidence continues above and below".to_owned()
+            }
+            Some(max) if scroll < max => "Origin evidence continues below".to_owned(),
+            _ => "Enter origin evidence before reviewing it".to_owned(),
+        },
+        AdoptionPrompt::Preview(_) if !fully_seen => match extent {
+            Some(max) if scroll > 0 && scroll < max => "Plan continues above and below".to_owned(),
+            Some(max) if scroll < max => "Plan continues below".to_owned(),
+            _ => "Plan must be shown before confirmation".to_owned(),
+        },
+        AdoptionPrompt::Preview(_) => "Complete origin and baseline plan shown".to_owned(),
+        AdoptionPrompt::Report(_) => match extent {
+            Some(max) if scroll > 0 && scroll < max => {
+                "Result continues above and below".to_owned()
+            }
+            Some(max) if scroll < max => "Result continues below".to_owned(),
+            _ => match prompt {
+                AdoptionPrompt::Report(AdoptionVerification::Verified) => {
+                    "Origin and baseline recorded"
+                }
+                AdoptionPrompt::Report(AdoptionVerification::Failed(_)) => {
+                    "Baseline saved; verification failed"
+                }
+                AdoptionPrompt::Report(AdoptionVerification::Incomplete(_)) => {
+                    "Baseline saved; verification incomplete"
+                }
+                _ => unreachable!("report branch"),
+            }
+            .to_owned(),
+        },
+        AdoptionPrompt::Failed(_) => match extent {
+            Some(max) if scroll > 0 && scroll < max => {
+                "Result continues above and below".to_owned()
+            }
+            Some(max) if scroll < max => "Result continues below".to_owned(),
+            _ => "Review the result below".to_owned(),
+        },
+    }
+}
+
+fn adoption_prompt_lines(prompt: &AdoptionPrompt) -> Vec<Line<'static>> {
+    if let AdoptionPrompt::Editing(form) = prompt {
+        return adoption_form_lines(form);
+    }
+    let lines = match prompt {
+        AdoptionPrompt::Preview(plan) => plan.lines(),
+        AdoptionPrompt::Report(verification) => vec![match verification {
+            AdoptionVerification::Verified => "Origin and current-content baseline saved and verified. Future comparisons start here; no historical revision was proven.".into(),
+            AdoptionVerification::Failed(failure) => format!("Baseline saved; verification failed: {}", failure.message),
+            AdoptionVerification::Incomplete(failure) => format!("Baseline saved; verification incomplete: {}", failure.message),
+        }],
+        AdoptionPrompt::Failed(failure) => failure.message.lines().map(str::to_owned).collect(),
+        AdoptionPrompt::Editing(_) => unreachable!("handled above"),
+    };
+    lines
+        .into_iter()
+        .map(|line| Line::raw(terminal_safe(&line)))
+        .collect()
+}
+
+fn adoption_form_lines(form: &crate::app::AdoptionForm) -> Vec<Line<'static>> {
+    use crate::app::AdoptionField;
+    let draft = &form.draft;
+    let mut text = vec![
+        format!(
+            "Skill: {}",
+            draft
+                .checkout
+                .join(draft.variant.variant_relative_path())
+                .display()
+        ),
+        "Confirm an exact origin and tracking branch. Use . for the repository root.".into(),
+        "Attribution and lock entries are hints, not proof of a historical revision.".into(),
+    ];
+    if draft.evidence.is_ambiguous() {
+        text.push(
+            "Ambiguous evidence: enter one exact origin to resolve it before previewing.".into(),
+        );
+    }
+    for origin in &draft.evidence.candidates {
+        text.push(format!(
+            "Hint: {} · {}",
+            origin.repository,
+            origin.subdirectory.as_deref().unwrap_or_default()
+        ));
+    }
+    for problem in &draft.evidence.problems {
+        text.push(format!("Evidence: {problem}"));
+    }
+    let mut lines: Vec<_> = text
+        .into_iter()
+        .map(|text| Line::raw(terminal_safe(&text)))
+        .collect();
+    for field in AdoptionField::ALL {
+        let label = match field {
+            AdoptionField::Repository => "Repository URL",
+            AdoptionField::Subdirectory => "Subdirectory",
+            AdoptionField::TrackingBranch => "Tracking branch (refs/heads/…)",
+        };
+        let marker = if form.focused == field {
+            Span::styled(">", theme::focus_marker())
+        } else {
+            Span::raw(" ")
+        };
+        lines.push(Line::from(vec![
+            marker,
+            Span::raw(format!(" {label}: {}", terminal_safe(form.value(field)))),
+        ]));
+    }
+    if let Some(error) = &form.error {
+        lines.push(Line::raw(format!("Blocked: {}", terminal_safe(error))));
+    }
+    lines
+}
+
+fn adoption_prompt_rows(prompt: &AdoptionPrompt, width: u16) -> Vec<Line<'static>> {
+    visual_rows(adoption_prompt_lines(prompt), width)
+}
+
 fn update_prompt_rows(prompt: &RepositoryUpdatePrompt, width: u16) -> Vec<Line<'static>> {
     visual_rows(update_prompt_lines(prompt), width)
 }
 
-/// Materialize the update dialog as terminal rows. Unlike `Paragraph::scroll`,
-/// this keeps the logical offset as `usize`, so complete evidence remains
-/// reachable after row 65,535 instead of wrapping through a `u16` cast.
+/// Materialize preview text as terminal rows, retaining line and span styles.
+/// Measure whole graphemes using the same segmentation and widths as Ratatui.
+/// Both measurement and rendering use these rows. The logical offset stays
+/// `usize`, so evidence after row 65,535 remains reachable without a `u16` cast.
 fn visual_rows(lines: Vec<Line<'static>>, width: u16) -> Vec<Line<'static>> {
     if width == 0 {
         return Vec::new();
@@ -3918,32 +4366,37 @@ fn visual_rows(lines: Vec<Line<'static>>, width: u16) -> Vec<Line<'static>> {
     let width = usize::from(width);
     let mut rows = Vec::new();
     for line in lines {
-        let text = line
-            .spans
-            .iter()
-            .map(|span| span.content.as_ref())
-            .collect::<String>();
-        if text.is_empty() {
-            rows.push(Line::raw(String::new()));
-            continue;
-        }
-        let mut row = String::new();
+        let mut row: Vec<Span<'static>> = Vec::new();
         let mut row_width = 0_usize;
-        for character in text.chars() {
-            let character_width = Span::raw(character.to_string()).width();
-            if !row.is_empty() && row_width.saturating_add(character_width) > width {
-                rows.push(Line::raw(std::mem::take(&mut row)));
-                row_width = 0;
+        for span in line.spans {
+            for grapheme in span.styled_graphemes(span.style) {
+                let grapheme_width = Span::raw(grapheme.symbol).width();
+                if !row.is_empty() && row_width.saturating_add(grapheme_width) > width {
+                    rows.push(Line::from(std::mem::take(&mut row)).style(line.style));
+                    row_width = 0;
+                }
+                if let Some(previous) = row
+                    .last_mut()
+                    .filter(|previous| previous.style == span.style)
+                {
+                    previous.content.to_mut().push_str(grapheme.symbol);
+                } else {
+                    row.push(Span::styled(grapheme.symbol.to_owned(), span.style));
+                }
+                row_width = row_width.saturating_add(grapheme_width);
             }
-            row.push(character);
-            row_width = row_width.saturating_add(character_width);
         }
-        rows.push(Line::raw(row));
+        rows.push(Line::from(row).style(line.style));
     }
     rows
 }
 
-fn render_sources(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
+fn render_sources(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &SkilledApp,
+    feedback: &mut RenderFeedback,
+) {
     match viewport::workspace_regions(area) {
         (primary, Some(details)) => {
             // A region that opens on a rule is set in from it, the way the
@@ -3957,19 +4410,24 @@ fn render_sources(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
             ])
             .areas(primary);
             render_region_separator(frame, separator);
-            render_source_repositories(frame, repositories, app);
+            render_source_repositories(frame, repositories, app, feedback);
             render_source_variants(frame, variants, app, true);
             render_source_details(frame, details, app, true);
         }
         (primary, None) => match app.sources_pane() {
-            SourcesPane::Repositories => render_source_repositories(frame, primary, app),
+            SourcesPane::Repositories => render_source_repositories(frame, primary, app, feedback),
             SourcesPane::Variants => render_source_variants(frame, primary, app, false),
             SourcesPane::Details => render_source_details(frame, primary, app, false),
         },
     }
 }
 
-fn render_source_repositories(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
+fn render_source_repositories(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &SkilledApp,
+    feedback: &mut RenderFeedback,
+) {
     let metadata_unavailable = app.registry_availability() == RegistryAvailability::Unavailable;
     let subtitle = if metadata_unavailable {
         "registry unavailable".to_owned()
@@ -4011,6 +4469,7 @@ fn render_source_repositories(frame: &mut Frame<'_>, area: Rect, app: &SkilledAp
             components::empty_state("·", headline, explanation, inner),
             inner,
         );
+        feedback.list_window_starts[ListWindow::Sources as usize] = Some(0);
         return;
     }
 
@@ -4018,7 +4477,13 @@ fn render_source_repositories(frame: &mut Frame<'_>, area: Rect, app: &SkilledAp
     // as it has rows. A pane too short for one still shows the top of the
     // focused entry rather than nothing.
     let capacity = (usize::from(inner.height) / REPOSITORY_ENTRY_LINES).max(1);
-    let start = visible_window_start(app.focused_source(), capacity);
+    let start = visible_window_start(
+        app.list_window_start(ListWindow::Sources),
+        app.focused_source(),
+        capacity,
+        app.sources().len(),
+    );
+    feedback.list_window_starts[ListWindow::Sources as usize] = Some(start);
     let lines = app
         .sources()
         .iter()
@@ -5144,8 +5609,21 @@ fn visible_grouped_lines(
     }
 }
 
-fn visible_window_start(focused: usize, capacity: usize) -> usize {
-    focused.saturating_add(1).saturating_sub(capacity)
+/// Shift only far enough to keep selection visible, filling the window after
+/// content shrinks or capacity grows. Offsets and capacity count list entries.
+fn visible_window_start(previous: usize, focused: usize, capacity: usize, len: usize) -> usize {
+    if len == 0 || capacity == 0 {
+        return 0;
+    }
+    let focused = focused.min(len - 1);
+    let start = previous.min(len.saturating_sub(capacity));
+    if focused < start {
+        focused
+    } else if focused - start >= capacity {
+        focused + 1 - capacity
+    } else {
+        start
+    }
 }
 
 fn render_source_path_entry(frame: &mut Frame<'_>, area: Rect, app: &SkilledApp) {
@@ -5678,6 +6156,38 @@ fn forget_prompt_lines(prompt: &ForgetPrompt) -> Vec<Line<'static>> {
                     terminal_safe(&catalog.relative_path().display().to_string())
                 )));
             }
+            for record in plan.origins() {
+                lines.push(Line::styled(
+                    "Adopted origin and baseline to remove",
+                    theme::section_title(),
+                ));
+                for text in [
+                    format!(
+                        "Catalog: {}",
+                        source
+                            .git_top_level()
+                            .join(&record.catalog_relative_path)
+                            .display()
+                    ),
+                    format!(
+                        "Skill: {}",
+                        source
+                            .git_top_level()
+                            .join(&record.variant_relative_path)
+                            .display()
+                    ),
+                    format!("Origin: {}", record.origin.repository()),
+                    format!("Subdirectory: {}", record.origin.subdirectory()),
+                    format!("Tracking ref: {}", record.update_ref),
+                    format!(
+                        "Baseline v{}: {}",
+                        record.baseline.version, record.baseline.digest
+                    ),
+                    "Explicit current-content association; historical revision unknown.".to_owned(),
+                ] {
+                    lines.push(Line::from(terminal_safe(&text)));
+                }
+            }
             for item in plan.receipts() {
                 let receipt = item.receipt();
                 match item.state() {
@@ -6095,6 +6605,12 @@ fn repair_report_lines(outcome: &RepairOutcome) -> Vec<Line<'static>> {
         lines.push(Line::from(text));
         lines.push(Line::from(terminal_safe(
             &step.link_path().display().to_string(),
+        )));
+    }
+    if outcome.verified_standing_conflict() {
+        lines.push(Line::from(components::badge(
+            Tone::Warning,
+            "The existing OpenCode conflict remains, as previewed.",
         )));
     }
     for withheld in outcome.verification().withheld() {
@@ -7115,6 +7631,20 @@ fn help_commands(
                     description: "preview installing the focused variant",
                 });
             }
+            if app.can_check_vendored_selection() {
+                commands.push(HelpCommand {
+                    key: "u",
+                    label: "Check skill origin",
+                    description: "fetch the confirmed origin and preview skill changes",
+                });
+            }
+            if app.can_adopt_selection() {
+                commands.push(HelpCommand {
+                    key: "p",
+                    label: "Confirm origin",
+                    description: "review and record a baseline for the focused variant",
+                });
+            }
             if app.can_add_source() {
                 commands.push(HelpCommand {
                     key: "a",
@@ -7436,6 +7966,64 @@ fn context_key_hints(
         hints.push(KeyHint::new("Ctrl-C", "Quit"));
         return hints;
     }
+    if let Some(prompt) = app.pending_vendored() {
+        let mut hints = Vec::new();
+        if detail_extent.is_some_and(|extent| extent > 0) {
+            hints.push(KeyHint::essential("j/k", "Scroll"));
+        }
+        if matches!(prompt, crate::app::VendoredPrompt::Preview(_))
+            && app.vendored_preview_fully_seen()
+        {
+            hints.push(KeyHint::essential("Enter", "Apply"));
+        }
+        if !matches!(prompt, crate::app::VendoredPrompt::Applying) {
+            hints.push(KeyHint::essential(
+                "Esc",
+                if matches!(prompt, crate::app::VendoredPrompt::Checking) {
+                    "Cancel"
+                } else {
+                    "Close"
+                },
+            ));
+        }
+        hints.push(KeyHint::new("Ctrl-C", "Quit"));
+        return hints;
+    }
+    if let Some(prompt) = app.pending_adoption() {
+        let mut hints = Vec::new();
+        if detail_extent.is_some_and(|extent| extent > 0) {
+            hints.push(KeyHint::essential(
+                if matches!(prompt, AdoptionPrompt::Editing(_)) {
+                    "Up/Down"
+                } else {
+                    "j/k"
+                },
+                "Scroll",
+            ));
+        }
+        match prompt {
+            AdoptionPrompt::Editing(_) => hints.extend([
+                KeyHint::new("Tab", "Next field"),
+                KeyHint::essential("Enter", "Review"),
+                KeyHint::essential("Esc", "Cancel"),
+            ]),
+            AdoptionPrompt::Preview(_) => {
+                if app.adoption_preview_fully_seen()
+                    || detail_extent.is_some_and(|extent| app.detail_scroll() >= extent)
+                {
+                    hints.push(KeyHint::essential("Enter", "Confirm"));
+                    hints.push(KeyHint::essential("Esc", "Cancel"));
+                } else {
+                    hints.push(KeyHint::essential("Esc", "Close"));
+                }
+            }
+            AdoptionPrompt::Report(_) | AdoptionPrompt::Failed(_) => {
+                hints.push(KeyHint::essential("Esc", "Close"));
+            }
+        }
+        hints.push(KeyHint::new("Ctrl-C", "Quit"));
+        return hints;
+    }
     if app.source_path_input_active() {
         return vec![
             KeyHint::essential("Enter", "Inspect"),
@@ -7531,6 +8119,12 @@ fn context_key_hints(
             }
             if app.can_install_selection() {
                 hints.push(KeyHint::new("i", "Install"));
+            }
+            if app.can_adopt_selection() {
+                hints.push(KeyHint::new("p", "Confirm origin"));
+            }
+            if app.can_check_vendored_selection() {
+                hints.push(KeyHint::new("u", "Check"));
             }
             if app.can_add_source() {
                 hints.push(KeyHint::new("a", "Add source"));
@@ -7738,6 +8332,34 @@ fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn list_window_clamps_resize_and_content_changes() {
+        // A growing viewport fills its newly available rows near the end.
+        assert_eq!(super::visible_window_start(20, 24, 15, 30), 15);
+        // A shrinking viewport keeps the selected entry visible.
+        assert_eq!(super::visible_window_start(10, 24, 5, 30), 20);
+        assert_eq!(super::visible_window_start(20, 7, 5, 8), 3);
+        assert_eq!(super::visible_window_start(20, 24, 5, 0), 0);
+        assert_eq!(super::visible_window_start(20, 24, 0, 30), 0);
+        for len in 1..35 {
+            for capacity in 1..40 {
+                for focused in 0..len {
+                    for previous in 0..40 {
+                        let start = super::visible_window_start(previous, focused, capacity, len);
+                        assert!(start <= focused && focused - start < capacity);
+                        assert!(start <= len.saturating_sub(capacity));
+                        if previous <= len.saturating_sub(capacity)
+                            && previous <= focused
+                            && focused - previous < capacity
+                        {
+                            assert_eq!(start, previous);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     use super::*;
 
     /// What the narrowest detail region leaves its text: the region less the
@@ -7754,8 +8376,310 @@ mod tests {
     }
 
     #[test]
+    fn vendored_dialogs_gate_apply_and_distinguish_the_outcome_in_text_and_cell_styles() {
+        use crate::app::VendoredPrompt;
+        use ratatui::{Terminal, backend::TestBackend};
+        for (name, prompt, heading, scope, action, fully_seen, status) in [
+            (
+                "preview",
+                VendoredPrompt::Preview(Box::new(crate::vendored::ApplyPlan::fixture())),
+                "Apply skill update",
+                "guarded replacement plan",
+                "Apply",
+                true,
+                "Complete plan shown",
+            ),
+            (
+                "readonly",
+                VendoredPrompt::Preview(Box::new(crate::vendored::ApplyPlan::readonly_fixture())),
+                "Skill update preview",
+                "read-only origin preview",
+                "Close",
+                true,
+                "Read-only preview — replacement",
+            ),
+            (
+                "checking",
+                VendoredPrompt::Checking,
+                "Checking skill origin",
+                "origin check",
+                "Cancel",
+                false,
+                "Checking — no skill files",
+            ),
+            (
+                "blocked",
+                VendoredPrompt::Failed(
+                    "Modified skill: content differs from the adopted baseline".into(),
+                ),
+                "Skill check needs attention",
+                "origin check",
+                "Close",
+                false,
+                "Check blocked — no replacement",
+            ),
+            (
+                "report",
+                VendoredPrompt::Report(crate::vendored::ApplyOutcome::fixture()),
+                "Skill update report",
+                "replacement outcome",
+                "Close",
+                false,
+                "Replacement result shown",
+            ),
+        ] {
+            for (width, height) in [(80, 24), (120, 40)] {
+                let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+                terminal
+                    .draw(|frame| {
+                        render_vendored_prompt(frame, frame.area(), &prompt, 0, Some(0), fully_seen)
+                    })
+                    .unwrap();
+                let buffer = terminal.backend().buffer();
+                let rows = (0..height)
+                    .map(|y| {
+                        (0..width)
+                            .map(|x| buffer[(x, y)].symbol())
+                            .collect::<String>()
+                    })
+                    .collect::<Vec<_>>();
+                let screen = rows
+                    .iter()
+                    .map(|row| row.trim_end())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                assert!(screen.contains(heading));
+                assert!(screen.contains(scope));
+                assert!(screen.contains(action));
+                if name == "preview" {
+                    assert!(screen.contains("Enter"));
+                } else {
+                    assert!(!screen.contains("Enter Apply"));
+                }
+                let status_row = rows.iter().position(|row| row.contains(status)).unwrap();
+                let status_byte = rows[status_row].find(status).unwrap();
+                let status_column = rows[status_row][..status_byte].chars().count();
+                assert_eq!(
+                    buffer[(status_column as u16, status_row as u16)].style().fg,
+                    theme::key_label().fg
+                );
+                let row = rows.iter().rposition(|row| row.contains("Esc")).unwrap();
+                let byte = rows[row].find("Esc").unwrap();
+                let column = rows[row][..byte].chars().count();
+                assert_eq!(
+                    buffer[(column as u16, row as u16)].style().fg,
+                    theme::key_cap().fg
+                );
+                if width == 80 {
+                    insta::with_settings!({snapshot_path => "../tests/snapshots"}, {
+                        insta::assert_snapshot!(format!("vendored_{name}"), screen);
+                    });
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn vendored_apply_and_incomplete_report_state_their_distinct_outcomes() {
+        use crate::{app::VendoredPrompt, vendored::ApplyStatus};
+        use ratatui::{Terminal, backend::TestBackend};
+
+        let mut incomplete = crate::vendored::ApplyOutcome::fixture();
+        incomplete.status = ApplyStatus::VerificationIncomplete;
+        for (prompt, required, forbidden) in [
+            (
+                VendoredPrompt::Applying,
+                "Replacement is in progress and cannot be cancelled.",
+                "Esc",
+            ),
+            (
+                VendoredPrompt::Report(incomplete),
+                "Skill update verification is incomplete.",
+                "Enter Apply",
+            ),
+        ] {
+            for (width, height) in [(80, 24), (120, 40)] {
+                let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+                terminal
+                    .draw(|frame| {
+                        render_vendored_prompt(frame, frame.area(), &prompt, 0, Some(0), false)
+                    })
+                    .unwrap();
+                let screen = terminal
+                    .backend()
+                    .buffer()
+                    .content
+                    .iter()
+                    .map(|cell| cell.symbol())
+                    .collect::<String>();
+                assert!(screen.contains(required), "{screen}");
+                assert!(!screen.contains(forbidden), "{screen}");
+            }
+        }
+    }
+
+    #[test]
+    fn preview_rows_preserve_styles_across_wraps_and_empty_lines() {
+        let lines = vec![
+            Line::from(vec![
+                Span::styled(">", theme::focus_marker()),
+                Span::raw(" 界ae\u{301}"),
+            ])
+            .style(theme::key_label()),
+            Line::default(),
+            Line::raw(""),
+        ];
+        assert!(visual_rows(lines.clone(), 0).is_empty());
+        let rows = visual_rows(lines, 4);
+        assert_eq!(
+            rows.iter().map(label_text).collect::<Vec<_>>(),
+            ["> 界", "ae\u{301}", "", ""]
+        );
+        assert_eq!(rows[1].spans[0].content, "ae\u{301}");
+        assert_eq!(rows[0].spans[0].style, theme::focus_marker());
+        assert_eq!(rows[0].style, theme::key_label());
+        assert_eq!(rows[1].style, theme::key_label());
+        assert_eq!(rows[1].spans[0].style, ratatui::style::Style::default());
+    }
+
+    #[test]
+    fn preview_rows_wrap_rendered_graphemes_without_clipping_boundary_cells() {
+        use ratatui::{buffer::Buffer, widgets::Widget};
+        for symbol in ["❤️", "👩‍💻", "🇺🇸", "e\u{301}"] {
+            let symbol_width = Span::raw(symbol).width() as u16;
+            for spare_column in [0, 1] {
+                let width = symbol_width + spare_column;
+                let rows = visual_rows(
+                    vec![Line::from(vec![
+                        Span::styled("x", theme::focus_marker()),
+                        Span::raw(format!("{symbol}y")),
+                    ])],
+                    width,
+                );
+                let expected = if spare_column == 0 {
+                    vec!["x".to_owned(), symbol.to_owned(), "y".to_owned()]
+                } else {
+                    vec![format!("x{symbol}"), "y".to_owned()]
+                };
+                assert_eq!(
+                    rows.iter().map(label_text).collect::<Vec<_>>(),
+                    expected,
+                    "{symbol:?}, width {width}"
+                );
+                let area = Rect::new(0, 0, width, rows.len() as u16);
+                let mut buffer = Buffer::empty(area);
+                Paragraph::new(rows).render(area, &mut buffer);
+                assert_eq!(buffer[(0, 0)].style().fg, theme::focus_marker().fg);
+                let (x, y) = if spare_column == 0 { (0, 1) } else { (1, 0) };
+                assert_eq!(buffer[(x, y)].symbol(), symbol, "{symbol:?}, width {width}");
+                assert_eq!(buffer[(0, area.height - 1)].symbol(), "y");
+            }
+        }
+    }
+
+    #[test]
     fn update_dialog_rows_keep_offsets_beyond_the_paragraph_scroll_limit() {
         let rows = visual_rows(vec![Line::raw("x".repeat(65_540))], 1);
+
+        assert_eq!(rows.len(), 65_540);
+        assert_eq!(label_text(&rows[65_536]), "x");
+        assert_eq!(label_text(&rows[65_539]), "x");
+    }
+
+    #[test]
+    fn adoption_result_failure_does_not_claim_that_nothing_was_recorded() {
+        let prompt = AdoptionPrompt::Report(AdoptionVerification::Incomplete(
+            "post-save verification could not finish".into(),
+        ));
+
+        assert_eq!(
+            adoption_prompt_heading(&prompt),
+            ("Adoption needs attention", "baseline recorded")
+        );
+        assert_eq!(
+            adoption_prompt_status(&prompt, 0, Some(0), true),
+            "Baseline saved; verification incomplete"
+        );
+    }
+
+    #[test]
+    fn adoption_outcomes_have_text_and_cell_styles_at_supported_sizes() {
+        use ratatui::{Terminal, backend::TestBackend};
+        for (name, prompt, status, scope) in [
+            (
+                "not_saved",
+                AdoptionPrompt::Failed("Skill content changed after the adoption preview".into()),
+                "Review the result below",
+                "nothing written",
+            ),
+            (
+                "saved_verified",
+                AdoptionPrompt::Report(AdoptionVerification::Verified),
+                "Origin and baseline recorded",
+                "baseline recorded",
+            ),
+            (
+                "saved_failed",
+                AdoptionPrompt::Report(AdoptionVerification::Failed(
+                    "Skill content changed after the adoption preview".into(),
+                )),
+                "Baseline saved; verification failed",
+                "baseline recorded",
+            ),
+            (
+                "saved_incomplete",
+                AdoptionPrompt::Report(AdoptionVerification::Incomplete(
+                    "Skill content could not be read".into(),
+                )),
+                "Baseline saved; verification incomplete",
+                "baseline recorded",
+            ),
+        ] {
+            for (width, height) in [(80, 24), (120, 40)] {
+                let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+                terminal
+                    .draw(|frame| {
+                        render_adoption_prompt(frame, frame.area(), &prompt, 0, Some(0), true);
+                    })
+                    .unwrap();
+                let buffer = terminal.backend().buffer();
+                let rows: Vec<String> = (0..height)
+                    .map(|y| (0..width).map(|x| buffer[(x, y)].symbol()).collect())
+                    .collect();
+                let rendered = rows
+                    .iter()
+                    .map(|row| row.trim_end())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                assert!(rendered.contains(scope), "{rendered}");
+                let y = rows.iter().rposition(|row| row.contains(status)).unwrap();
+                let x = rows[y]
+                    .chars()
+                    .collect::<Vec<_>>()
+                    .windows(status.chars().count())
+                    .position(|chars| chars.iter().collect::<String>() == status)
+                    .unwrap();
+                for offset in 0..status.chars().count() {
+                    assert_eq!(
+                        buffer[((x + offset) as u16, y as u16)].fg,
+                        theme::key_label().fg.unwrap()
+                    );
+                }
+                assert!(rendered.contains("Esc Close"));
+                assert!(!rendered.contains("Enter Confirm"));
+                if width == 80 {
+                    insta::with_settings!({snapshot_path => "../tests/snapshots"}, {
+                        insta::assert_snapshot!(format!("adoption_outcome_{name}"), rendered);
+                    });
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn adoption_rows_keep_offsets_beyond_the_paragraph_scroll_limit() {
+        let prompt = AdoptionPrompt::Failed("x".repeat(65_540).into());
+        let rows = adoption_prompt_rows(&prompt, 1);
 
         assert_eq!(rows.len(), 65_540);
         assert_eq!(label_text(&rows[65_536]), "x");

@@ -20,6 +20,258 @@ use skilled::{
     },
 };
 
+// A moved source leaves an owned dangling OpenCode link. Other roots may
+// already expose its new target alongside a different, unregistered skill.
+fn standing_conflict_fixture(target_already_visible: bool) -> (Fixture, SkilledApp, PathBuf) {
+    let fixture = Fixture::new();
+    let source = fixture.source("library", "skills", "portable");
+    let mut app = fixture.registered(&source);
+    fixture.create_root_parents();
+    fixture.install(&mut app);
+    let moved = fixture.directory.path().join("moved-library");
+    fs::rename(&source, &moved).unwrap();
+    let preview = app.preview_source(&moved).unwrap();
+    app.confirm_source(preview).unwrap();
+    for agent in [AgentKind::ClaudeCode, AgentKind::Codex] {
+        let link = fixture.root(agent).join("portable");
+        fs::remove_file(&link).unwrap();
+        if agent == AgentKind::ClaudeCode && target_already_visible {
+            std::os::unix::fs::symlink(moved.join("skills/portable"), link).unwrap();
+        } else {
+            write_skill(&link, "portable");
+        }
+    }
+    (fixture, app, moved)
+}
+
+fn preview_native_repair(app: &mut SkilledApp) {
+    dispatch(app, Action::OpenDoctor);
+    // Locate the owned dangling link, independently of other Doctor findings.
+    for _ in 0..app.doctor_findings().len() {
+        dispatch(app, Action::BeginRepair);
+        if matches!(app.pending_repair(), Some(RepairPrompt::Preview(plan)) if plan.agent() == AgentKind::OpenCode)
+        {
+            break;
+        }
+        dispatch(app, Action::DismissRepair);
+        dispatch(app, Action::MoveDoctorSelection(1));
+    }
+}
+
+#[test]
+fn native_repair_preserves_a_standing_conflict_without_introducing_a_directory() {
+    let (fixture, mut app, moved) = standing_conflict_fixture(true);
+    preview_native_repair(&mut app);
+    let Some(RepairPrompt::Preview(plan)) = app.pending_repair() else {
+        panic!("repair preview")
+    };
+    assert!(plan.is_executable(), "{plan:?}");
+    let preview = render_text(&app, 160, 60);
+    assert!(
+        preview.contains("existing OpenCode conflict remains"),
+        "{preview}"
+    );
+    assert_conflict_warning_style(&app);
+    app.note_detail_max_scroll(Some(0));
+    dispatch(&mut app, Action::ConfirmRepair);
+    let Some(RepairPrompt::Report(outcome)) = app.pending_repair() else {
+        panic!("report")
+    };
+    assert_eq!(outcome.status(), RepairStatus::Repaired);
+    assert!(outcome.verification().is_complete());
+    let plan = outcome.plan().clone();
+    let applied = outcome.applied().clone();
+    assert_eq!(
+        fs::read_link(fixture.root(AgentKind::OpenCode).join("portable")).unwrap(),
+        moved.join("skills/portable").canonicalize().unwrap()
+    );
+    assert_conflict_warning_style(&app);
+    // Snapshot the rendered verdict rows; filesystem path wrapping varies
+    // with the host's temporary-directory prefix and is covered elsewhere.
+    let report = render_text(&app, 100, 30);
+    let verdict_rows = report
+        .lines()
+        .filter(|line| {
+            line.contains("Result:")
+                || line.contains("link replaced and receipt recorded")
+                || line.contains("existing OpenCode conflict remains")
+                || line.contains("Repaired and verified")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    insta::assert_snapshot!("repair_with_standing_conflict_report", verdict_rows);
+    // A different conflict with the same number of directories is not what
+    // the confirmed plan described.
+    dispatch(&mut app, Action::DismissRepair);
+    let competing = fixture.root(AgentKind::Codex).join("portable");
+    fs::rename(&competing, fixture.directory.path().join("old-competing")).unwrap();
+    let other = fixture.directory.path().join("other");
+    write_skill(&other, "portable");
+    std::os::unix::fs::symlink(other, &competing).unwrap();
+    dispatch(&mut app, Action::OpenInventory);
+    assert!(!verify_repair(&plan, &applied, app.inventory()).is_verified());
+    fs::remove_file(&competing).unwrap();
+    std::os::unix::fs::symlink(&competing, &competing).unwrap();
+    dispatch(&mut app, Action::OpenInventory);
+    let withheld = verify_repair(&plan, &applied, app.inventory());
+    assert!(
+        !withheld.is_complete(),
+        "an unresolved competitor is not a verified conflict"
+    );
+}
+
+#[test]
+fn native_repair_can_correct_an_owned_wrong_link_with_a_standing_conflict() {
+    let (fixture, mut app, _) = standing_conflict_fixture(true);
+    // The receipt still proves the link's raw target, which now resolves to
+    // the other already-visible directory rather than being absent.
+    fs::create_dir_all(fixture.directory.path().join("library/skills")).unwrap();
+    std::os::unix::fs::symlink(
+        fixture.root(AgentKind::Codex).join("portable"),
+        fixture.directory.path().join("library/skills/portable"),
+    )
+    .unwrap();
+    preview_native_repair(&mut app);
+    let Some(RepairPrompt::Preview(plan)) = app.pending_repair() else {
+        panic!("preview")
+    };
+    assert_eq!(
+        plan.disposition(),
+        &RepairDisposition::ReplaceLink { dangling: false }
+    );
+    app.note_detail_max_scroll(Some(0));
+    dispatch(&mut app, Action::ConfirmRepair);
+    let Some(RepairPrompt::Report(outcome)) = app.pending_repair() else {
+        panic!("report")
+    };
+    assert_eq!(outcome.status(), RepairStatus::Repaired);
+    assert!(outcome.verification().is_complete());
+}
+
+#[test]
+fn native_repair_cannot_add_a_directory_to_a_standing_conflict() {
+    let (_fixture, app, _) = standing_conflict_fixture(false);
+    let probe = probe_repair(
+        app.agents(),
+        app.sources(),
+        "portable",
+        AgentKind::OpenCode,
+        app.home(),
+    );
+    let plan = plan_repair(
+        app.agents(),
+        app.sources(),
+        "portable",
+        AgentKind::OpenCode,
+        &probe,
+        &app.receipts().unwrap(),
+    );
+    assert!(!plan.is_executable());
+}
+
+fn assert_conflict_warning_style(app: &SkilledApp) {
+    let mut terminal = Terminal::new(TestBackend::new(160, 60)).unwrap();
+    terminal
+        .draw(|frame| {
+            skilled::tui::render(frame, app);
+        })
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    let expected = ratatui::style::Color::Rgb(0xe6, 0xbd, 0x6a);
+    let mut found = false;
+    for y in 0..60 {
+        let row: String = (0..160).map(|x| buffer[(x, y)].symbol()).collect();
+        if let Some(start) = row.find("The existing OpenCode conflict remains") {
+            let x = row[..start].chars().count() as u16;
+            assert_eq!(buffer[(x, y)].fg, expected);
+            found = true;
+        }
+    }
+    assert!(found, "warning must be visible in words and tone");
+}
+
+#[test]
+fn native_repair_refuses_changed_conflict_evidence_before_writing() {
+    let (fixture, mut app, _) = standing_conflict_fixture(true);
+    preview_native_repair(&mut app);
+    let link = fixture.root(AgentKind::OpenCode).join("portable");
+    let old = fs::read_link(&link).unwrap();
+    let receipts = app.receipts().unwrap();
+    let competitor = fixture.root(AgentKind::ClaudeCode).join("portable");
+    fs::remove_file(&competitor).unwrap();
+    write_skill(&competitor, "portable");
+    app.note_detail_max_scroll(Some(0));
+    dispatch(&mut app, Action::ConfirmRepair);
+    let Some(RepairPrompt::Report(outcome)) = app.pending_repair() else {
+        panic!("report")
+    };
+    assert_eq!(outcome.status(), RepairStatus::NotApplied);
+    assert!(
+        matches!(outcome.applied().step().unwrap().outcome(), RepairStepOutcome::Failed(reason) if reason.contains("conflict changed after preview"))
+    );
+    assert_eq!(fs::read_link(link).unwrap(), old);
+    assert_eq!(app.receipts().unwrap(), receipts);
+}
+
+#[test]
+fn native_repair_cli_discloses_and_verifies_the_remaining_conflict() {
+    let (fixture, app, _) = standing_conflict_fixture(true);
+    drop(app);
+    let mut output = Vec::new();
+    let code = cli::run(
+        &[
+            "repair", "--yes", "--skill", "portable", "--agent", "opencode",
+        ]
+        .map(str::to_owned),
+        fixture.environment(),
+        &mut Cursor::new(Vec::<u8>::new()),
+        &mut output,
+    );
+    let output = String::from_utf8(output).unwrap();
+    assert_eq!(code, ExitCodeKind::Success, "{output}");
+    assert!(output.contains("OpenCode before:"), "{output}");
+    assert!(output.contains("OpenCode after:"), "{output}");
+    assert!(
+        output.contains("existing OpenCode conflict remains, as previewed"),
+        "{output}"
+    );
+}
+
+#[test]
+fn native_repair_cannot_introduce_a_conflict_or_substitute_a_new_directory() {
+    for standing in [false, true] {
+        let (fixture, app, _) = standing_conflict_fixture(false);
+        fs::remove_dir_all(fixture.root(AgentKind::ClaudeCode).join("portable")).unwrap();
+        if standing {
+            // Restore the old receipted target: replacing it by the moved
+            // target would substitute a new directory, keeping the count two.
+            write_skill(
+                &fixture.directory.path().join("library/skills/portable"),
+                "portable",
+            );
+        }
+        let probe = probe_repair(
+            app.agents(),
+            app.sources(),
+            "portable",
+            AgentKind::OpenCode,
+            app.home(),
+        );
+        let plan = plan_repair(
+            app.agents(),
+            app.sources(),
+            "portable",
+            AgentKind::OpenCode,
+            &probe,
+            &app.receipts().unwrap(),
+        );
+        assert_eq!(
+            plan.blocking_finding().unwrap().code(),
+            "install.opencode_conflict"
+        );
+    }
+}
+
 #[test]
 fn an_owned_healthy_link_is_replanned_to_the_agent_specific_variant_selected_today() {
     let fixture = Fixture::new();

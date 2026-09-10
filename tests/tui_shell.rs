@@ -5525,6 +5525,126 @@ fn the_install_hint_appears_only_where_a_variant_is_focused() {
     assert!(!footer(&app).contains("i Install"), "{}", footer(&app));
 }
 
+/// Origin adoption starts as an editable declaration. Its focused field and
+/// the modal's explicit review/cancel controls must remain visible in text as
+/// well as in the focus colour.
+#[cfg(unix)]
+#[test]
+fn adoption_draft_names_the_focused_origin_field_and_its_controls() {
+    let harness = Harness::new();
+    let mut app = harness.installable_source();
+    let update = app.update(Action::BeginAdoption);
+    app.perform_effects(update.effects())
+        .expect("build adoption draft");
+
+    let screen = buffer(&app, 102, 32);
+    let rendered = inner_text(&screen);
+    assert!(rendered.contains("┌ Confirm origin"), "{rendered}");
+    assert!(rendered.contains("nothing written yet"), "{rendered}");
+    let field = row_containing(&screen, "> Repository URL:");
+    let row = row_text(&screen, field);
+    assert!(row.contains("> Repository URL:"), "{row}\n{rendered}");
+    assert_eq!(
+        style_in_row(&screen, field, ">").fg,
+        Some(Color::Rgb(0x73, 0xd7, 0xee))
+    );
+    let footer = inner_row_text(&screen, screen.area.height - 2);
+    assert!(footer.contains("Tab Next field"), "{footer}");
+    assert!(footer.contains("Enter Review"), "{footer}");
+    assert!(footer.contains("Esc Cancel"), "{footer}");
+}
+
+#[cfg(unix)]
+#[test]
+fn adoption_focus_cycles_through_named_fields_at_supported_sizes() {
+    use skilled::adoption::AdoptionPrompt;
+    for (width, height) in [(80, 24), (120, 40)] {
+        let harness = Harness::new();
+        let mut app = harness.installable_source();
+        let update = app.update(Action::BeginAdoption);
+        app.perform_effects(update.effects()).unwrap();
+        let mut focused_rows = Vec::new();
+        for (label, value) in [
+            ("Repository URL", "https://github.com/example/upstream"),
+            ("Subdirectory", "."),
+            ("Tracking branch (refs/heads/…)", "refs/heads/main"),
+        ] {
+            for character in value.chars() {
+                app.update(Action::AppendAdoptionCharacter(character));
+            }
+            app.update(Action::AppendAdoptionCharacter('界'));
+            app.update(Action::DeleteAdoptionCharacter);
+            // Controls must not enter the draft, even if dispatched directly.
+            app.update(Action::AppendAdoptionCharacter('\u{1b}'));
+            let screen = buffer(&app, width, height);
+            let marker = format!("> {label}:");
+            let row = row_containing(&screen, &marker);
+            focused_rows.push(row_text(&screen, row).trim().to_owned());
+            assert_eq!(
+                style_in_row(&screen, row, ">").fg,
+                Some(Color::Rgb(0x73, 0xd7, 0xee))
+            );
+            app.update(Action::NextAdoptionField);
+        }
+        let screen = buffer(&app, width, height);
+        let row = row_containing(&screen, "> Repository URL:");
+        assert_eq!(
+            style_in_row(&screen, row, ">").fg,
+            Some(Color::Rgb(0x73, 0xd7, 0xee))
+        );
+        insta::assert_snapshot!(
+            format!("adoption_focus_cycle_{width}"),
+            focused_rows.join("\n")
+        );
+        let Some(AdoptionPrompt::Editing(form)) = app.pending_adoption() else {
+            panic!("expected form")
+        };
+        assert_eq!(form.draft.repository, "https://github.com/example/upstream");
+        assert_eq!(form.draft.subdirectory, ".");
+        assert_eq!(form.draft.update_ref, "refs/heads/main");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn adoption_confirmation_waits_for_the_complete_preview_after_resize() {
+    let harness = Harness::new();
+    // Force wrapping even under short temporary roots such as Linux's /tmp.
+    let application_root = harness
+        .directory
+        .path()
+        .join("adoption-preview-overflow-fixture-with-a-deliberately-long-root")
+        .join("whose-length-does-not-depend-on-the-system-temporary-directory");
+    let mut app = harness.installable_source_at(&application_root);
+    let update = app.update(Action::BeginAdoption);
+    app.perform_effects(update.effects()).unwrap();
+    for value in [
+        "https://github.com/example/upstream",
+        ".",
+        "refs/heads/main",
+    ] {
+        for character in value.chars() {
+            app.update(Action::AppendAdoptionCharacter(character));
+        }
+        app.update(Action::NextAdoptionField);
+    }
+    let update = app.update(Action::PreviewAdoption);
+    app.perform_effects(update.effects()).unwrap();
+    assert!(app.update(Action::ConfirmAdoption).effects().is_empty());
+    app.note_detail_max_scroll(feedback(&app, 120, 40).detail_max_scroll());
+    assert!(app.adoption_preview_fully_seen());
+    // A smaller frame requires more scrolling before the last plan row is visible.
+    app.note_detail_max_scroll(feedback(&app, 80, 24).detail_max_scroll());
+    assert!(!app.adoption_preview_fully_seen());
+    assert!(app.update(Action::ConfirmAdoption).effects().is_empty());
+    let extent = measured_extent(&app, 80, 24);
+    scroll_detail(&mut app, 80, 24, extent);
+    app.note_detail_max_scroll(feedback(&app, 80, 24).detail_max_scroll());
+    assert!(app.adoption_preview_fully_seen());
+    assert!(text(&buffer(&app, 80, 24)).contains("Complete origin and baseline plan shown"));
+    assert!(!app.update(Action::ConfirmAdoption).effects().is_empty());
+}
+
 /// The report escapes what it prints, as every other surface does.
 ///
 /// A step's failure reason carries paths and operating-system error text, both
@@ -7182,4 +7302,209 @@ mod installed {
         let back = text(&buffer(&app, 80, 24));
         assert!(back.contains("▌ Global inventory"), "{back}");
     }
+}
+
+#[test]
+fn inventory_list_window_stays_still_when_focus_moves_back_inside_it() {
+    let harness = Harness::new();
+    let home = harness.directory.path().join("home");
+    for index in 1..=30 {
+        let name = format!("skill-{index:02}");
+        write_skill_fixture(&home.join(".claude/skills").join(&name), &name);
+    }
+    let mut app = harness.completed_setup();
+    for _ in 0..24 {
+        draw_list_frame(&mut app, 80, 24);
+        app.update(Action::MoveInventorySelection(1));
+    }
+    let before = draw_list_frame(&mut app, 80, 24);
+    let old_y = row_containing(&before, "skill-25");
+    app.update(Action::MoveInventorySelection(-1));
+    let after = buffer(&app, 80, 24);
+    assert_eq!(row_containing(&after, "skill-24"), old_y - 1);
+    assert!(text(&after).contains("skill-25"));
+    assert_eq!(
+        style_in_row(&before, old_y, "skill-25"),
+        style_in_row(&after, old_y - 1, "skill-24"),
+    );
+    assert_ne!(
+        style_in_row(&after, old_y - 1, "skill-24"),
+        style_in_row(&after, old_y, "skill-25")
+    );
+}
+
+fn draw_list_frame(app: &mut SkilledApp, width: u16, height: u16) -> Buffer {
+    let (screen, feedback) = drawn(app, width, height);
+    for list in skilled::app::ListWindow::ALL {
+        app.note_list_window_start(list, feedback.list_window_start(list));
+    }
+    screen
+}
+
+/// Each view must round-trip its own measurement, including multi-line source
+/// entries and the Inventory's alternating compact/airy row heights.
+#[test]
+fn list_windows_scroll_only_at_edges_and_remember_each_view() {
+    use skilled::app::ListWindow;
+    let harness = Harness::new();
+    let home = harness.directory.path().join("home");
+    for index in 0..30 {
+        let name = format!("skill-{index:02}");
+        write_skill_fixture(&home.join(".claude/skills").join(&name), &name);
+    }
+    let mut app = harness.completed_setup();
+    for index in 0..30 {
+        let repository = harness.directory.path().join(format!("source-{index:02}"));
+        create_source_fixture(&repository);
+        let preview = app.preview_source(&repository).expect("preview");
+        app.confirm_source(preview).expect("register");
+    }
+    type ListCase = (ListWindow, Action, fn(i8) -> Action);
+    let cases: [ListCase; 4] = [
+        (
+            ListWindow::Inventory,
+            Action::OpenInventory,
+            Action::MoveInventorySelection,
+        ),
+        (
+            ListWindow::Doctor,
+            Action::OpenDoctor,
+            Action::MoveDoctorSelection,
+        ),
+        (
+            ListWindow::Sources,
+            Action::OpenSources,
+            Action::MoveSourcesSelection,
+        ),
+        (
+            ListWindow::Updates,
+            Action::OpenUpdates,
+            Action::MoveUpdatesSelection,
+        ),
+    ];
+    for (width, height) in [(80, 24), (170, 41)] {
+        for (list, open, move_selection) in cases {
+            let update = app.update(open);
+            app.perform_effects(update.effects()).expect("open view");
+            // Wrap to a known first entry regardless of the previous run.
+            let focused = match list {
+                ListWindow::Inventory => app.focused_installation(),
+                ListWindow::Doctor => app.focused_finding(),
+                ListWindow::Sources => app.focused_source(),
+                ListWindow::Updates => app.focused_update(),
+            };
+            for _ in 0..focused {
+                app.update(move_selection(-1));
+            }
+            draw_list_frame(&mut app, width, height);
+            assert_eq!(app.list_window_start(list), 0);
+            for _ in 0..28 {
+                app.update(move_selection(1));
+                draw_list_frame(&mut app, width, height);
+            }
+            let start = app.list_window_start(list);
+            assert!(start > 0, "{list:?} must have scrolled");
+            app.update(move_selection(-1));
+            draw_list_frame(&mut app, width, height);
+            assert_eq!(
+                app.list_window_start(list),
+                start,
+                "{list:?} moving up inside"
+            );
+            app.update(move_selection(1));
+            draw_list_frame(&mut app, width, height);
+            assert_eq!(
+                app.list_window_start(list),
+                start,
+                "{list:?} moving down inside"
+            );
+            app.update(move_selection(1));
+            draw_list_frame(&mut app, width, height);
+            assert_eq!(
+                app.list_window_start(list),
+                start + 1,
+                "{list:?} bottom edge"
+            );
+            // Focus is 29; walk back to the first visible entry without scrolling.
+            for _ in (start + 1)..29 {
+                app.update(move_selection(-1));
+                draw_list_frame(&mut app, width, height);
+                assert_eq!(app.list_window_start(list), start + 1, "{list:?} inside");
+            }
+            app.update(move_selection(-1));
+            draw_list_frame(&mut app, width, height);
+            assert_eq!(app.list_window_start(list), start, "{list:?} top edge");
+            draw_list_frame(&mut app, 60, 10);
+            assert_eq!(app.list_window_start(list), start, "undrawn frame");
+            // Another view must not erase this list's offset.
+            let update = app.update(if list == ListWindow::Inventory {
+                Action::OpenUpdates
+            } else {
+                Action::OpenInventory
+            });
+            app.perform_effects(update.effects()).expect("switch view");
+            draw_list_frame(&mut app, width, height);
+            let update = app.update(open);
+            app.perform_effects(update.effects()).expect("open view");
+            draw_list_frame(&mut app, width, height);
+            assert_eq!(app.list_window_start(list), start, "{list:?} returning");
+            for _ in 0..start {
+                app.update(move_selection(-1));
+            }
+            draw_list_frame(&mut app, width, height);
+            assert_eq!(app.list_window_start(list), 0);
+            app.update(move_selection(-1));
+            draw_list_frame(&mut app, width, height);
+            assert!(app.list_window_start(list) > 0, "{list:?} wrap to end");
+            app.update(move_selection(1));
+            draw_list_frame(&mut app, width, height);
+            assert_eq!(app.list_window_start(list), 0, "{list:?} wrap to start");
+        }
+    }
+}
+
+#[test]
+fn inventory_list_window_survives_filter_scan_and_hidden_pane() {
+    use skilled::app::ListWindow;
+    let harness = Harness::new();
+    let home = harness.directory.path().join("home");
+    for index in 0..30 {
+        let name = format!("skill-{index:02}");
+        write_skill_fixture(&home.join(".claude/skills").join(&name), &name);
+    }
+    let mut app = harness.completed_setup();
+    for _ in 0..24 {
+        draw_list_frame(&mut app, 80, 24);
+        app.update(Action::MoveInventorySelection(1));
+    }
+    draw_list_frame(&mut app, 80, 24);
+    app.update(Action::MoveInventorySelection(-1));
+    draw_list_frame(&mut app, 80, 24);
+    let start = app.list_window_start(ListWindow::Inventory);
+    app.update(Action::BeginInventoryFilter);
+    app.update(Action::AppendInventoryFilter('s'));
+    app.update(Action::SubmitInventoryFilter);
+    let before = draw_list_frame(&mut app, 80, 24);
+    assert_eq!(app.list_window_start(ListWindow::Inventory), start);
+    app.perform_effects(&[skilled::Effect::ScanInstallations])
+        .expect("rescan");
+    let after = draw_list_frame(&mut app, 80, 24);
+    assert_eq!(app.list_window_start(ListWindow::Inventory), start);
+    assert_eq!(
+        row_containing(&before, "skill-23"),
+        row_containing(&after, "skill-23")
+    );
+    app.update(Action::AdvanceInventoryPane);
+    assert_eq!(
+        feedback(&app, 80, 24).list_window_start(ListWindow::Inventory),
+        None
+    );
+    draw_list_frame(&mut app, 80, 24);
+    assert_eq!(app.list_window_start(ListWindow::Inventory), start);
+    app.update(Action::MoveInventoryPane(-1));
+    // A filter with no matches resets a visible empty list; clearing it begins at zero.
+    app.update(Action::BeginInventoryFilter);
+    app.update(Action::AppendInventoryFilter('!'));
+    draw_list_frame(&mut app, 80, 24);
+    assert_eq!(app.list_window_start(ListWindow::Inventory), 0);
 }

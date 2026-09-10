@@ -1,0 +1,1063 @@
+//! Bounded, local provenance evidence and content baselines.
+//!
+//! This module never contacts an origin or asks Git whether a worktree is
+//! clean. Its digest deliberately covers the bytes presently in a skill
+//! directory: ignored and untracked entries are part of it. The only excluded
+//! entries are `.git` directories (or gitfiles) at any level, which are Git
+//! metadata rather than skill content. Unix opens use no-follow, nonblocking
+//! descriptors; other platforms retain the conservative before-and-after
+//! metadata checks but do not claim descriptor-pinned traversal.
+
+use super::ObservationFailure;
+use sha2::{Digest, Sha256};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    ffi::OsStr,
+    fs,
+    io::{self, Read},
+    path::Path,
+};
+
+const BASELINE_VERSION: u32 = 1;
+const MAX_ENTRIES: usize = 16_384;
+const MAX_BYTES: usize = 32 * 1024 * 1024;
+const MAX_DEPTH: usize = 32;
+const MAX_PATH_BYTES: usize = 16 * 1024;
+const MAX_SYMLINK_BYTES: usize = 16 * 1024;
+/// A versioned whole-directory content baseline.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Baseline {
+    pub version: u32,
+    pub digest: String,
+}
+
+/// One physical entry captured while calculating a baseline.  The manifest is
+/// intentionally ephemeral: update previews need the bytes they already read
+/// to describe their writes, but provenance stores only the digest.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ManifestEntry {
+    pub(crate) relative_path: std::path::PathBuf,
+    pub(crate) kind: ManifestEntryKind,
+    pub(crate) executable: bool,
+    pub(crate) bytes: Vec<u8>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ManifestEntryKind {
+    Directory,
+    File,
+    Symlink,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct DirectoryManifest {
+    pub(crate) baseline: Baseline,
+    pub(crate) entries: Vec<ManifestEntry>,
+}
+
+/// Computes a deterministic SHA-256 digest of all content in a directory.
+/// It is fail-closed for resource exhaustion, unsupported entry types, links,
+/// and observations that change while being read.
+pub fn directory_hash(path: &Path) -> Result<Baseline, String> {
+    observe_directory_hash(path).map_err(|error| error.to_string())
+}
+
+pub(crate) fn observe_directory_hash(path: &Path) -> Result<Baseline, ObservationFailure> {
+    let mut state = HashState::new();
+    observe_directory(path, &mut state)?;
+    debug_assert!(state.entries_manifest.is_none());
+    Ok(state.baseline())
+}
+
+/// Capture the same bounded, descriptor-pinned walk used for a baseline while
+/// retaining its entries for a pending, read-only update preview.
+pub(crate) fn observe_directory_manifest(
+    path: &Path,
+) -> Result<DirectoryManifest, ObservationFailure> {
+    let mut state = HashState::new_manifest();
+    observe_directory(path, &mut state)?;
+    Ok(DirectoryManifest {
+        baseline: state.baseline(),
+        entries: state
+            .entries_manifest
+            .expect("manifest capture was requested"),
+    })
+}
+
+fn observe_directory(path: &Path, state: &mut HashState) -> Result<(), ObservationFailure> {
+    let root = fs::symlink_metadata(path).map_err(|error| {
+        ObservationFailure::io(
+            format!("cannot inspect skill directory {}: {error}", path.display()),
+            error,
+        )
+    })?;
+    if !root.file_type().is_dir() {
+        return Err(format!("skill baseline root is not a directory: {}", path.display()).into());
+    }
+    state.entry(Path::new(""), b'D', executable(&root), &[])?;
+    hash_directory(path, Path::new(""), 0, state)?;
+    ensure_unchanged(path, &root)?;
+    Ok(())
+}
+
+struct HashState {
+    hasher: Sha256,
+    entries: usize,
+    bytes: usize,
+    entries_manifest: Option<Vec<ManifestEntry>>,
+}
+impl HashState {
+    fn new() -> Self {
+        let mut hasher = Sha256::new();
+        hasher.update(b"skilled-directory-baseline-v1\0");
+        hasher.update(baseline_platform_tag());
+        hasher.update(b"\0");
+        Self {
+            hasher,
+            entries: 0,
+            bytes: 0,
+            entries_manifest: None,
+        }
+    }
+    fn new_manifest() -> Self {
+        let mut state = Self::new();
+        state.entries_manifest = Some(Vec::new());
+        state
+    }
+    fn entry(
+        &mut self,
+        path: &Path,
+        kind: u8,
+        executable: bool,
+        bytes: &[u8],
+    ) -> Result<(), ObservationFailure> {
+        self.entries += 1;
+        if self.entries > MAX_ENTRIES {
+            return Err(format!("skill baseline exceeds {MAX_ENTRIES} entries").into());
+        }
+        let encoded_path = path_bytes(path)?;
+        if encoded_path.len() > MAX_PATH_BYTES {
+            return Err("skill baseline path is too long".into());
+        }
+        self.bytes = self
+            .bytes
+            .checked_add(bytes.len())
+            .ok_or("skill baseline size overflow")?;
+        if self.bytes > MAX_BYTES {
+            return Err(format!("skill baseline exceeds {MAX_BYTES} bytes").into());
+        }
+        self.hasher.update([kind, u8::from(executable)]);
+        self.hasher
+            .update((encoded_path.len() as u64).to_be_bytes());
+        self.hasher.update(&encoded_path);
+        self.hasher.update((bytes.len() as u64).to_be_bytes());
+        self.hasher.update(bytes);
+        if let Some(entries) = &mut self.entries_manifest {
+            entries.push(ManifestEntry {
+                relative_path: path.to_path_buf(),
+                kind: match kind {
+                    b'D' => ManifestEntryKind::Directory,
+                    b'F' => ManifestEntryKind::File,
+                    b'L' => ManifestEntryKind::Symlink,
+                    _ => unreachable!("baseline entry kind is internal"),
+                },
+                executable,
+                bytes: bytes.to_vec(),
+            });
+        }
+        Ok(())
+    }
+
+    fn baseline(&self) -> Baseline {
+        Baseline {
+            version: BASELINE_VERSION,
+            digest: format!("{:x}", self.hasher.clone().finalize()),
+        }
+    }
+}
+
+/// Build a candidate baseline while retaining known executable bits on its
+/// physical directories. Git trees do not store directory modes, so a caller
+/// supplies the modes the checked-out output will retain.
+pub(crate) fn baseline_from_regular_entries_with_directory_modes(
+    files: &[(std::path::PathBuf, bool, Vec<u8>)],
+    executable_directories: &BTreeMap<std::path::PathBuf, bool>,
+) -> Result<DirectoryManifest, String> {
+    let mut paths = BTreeSet::new();
+    paths.insert(std::path::PathBuf::new());
+    // Empty directories have no Git tree entry but are content the local
+    // baseline observed. A preview which promises to retain them must include
+    // them in its expected digest rather than accidentally advertising a noop.
+    for directory in executable_directories.keys() {
+        paths.extend(directory.ancestors().map(Path::to_path_buf));
+    }
+    for (path, _, _) in files {
+        let mut parent = path.parent();
+        while let Some(directory) = parent {
+            paths.insert(directory.to_path_buf());
+            parent = directory.parent();
+        }
+    }
+    // Validate the complete tree, including retained empty directories and
+    // implicit parents. A file cannot occupy a directory's path or ancestor.
+    let directory_names = paths
+        .iter()
+        .map(|path| path.to_string_lossy().to_lowercase())
+        .collect::<BTreeSet<_>>();
+    for (file, _, _) in files {
+        if directory_names.contains(&file.to_string_lossy().to_lowercase()) {
+            return Err(format!(
+                "candidate manifest has a file/directory collision: {}",
+                file.display()
+            ));
+        }
+    }
+    let mut entries = Vec::with_capacity(paths.len() + files.len());
+    entries.extend(paths.into_iter().map(|relative_path| {
+        ManifestEntry {
+            executable: executable_directories
+                .get(&relative_path)
+                .copied()
+                .unwrap_or(cfg!(unix)),
+            relative_path,
+            kind: ManifestEntryKind::Directory,
+            bytes: Vec::new(),
+        }
+    }));
+    entries.extend(
+        files
+            .iter()
+            .map(|(relative_path, executable, bytes)| ManifestEntry {
+                relative_path: relative_path.clone(),
+                kind: ManifestEntryKind::File,
+                executable: cfg!(unix) && *executable,
+                bytes: bytes.clone(),
+            }),
+    );
+    entries
+        .sort_by(|left, right| compare_traversal_path(&left.relative_path, &right.relative_path));
+    let mut state = HashState::new_manifest();
+    for entry in &entries {
+        let kind = match entry.kind {
+            ManifestEntryKind::Directory => b'D',
+            ManifestEntryKind::File => b'F',
+            ManifestEntryKind::Symlink => {
+                return Err("candidate manifest contains a symlink".into());
+            }
+        };
+        state
+            .entry(&entry.relative_path, kind, entry.executable, &entry.bytes)
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(DirectoryManifest {
+        baseline: state.baseline(),
+        entries: state
+            .entries_manifest
+            .expect("manifest capture was requested"),
+    })
+}
+
+/// Match the recursive walk's order: compare one raw path component at a time
+/// and visit a directory's descendants before its next sibling. A flat byte
+/// comparison gets `a.txt` before `a/file`, producing a different digest.
+fn compare_traversal_path(left: &Path, right: &Path) -> std::cmp::Ordering {
+    let mut left = left.components();
+    let mut right = right.components();
+    loop {
+        match (left.next(), right.next()) {
+            (None, None) => return std::cmp::Ordering::Equal,
+            (None, Some(_)) => return std::cmp::Ordering::Less,
+            (Some(_), None) => return std::cmp::Ordering::Greater,
+            (Some(left), Some(right)) => {
+                let left = match left {
+                    std::path::Component::Normal(value) => value,
+                    _ => unreachable!(),
+                };
+                let right = match right {
+                    std::path::Component::Normal(value) => value,
+                    _ => unreachable!(),
+                };
+                match os_bytes(left).cmp(os_bytes(right)) {
+                    std::cmp::Ordering::Equal => {}
+                    order => return order,
+                }
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn baseline_platform_tag() -> &'static [u8] {
+    b"linux"
+}
+#[cfg(target_os = "macos")]
+fn baseline_platform_tag() -> &'static [u8] {
+    b"macos"
+}
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn baseline_platform_tag() -> &'static [u8] {
+    b"other"
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn hash_directory(
+    root: &Path,
+    relative: &Path,
+    depth: usize,
+    state: &mut HashState,
+) -> Result<(), ObservationFailure> {
+    let path = root.join(relative);
+    let before = fs::symlink_metadata(&path).map_err(|error| {
+        ObservationFailure::io(format!("cannot inspect {}: {error}", path.display()), error)
+    })?;
+    let held = open_directory_without_following(&path)?;
+    ensure_unchanged_metadata(
+        &path,
+        &before,
+        &held.metadata().map_err(|error| {
+            ObservationFailure::io(format!("cannot inspect {}: {error}", path.display()), error)
+        })?,
+    )?;
+    hash_directory_bound(root, &held, relative, depth, state)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn hash_directory_bound(
+    root: &Path,
+    directory: &fs::File,
+    relative: &Path,
+    depth: usize,
+    state: &mut HashState,
+) -> Result<(), ObservationFailure> {
+    let directory_before = stat_file(directory)?;
+    if depth > MAX_DEPTH {
+        return Err(format!("skill baseline exceeds {MAX_DEPTH} directory levels").into());
+    }
+    let mut entries = crate::git::bound_directory_entries(directory, MAX_ENTRIES)
+        .map_err(|error| {
+            ObservationFailure::io(
+                format!("cannot read {}: {error}", root.join(relative).display()),
+                error,
+            )
+        })?
+        .ok_or_else(|| format!("skill baseline exceeds {MAX_ENTRIES} entries"))?
+        .into_iter()
+        .map(|entry| entry.name)
+        .collect::<Vec<_>>();
+    entries.sort_by(|left, right| os_bytes(left).cmp(os_bytes(right)));
+    for name in entries {
+        if name == OsStr::new(".git") {
+            continue;
+        }
+        let child_relative = relative.join(&name);
+        let before = stat_at(directory, &name)?;
+        match before.kind() {
+            libc::S_IFDIR => {
+                state.entry(&child_relative, b'D', before.executable(), &[])?;
+                let child = crate::git::open_directory_at(directory, &name).map_err(|error| {
+                    ObservationFailure::io(
+                        format!(
+                            "cannot open {}: {error}",
+                            root.join(&child_relative).display()
+                        ),
+                        error,
+                    )
+                })?;
+                if !before.same(&stat_file(&child)?) {
+                    return Err(format!(
+                        "skill baseline changed while reading: {}",
+                        root.join(&child_relative).display()
+                    )
+                    .into());
+                }
+                hash_directory_bound(root, &child, &child_relative, depth + 1, state)?;
+            }
+            libc::S_IFREG => {
+                hash_file_bound(root, directory, &name, &child_relative, &before, state)?
+            }
+            libc::S_IFLNK => {
+                let target = read_link_at(directory, &name)?;
+                if target.len() > MAX_SYMLINK_BYTES {
+                    return Err("skill baseline symlink target is too long".into());
+                }
+                if !before.same(&stat_at(directory, &name)?) {
+                    return Err(format!(
+                        "skill baseline changed while reading: {}",
+                        root.join(&child_relative).display()
+                    )
+                    .into());
+                }
+                state.entry(&child_relative, b'L', before.executable(), &target)?;
+            }
+            _ => {
+                return Err(format!(
+                    "skill baseline contains unsupported entry: {}",
+                    root.join(&child_relative).display()
+                )
+                .into());
+            }
+        }
+    }
+    if !directory_before.same(&stat_file(directory)?) {
+        return Err(format!(
+            "skill baseline directory changed while reading: {}",
+            root.join(relative).display()
+        )
+        .into());
+    }
+    Ok(())
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn hash_file_bound(
+    root: &Path,
+    parent: &fs::File,
+    name: &OsStr,
+    relative: &Path,
+    before: &UnixStat,
+    state: &mut HashState,
+) -> Result<(), ObservationFailure> {
+    let mut file = open_file_at(parent, name)?;
+    if !before.same(&stat_file(&file)?) {
+        return Err(format!(
+            "skill baseline changed while reading: {}",
+            root.join(relative).display()
+        )
+        .into());
+    }
+    let mut content = Vec::new();
+    file.by_ref()
+        .take((MAX_BYTES + 1) as u64)
+        .read_to_end(&mut content)
+        .map_err(|error| {
+            ObservationFailure::io(
+                format!("cannot read {}: {error}", root.join(relative).display()),
+                error,
+            )
+        })?;
+    if !before.same(&stat_file(&file)?) {
+        return Err(format!(
+            "skill baseline changed while reading: {}",
+            root.join(relative).display()
+        )
+        .into());
+    }
+    state.entry(relative, b'F', before.executable(), &content)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[derive(Clone, Copy)]
+struct UnixStat(libc::stat);
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl UnixStat {
+    fn kind(self) -> libc::mode_t {
+        self.0.st_mode & libc::S_IFMT
+    }
+    fn executable(self) -> bool {
+        self.0.st_mode & 0o111 != 0
+    }
+    fn same(self, other: &Self) -> bool {
+        self.0.st_dev == other.0.st_dev
+            && self.0.st_ino == other.0.st_ino
+            && self.0.st_mode == other.0.st_mode
+            && self.0.st_size == other.0.st_size
+            && stat_times_equal(&self.0, &other.0)
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn stat_times_equal(left: &libc::stat, right: &libc::stat) -> bool {
+    left.st_mtime == right.st_mtime
+        && left.st_mtime_nsec == right.st_mtime_nsec
+        && left.st_ctime == right.st_ctime
+        && left.st_ctime_nsec == right.st_ctime_nsec
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn stat_at(parent: &fs::File, name: &OsStr) -> Result<UnixStat, ObservationFailure> {
+    use std::os::{fd::AsRawFd, unix::ffi::OsStrExt};
+    let name = std::ffi::CString::new(name.as_bytes())
+        .map_err(|_| "skill baseline path contains a NUL byte")?;
+    let mut stat = unsafe { std::mem::zeroed::<libc::stat>() };
+    if unsafe {
+        libc::fstatat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            &mut stat,
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    } != 0
+    {
+        let error = io::Error::last_os_error();
+        return Err(ObservationFailure::io(
+            format!("cannot inspect entry: {}", error),
+            error,
+        ));
+    }
+    Ok(UnixStat(stat))
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn stat_file(file: &fs::File) -> Result<UnixStat, ObservationFailure> {
+    use std::os::fd::AsRawFd;
+    let mut stat = unsafe { std::mem::zeroed::<libc::stat>() };
+    if unsafe { libc::fstat(file.as_raw_fd(), &mut stat) } != 0 {
+        let error = io::Error::last_os_error();
+        return Err(ObservationFailure::io(
+            format!("cannot inspect held entry: {}", error),
+            error,
+        ));
+    }
+    Ok(UnixStat(stat))
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn open_file_at(parent: &fs::File, name: &OsStr) -> Result<fs::File, ObservationFailure> {
+    use std::os::{
+        fd::{AsRawFd, FromRawFd},
+        unix::ffi::OsStrExt,
+    };
+    let name = std::ffi::CString::new(name.as_bytes())
+        .map_err(|_| "skill baseline path contains a NUL byte")?;
+    let descriptor = unsafe {
+        libc::openat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
+        )
+    };
+    if descriptor < 0 {
+        let error = io::Error::last_os_error();
+        return Err(ObservationFailure::io(
+            format!("cannot open entry without following links: {}", error),
+            error,
+        ));
+    }
+    Ok(unsafe { fs::File::from_raw_fd(descriptor) })
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn read_link_at(parent: &fs::File, name: &OsStr) -> Result<Vec<u8>, ObservationFailure> {
+    use std::os::{fd::AsRawFd, unix::ffi::OsStrExt};
+    let name = std::ffi::CString::new(name.as_bytes())
+        .map_err(|_| "skill baseline path contains a NUL byte")?;
+    let mut target = vec![0; MAX_SYMLINK_BYTES + 1];
+    let length = unsafe {
+        libc::readlinkat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            target.as_mut_ptr().cast(),
+            target.len(),
+        )
+    };
+    if length < 0 {
+        let error = io::Error::last_os_error();
+        return Err(ObservationFailure::io(
+            format!("cannot read link target: {}", error),
+            error,
+        ));
+    }
+    let length = length as usize;
+    if length == target.len() {
+        return Err("skill baseline symlink target is too long".into());
+    }
+    target.truncate(length);
+    Ok(target)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn hash_directory(
+    root: &Path,
+    relative: &Path,
+    depth: usize,
+    state: &mut HashState,
+) -> Result<(), ObservationFailure> {
+    if depth > MAX_DEPTH {
+        return Err(format!("skill baseline exceeds {MAX_DEPTH} directory levels").into());
+    }
+    let directory = root.join(relative);
+    let before = fs::symlink_metadata(&directory).map_err(|error| {
+        ObservationFailure::io(
+            format!("cannot inspect {}: {error}", directory.display()),
+            error,
+        )
+    })?;
+    let held = open_directory_without_following(&directory)?;
+    ensure_unchanged_metadata(
+        &directory,
+        &before,
+        &held.metadata().map_err(|error| {
+            ObservationFailure::io(
+                format!("cannot inspect {}: {error}", directory.display()),
+                error,
+            )
+        })?,
+    )?;
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    let mut entries = crate::git::bound_directory_entries(&held, MAX_ENTRIES)
+        .map_err(|error| {
+            ObservationFailure::io(
+                format!("cannot read {}: {error}", directory.display()),
+                error,
+            )
+        })?
+        .ok_or_else(|| format!("skill baseline exceeds {MAX_ENTRIES} entries"))?
+        .into_iter()
+        .map(|entry| entry.name)
+        .collect::<Vec<_>>();
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    let mut entries = {
+        let mut entries = Vec::new();
+        for entry in fs::read_dir(&directory).map_err(|error| {
+            ObservationFailure::io(
+                format!("cannot read {}: {error}", directory.display()),
+                error,
+            )
+        })? {
+            if entries.len() == MAX_ENTRIES {
+                return Err(format!("skill baseline exceeds {MAX_ENTRIES} entries").into());
+            }
+            entries.push(
+                entry
+                    .map_err(|error| {
+                        ObservationFailure::io(
+                            format!("cannot read {}: {error}", directory.display()),
+                            error,
+                        )
+                    })?
+                    .file_name(),
+            );
+        }
+        entries
+    };
+    entries.sort_by(|left, right| os_bytes(left).cmp(os_bytes(right)));
+    for name in entries {
+        if name == OsStr::new(".git") {
+            continue;
+        }
+        let child_relative = relative.join(&name);
+        let child = root.join(&child_relative);
+        let metadata = fs::symlink_metadata(&child).map_err(|error| {
+            ObservationFailure::io(
+                format!("cannot inspect {}: {error}", child.display()),
+                error,
+            )
+        })?;
+        let file_type = metadata.file_type();
+        if file_type.is_dir() {
+            state.entry(&child_relative, b'D', executable(&metadata), &[])?;
+            hash_directory(root, &child_relative, depth + 1, state)?;
+        } else if file_type.is_file() {
+            hash_file(&child, &child_relative, &metadata, state)?;
+        } else if file_type.is_symlink() {
+            let target = fs::read_link(&child).map_err(|error| {
+                ObservationFailure::io(
+                    format!("cannot read link {}: {error}", child.display()),
+                    error,
+                )
+            })?;
+            let target = path_bytes(&target)?;
+            if target.len() > MAX_SYMLINK_BYTES {
+                return Err("skill baseline symlink target is too long".into());
+            }
+            let after = fs::symlink_metadata(&child).map_err(|error| {
+                ObservationFailure::io(
+                    format!("cannot inspect {}: {error}", child.display()),
+                    error,
+                )
+            })?;
+            ensure_unchanged_metadata(&child, &metadata, &after)?;
+            state.entry(&child_relative, b'L', executable(&metadata), &target)?;
+        } else {
+            return Err(format!(
+                "skill baseline contains unsupported entry: {}",
+                child.display()
+            )
+            .into());
+        }
+    }
+    ensure_unchanged(&directory, &before)?;
+    ensure_unchanged_metadata(
+        &directory,
+        &before,
+        &held.metadata().map_err(|error| {
+            ObservationFailure::io(
+                format!("cannot inspect {}: {error}", directory.display()),
+                error,
+            )
+        })?,
+    )
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn hash_file(
+    path: &Path,
+    relative: &Path,
+    before: &fs::Metadata,
+    state: &mut HashState,
+) -> Result<(), ObservationFailure> {
+    let mut file = open_file_without_following(path)?;
+    ensure_unchanged_metadata(
+        path,
+        before,
+        &file.metadata().map_err(|error| {
+            ObservationFailure::io(format!("cannot inspect {}: {error}", path.display()), error)
+        })?,
+    )?;
+    let mut content = Vec::new();
+    file.by_ref()
+        .take((MAX_BYTES + 1) as u64)
+        .read_to_end(&mut content)
+        .map_err(|error| {
+            ObservationFailure::io(format!("cannot read {}: {error}", path.display()), error)
+        })?;
+    let after = fs::symlink_metadata(path).map_err(|error| {
+        ObservationFailure::io(format!("cannot inspect {}: {error}", path.display()), error)
+    })?;
+    ensure_unchanged_metadata(path, before, &after)?;
+    state.entry(relative, b'F', executable(before), &content)
+}
+
+fn ensure_unchanged(path: &Path, before: &fs::Metadata) -> Result<(), ObservationFailure> {
+    let after = fs::symlink_metadata(path).map_err(|error| {
+        ObservationFailure::io(format!("cannot inspect {}: {error}", path.display()), error)
+    })?;
+    ensure_unchanged_metadata(path, before, &after)
+}
+
+fn ensure_unchanged_metadata(
+    path: &Path,
+    before: &fs::Metadata,
+    after: &fs::Metadata,
+) -> Result<(), ObservationFailure> {
+    if before.file_type() != after.file_type()
+        || before.len() != after.len()
+        || before.modified().ok() != after.modified().ok()
+        || executable(before) != executable(after)
+        || !same_file_identity(before, after)
+    {
+        Err(format!("skill baseline changed while reading: {}", path.display()).into())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+fn executable(metadata: &fs::Metadata) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    metadata.permissions().mode() & 0o111 != 0
+}
+#[cfg(unix)]
+fn same_file_identity(before: &fs::Metadata, after: &fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    before.dev() == after.dev()
+        && before.ino() == after.ino()
+        && before.ctime() == after.ctime()
+        && before.ctime_nsec() == after.ctime_nsec()
+}
+#[cfg(not(unix))]
+fn same_file_identity(_: &fs::Metadata, _: &fs::Metadata) -> bool {
+    true
+}
+#[cfg(unix)]
+fn open_directory_without_following(path: &Path) -> Result<fs::File, ObservationFailure> {
+    use std::os::unix::fs::OpenOptionsExt;
+    fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+        .map_err(|error| {
+            ObservationFailure::io(
+                format!(
+                    "cannot open directory {} without following links: {error}",
+                    path.display()
+                ),
+                error,
+            )
+        })
+}
+#[cfg(windows)]
+fn open_directory_without_following(path: &Path) -> Result<fs::File, ObservationFailure> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+    };
+    fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+        .map_err(|error| {
+            ObservationFailure::io(
+                format!("cannot open directory {}: {error}", path.display()),
+                error,
+            )
+        })
+}
+
+#[cfg(not(any(unix, windows)))]
+fn open_directory_without_following(path: &Path) -> Result<fs::File, ObservationFailure> {
+    fs::File::open(path).map_err(|error| {
+        ObservationFailure::io(
+            format!("cannot open directory {}: {error}", path.display()),
+            error,
+        )
+    })
+}
+#[cfg(not(unix))]
+fn executable(_: &fs::Metadata) -> bool {
+    false
+}
+#[cfg(unix)]
+pub(super) fn open_file_without_following(path: &Path) -> Result<fs::File, ObservationFailure> {
+    use std::os::unix::fs::OpenOptionsExt;
+    fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+        .map_err(|error| {
+            ObservationFailure::io(
+                format!(
+                    "cannot read {} without following links: {error}",
+                    path.display()
+                ),
+                error,
+            )
+        })
+}
+#[cfg(windows)]
+pub(super) fn open_file_without_following(path: &Path) -> Result<fs::File, ObservationFailure> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+        .map_err(|error| {
+            ObservationFailure::io(
+                format!("cannot open file {}: {error}", path.display()),
+                error,
+            )
+        })?;
+    if !file
+        .metadata()
+        .map_err(|error| ObservationFailure::io(error.to_string(), error))?
+        .is_file()
+    {
+        return Err(format!("not a regular file: {}", path.display()).into());
+    }
+    Ok(file)
+}
+
+#[cfg(not(any(unix, windows)))]
+pub(super) fn open_file_without_following(path: &Path) -> Result<fs::File, ObservationFailure> {
+    // The lstat checks before and after the read reject a replacement with a
+    // link. Windows' standard library opens reparse points through this path;
+    // this build has no descriptor-level no-follow primitive available here.
+    fs::File::open(path).map_err(|error| {
+        ObservationFailure::io(format!("cannot read {}: {error}", path.display()), error)
+    })
+}
+fn os_bytes(value: &OsStr) -> &[u8] {
+    value.as_encoded_bytes()
+}
+fn path_bytes(path: &Path) -> Result<Vec<u8>, ObservationFailure> {
+    let bytes = os_bytes(path.as_os_str());
+    if bytes.contains(&0) {
+        Err("skill baseline path contains a NUL byte".into())
+    } else {
+        Ok(bytes.to_vec())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+    fn write(path: &Path, text: &str) {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, text).unwrap();
+    }
+
+    #[test]
+    fn hash_only_walk_does_not_retain_manifest_entries() {
+        let temporary = tempdir().unwrap();
+        let root = temporary.path().join("skill");
+        write(&root.join("SKILL.md"), "fixture\n");
+        let mut state = HashState::new();
+        observe_directory(&root, &mut state).unwrap();
+        assert!(state.entries_manifest.is_none());
+        assert_eq!(state.baseline(), directory_hash(&root).unwrap());
+    }
+    #[test]
+    fn synthesized_directory_and_file_modes_match_materialized_tree() {
+        let temporary = tempdir().unwrap();
+        let root = temporary.path().join("candidate");
+        write(&root.join("new/nested/run"), "content");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for path in [
+                &root,
+                &root.join("new"),
+                &root.join("new/nested"),
+                &root.join("new/nested/run"),
+            ] {
+                fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+            }
+        }
+        let proposed = baseline_from_regular_entries_with_directory_modes(
+            &[("new/nested/run".into(), true, b"content".to_vec())],
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        assert_eq!(proposed, observe_directory_manifest(&root).unwrap());
+    }
+
+    // Frozen against PR 68 before extracting the walker. Includes empty and
+    // nested directories, binary/untracked content, executable bits
+    // and dangling links, and both forms of excluded Git metadata.
+    #[cfg(unix)]
+    #[test]
+    fn baseline_v1_golden_fixture() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("fixture");
+        write(&root.join("SKILL.md"), "fixture\n");
+        write(&root.join("nested/run"), "#!/bin/sh\n");
+        fs::write(root.join("binary"), [0, 255, 10]).unwrap();
+        fs::create_dir(root.join("empty")).unwrap();
+        write(&root.join(".git/config"), "excluded");
+        write(&root.join("nested/.git"), "gitdir: excluded");
+        for path in [root.clone(), root.join("nested"), root.join("empty")] {
+            fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        for path in [root.join("SKILL.md"), root.join("binary")] {
+            fs::set_permissions(path, fs::Permissions::from_mode(0o644)).unwrap();
+        }
+        fs::set_permissions(root.join("nested/run"), fs::Permissions::from_mode(0o755)).unwrap();
+        symlink("../missing", root.join("dangling")).unwrap();
+        let baseline = directory_hash(&root).unwrap();
+        assert_eq!(baseline.version, 1);
+        #[cfg(target_os = "macos")]
+        assert_eq!(
+            baseline.digest,
+            "3f80d8d03e40238c0b1e859c0333f4ddc111f6eea953993e380a84ecd124fcf8"
+        );
+        #[cfg(target_os = "linux")]
+        assert_eq!(
+            baseline.digest,
+            "fbc1b78a5d5b389a154e54317aaf8a2b87f208dcb81923bb668406ce25b1b7db"
+        );
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        assert_eq!(
+            baseline.digest,
+            "7bd20811314d1f494833302d88faacf46b1d7e7e2e18b2535daa54a69cab82f1"
+        );
+    }
+
+    #[test]
+    fn directory_digest_is_stable_includes_links_and_excludes_git() {
+        let temp = tempdir().unwrap();
+        let skill = temp.path().join("skill");
+        write(&skill.join("SKILL.md"), "one");
+        write(&skill.join("nested/file"), "two");
+        write(&skill.join(".git/config"), "ignored");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("nested/file", skill.join("alias")).unwrap();
+        let first = directory_hash(&skill).unwrap();
+        let second = directory_hash(&skill).unwrap();
+        assert_eq!(first, second);
+        assert_eq!(first.version, 1);
+        assert_eq!(first.digest.len(), 64);
+        write(&skill.join(".git/config"), "still ignored");
+        assert_eq!(first, directory_hash(&skill).unwrap());
+        write(&skill.join("nested/file"), "changed");
+        assert_ne!(first, directory_hash(&skill).unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn digest_includes_modes_and_raw_link_targets_without_following_them() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let temp = tempdir().unwrap();
+        let skill = temp.path().join("skill");
+        write(&skill.join("SKILL.md"), "one");
+        symlink("missing-one", skill.join("alias")).unwrap();
+        let first = directory_hash(&skill).unwrap();
+        symlink("missing-two", skill.join("replacement")).unwrap();
+        fs::remove_file(skill.join("alias")).unwrap();
+        fs::rename(skill.join("replacement"), skill.join("alias")).unwrap();
+        assert_ne!(first, directory_hash(&skill).unwrap());
+        let mut permissions = fs::metadata(skill.join("SKILL.md")).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(skill.join("SKILL.md"), permissions).unwrap();
+        assert_ne!(first, directory_hash(&skill).unwrap());
+    }
+
+    #[test]
+    fn digest_includes_ignored_content_and_refuses_excessive_depth() {
+        let temp = tempdir().unwrap();
+        let skill = temp.path().join("skill");
+        write(&skill.join("SKILL.md"), "one");
+        write(&skill.join("ignored-by-git.log"), "first");
+        let first = directory_hash(&skill).unwrap();
+        write(&skill.join("ignored-by-git.log"), "second");
+        assert_ne!(first, directory_hash(&skill).unwrap());
+        let mut nested = skill;
+        for number in 0..=MAX_DEPTH {
+            nested = nested.join(number.to_string());
+        }
+        write(&nested.join("too-deep"), "x");
+        assert!(directory_hash(temp.path().join("skill").as_path()).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn digest_refuses_fifo_without_blocking() {
+        use std::{ffi::CString, os::unix::ffi::OsStrExt};
+
+        let temp = tempdir().unwrap();
+        let skill = temp.path().join("skill");
+        write(&skill.join("SKILL.md"), "one");
+        let fifo = skill.join("stream");
+        let fifo = CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        // SAFETY: the C string is NUL-terminated and names a fresh test path.
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+        assert!(directory_hash(&skill).is_err());
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn bound_walker_keeps_reading_the_held_directory_after_its_path_is_replaced() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempdir().unwrap();
+        let skill = temp.path().join("skill");
+        let moved = temp.path().join("moved");
+        let impostor = temp.path().join("impostor");
+        write(&skill.join("SKILL.md"), "held");
+        write(&impostor.join("SKILL.md"), "impostor");
+        let held = open_directory_without_following(&skill).unwrap();
+        fs::rename(&skill, &moved).unwrap();
+        symlink(&impostor, &skill).unwrap();
+
+        let mut state = HashState::new();
+        state
+            .entry(
+                Path::new(""),
+                b'D',
+                executable(&held.metadata().unwrap()),
+                &[],
+            )
+            .unwrap();
+        hash_directory_bound(temp.path(), &held, Path::new(""), 0, &mut state).unwrap();
+        let held_digest = Baseline {
+            version: BASELINE_VERSION,
+            digest: format!("{:x}", state.hasher.finalize()),
+        };
+        assert_eq!(held_digest, directory_hash(&moved).unwrap());
+        assert_ne!(held_digest, directory_hash(&impostor).unwrap());
+    }
+}

@@ -16,12 +16,15 @@ version is 0.2.0. It currently supports:
   incorrect or dangling links, guarded uninstall, and metadata-only Forget Source.
 - Explicit repository update checks and confirmed fast-forwards to the exact
   previewed revision, followed by a rescan and verification.
+- Explicit origin adoption and guarded vendored-skill updates from a confirmed
+  origin on Linux and macOS; modified skills block before fetching.
 - Read-only inventory when private metadata is unavailable, with unknown state
   stated explicitly.
 
 Skilled never adopts unproven links. Install refuses occupied paths; repair and
 uninstall act only on links proven by ownership receipts; Forget Source leaves
-checkout content intact. Other network workflows remain future work. See the
+checkout content intact. Vendored checks write only their private cache; confirmed updates replace
+planned files and retain displaced files for recovery. See the
 [user guide](docs/usage.md) for operation limits and update behavior.
 
 ## Requirements
@@ -60,7 +63,7 @@ After setup, the application opens Inventory. Press `?` for contextual help.
 | View | Key | Main actions |
 | --- | --- | --- |
 | Inventory | `1` | `/` filters; `x` previews uninstall of managed links. |
-| Sources | `2` | `a` adds a source; `i` on a variant previews install; `x` in Repositories previews Forget Source. |
+| Sources | `2` | `a` adds a source; `i` previews install; `p` confirms origin; `u` checks a variant’s origin; `x` previews Forget Source in Repositories. |
 | Updates | `3` | `u` checks repositories; Enter advances to Details and then to an available update preview. |
 | Doctor | `4` | Inspect findings; `r` previews repair where supported. |
 
@@ -78,6 +81,7 @@ cargo run -- install --source <id-or-path> --skill <name> --agents claude-code
 cargo run -- repair --skill <name> --agent claude-code
 cargo run -- uninstall --skill <name> --agent claude-code
 cargo run -- update --source <id-or-path>
+cargo run -- update --skill <name>
 ```
 
 Commands print a plan and ask for confirmation. `--yes` skips the prompt only;

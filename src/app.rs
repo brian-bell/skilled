@@ -43,6 +43,79 @@ use crate::{
     validation::valid_skill_name,
 };
 
+/// The explicit origin flow owns the keyboard from its cancellable check
+/// through the guarded replacement report. The replacement itself is never
+/// cancellable: once it has started, it must finish and account for the
+/// filesystem state it leaves behind.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum VendoredPrompt {
+    Checking,
+    Preview(Box<crate::vendored::ApplyPlan>),
+    Applying,
+    Report(crate::vendored::ApplyOutcome),
+    Failed(crate::adoption::AdoptionFailure),
+}
+
+struct VendoredCheckRun {
+    receiver: Receiver<
+        std::result::Result<Option<crate::vendored::ApplyPlan>, crate::adoption::AdoptionFailure>,
+    >,
+    handle: JoinHandle<()>,
+    cancelled: Arc<AtomicBool>,
+    child: Arc<Mutex<Option<Child>>>,
+}
+
+struct VendoredApplyRun {
+    receiver: Receiver<crate::vendored::ApplyOutcome>,
+    handle: JoinHandle<()>,
+    confirmed_plan: Vec<String>,
+}
+
+/// The editable origin declaration; focus and errors belong to the UI session.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AdoptionForm {
+    pub draft: crate::adoption::AdoptionDraft,
+    pub focused: AdoptionField,
+    pub error: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AdoptionField {
+    Repository,
+    Subdirectory,
+    TrackingBranch,
+}
+
+impl AdoptionField {
+    pub const ALL: [Self; 3] = [Self::Repository, Self::Subdirectory, Self::TrackingBranch];
+
+    fn next(self) -> Self {
+        match self {
+            Self::Repository => Self::Subdirectory,
+            Self::Subdirectory => Self::TrackingBranch,
+            Self::TrackingBranch => Self::Repository,
+        }
+    }
+}
+
+impl AdoptionForm {
+    pub fn value(&self, field: AdoptionField) -> &str {
+        match field {
+            AdoptionField::Repository => &self.draft.repository,
+            AdoptionField::Subdirectory => &self.draft.subdirectory,
+            AdoptionField::TrackingBranch => &self.draft.update_ref,
+        }
+    }
+
+    fn focused_value_mut(&mut self) -> &mut String {
+        match self.focused {
+            AdoptionField::Repository => &mut self.draft.repository,
+            AdoptionField::Subdirectory => &mut self.draft.subdirectory,
+            AdoptionField::TrackingBranch => &mut self.draft.update_ref,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SetupStep {
     Welcome,
@@ -203,6 +276,16 @@ pub enum Action {
     ///
     /// Nothing is written by this, and nothing is written by anything until
     /// [`Action::ConfirmOperation`] is applied to the preview it produces.
+    BeginVendoredCheck,
+    ConfirmVendoredApply,
+    DismissVendoredCheck,
+    BeginAdoption,
+    AppendAdoptionCharacter(char),
+    DeleteAdoptionCharacter,
+    NextAdoptionField,
+    PreviewAdoption,
+    ConfirmAdoption,
+    DismissAdoption,
     BeginInstall,
     /// Plan removal of the focused skill's owned links.
     BeginUninstall,
@@ -245,6 +328,12 @@ pub enum Effect {
     /// is what the user is standing on, and the runner reads it back from the
     /// same state the reducer read, exactly as [`Effect::ScanInstallations`]
     /// carries no roots.
+    CheckVendoredOrigin,
+    CancelVendoredCheck,
+    ApplyVendored,
+    BeginAdoption,
+    PreviewAdoption,
+    ApplyAdoption,
     PlanInstall,
     /// Create the links the shown preview calls work, then rescan and verify.
     ApplyInstall,
@@ -588,7 +677,10 @@ enum RegistrationFailure {
 /// the path: it is refused before anything is written, and refusing it says
 /// nothing about whether the next path could be registered.
 fn is_source_request_error(error: &Error) -> bool {
-    matches!(error, Error::InvalidSourcePath(_))
+    matches!(
+        error,
+        Error::InvalidSourcePath(_) | Error::SourceHasOriginBaselines
+    )
 }
 
 struct MetadataStartup {
@@ -669,7 +761,21 @@ fn open_metadata(data_dir: &Path) -> MetadataStartup {
     }
 }
 
+/// Independently remembered list windows, measured in entries rather than terminal rows.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ListWindow {
+    Inventory,
+    Doctor,
+    Sources,
+    Updates,
+}
+
+impl ListWindow {
+    pub const ALL: [Self; 4] = [Self::Inventory, Self::Doctor, Self::Sources, Self::Updates];
+}
+
 pub struct SkilledApp {
+    list_window_starts: [usize; 4],
     view: View,
     metadata: Metadata,
     registry_availability: RegistryAvailability,
@@ -689,6 +795,10 @@ pub struct SkilledApp {
     update_checks: Vec<CachedUpdateCheck>,
     updates_pane: UpdatesPane,
     focused_update: usize,
+    pending_vendored: Option<VendoredPrompt>,
+    vendored_check_run: Option<VendoredCheckRun>,
+    vendored_apply_run: Option<VendoredApplyRun>,
+    pending_adoption: Option<crate::adoption::AdoptionPrompt>,
     pending_update: Option<RepositoryUpdatePrompt>,
     update_preview_fully_seen: bool,
     update_check_run: Option<UpdateCheckRun>,
@@ -809,11 +919,16 @@ impl SkilledApp {
             source_error: None,
             focused_catalog: 0,
             sources_pane: SourcesPane::Repositories,
+            list_window_starts: [0; 4],
             focused_source: 0,
             focused_variant: 0,
             update_checks,
             updates_pane: UpdatesPane::Candidates,
             focused_update: 0,
+            pending_vendored: None,
+            vendored_check_run: None,
+            vendored_apply_run: None,
+            pending_adoption: None,
             pending_update: None,
             update_preview_fully_seen: false,
             update_check_run: None,
@@ -1201,6 +1316,347 @@ impl SkilledApp {
             )
     }
 
+    pub fn can_check_vendored_selection(&self) -> bool {
+        self.can_install_selection()
+            && self.vendored_check_run.is_none()
+            && self.vendored_apply_run.is_none()
+            && !self.update_check_in_flight()
+    }
+
+    pub fn pending_vendored(&self) -> Option<&VendoredPrompt> {
+        self.pending_vendored.as_ref()
+    }
+
+    pub fn vendored_check_in_flight(&self) -> bool {
+        self.vendored_check_run.is_some()
+    }
+
+    /// Prepare the same guarded origin check used by Sources for a variant a
+    /// non-interactive caller resolved explicitly. The installation snapshot
+    /// is refreshed at the effect boundary before it can become part of the
+    /// request and its later verification.
+    pub(crate) fn prepare_vendored_check_for(
+        &mut self,
+        variant: VariantRef,
+    ) -> std::result::Result<crate::vendored::CheckRequest, crate::adoption::AdoptionFailure> {
+        self.rescan_installations();
+        let source = self
+            .sources
+            .iter()
+            .find(|source| source.id() == variant.source_id())
+            .ok_or_else(|| {
+                crate::adoption::AdoptionFailure::from("No registered source selected")
+            })?;
+        crate::vendored::prepare(
+            source,
+            variant,
+            self.store()
+                .map_err(crate::adoption::AdoptionFailure::metadata)?,
+            &self.inventory,
+            &self.environment,
+        )
+    }
+
+    pub fn vendored_apply_in_flight(&self) -> bool {
+        self.vendored_apply_run.is_some()
+    }
+
+    /// A guarded replacement is available only after the complete, rendered
+    /// mutation plan has been seen. A no-op has nothing to confirm.
+    pub fn vendored_preview_fully_seen(&self) -> bool {
+        matches!(self.pending_vendored, Some(VendoredPrompt::Preview(ref plan)) if plan.can_apply())
+            && self.detail_measured
+            && self.detail_scroll >= self.detail_max_scroll
+    }
+
+    fn vendored_failure(&mut self, failure: crate::adoption::AdoptionFailure) {
+        if failure.metadata == crate::adoption::MetadataAvailability::Unavailable {
+            self.degrade(MetadataFailure::new(
+                self.environment.data_dir.join("skilled.sqlite3"),
+                failure.message.clone(),
+            ));
+        }
+        self.pending_vendored = Some(VendoredPrompt::Failed(failure));
+        self.reset_detail_scroll();
+    }
+
+    fn start_vendored_check(&mut self) {
+        if self.vendored_check_run.is_some() {
+            return;
+        }
+        self.rescan_installations();
+        let request = (|| {
+            let source = self.selected_source().ok_or("No source selected")?;
+            let Some(SourceRow::Variant { catalog, candidate }) = self.selected_variant_row()
+            else {
+                return Err(crate::adoption::AdoptionFailure::from(
+                    "No variant selected",
+                ));
+            };
+            crate::vendored::prepare(
+                source,
+                VariantRef::of(source, catalog, candidate),
+                self.store()
+                    .map_err(crate::adoption::AdoptionFailure::metadata)?,
+                &self.inventory,
+                &self.environment,
+            )
+        })();
+        let request = match request {
+            Ok(request) => request,
+            Err(failure) => {
+                self.vendored_failure(failure);
+                return;
+            }
+        };
+        let (sender, receiver) = mpsc::channel();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let child = Arc::new(Mutex::new(None));
+        let worker_cancelled = cancelled.clone();
+        let worker_child = child.clone();
+        let data_dir = self.environment.data_dir.clone();
+        let handle = std::thread::spawn(move || {
+            let result =
+                crate::vendored::check(request, &data_dir, &worker_cancelled, &worker_child)
+                    .and_then(|preview| {
+                        preview
+                            .map(|preview| crate::vendored::plan_apply(&preview, &data_dir))
+                            .transpose()
+                    });
+            let _ = sender.send(result);
+        });
+        self.vendored_check_run = Some(VendoredCheckRun {
+            receiver,
+            handle,
+            cancelled,
+            child,
+        });
+        self.pending_vendored = Some(VendoredPrompt::Checking);
+        self.reset_detail_scroll();
+    }
+
+    /// Called at the event-loop boundary, never by the reducer or renderer.
+    /// Dropping a cancelled run's receiver prevents a late result replacing a
+    /// newer dialog; there is at most one live receiver for the current check.
+    pub fn drain_vendored_check(&mut self) {
+        let Some(run) = self.vendored_check_run.as_ref() else {
+            return;
+        };
+        let result = match run.receiver.try_recv() {
+            Ok(result) => result,
+            Err(TryRecvError::Empty) => return,
+            Err(TryRecvError::Disconnected) => Err("Origin check ended before completing".into()),
+        };
+        if let Some(run) = self.vendored_check_run.take() {
+            self.retire_update_worker(run.handle);
+        }
+        match result {
+            Ok(Some(plan)) => self.pending_vendored = Some(VendoredPrompt::Preview(Box::new(plan))),
+            Ok(None) => self.pending_vendored = None,
+            Err(failure) => self.vendored_failure(failure),
+        }
+        self.reset_detail_scroll();
+    }
+
+    fn cancel_vendored_check(&mut self) {
+        if let Some(run) = self.vendored_check_run.take() {
+            run.cancelled.store(true, Ordering::Release);
+            if let Some(mut child) = run
+                .child
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .take()
+            {
+                crate::git::terminate_child(&mut child);
+            }
+            self.retire_update_worker(run.handle);
+        }
+        self.pending_vendored = None;
+        self.reset_detail_scroll();
+    }
+
+    fn start_vendored_apply(&mut self) {
+        if self.vendored_apply_run.is_some() || !self.vendored_preview_fully_seen() {
+            return;
+        }
+        let Some(VendoredPrompt::Preview(plan)) = self.pending_vendored.as_ref() else {
+            return;
+        };
+        let plan = (**plan).clone();
+        let data_dir = self.environment.data_dir.clone();
+        let confirmed_plan = plan.lines();
+        let (sender, receiver) = mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            let _ = sender.send(crate::vendored::apply(&plan, &data_dir));
+        });
+        self.vendored_apply_run = Some(VendoredApplyRun {
+            receiver,
+            handle,
+            confirmed_plan,
+        });
+        self.pending_vendored = Some(VendoredPrompt::Applying);
+        self.reset_detail_scroll();
+    }
+
+    /// Finish a replacement at the event-loop boundary. The filesystem and
+    /// metadata work happens on the worker; the state it left behind is then
+    /// restated before its report is shown.
+    pub fn drain_vendored_apply(&mut self) {
+        let Some(run) = self.vendored_apply_run.as_ref() else {
+            return;
+        };
+        let outcome = match run.receiver.try_recv() {
+            Ok(outcome) => outcome,
+            Err(TryRecvError::Empty) => return,
+            Err(TryRecvError::Disconnected) => {
+                let confirmed_plan = self
+                    .vendored_apply_run
+                    .take()
+                    .map(|run| {
+                        let _ = run.handle.join();
+                        run.confirmed_plan
+                    })
+                    .unwrap_or_default();
+                // Losing the report does not prove that the worker made no
+                // writes. Use the normal refresh path and withhold success.
+                crate::vendored::ApplyOutcome::unreported(confirmed_plan)
+            }
+        };
+        if let Some(run) = self.vendored_apply_run.take() {
+            self.retire_update_worker(run.handle);
+        }
+        // The result is an account of a write attempt. Re-read the catalog and
+        // agent roots even after a failed attempt so the dialog never claims
+        // the pre-apply state is still current.
+        if outcome.metadata_available() {
+            match self.store().and_then(Store::registered_sources) {
+                Ok(sources) => self.sources = sources,
+                Err(error) => {
+                    self.set_degraded(MetadataFailure::new(
+                        self.metadata_database_path(),
+                        error.to_string(),
+                    ));
+                }
+            }
+        } else {
+            self.set_degraded(MetadataFailure::new(
+                self.metadata_database_path(),
+                "vendored replacement metadata could not be verified",
+            ));
+        }
+        self.rescan_installations();
+        self.pending_vendored = Some(VendoredPrompt::Report(outcome));
+        self.reset_detail_scroll();
+    }
+
+    pub fn can_adopt_selection(&self) -> bool {
+        self.can_install_selection()
+    }
+
+    pub fn pending_adoption(&self) -> Option<&crate::adoption::AdoptionPrompt> {
+        self.pending_adoption.as_ref()
+    }
+
+    pub fn adoption_preview_fully_seen(&self) -> bool {
+        matches!(
+            self.pending_adoption,
+            Some(crate::adoption::AdoptionPrompt::Preview(_))
+        ) && self.detail_measured
+            && self.detail_scroll >= self.detail_max_scroll
+    }
+
+    fn adoption_failure(
+        &mut self,
+        failure: crate::adoption::AdoptionFailure,
+    ) -> crate::adoption::AdoptionPrompt {
+        if failure.metadata == crate::adoption::MetadataAvailability::Unavailable {
+            self.degrade(MetadataFailure::new(
+                self.environment.data_dir.join("skilled.sqlite3"),
+                failure.message.clone(),
+            ));
+        }
+        crate::adoption::AdoptionPrompt::Failed(failure)
+    }
+
+    fn begin_adoption(&mut self) {
+        let result = (|| {
+            let source = self.selected_source().ok_or("No source selected")?;
+            let Some(SourceRow::Variant { catalog, candidate }) = self.selected_variant_row()
+            else {
+                return Err(crate::adoption::AdoptionFailure::from(
+                    "No variant selected",
+                ));
+            };
+            crate::adoption::begin(
+                source,
+                VariantRef::of(source, catalog, candidate),
+                self.store().map_err(|e| e.to_string())?,
+            )
+        })();
+        self.pending_adoption = Some(match result {
+            Ok(draft) => crate::adoption::AdoptionPrompt::Editing(AdoptionForm {
+                draft,
+                focused: AdoptionField::Repository,
+                error: None,
+            }),
+            Err(error) => self.adoption_failure(error),
+        });
+        self.reset_detail_scroll();
+    }
+
+    fn preview_adoption(&mut self) {
+        let Some(crate::adoption::AdoptionPrompt::Editing(mut form)) =
+            self.pending_adoption.clone()
+        else {
+            return;
+        };
+        let result = self
+            .store()
+            .map_err(crate::adoption::AdoptionFailure::metadata)
+            .and_then(|store| crate::adoption::plan(&form.draft, store));
+        self.pending_adoption = Some(match result {
+            Ok(plan) => crate::adoption::AdoptionPrompt::Preview(plan),
+            Err(error) if error.metadata == crate::adoption::MetadataAvailability::Unavailable => {
+                self.adoption_failure(error)
+            }
+            Err(error) => {
+                form.error = Some(error.message);
+                crate::adoption::AdoptionPrompt::Editing(form)
+            }
+        });
+        self.reset_detail_scroll();
+    }
+
+    fn apply_adoption(&mut self) {
+        if !self.adoption_preview_fully_seen() {
+            return;
+        }
+        let Some(crate::adoption::AdoptionPrompt::Preview(plan)) = self.pending_adoption.clone()
+        else {
+            return;
+        };
+        let result = self
+            .store_mut()
+            .map_err(crate::adoption::AdoptionFailure::metadata)
+            .and_then(|store| crate::adoption::apply(&plan, store));
+        self.rescan_installations();
+        self.pending_adoption = Some(match result {
+            Ok(verification) => {
+                if let Some(failure) = verification.failure()
+                    && failure.metadata == crate::adoption::MetadataAvailability::Unavailable
+                {
+                    self.degrade(MetadataFailure::new(
+                        self.environment.data_dir.join("skilled.sqlite3"),
+                        failure.message.clone(),
+                    ));
+                }
+                crate::adoption::AdoptionPrompt::Report(verification)
+            }
+            Err(error) => self.adoption_failure(error),
+        });
+        self.reset_detail_scroll();
+    }
+
     pub fn can_add_source(&self) -> bool {
         self.metadata_failure().is_none()
     }
@@ -1350,6 +1806,17 @@ impl SkilledApp {
         self.detail_scroll
     }
 
+    pub fn list_window_start(&self, list: ListWindow) -> usize {
+        self.list_window_starts[list as usize]
+    }
+
+    /// Keep the window actually drawn. An undrawn list has no new measurement.
+    pub fn note_list_window_start(&mut self, list: ListWindow, start: Option<usize>) {
+        if let Some(start) = start {
+            self.list_window_starts[list as usize] = start;
+        }
+    }
+
     /// Record what the frame just drawn measured the detail region's scrollable
     /// extent to be, or that it measured nothing.
     ///
@@ -1497,6 +1964,8 @@ impl SkilledApp {
         self.pending_operation = None;
         self.pending_repair = None;
         self.pending_update = None;
+        self.pending_adoption = None;
+        self.pending_vendored = None;
     }
 
     pub fn update(&mut self, action: Action) -> UpdateResult {
@@ -1509,6 +1978,81 @@ impl SkilledApp {
                 Action::Quit => self.quit_result(),
                 _ => UpdateResult::continuing(Vec::new()),
             };
+        }
+
+        if self.pending_vendored.is_some() {
+            let effects = match action {
+                Action::Quit => return self.quit_result(),
+                Action::ConfirmVendoredApply if self.vendored_preview_fully_seen() => {
+                    vec![Effect::ApplyVendored]
+                }
+                Action::DismissVendoredCheck
+                    if !matches!(self.pending_vendored, Some(VendoredPrompt::Applying)) =>
+                {
+                    if matches!(self.pending_vendored, Some(VendoredPrompt::Checking)) {
+                        vec![Effect::CancelVendoredCheck]
+                    } else {
+                        self.pending_vendored = None;
+                        self.reset_detail_scroll();
+                        Vec::new()
+                    }
+                }
+                Action::ScrollDetail(delta) => {
+                    self.scroll_detail(delta);
+                    Vec::new()
+                }
+                _ => Vec::new(),
+            };
+            return UpdateResult::continuing(effects);
+        }
+
+        if self.pending_adoption.is_some() {
+            use crate::adoption::AdoptionPrompt;
+            let effects = match action {
+                Action::Quit => return self.quit_result(),
+                Action::DismissAdoption => {
+                    self.pending_adoption = None;
+                    self.reset_detail_scroll();
+                    Vec::new()
+                }
+                Action::ScrollDetail(delta) => {
+                    self.scroll_detail(delta);
+                    Vec::new()
+                }
+                Action::ConfirmAdoption if self.adoption_preview_fully_seen() => {
+                    vec![Effect::ApplyAdoption]
+                }
+                Action::PreviewAdoption
+                    if matches!(self.pending_adoption, Some(AdoptionPrompt::Editing(_))) =>
+                {
+                    vec![Effect::PreviewAdoption]
+                }
+                Action::AppendAdoptionCharacter(character) => {
+                    if let Some(AdoptionPrompt::Editing(form)) = &mut self.pending_adoption
+                        && !character.is_control()
+                        && form.value(form.focused).len() < 2048
+                    {
+                        form.focused_value_mut().push(character);
+                        form.error = None;
+                    }
+                    Vec::new()
+                }
+                Action::DeleteAdoptionCharacter => {
+                    if let Some(AdoptionPrompt::Editing(form)) = &mut self.pending_adoption {
+                        form.focused_value_mut().pop();
+                        form.error = None;
+                    }
+                    Vec::new()
+                }
+                Action::NextAdoptionField => {
+                    if let Some(AdoptionPrompt::Editing(form)) = &mut self.pending_adoption {
+                        form.focused = form.focused.next();
+                    }
+                    Vec::new()
+                }
+                _ => Vec::new(),
+            };
+            return UpdateResult::continuing(effects);
         }
 
         // A preview is a question about writes that have not happened yet, so
@@ -1881,6 +2425,25 @@ impl SkilledApp {
             Action::AppendInventoryFilter(_)
             | Action::DeleteInventoryFilterCharacter
             | Action::SubmitInventoryFilter => Vec::new(),
+            Action::BeginVendoredCheck if self.can_check_vendored_selection() => {
+                vec![Effect::CheckVendoredOrigin]
+            }
+            Action::BeginAdoption => {
+                if self.can_adopt_selection() {
+                    vec![Effect::BeginAdoption]
+                } else {
+                    Vec::new()
+                }
+            }
+            Action::AppendAdoptionCharacter(_)
+            | Action::DeleteAdoptionCharacter
+            | Action::NextAdoptionField
+            | Action::PreviewAdoption
+            | Action::ConfirmAdoption
+            | Action::DismissAdoption
+            | Action::DismissVendoredCheck
+            | Action::ConfirmVendoredApply
+            | Action::BeginVendoredCheck => Vec::new(),
             Action::BeginInstall => {
                 if self.pending_repair.is_none() && self.can_install_selection() {
                     vec![Effect::PlanInstall]
@@ -2024,6 +2587,12 @@ impl SkilledApp {
                     self.rescan_installations();
                 }
                 Effect::ScanInstallations => self.rescan_installations(),
+                Effect::CheckVendoredOrigin => self.start_vendored_check(),
+                Effect::CancelVendoredCheck => self.cancel_vendored_check(),
+                Effect::ApplyVendored => self.start_vendored_apply(),
+                Effect::BeginAdoption => self.begin_adoption(),
+                Effect::PreviewAdoption => self.preview_adoption(),
+                Effect::ApplyAdoption => self.apply_adoption(),
                 Effect::PlanInstall => {
                     match self.build_install_preview() {
                         Ok(prompt) => {
@@ -2350,6 +2919,10 @@ impl SkilledApp {
             self.update_check_in_flight()
                 .then_some(Effect::CancelUpdateCheck)
                 .into_iter()
+                .chain(
+                    self.vendored_check_in_flight()
+                        .then_some(Effect::CancelVendoredCheck),
+                )
                 .collect(),
         )
     }
@@ -3051,8 +3624,19 @@ impl SkilledApp {
                 ));
             }
         };
+        let origins = match self
+            .store()
+            .and_then(|store| store.origin_records(source.id()))
+        {
+            Ok(origins) => origins,
+            Err(error) => {
+                return ForgetPrompt::Failed(format!(
+                    "Origin associations and baselines could not be read; no metadata can be removed: {error}"
+                ));
+            }
+        };
         let probe = probe_forget(source, &receipts);
-        ForgetPrompt::Preview(plan_forget(source, &receipts, &probe))
+        ForgetPrompt::Preview(plan_forget(source, &receipts, &probe, &origins))
     }
 
     /// The one planning path shared by the screen and `skilled uninstall`.
@@ -3521,6 +4105,8 @@ impl SkilledApp {
         if self.pending_operation.is_some()
             || self.pending_repair.is_some()
             || self.pending_update.is_some()
+            || self.pending_adoption.is_some()
+            || self.pending_vendored.is_some()
         {
             return true;
         }
@@ -3739,6 +4325,18 @@ fn publish_update_worker_failure(
 /// asked for it.
 impl Drop for SkilledApp {
     fn drop(&mut self) {
+        self.cancel_vendored_check();
+        // A replacement cannot be cancelled once it starts: staging and the
+        // final replacement must run to their own verification boundary.
+        // Joining here keeps that account tied to this application lifetime.
+        if let Some(run) = self.vendored_apply_run.take() {
+            let _ = run.handle.join();
+        }
+        // Cancelled workers have already received their cancellation signal.
+        // Join them here so no origin fetch outlives the application.
+        for handle in self.retired_update_workers.drain(..) {
+            let _ = handle.join();
+        }
         let Some(run) = self.update_check_run.take() else {
             return;
         };
@@ -3930,6 +4528,201 @@ mod tests {
         note_generation(second + 5);
 
         assert!(now() > second + 5);
+    }
+
+    #[test]
+    fn vendored_preview_requires_the_complete_plan_and_owns_the_keyboard() {
+        let (_temporary, mut app) = test_app();
+        app.pending_vendored = Some(VendoredPrompt::Preview(Box::new(
+            crate::vendored::ApplyPlan::fixture(),
+        )));
+        app.detail_max_scroll = 4;
+        app.detail_measured = true;
+        app.update(Action::ScrollDetail(1));
+        assert_eq!(app.detail_scroll(), 1);
+        for action in [
+            Action::ConfirmAdoption,
+            Action::ConfirmRepositoryUpdate,
+            Action::OpenSources,
+            Action::BeginInstall,
+        ] {
+            assert!(app.update(action).effects().is_empty());
+            assert!(matches!(
+                app.pending_vendored,
+                Some(VendoredPrompt::Preview(_))
+            ));
+        }
+        assert!(
+            app.update(Action::ConfirmVendoredApply)
+                .effects()
+                .is_empty()
+        );
+        app.detail_scroll = app.detail_max_scroll;
+        assert_eq!(
+            app.update(Action::ConfirmVendoredApply).effects(),
+            [Effect::ApplyVendored]
+        );
+        let update = app.update(Action::DismissVendoredCheck);
+        app.perform_effects(update.effects()).unwrap();
+        assert!(app.pending_vendored().is_none());
+    }
+
+    #[test]
+    fn vendored_readonly_platform_never_offers_apply() {
+        let (_temporary, mut app) = test_app();
+        app.pending_vendored = Some(VendoredPrompt::Preview(Box::new(
+            crate::vendored::ApplyPlan::readonly_fixture(),
+        )));
+        app.detail_measured = true;
+        app.detail_scroll = app.detail_max_scroll;
+        assert!(!app.vendored_preview_fully_seen());
+        assert!(
+            app.update(Action::ConfirmVendoredApply)
+                .effects()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn disconnected_vendored_apply_reports_unknown_writes_and_rescans() {
+        let (_temporary, mut app) = test_app();
+        for agent in &mut app.agents {
+            agent.set_selected(true);
+        }
+        let root = app
+            .environment
+            .home_dir
+            .join(crate::agents::adapter(AgentKind::Codex).native_skill_root())
+            .join("appeared");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join("SKILL.md"),
+            "---\nname: appeared\ndescription: after worker write\n---\n",
+        )
+        .unwrap();
+        let (sender, receiver) = mpsc::channel();
+        drop(sender);
+        app.vendored_apply_run = Some(VendoredApplyRun {
+            receiver,
+            handle: std::thread::spawn(|| {}),
+            confirmed_plan: vec!["Staging: /source/.skilled-update-fixture".into()],
+        });
+        app.pending_vendored = Some(VendoredPrompt::Applying);
+        assert!(
+            !app.inventory
+                .rows()
+                .iter()
+                .any(|row| row.name() == "appeared")
+        );
+        app.drain_vendored_apply();
+        assert!(app.vendored_apply_run.is_none());
+        assert!(
+            app.inventory
+                .rows()
+                .iter()
+                .any(|row| row.name() == "appeared")
+        );
+        let Some(VendoredPrompt::Report(outcome)) = app.pending_vendored() else {
+            panic!("an unknown write outcome must remain a report");
+        };
+        assert_eq!(
+            outcome.status,
+            crate::vendored::ApplyStatus::VerificationIncomplete
+        );
+        let lines = outcome.lines().join("\n");
+        assert!(lines.contains("Files may have changed"));
+        assert!(lines.contains("/source/.skilled-update-fixture"));
+        assert!(!lines.contains("blocked before") && !lines.contains("Update written"));
+    }
+
+    #[test]
+    fn vendored_apply_cannot_be_cancelled_once_started() {
+        let (_temporary, mut app) = test_app();
+        app.pending_vendored = Some(VendoredPrompt::Applying);
+
+        assert!(
+            app.update(Action::DismissVendoredCheck)
+                .effects()
+                .is_empty()
+        );
+        assert_eq!(app.pending_vendored, Some(VendoredPrompt::Applying));
+    }
+
+    #[test]
+    fn vendored_input_withholds_enter_until_the_plan_is_seen_and_locks_apply_escape() {
+        use crossterm::event::{KeyCode, KeyEvent};
+
+        let (_temporary, mut app) = test_app();
+        app.pending_vendored = Some(VendoredPrompt::Preview(Box::new(
+            crate::vendored::ApplyPlan::fixture(),
+        )));
+        app.detail_max_scroll = 1;
+        assert_eq!(
+            crate::input::action_for_app_key(&app, KeyEvent::from(KeyCode::Enter)),
+            None
+        );
+
+        app.detail_measured = true;
+        app.detail_scroll = 1;
+        assert_eq!(
+            crate::input::action_for_app_key(&app, KeyEvent::from(KeyCode::Enter)),
+            Some(Action::ConfirmVendoredApply)
+        );
+
+        app.pending_vendored = Some(VendoredPrompt::Applying);
+        assert_eq!(
+            crate::input::action_for_app_key(&app, KeyEvent::from(KeyCode::Esc)),
+            None
+        );
+    }
+
+    #[test]
+    fn cancelled_origin_worker_cannot_replace_a_later_dialog() {
+        let (_temporary, mut app) = test_app();
+        let (sender, receiver) = mpsc::channel();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let worker_cancelled = cancelled.clone();
+        let handle = std::thread::spawn(move || {
+            while !worker_cancelled.load(Ordering::Acquire) {
+                std::thread::yield_now();
+            }
+            let _ = sender.send(Err("late origin failure".into()));
+        });
+        app.vendored_check_run = Some(VendoredCheckRun {
+            receiver,
+            handle,
+            cancelled: cancelled.clone(),
+            child: Arc::new(Mutex::new(None)),
+        });
+        app.pending_vendored = Some(VendoredPrompt::Checking);
+        let update = app.update(Action::DismissVendoredCheck);
+        app.perform_effects(update.effects()).unwrap();
+        assert!(cancelled.load(Ordering::Acquire));
+        app.pending_vendored = Some(VendoredPrompt::Failed("new dialog".into()));
+        app.drain_vendored_check();
+        assert_eq!(
+            app.pending_vendored,
+            Some(VendoredPrompt::Failed("new dialog".into()))
+        );
+    }
+
+    #[test]
+    fn disconnected_origin_worker_reports_incomplete_check() {
+        let (_temporary, mut app) = test_app();
+        let (sender, receiver) = mpsc::channel();
+        drop(sender);
+        app.vendored_check_run = Some(VendoredCheckRun {
+            receiver,
+            handle: std::thread::spawn(|| {}),
+            cancelled: Arc::new(AtomicBool::new(false)),
+            child: Arc::new(Mutex::new(None)),
+        });
+        app.pending_vendored = Some(VendoredPrompt::Checking);
+        app.drain_vendored_check();
+        assert!(
+            matches!(app.pending_vendored(), Some(VendoredPrompt::Failed(failure)) if failure.message.contains("before completing"))
+        );
+        assert!(!app.vendored_check_in_flight());
     }
 
     #[test]

@@ -19,6 +19,8 @@ pub fn run(environment: AppEnvironment) -> Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     loop {
+        app.drain_vendored_check();
+        app.drain_vendored_apply();
         let effects = app.drain_update_check();
         app.perform_effects(&effects)?;
         // The frame measures what the reducer cannot see, so its report is
@@ -32,9 +34,15 @@ pub fn run(environment: AppEnvironment) -> Result<()> {
         // where the region is off screen. That the frame measured nothing is
         // itself reported, so a dialog the terminal was too small to draw
         // cannot be confirmed on the strength of an earlier frame's extent.
+        for list in crate::app::ListWindow::ALL {
+            app.note_list_window_start(list, feedback.list_window_start(list));
+        }
         app.note_detail_max_scroll(feedback.detail_max_scroll());
         app.note_update_preview_fully_seen(feedback.update_preview_fully_seen());
-        let event = if app.update_check_in_flight() {
+        let event = if app.update_check_in_flight()
+            || app.vendored_check_in_flight()
+            || app.vendored_apply_in_flight()
+        {
             event::poll(Duration::from_millis(100))?
                 .then(event::read)
                 .transpose()?

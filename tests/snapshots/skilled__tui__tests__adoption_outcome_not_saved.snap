@@ -1,0 +1,27 @@
+---
+source: src/tui.rs
+expression: rendered
+---
+
+  ┌ Adoption needs attention ─────────────────────────────── nothing written ┐
+  │                                                                          │
+  │  Skill content changed after the adoption preview                        │
+  │                                                                          │
+  │                                                                          │
+  │                                                                          │
+  │                                                                          │
+  │                                                                          │
+  │                                                                          │
+  │                                                                          │
+  │                                                                          │
+  │                                                                          │
+  │                                                                          │
+  │                                                                          │
+  │                                                                          │
+  │                                                                          │
+  │                                                                          │
+  │                                                                          │
+  │  ──────────────────────────────────────────────────────────────────────  │
+  │  Review the result below                                      Esc Close  │
+  │                                                                          │
+  └──────────────────────────────────────────────────────────────────────────┘

@@ -6,15 +6,38 @@ current behavior; [AGENTS.md](../AGENTS.md) is the entry point for agent workflo
 ## Module map
 
 - `src/app.rs`: application state, actions, pure reducer transitions, typed
-  effects.
+  effects. Adoption form focus and validation errors live here; the adoption
+  draft carries named repository, subdirectory, and tracking-branch inputs.
 - `src/agents.rs`: Claude Code, Codex, and OpenCode adapters; agent path
   conventions and non-executing detection belong here.
 - `src/source.rs`: local Git source inspection, catalog discovery, and skill
   candidate validation.
 - `src/git.rs`: typed no-shell Git boundary for repository inspection, fetch,
   and the sole fast-forward write.
+- `src/git/origin.rs`: explicit cancellable origin fetch into a fresh private
+  cache, with bounded object-database subtree reads and no checkout.
+- `src/vendored.rs`: adopted-baseline checks and immutable previews for one
+  selected skill, including proposed content, notices, and installations.
+  `vendored/apply.rs` holds the metadata mutation guard across replacement and
+  verification; `vendored/replacement.rs` stages on the destination volume and
+  performs descriptor-bound, per-file replacements with retained recovery files.
 - `src/updates.rs`: repository update probing, classification, planning,
   guarded apply, and three-answer verification.
+- `src/provenance.rs`: bounded local attribution/lock evidence parsing and
+  versioned SHA-256 directory baselines; evidence never proves a historical
+  revision or performs network access.
+- `src/adoption.rs`: exact-variant, metadata-only origin adoption with a
+  separately confirmed preview, content/path/evidence rechecks, and immutable
+  baseline persistence. One observation recipe captures preview evidence and
+  performs each guarded recheck. Evidence and baseline readers preserve typed
+  observation failures internally while the public hash interface remains
+  unchanged. Apply returns a saved verification result only
+  after commit; pre-save failures remain separate, and the TUI renders these
+  typed outcomes. Adoption and repository-update previews share a style-preserving
+  row layout in `tui.rs` for both drawing and scroll measurement. Schema v12 adds `origin_baselines`, keyed by source ID,
+  catalog path, and variant path; manifests are not persisted. Schema v13 permits
+  a verified replacement to advance that baseline and record its origin revision;
+  adoption itself continues to record no historical revision.
 - `src/inventory.rs`: read-only scan of the native agent skill roots; owns the
   finding codes, the state vocabulary, and the count-or-phrase verdict.
 - `src/operations.rs`: sibling install, repair, uninstall, and Forget Source

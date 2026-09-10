@@ -1,0 +1,27 @@
+---
+source: src/tui.rs
+expression: rendered
+---
+
+  ┌ Origin established ─────────────────────────────────── baseline recorded ┐
+  │                                                                          │
+  │  Origin and current-content baseline saved and verified. Future compari  │
+  │  sons start here; no historical revision was proven.                     │
+  │                                                                          │
+  │                                                                          │
+  │                                                                          │
+  │                                                                          │
+  │                                                                          │
+  │                                                                          │
+  │                                                                          │
+  │                                                                          │
+  │                                                                          │
+  │                                                                          │
+  │                                                                          │
+  │                                                                          │
+  │                                                                          │
+  │                                                                          │
+  │  ──────────────────────────────────────────────────────────────────────  │
+  │  Origin and baseline recorded                                 Esc Close  │
+  │                                                                          │
+  └──────────────────────────────────────────────────────────────────────────┘

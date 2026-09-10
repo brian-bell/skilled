@@ -1,0 +1,7 @@
+---
+source: tests/tui_shell.rs
+expression: "focused_rows.join(\"\\n\")"
+---
+▕  │  > Repository URL: https://github.com/example/upstream                                                         │  ▏
+▕──│  > Subdirectory: .                                                                                             │─ ▏
+▕▌ │  > Tracking branch (refs/heads/…): refs/heads/main                                                             │  ▏

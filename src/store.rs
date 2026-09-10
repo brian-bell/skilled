@@ -10,6 +10,7 @@ use rusqlite::{
 
 use crate::{
     AgentKind, Error, Result,
+    adoption::OriginRecord,
     operations::{Receipt, ReceiptOperation},
     resolution::VariantRef,
     source::{
@@ -20,7 +21,7 @@ use crate::{
     validation::InspectionBudget,
 };
 
-const SCHEMA_VERSION: i64 = 11;
+const SCHEMA_VERSION: i64 = 13;
 const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 /// Record one check, unless the stored row was written under a later
 /// generation.
@@ -103,6 +104,7 @@ pub(crate) enum MetadataOperation {
     ReadSources,
     ReadReceipts,
     RecordReceipt,
+    AdvanceOrigin,
 }
 
 /// One cross-process metadata mutation guard.
@@ -396,8 +398,28 @@ impl Store {
         receipts_on(&self.connection)
     }
 
-    /// Required postconditions for forgetting: source, catalogs, and receipts absent.
-    pub(crate) fn verify_source_forgotten(&self, source_id: i64) -> Result<[bool; 3]> {
+    /// The immutable origin baseline adopted for this exact registered
+    /// variant, if one exists.
+    ///
+    /// The source and catalog paths are part of the lookup rather than a
+    /// catalog-row id: refreshing a source deliberately rebuilds its catalog
+    /// rows, while an adoption remains evidence about the same registered
+    /// source-relative location.
+    pub(crate) fn origin_record(
+        &self,
+        source_id: i64,
+        catalog: &Path,
+        variant: &Path,
+    ) -> Result<Option<OriginRecord>> {
+        origin_record_on(&self.connection, source_id, catalog, variant)
+    }
+
+    pub(crate) fn origin_records(&self, source_id: i64) -> Result<Vec<OriginRecord>> {
+        origin_records_on(&self.connection, source_id)
+    }
+
+    /// Required postconditions: source, catalogs, receipts, and baselines absent.
+    pub(crate) fn verify_source_forgotten(&self, source_id: i64) -> Result<[bool; 4]> {
         let source: i64 = self.connection.query_row(
             "SELECT COUNT(*) FROM source_repositories WHERE id = ?1",
             params![source_id],
@@ -413,7 +435,12 @@ impl Store {
             params![source_id],
             |row| row.get(0),
         )?;
-        Ok([source == 0, catalogs == 0, receipts == 0])
+        let origins: i64 = self.connection.query_row(
+            "SELECT COUNT(*) FROM origin_baselines WHERE source_id = ?1",
+            params![source_id],
+            |row| row.get(0),
+        )?;
+        Ok([source == 0, catalogs == 0, receipts == 0, origins == 0])
     }
 
     pub(crate) fn register_source(&mut self, preview: &SourcePreview) -> Result<()> {
@@ -436,15 +463,27 @@ impl Store {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let existing_id = transaction
+        let existing = transaction
             .query_row(
-                "SELECT id FROM source_repositories WHERE canonical_path = ?1",
+                "SELECT id, repository_identity FROM source_repositories WHERE canonical_path = ?1",
                 params![canonical_path],
-                |row| row.get::<_, i64>(0),
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?)),
             )
             .optional()?;
-        let source_id = match existing_id {
-            Some(id) => id,
+        if let Some((source_id, stored_identity)) = &existing
+            && stored_identity.as_deref() != repository_identity.as_deref()
+        {
+            let has_origins: bool = transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM origin_baselines WHERE source_id = ?1)",
+                params![source_id],
+                |row| row.get(0),
+            )?;
+            if has_origins {
+                return Err(Error::SourceHasOriginBaselines);
+            }
+        }
+        let source_id = match existing {
+            Some((id, _)) => id,
             None => {
                 let id = transaction.query_row(
                     "SELECT next_id FROM source_id_sequence WHERE singleton = 1",
@@ -750,10 +789,23 @@ impl Store {
         inspection: SourceInspection,
         uninspected: Option<&Path>,
     ) -> Result<Vec<RegisteredSource>> {
-        let refresh = inspection == SourceInspection::Refreshed;
         #[cfg(test)]
         self.fail_if(MetadataOperation::ReadSources)?;
-        let mut statement = self.connection.prepare(
+        Self::load_sources_on(&self.connection, inspection, uninspected)
+    }
+
+    /// Build fresh catalog observations through the connection that owns the
+    /// current metadata transaction. This is deliberately connection-based:
+    /// opening a second `Store` while an immediate mutation guard is held
+    /// asks SQLite for a competing writer and can turn a post-write rescan
+    /// into a lock failure.
+    fn load_sources_on(
+        connection: &Connection,
+        inspection: SourceInspection,
+        uninspected: Option<&Path>,
+    ) -> Result<Vec<RegisteredSource>> {
+        let refresh = inspection == SourceInspection::Refreshed;
+        let mut statement = connection.prepare(
             "SELECT id, label, canonical_path, remote_url, branch, head_revision, dirty, dirty_known,
                     last_scan_at, repository_identity
              FROM source_repositories ORDER BY label, canonical_path",
@@ -872,7 +924,7 @@ impl Store {
                             // registered repository for every later update.
                             // Re-registration is the only way an identity is
                             // recorded (skilled-t0f).
-                            self.connection.execute(
+                            connection.execute(
                                 "UPDATE source_repositories SET
                                 remote_url = ?1,
                                 branch = ?2,
@@ -924,7 +976,7 @@ impl Store {
             } else {
                 inspected
             };
-            let mut catalog_statement = self.connection.prepare(
+            let mut catalog_statement = connection.prepare(
                 "SELECT relative_path, classification, claude_code, codex, opencode
                  FROM catalog_roots WHERE source_id = ?1 ORDER BY relative_path",
             )?;
@@ -1007,6 +1059,105 @@ fn unsafe_metadata_leaf(path: &Path, message: &str) -> Error {
 }
 
 impl Mutation<'_> {
+    /// Persist one explicit-content adoption while the caller's mutation guard
+    /// still protects the source registration it previewed.
+    ///
+    /// The table keeps one immutable baseline per source-relative candidate.
+    /// It intentionally has no upsert: stale content and a second adoption
+    /// both fail closed instead of silently replacing the only honest baseline.
+    pub(crate) fn record_origin(&self, record: &OriginRecord) -> Result<()> {
+        let catalog = stored_path(&record.catalog_relative_path)?;
+        let variant = stored_path(&record.variant_relative_path)?;
+        let registered: bool = self.transaction.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM catalog_roots
+                WHERE source_id = ?1 AND relative_path = ?2
+             )",
+            params![record.source_id, catalog],
+            |row| row.get(0),
+        )?;
+        if !registered {
+            return Err(Error::Database(rusqlite::Error::QueryReturnedNoRows));
+        }
+        let inserted = self.transaction.execute(
+            "INSERT INTO origin_baselines
+                (source_id, catalog_relative_path, variant_relative_path,
+                 repository, subdirectory, update_ref, baseline_version,
+                 baseline_digest, proven_revision, association)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL,
+                     'explicit-current-content')
+             ON CONFLICT(source_id, catalog_relative_path, variant_relative_path) DO NOTHING",
+            params![
+                record.source_id,
+                catalog,
+                variant,
+                record.origin.repository(),
+                record.origin.subdirectory(),
+                &record.update_ref,
+                record.baseline.version,
+                &record.baseline.digest,
+            ],
+        )?;
+        if inserted == 0 {
+            return Err(Error::SourceChangedAfterPreview);
+        }
+        Ok(())
+    }
+
+    /// Advance only the exact adopted baseline protected by this mutation.
+    /// The association continues to describe initial adoption; the revision
+    /// describes the content proven after replacement, never earlier history.
+    pub(crate) fn advance_origin(
+        &self,
+        expected: &OriginRecord,
+        baseline: &crate::provenance::Baseline,
+        revision: &str,
+    ) -> Result<()> {
+        #[cfg(test)]
+        self.fail_if(MetadataOperation::AdvanceOrigin)?;
+        validate_origin_revision(revision)?;
+        if baseline.version != 1 || !is_sha256_digest(&baseline.digest) {
+            return Err(invalid_origin_metadata("invalid replacement baseline"));
+        }
+        let current = origin_record_on(
+            &self.transaction,
+            expected.source_id,
+            &expected.catalog_relative_path,
+            &expected.variant_relative_path,
+        )?;
+        if current.as_ref() != Some(expected) {
+            return Err(Error::SourceChangedAfterPreview);
+        }
+        let changed = self.transaction.execute(
+            "UPDATE origin_baselines SET baseline_version=?1, baseline_digest=?2, proven_revision=?3 WHERE source_id=?4 AND catalog_relative_path=?5 AND variant_relative_path=?6",
+            params![baseline.version, baseline.digest, revision, expected.source_id, stored_path(&expected.catalog_relative_path)?, stored_path(&expected.variant_relative_path)?],
+        )?;
+        if changed != 1 {
+            return Err(Error::SourceChangedAfterPreview);
+        }
+        Ok(())
+    }
+
+    /// Refresh source and catalog observations under this mutation guard.
+    ///
+    /// The selected checkout is intentionally left uninspected: callers use
+    /// this after a replacement that may have run repository programs, so the
+    /// stored Git observation remains the safe one while its catalog is read
+    /// from disk. Other registered repositories retain ordinary refreshed
+    /// inspection.
+    pub(crate) fn registered_sources_leaving_uninspected(
+        &self,
+        uninspected: &Path,
+    ) -> Result<Vec<RegisteredSource>> {
+        #[cfg(test)]
+        self.fail_if(MetadataOperation::ReadSources)?;
+        Store::load_sources_on(
+            &self.transaction,
+            SourceInspection::Refreshed,
+            Some(uninspected),
+        )
+    }
+
     /// Record ownership in the transaction that already covers link creation.
     ///
     /// A receipt identical to one already recorded is left alone rather than
@@ -1027,6 +1178,10 @@ impl Mutation<'_> {
         }
         self.fail_next.borrow_mut().take();
         Err(Error::Database(rusqlite::Error::InvalidQuery))
+    }
+
+    pub(crate) fn origin_records(&self, source_id: i64) -> Result<Vec<OriginRecord>> {
+        origin_records_on(&self.transaction, source_id)
     }
 
     pub(crate) fn receipts(&self) -> Result<Vec<Receipt>> {
@@ -1505,6 +1660,120 @@ fn stored_path(path: &Path) -> Result<String> {
         .ok_or_else(|| Error::UnrepresentablePath(path.to_path_buf()))
 }
 
+/// An origin baseline states an intentional user association, so malformed
+/// persisted fields are metadata corruption rather than a second, silently
+/// different provenance answer.
+fn validate_origin_revision(revision: &str) -> Result<()> {
+    if !matches!(revision.len(), 40 | 64)
+        || !revision
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(invalid_origin_metadata(
+            "verified origin revision is not a full lowercase object ID",
+        ));
+    }
+    Ok(())
+}
+
+fn origin_record_on(
+    connection: &Connection,
+    source_id: i64,
+    catalog: &Path,
+    variant: &Path,
+) -> Result<Option<OriginRecord>> {
+    let catalog = stored_path(catalog)?;
+    let variant = stored_path(variant)?;
+    let stored = connection
+        .query_row(
+            "SELECT repository, subdirectory, update_ref, baseline_version, baseline_digest,
+                        proven_revision, association
+                 FROM origin_baselines
+                 WHERE source_id = ?1 AND catalog_relative_path = ?2
+                       AND variant_relative_path = ?3",
+            params![source_id, catalog, variant],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, u32>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, String>(6)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(Error::from)?;
+    let Some((repository, subdirectory, update_ref, version, digest, proven_revision, association)) =
+        stored
+    else {
+        return Ok(None);
+    };
+    if let Some(revision) = &proven_revision {
+        validate_origin_revision(revision)?;
+    }
+    if association != "explicit-current-content" {
+        return Err(invalid_origin_metadata("unknown association method"));
+    }
+    if version != 1 {
+        return Err(invalid_origin_metadata(format!(
+            "unsupported baseline version {version}"
+        )));
+    }
+    if !is_sha256_digest(&digest) {
+        return Err(invalid_origin_metadata(
+            "baseline digest is not 64 lowercase hexadecimal SHA-256 characters",
+        ));
+    }
+    let origin = crate::provenance::Origin::new(repository, subdirectory)
+        .map_err(invalid_origin_metadata)?;
+    crate::provenance::validate_update_ref(&update_ref).map_err(invalid_origin_metadata)?;
+    Ok(Some(OriginRecord {
+        source_id,
+        catalog_relative_path: PathBuf::from(catalog),
+        variant_relative_path: PathBuf::from(variant),
+        origin,
+        update_ref,
+        baseline: crate::provenance::Baseline { version, digest },
+        proven_revision,
+    }))
+}
+
+fn origin_records_on(connection: &Connection, source_id: i64) -> Result<Vec<OriginRecord>> {
+    let mut statement = connection.prepare("SELECT catalog_relative_path, variant_relative_path FROM origin_baselines WHERE source_id = ?1 ORDER BY catalog_relative_path, variant_relative_path")?;
+    let keys = statement
+        .query_map([source_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    keys.into_iter()
+        .map(|(catalog, variant)| {
+            origin_record_on(
+                connection,
+                source_id,
+                Path::new(&catalog),
+                Path::new(&variant),
+            )?
+            .ok_or_else(|| {
+                invalid_origin_metadata("baseline disappeared while reading source metadata")
+            })
+        })
+        .collect()
+}
+
+fn invalid_origin_metadata(detail: impl std::fmt::Display) -> Error {
+    Error::InvalidSetupMetadata(format!("stored origin baseline is invalid: {detail}"))
+}
+
+fn is_sha256_digest(digest: &str) -> bool {
+    digest.len() == 64
+        && digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+}
+
 /// The stored spelling of an agent, shared by every table that names one.
 const AGENT_IDENTIFIERS: [&str; 3] = ["claude-code", "codex", "opencode"];
 
@@ -1536,9 +1805,39 @@ fn current_timestamp() -> i64 {
 
 #[cfg(all(test, unix))]
 mod tests {
-    use std::{ffi::OsString, os::unix::ffi::OsStringExt};
+    use std::{ffi::OsString, os::unix::ffi::OsStringExt, process::Command};
 
     use super::*;
+
+    fn adopted_origin_record(store: &Store) -> OriginRecord {
+        store
+            .connection
+            .execute_batch(
+                "INSERT INTO source_repositories
+                    (id, label, canonical_path, head_revision, dirty, dirty_known, last_scan_at)
+                 VALUES (1, 'source', '/source', 'head', 0, 1, 0);
+                 INSERT INTO catalog_roots
+                    (source_id, relative_path, classification, claude_code, codex, opencode)
+                 VALUES (1, '.agents/skills', 'common', 1, 1, 1);",
+            )
+            .expect("source fixture");
+        OriginRecord {
+            source_id: 1,
+            catalog_relative_path: PathBuf::from(".agents/skills"),
+            variant_relative_path: PathBuf::from("format"),
+            origin: crate::provenance::Origin::new(
+                "https://github.com/acme/skills".to_owned(),
+                "skills/format".to_owned(),
+            )
+            .expect("origin fixture"),
+            update_ref: "refs/heads/main".to_owned(),
+            proven_revision: None,
+            baseline: crate::provenance::Baseline {
+                version: 1,
+                digest: "a".repeat(64),
+            },
+        }
+    }
 
     #[test]
     fn registry_fingerprints_distinguish_separators_inside_source_fields() {
@@ -1573,6 +1872,355 @@ mod tests {
             result,
             Err(Error::UnrepresentablePath(path)) if path == link_path
         ));
+    }
+
+    #[test]
+    fn an_origin_baseline_is_immutable_and_belongs_to_an_included_catalog() {
+        let temporary = tempfile::tempdir().expect("temporary data directory");
+        let mut store = Store::open(&temporary.path().join("data")).expect("open store");
+        store
+            .connection
+            .execute_batch(
+                "INSERT INTO source_repositories
+                    (id, label, canonical_path, head_revision, dirty, dirty_known, last_scan_at)
+                 VALUES (1, 'source', '/source', 'head', 0, 1, 0);
+                 INSERT INTO catalog_roots
+                    (source_id, relative_path, classification, claude_code, codex, opencode)
+                 VALUES (1, '.agents/skills', 'common', 1, 1, 1);",
+            )
+            .expect("source fixture");
+        let record = OriginRecord {
+            source_id: 1,
+            catalog_relative_path: PathBuf::from(".agents/skills"),
+            variant_relative_path: PathBuf::from("format"),
+            origin: crate::provenance::Origin::new(
+                "https://github.com/acme/skills".to_owned(),
+                "skills/format".to_owned(),
+            )
+            .unwrap(),
+            update_ref: "refs/heads/main".to_owned(),
+            proven_revision: None,
+            baseline: crate::provenance::Baseline {
+                version: 1,
+                digest: "a".repeat(64),
+            },
+        };
+
+        let mutation = store.begin_mutation().expect("begin origin mutation");
+        mutation.record_origin(&record).expect("record baseline");
+        let replacement = OriginRecord {
+            baseline: crate::provenance::Baseline {
+                version: 1,
+                digest: "b".repeat(64),
+            },
+            ..record.clone()
+        };
+        assert!(
+            matches!(
+                mutation.record_origin(&replacement),
+                Err(Error::SourceChangedAfterPreview)
+            ),
+            "an adoption race must not overwrite its existing baseline"
+        );
+        mutation.commit().expect("commit origin baseline");
+
+        assert_eq!(
+            store
+                .origin_record(1, Path::new(".agents/skills"), Path::new("format"))
+                .expect("read origin baseline"),
+            Some(record)
+        );
+        let absent_catalog = OriginRecord {
+            catalog_relative_path: PathBuf::from(".codex/skills"),
+            variant_relative_path: PathBuf::from("missing"),
+            ..replacement
+        };
+        let mutation = store
+            .begin_mutation()
+            .expect("begin rejected origin mutation");
+        assert!(
+            mutation.record_origin(&absent_catalog).is_err(),
+            "an origin may only name a catalog included by its registered source"
+        );
+    }
+
+    #[test]
+    fn advancing_an_origin_replaces_only_the_expected_baseline() {
+        let temporary = tempfile::tempdir().expect("temporary data directory");
+        let mut store = Store::open(&temporary.path().join("data")).expect("open store");
+        let record = adopted_origin_record(&store);
+        let mutation = store.begin_mutation().expect("begin adoption");
+        mutation.record_origin(&record).expect("record adoption");
+        mutation.commit().expect("commit adoption");
+
+        let baseline = crate::provenance::Baseline {
+            version: 1,
+            digest: "b".repeat(64),
+        };
+        let revision = "c".repeat(40);
+        let mutation = store.begin_mutation().expect("begin advancement");
+        mutation
+            .advance_origin(&record, &baseline, &revision)
+            .expect("advance origin");
+        mutation.commit().expect("commit advancement");
+
+        assert_eq!(
+            store
+                .origin_record(1, Path::new(".agents/skills"), Path::new("format"))
+                .expect("read advanced origin"),
+            Some(OriginRecord {
+                baseline,
+                proven_revision: Some(revision),
+                ..record
+            })
+        );
+    }
+
+    #[test]
+    fn stale_origin_advancement_rolls_back_without_changing_the_record() {
+        let temporary = tempfile::tempdir().expect("temporary data directory");
+        let mut store = Store::open(&temporary.path().join("data")).expect("open store");
+        let record = adopted_origin_record(&store);
+        let mutation = store.begin_mutation().expect("begin adoption");
+        mutation.record_origin(&record).expect("record adoption");
+        mutation.commit().expect("commit adoption");
+
+        let stale = OriginRecord {
+            baseline: crate::provenance::Baseline {
+                version: 1,
+                digest: "d".repeat(64),
+            },
+            ..record.clone()
+        };
+        let mutation = store.begin_mutation().expect("begin stale advancement");
+        assert!(matches!(
+            mutation.advance_origin(
+                &stale,
+                &crate::provenance::Baseline {
+                    version: 1,
+                    digest: "b".repeat(64),
+                },
+                &"c".repeat(40),
+            ),
+            Err(Error::SourceChangedAfterPreview)
+        ));
+        mutation.commit().expect("commit refused advancement");
+
+        assert_eq!(
+            store
+                .origin_record(1, Path::new(".agents/skills"), Path::new("format"))
+                .expect("read unchanged origin"),
+            Some(record)
+        );
+    }
+
+    #[test]
+    fn injected_origin_advancement_failure_leaves_the_record_unchanged() {
+        let temporary = tempfile::tempdir().expect("temporary data directory");
+        let mut store = Store::open(&temporary.path().join("data")).expect("open store");
+        let record = adopted_origin_record(&store);
+        let mutation = store.begin_mutation().expect("begin adoption");
+        mutation.record_origin(&record).expect("record adoption");
+        mutation.commit().expect("commit adoption");
+
+        store.fail_next(MetadataOperation::AdvanceOrigin);
+        let mutation = store.begin_mutation().expect("begin injected failure");
+        assert!(matches!(
+            mutation.advance_origin(
+                &record,
+                &crate::provenance::Baseline {
+                    version: 1,
+                    digest: "b".repeat(64),
+                },
+                &"c".repeat(40),
+            ),
+            Err(Error::Database(rusqlite::Error::InvalidQuery))
+        ));
+        mutation.commit().expect("commit no-op failure");
+
+        assert_eq!(
+            store
+                .origin_record(1, Path::new(".agents/skills"), Path::new("format"))
+                .expect("read unchanged origin"),
+            Some(record)
+        );
+    }
+
+    #[test]
+    fn invalid_persisted_origin_fields_fail_closed() {
+        let temporary = tempfile::tempdir().expect("temporary data directory");
+        let store = Store::open(&temporary.path().join("data")).expect("open store");
+        store
+            .connection
+            .execute_batch(
+                "INSERT INTO source_repositories
+                    (id, label, canonical_path, head_revision, dirty, dirty_known, last_scan_at)
+                 VALUES (1, 'source', '/source', 'head', 0, 1, 0);
+                 INSERT INTO origin_baselines
+                    (source_id, catalog_relative_path, variant_relative_path,
+                     repository, subdirectory, update_ref, baseline_version,
+                     baseline_digest, proven_revision, association)
+                 VALUES (1, '.agents/skills', 'format', 'https://github.com/acme/skills',
+                         'skills/format', 'refs/heads/main', 2, 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', NULL,
+                         'explicit-current-content');",
+            )
+            .expect("invalid version fixture");
+
+        let invalid = store.origin_record(1, Path::new(".agents/skills"), Path::new("format"));
+        assert!(matches!(
+            invalid,
+            Err(Error::InvalidSetupMetadata(message)) if message.contains("unsupported baseline version 2")
+        ));
+
+        store
+            .connection
+            .execute(
+                "UPDATE origin_baselines SET baseline_version = 1,
+                     baseline_digest = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                     proven_revision = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'",
+                [],
+            )
+            .expect("verified revision fixture");
+        assert!(
+            store
+                .origin_record(1, Path::new(".agents/skills"), Path::new("format"))
+                .expect("a full verified revision is valid")
+                .is_some()
+        );
+
+        store
+            .connection
+            .execute(
+                "UPDATE origin_baselines SET proven_revision = NULL, baseline_digest = 'not-a-digest'",
+                [],
+            )
+            .expect("invalid digest fixture");
+        let invalid = store.origin_record(1, Path::new(".agents/skills"), Path::new("format"));
+        assert!(matches!(
+            invalid,
+            Err(Error::InvalidSetupMetadata(message)) if message.contains("lowercase hexadecimal")
+        ));
+    }
+
+    #[test]
+    fn replacing_a_checkout_path_cannot_inherit_its_origin_baselines() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let repository = temporary.path().join("source");
+        initialize_source_repository(&repository, "first source");
+        let mut store = Store::open(&temporary.path().join("data")).expect("open store");
+        let preview = crate::source::preview_local_source(&repository).expect("first preview");
+        store
+            .register_source(&preview)
+            .expect("register first source");
+        let source_id = store
+            .connection
+            .query_row(
+                "SELECT id FROM source_repositories WHERE canonical_path = ?1",
+                params![
+                    preview
+                        .inspected()
+                        .git_top_level()
+                        .to_str()
+                        .expect("portable repository path")
+                ],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("source ID");
+        let record = OriginRecord {
+            source_id,
+            catalog_relative_path: PathBuf::from("skills"),
+            variant_relative_path: PathBuf::from("skills/format"),
+            origin: crate::provenance::Origin::new(
+                "https://github.com/acme/skills".to_owned(),
+                "skills/format".to_owned(),
+            )
+            .unwrap(),
+            update_ref: "refs/heads/main".to_owned(),
+            proven_revision: None,
+            baseline: crate::provenance::Baseline {
+                version: 1,
+                digest: "a".repeat(64),
+            },
+        };
+        let mutation = store.begin_mutation().expect("begin origin mutation");
+        mutation.record_origin(&record).expect("record origin");
+        mutation.commit().expect("commit origin");
+        let stored_identity: String = store
+            .connection
+            .query_row(
+                "SELECT repository_identity FROM source_repositories WHERE id = ?1",
+                params![source_id],
+                |row| row.get(0),
+            )
+            .expect("stored first identity");
+
+        // A re-registration of the same checkout remains a normal metadata
+        // refresh; its baseline is still evidence about this repository.
+        let same_checkout = crate::source::preview_local_source(&repository).expect("same preview");
+        store
+            .register_source(&same_checkout)
+            .expect("refresh unchanged checkout");
+
+        fs::remove_dir_all(repository.join(".git")).expect("remove first repository metadata");
+        initialize_source_repository(&repository, "replacement source");
+        let replacement =
+            crate::source::preview_local_source(&repository).expect("replacement preview");
+        assert!(matches!(
+            store.register_source(&replacement),
+            Err(Error::SourceHasOriginBaselines)
+        ));
+        assert_eq!(
+            store
+                .connection
+                .query_row(
+                    "SELECT repository_identity FROM source_repositories WHERE id = ?1",
+                    params![source_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .expect("original identity is preserved"),
+            stored_identity
+        );
+        assert_eq!(
+            store
+                .connection
+                .query_row(
+                    "SELECT COUNT(*) FROM origin_baselines WHERE source_id = ?1",
+                    params![source_id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("origin count"),
+            1
+        );
+    }
+
+    fn initialize_source_repository(repository: &Path, message: &str) {
+        fs::create_dir_all(repository.join("skills/format")).expect("create skill directory");
+        fs::write(
+            repository.join("skills/format/SKILL.md"),
+            "---\nname: format\ndescription: format fixture\n---\n# Format\n",
+        )
+        .expect("write skill");
+        git(repository, &["init", "-b", "main"]);
+        git(repository, &["config", "user.name", "Skilled Test"]);
+        git(
+            repository,
+            &["config", "user.email", "skilled@example.test"],
+        );
+        git(repository, &["add", "."]);
+        git(repository, &["commit", "-m", message]);
+    }
+
+    fn git(repository: &Path, arguments: &[&str]) {
+        let output = Command::new("git")
+            .args(arguments)
+            .current_dir(repository)
+            .output()
+            .expect("run git");
+        assert!(
+            output.status.success(),
+            "git {arguments:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     /// Two Skilled processes checking the same registry must not be handed the
@@ -1979,6 +2627,34 @@ const MIGRATIONS: &[Migration] = &[
                 ADD COLUMN generation INTEGER NOT NULL DEFAULT 0;
               UPDATE source_update_checks SET generation = checked_at;",
     },
+    Migration {
+        version: 12,
+        destructive: false,
+        // Catalog rows are intentionally not referenced by their transient
+        // row IDs: `register_source` refreshes a source by rebuilding them.
+        // The source-relative catalog path is the durable association and is
+        // rechecked by `Mutation::record_origin` at the moment of adoption.
+        sql: "CREATE TABLE origin_baselines (
+                source_id INTEGER NOT NULL REFERENCES source_repositories(id) ON DELETE CASCADE,
+                catalog_relative_path TEXT NOT NULL,
+                variant_relative_path TEXT NOT NULL,
+                repository TEXT NOT NULL,
+                subdirectory TEXT NOT NULL,
+                update_ref TEXT NOT NULL,
+                baseline_version INTEGER NOT NULL CHECK (baseline_version > 0),
+                baseline_digest TEXT NOT NULL,
+                proven_revision TEXT,
+                association TEXT NOT NULL CHECK (association = 'explicit-current-content'),
+                PRIMARY KEY (source_id, catalog_relative_path, variant_relative_path)
+              );",
+    },
+    Migration {
+        version: 13,
+        destructive: false,
+        // Schema 13 recognizes verified replacement revisions in the existing
+        // nullable column. Older binaries must refuse these newer semantics.
+        sql: "SELECT 1;",
+    },
 ];
 
 fn migrate(connection: &mut Connection, database_path: &Path) -> Result<()> {
@@ -2341,6 +3017,105 @@ mod migration_tests {
                     .get::<_, i64>(0))
                 .expect("read seeded generation"),
             9000
+        );
+    }
+
+    #[test]
+    fn upgrading_from_v11_preserves_registered_sources_and_adds_origin_baselines() {
+        let temporary = tempfile::tempdir().expect("temporary data directory");
+        let database = temporary.path().join("skilled.sqlite3");
+        let mut connection = Connection::open(&database).expect("create database");
+        let before: Vec<Migration> = MIGRATIONS
+            .iter()
+            .copied()
+            .filter(|migration| migration.version < 12)
+            .collect();
+        migrate_with(&mut connection, &database, &before).expect("migrate to schema 11");
+        connection
+            .execute_batch(
+                "INSERT INTO source_repositories
+                    (id, label, canonical_path, head_revision, dirty, dirty_known, last_scan_at)
+                 VALUES (7, 'source', '/source', 'head', 0, 1, 0);
+                 INSERT INTO catalog_roots
+                    (source_id, relative_path, classification, claude_code, codex, opencode)
+                 VALUES (7, '.agents/skills', 'common', 1, 1, 1);",
+            )
+            .expect("seed schema 11 registration");
+
+        migrate_with(&mut connection, &database, MIGRATIONS).expect("migrate to schema 13");
+        connection
+            .execute_batch(
+                "INSERT INTO origin_baselines
+                    (source_id, catalog_relative_path, variant_relative_path,
+                     repository, subdirectory, update_ref, baseline_version,
+                     baseline_digest, proven_revision, association)
+                 VALUES (7, '.agents/skills', 'format', 'github.com/acme/skills',
+                         'skills/format', 'main', 1, 'sha256:abc', NULL,
+                         'explicit-current-content');",
+            )
+            .expect("record origin baseline after upgrade");
+        connection
+            .execute_batch(
+                "DELETE FROM catalog_roots WHERE source_id = 7;
+                 INSERT INTO catalog_roots
+                    (source_id, relative_path, classification, claude_code, codex, opencode)
+                 VALUES (7, '.agents/skills', 'common', 1, 1, 1);",
+            )
+            .expect("refresh catalog rows without losing the adopted origin");
+
+        assert_eq!(
+            connection
+                .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .expect("read migrated version"),
+            13
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT repository, subdirectory, update_ref, baseline_version,
+                            baseline_digest, proven_revision, association
+                     FROM origin_baselines",
+                    [],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, i64>(3)?,
+                            row.get::<_, String>(4)?,
+                            row.get::<_, Option<String>>(5)?,
+                            row.get::<_, String>(6)?,
+                        ))
+                    },
+                )
+                .expect("read adopted origin"),
+            (
+                "github.com/acme/skills".to_owned(),
+                "skills/format".to_owned(),
+                "main".to_owned(),
+                1,
+                "sha256:abc".to_owned(),
+                None,
+                "explicit-current-content".to_owned(),
+            )
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT canonical_path FROM source_repositories WHERE id = 7",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .expect("registered source survives upgrade"),
+            "/source"
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM origin_baselines", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .expect("origin baseline survives catalog refresh"),
+            1
         );
     }
 
