@@ -12,11 +12,12 @@ use std::{
     ffi::OsString,
     io::{self, Read, Write},
     path::{Path, PathBuf},
-    process::{Child, Command, Output, Stdio},
+    process::{Child, Command, ExitStatus, Output, Stdio},
     sync::{
-        Mutex,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
+    thread::{self, JoinHandle},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -3162,10 +3163,8 @@ fn run_truncating(repository: GitTarget<'_>, op: &UpdateOp, limit: usize) -> Res
         let _ = child.kill();
     }
     drop(stdout);
-    let status = child.wait().map_err(Error::GitUnavailable)?;
-    let stderr = stderr_reader
-        .join()
-        .map_err(|_| io::Error::other("Git stderr reader panicked"))??;
+    let (status, stderr) = wait_joined_thread(&mut child, stderr_reader, "Git stderr reader")
+        .map_err(Error::GitUnavailable)?;
     if let Some(error) = failure {
         return Err(Error::GitUnavailable(error));
     }
@@ -3402,7 +3401,7 @@ fn filter_drivers_for_paths(
 ) -> Result<Vec<Option<String>>> {
     let op = UpdateOp::CheckAttr;
     let arguments = op.arguments();
-    let mut child = command(repository, &op)
+    let child = command(repository, &op)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -3413,46 +3412,11 @@ fn filter_drivers_for_paths(
         input.extend_from_slice(path);
         input.push(0);
     }
-    let mut stdin = child.stdin.take().expect("Git check-attr stdin is piped");
-    let mut stdout = child.stdout.take().expect("Git check-attr stdout is piped");
-    let mut stderr = child.stderr.take().expect("Git check-attr stderr is piped");
-    let writer = std::thread::spawn(move || -> io::Result<()> {
-        stdin.write_all(&input)?;
-        drop(stdin);
-        Ok(())
-    });
-    let stdout_reader = std::thread::spawn(move || -> io::Result<Vec<u8>> {
-        let mut bytes = Vec::new();
-        stdout.read_to_end(&mut bytes)?;
-        Ok(bytes)
-    });
-    let stderr_reader = std::thread::spawn(move || -> io::Result<Vec<u8>> {
-        let mut bytes = Vec::new();
-        stderr.read_to_end(&mut bytes)?;
-        Ok(bytes)
-    });
-    let status = child.wait().map_err(Error::GitUnavailable)?;
-    writer
-        .join()
-        .map_err(|_| io::Error::other("Git check-attr input writer panicked"))??;
-    let stdout = stdout_reader
-        .join()
-        .map_err(|_| io::Error::other("Git check-attr stdout reader panicked"))??;
-    let stderr = stderr_reader
-        .join()
-        .map_err(|_| io::Error::other("Git check-attr stderr reader panicked"))??;
-    if !status.success() {
-        return Err(git_error(
-            repository,
-            &arguments,
-            &Output {
-                status,
-                stdout,
-                stderr,
-            },
-        ));
+    let output = collect_piped_child(child, input).map_err(Error::GitUnavailable)?;
+    if !output.status.success() {
+        return Err(git_error(repository, &arguments, &output));
     }
-    let mut fields = stdout.split(|byte| *byte == 0);
+    let mut fields = output.stdout.split(|byte| *byte == 0);
     let mut drivers = Vec::with_capacity(paths.len());
     for expected_path in paths {
         let (Some(path), Some(attribute), Some(value)) =
@@ -3554,6 +3518,161 @@ pub fn update_operation_fixtures() -> Vec<OperationFixture> {
 pub fn terminate_child(child: &mut Child) {
     let _ = child.kill();
     let _ = child.wait();
+}
+
+fn join_io_thread<T>(
+    thread: JoinHandle<io::Result<T>>,
+    description: &'static str,
+) -> io::Result<T> {
+    thread
+        .join()
+        .map_err(|_| io::Error::other(format!("{description} panicked")))?
+}
+
+fn record_join(joined: Option<&Arc<AtomicUsize>>) {
+    if let Some(joined) = joined {
+        joined.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+fn join_started<T>(thread: Option<JoinHandle<io::Result<T>>>, joined: Option<&Arc<AtomicUsize>>) {
+    if let Some(thread) = thread {
+        let _ = thread.join();
+        record_join(joined);
+    }
+}
+
+/// Wait for `child`, and if that wait fails, terminate it and still join `thread`.
+fn wait_joined_thread<T>(
+    child: &mut Child,
+    thread: JoinHandle<io::Result<T>>,
+    description: &'static str,
+) -> io::Result<(ExitStatus, T)> {
+    wait_joined_thread_with(child, thread, description, Child::wait)
+}
+
+fn wait_joined_thread_with<T, W>(
+    child: &mut Child,
+    thread: JoinHandle<io::Result<T>>,
+    description: &'static str,
+    wait: W,
+) -> io::Result<(ExitStatus, T)>
+where
+    W: FnOnce(&mut Child) -> io::Result<ExitStatus>,
+{
+    let status = match wait(child) {
+        Ok(status) => status,
+        Err(error) => {
+            terminate_child(child);
+            let _ = thread.join();
+            return Err(error);
+        }
+    };
+    Ok((status, join_io_thread(thread, description)?))
+}
+
+/// Drain stdin/stdout/stderr of an already-spawned Git child.
+///
+/// Every path reaps the child and joins every pipe thread that was started.
+/// Callers keep command construction and output parsing.
+pub(crate) fn collect_piped_child(child: Child, input: Vec<u8>) -> io::Result<Output> {
+    collect_piped_child_inner(child, input, Child::wait, None, None)
+}
+
+fn collect_piped_child_inner<W>(
+    mut child: Child,
+    input: Vec<u8>,
+    wait: W,
+    fail_writer_spawn: Option<io::Error>,
+    joined: Option<Arc<AtomicUsize>>,
+) -> io::Result<Output>
+where
+    W: FnOnce(&mut Child) -> io::Result<ExitStatus>,
+{
+    let joined = joined.as_ref();
+    let stdin = child.stdin.take().expect("Git stdin is piped");
+    let mut stdout = child.stdout.take().expect("Git stdout is piped");
+    let mut stderr = child.stderr.take().expect("Git stderr is piped");
+
+    let stdout_reader = match thread::Builder::new()
+        .name("git-check-attr-stdout".to_owned())
+        .spawn(move || {
+            let mut bytes = Vec::new();
+            stdout.read_to_end(&mut bytes)?;
+            Ok(bytes)
+        }) {
+        Ok(reader) => reader,
+        Err(error) => {
+            drop(stdin);
+            drop(stderr);
+            terminate_child(&mut child);
+            return Err(error);
+        }
+    };
+    let stderr_reader = match thread::Builder::new()
+        .name("git-check-attr-stderr".to_owned())
+        .spawn(move || {
+            let mut bytes = Vec::new();
+            stderr.read_to_end(&mut bytes)?;
+            Ok(bytes)
+        }) {
+        Ok(reader) => reader,
+        Err(error) => {
+            drop(stdin);
+            terminate_child(&mut child);
+            join_started(Some(stdout_reader), joined);
+            return Err(error);
+        }
+    };
+
+    if let Some(error) = fail_writer_spawn {
+        drop(stdin);
+        terminate_child(&mut child);
+        join_started(Some(stdout_reader), joined);
+        join_started(Some(stderr_reader), joined);
+        return Err(error);
+    }
+
+    let writer = match thread::Builder::new()
+        .name("git-check-attr-stdin".to_owned())
+        .spawn(move || {
+            let mut stdin = stdin;
+            stdin.write_all(&input)?;
+            drop(stdin);
+            Ok(())
+        }) {
+        Ok(writer) => writer,
+        Err(error) => {
+            terminate_child(&mut child);
+            join_started(Some(stdout_reader), joined);
+            join_started(Some(stderr_reader), joined);
+            return Err(error);
+        }
+    };
+
+    let status = match wait(&mut child) {
+        Ok(status) => status,
+        Err(error) => {
+            terminate_child(&mut child);
+            join_started(Some(writer), joined);
+            join_started(Some(stdout_reader), joined);
+            join_started(Some(stderr_reader), joined);
+            return Err(error);
+        }
+    };
+
+    let write_result = join_io_thread(writer, "Git check-attr input writer");
+    record_join(joined);
+    let stdout_result = join_io_thread(stdout_reader, "Git check-attr stdout reader");
+    record_join(joined);
+    let stderr_result = join_io_thread(stderr_reader, "Git check-attr stderr reader");
+    record_join(joined);
+    write_result?;
+    Ok(Output {
+        status,
+        stdout: stdout_result?,
+        stderr: stderr_result?,
+    })
 }
 
 fn text(bytes: Vec<u8>) -> String {
@@ -4838,5 +4957,113 @@ mod tests {
     #[cfg(unix)]
     fn failure_status() -> std::process::ExitStatus {
         std::process::ExitStatus::from_raw(1 << 8)
+    }
+
+    #[cfg(unix)]
+    fn process_is_alive(pid: u32) -> bool {
+        unsafe { libc::kill(pid as i32, 0) == 0 }
+    }
+
+    #[cfg(unix)]
+    fn sleeping_piped_child() -> Child {
+        Command::new("sleep")
+            .arg("30")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn a stand-in Git child")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn collect_piped_child_returns_the_childs_output() {
+        let child = Command::new("cat")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn cat");
+        let joined = Arc::new(AtomicUsize::new(0));
+        let output = collect_piped_child_inner(
+            child,
+            b"hello".to_vec(),
+            Child::wait,
+            None,
+            Some(Arc::clone(&joined)),
+        )
+        .expect("successful piped child");
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"hello");
+        assert!(output.stderr.is_empty());
+        assert_eq!(joined.load(Ordering::SeqCst), 3);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn wait_failure_reaps_the_child_and_joins_started_pipe_threads() {
+        let child = sleeping_piped_child();
+        let pid = child.id();
+        let joined = Arc::new(AtomicUsize::new(0));
+        let error = collect_piped_child_inner(
+            child,
+            Vec::new(),
+            |_| Err(io::Error::other("injected wait failure")),
+            None,
+            Some(Arc::clone(&joined)),
+        )
+        .expect_err("injected wait failure");
+        assert_eq!(error.to_string(), "injected wait failure");
+        assert_eq!(joined.load(Ordering::SeqCst), 3);
+        assert!(!process_is_alive(pid), "owned Git child was not reaped");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn writer_spawn_failure_reaps_the_child_and_joins_started_readers() {
+        let child = sleeping_piped_child();
+        let pid = child.id();
+        let joined = Arc::new(AtomicUsize::new(0));
+        let error = collect_piped_child_inner(
+            child,
+            Vec::new(),
+            Child::wait,
+            Some(io::Error::other("injected writer spawn failure")),
+            Some(Arc::clone(&joined)),
+        )
+        .expect_err("injected writer spawn failure");
+        assert_eq!(error.to_string(), "injected writer spawn failure");
+        assert_eq!(joined.load(Ordering::SeqCst), 2);
+        assert!(!process_is_alive(pid), "owned Git child was not reaped");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn wait_failure_joins_a_started_thread_and_reaps_the_child() {
+        let mut child = Command::new("sleep")
+            .arg("30")
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn sleep");
+        let pid = child.id();
+        let mut stderr = child.stderr.take().expect("stderr is piped");
+        let finished = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&finished);
+        let reader = thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let result = stderr.read_to_end(&mut bytes).map(|_| bytes);
+            flag.store(true, Ordering::SeqCst);
+            result
+        });
+        wait_joined_thread_with(&mut child, reader, "Git stderr reader", |_| {
+            Err(io::Error::other("injected wait failure"))
+        })
+        .expect_err("injected wait failure");
+        assert!(
+            finished.load(Ordering::SeqCst),
+            "stderr reader was not joined"
+        );
+        assert!(!process_is_alive(pid), "owned Git child was not reaped");
     }
 }

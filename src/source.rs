@@ -2,10 +2,9 @@ use std::{
     collections::HashSet,
     ffi::OsStr,
     fs,
-    io::{self, BufRead, BufReader, Read, Write},
+    io::{BufRead, BufReader},
     path::{Component, Path, PathBuf},
     process::{Child, Command, Output, Stdio},
-    thread,
 };
 
 use crate::{
@@ -1036,45 +1035,12 @@ fn git_status_dirty(repository: &Path) -> Result<Option<bool>> {
         .spawn()
         .map_err(Error::GitUnavailable)?;
     let stdout = child.stdout.take().expect("Git status stdout is piped");
-    let mut stdout = BufReader::new(stdout);
-    let mut record = Vec::new();
-    let mut worktree_modifications = Vec::new();
-    let mut worktree_modification_bytes = 0_usize;
-    while stdout.read_until(0, &mut record)? != 0 {
-        if record.last() == Some(&0) {
-            record.pop();
-        }
-        let Some(path) = worktree_modification_path(&record) else {
-            drop(stdout);
-            let _ = child.kill();
-            let _ = child.wait();
-            return Ok(Some(true));
+    let stdout = BufReader::new(stdout);
+    let worktree_modifications =
+        match consume_status_records(stdout, &mut child, &configured_drivers)? {
+            ConsumedStatus::Dirty => return Ok(Some(true)),
+            ConsumedStatus::Records(paths) => paths,
         };
-        if configured_drivers.is_empty() {
-            drop(stdout);
-            let _ = child.kill();
-            let _ = child.wait();
-            return Ok(Some(true));
-        }
-        let Some(next_bytes) = worktree_modification_bytes.checked_add(path.len()) else {
-            drop(stdout);
-            let _ = child.kill();
-            let _ = child.wait();
-            return Ok(Some(true));
-        };
-        if worktree_modifications.len() == MAX_FILTERED_STATUS_PATHS
-            || next_bytes > MAX_FILTERED_STATUS_PATH_BYTES
-        {
-            drop(stdout);
-            let _ = child.kill();
-            let _ = child.wait();
-            return Ok(Some(true));
-        }
-        worktree_modification_bytes = next_bytes;
-        worktree_modifications.push(path.to_vec());
-        record.clear();
-    }
-    drop(stdout);
     let status = child.wait()?;
     if !status.success() {
         return Err(Error::GitCommand {
@@ -1095,6 +1061,63 @@ fn git_status_dirty(repository: &Path) -> Result<Option<bool>> {
     Ok((!all_filter_ambiguous).then_some(true))
 }
 
+#[derive(Debug)]
+enum ConsumedStatus {
+    Dirty,
+    Records(Vec<Vec<u8>>),
+}
+
+fn consume_status_records<R: BufRead>(
+    mut stdout: R,
+    child: &mut Child,
+    configured_drivers: &HashSet<&str>,
+) -> Result<ConsumedStatus> {
+    let mut record = Vec::new();
+    let mut worktree_modifications = Vec::new();
+    let mut worktree_modification_bytes = 0_usize;
+    loop {
+        match stdout.read_until(0, &mut record) {
+            Ok(0) => break,
+            Ok(_) => {}
+            Err(error) => {
+                drop(stdout);
+                crate::git::terminate_child(child);
+                return Err(error.into());
+            }
+        }
+        if record.last() == Some(&0) {
+            record.pop();
+        }
+        let Some(path) = worktree_modification_path(&record) else {
+            drop(stdout);
+            crate::git::terminate_child(child);
+            return Ok(ConsumedStatus::Dirty);
+        };
+        if configured_drivers.is_empty() {
+            drop(stdout);
+            crate::git::terminate_child(child);
+            return Ok(ConsumedStatus::Dirty);
+        }
+        let Some(next_bytes) = worktree_modification_bytes.checked_add(path.len()) else {
+            drop(stdout);
+            crate::git::terminate_child(child);
+            return Ok(ConsumedStatus::Dirty);
+        };
+        if worktree_modifications.len() == MAX_FILTERED_STATUS_PATHS
+            || next_bytes > MAX_FILTERED_STATUS_PATH_BYTES
+        {
+            drop(stdout);
+            crate::git::terminate_child(child);
+            return Ok(ConsumedStatus::Dirty);
+        }
+        worktree_modification_bytes = next_bytes;
+        worktree_modifications.push(path.to_vec());
+        record.clear();
+    }
+    drop(stdout);
+    Ok(ConsumedStatus::Records(worktree_modifications))
+}
+
 fn worktree_modification_path(record: &[u8]) -> Option<&[u8]> {
     (record.len() >= 3 && record[..3] == *b" M ").then_some(&record[3..])
 }
@@ -1106,7 +1129,7 @@ fn configured_filter_driver(key: &str) -> Option<&str> {
 
 fn filter_drivers_for_paths(repository: &Path, paths: &[Vec<u8>]) -> Result<Vec<Option<String>>> {
     let arguments = ["check-attr", "--stdin", "-z", "filter"];
-    let mut child = git_command(repository, &arguments)
+    let child = git_command(repository, &arguments)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -1117,69 +1140,7 @@ fn filter_drivers_for_paths(repository: &Path, paths: &[Vec<u8>]) -> Result<Vec<
         input.extend_from_slice(path);
         input.push(0);
     }
-    let mut stdin = child.stdin.take().expect("Git check-attr stdin is piped");
-    let mut stdout = child.stdout.take().expect("Git check-attr stdout is piped");
-    let mut stderr = child.stderr.take().expect("Git check-attr stderr is piped");
-    let writer = match thread::Builder::new()
-        .name("git-check-attr-stdin".to_owned())
-        .spawn(move || stdin.write_all(&input))
-    {
-        Ok(writer) => writer,
-        Err(error) => {
-            terminate_child(&mut child);
-            return Err(error.into());
-        }
-    };
-    let stdout_reader = match thread::Builder::new()
-        .name("git-check-attr-stdout".to_owned())
-        .spawn(move || {
-            let mut bytes = Vec::new();
-            stdout.read_to_end(&mut bytes)?;
-            Ok::<_, io::Error>(bytes)
-        }) {
-        Ok(reader) => reader,
-        Err(error) => {
-            terminate_child(&mut child);
-            let _ = writer.join();
-            return Err(error.into());
-        }
-    };
-    let stderr_reader = match thread::Builder::new()
-        .name("git-check-attr-stderr".to_owned())
-        .spawn(move || {
-            let mut bytes = Vec::new();
-            stderr.read_to_end(&mut bytes)?;
-            Ok::<_, io::Error>(bytes)
-        }) {
-        Ok(reader) => reader,
-        Err(error) => {
-            terminate_child(&mut child);
-            let _ = writer.join();
-            let _ = stdout_reader.join();
-            return Err(error.into());
-        }
-    };
-    let status = match child.wait() {
-        Ok(status) => status,
-        Err(error) => {
-            terminate_child(&mut child);
-            let _ = writer.join();
-            let _ = stdout_reader.join();
-            let _ = stderr_reader.join();
-            return Err(error.into());
-        }
-    };
-    let write_result = join_io_thread(writer, "Git check-attr input writer");
-    let stdout_result = join_io_thread(stdout_reader, "Git check-attr stdout reader");
-    let stderr_result = join_io_thread(stderr_reader, "Git check-attr stderr reader");
-    write_result?;
-    let stdout = stdout_result?;
-    let stderr = stderr_result?;
-    let output = Output {
-        status,
-        stdout,
-        stderr,
-    };
+    let output = crate::git::collect_piped_child(child, input).map_err(Error::GitUnavailable)?;
     if !output.status.success() {
         return Err(git_error(repository, &arguments, &output));
     }
@@ -1201,20 +1162,6 @@ fn filter_drivers_for_paths(repository: &Path, paths: &[Vec<u8>]) -> Result<Vec<
         return Err(Error::InvalidGitOutput);
     }
     Ok(drivers)
-}
-
-fn terminate_child(child: &mut Child) {
-    let _ = child.kill();
-    let _ = child.wait();
-}
-
-fn join_io_thread<T>(
-    thread: thread::JoinHandle<io::Result<T>>,
-    description: &'static str,
-) -> io::Result<T> {
-    thread
-        .join()
-        .map_err(|_| io::Error::other(format!("{description} panicked")))?
 }
 
 fn configured_filter_settings(repository: &Path) -> Result<Vec<(String, &'static str)>> {
@@ -1313,6 +1260,10 @@ fn git_error(repository: &Path, arguments: &[&str], output: &Output) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{
+        io::{self, BufReader, Read},
+        process::{Command, Stdio},
+    };
 
     fn registered(head: &str) -> RegisteredSource {
         RegisteredSource::new(
@@ -1352,5 +1303,44 @@ mod tests {
     #[test]
     fn a_multi_byte_revision_is_cut_on_a_character_boundary() {
         assert_eq!(registered("äöüäöüäöü").short_head(), "äöüäöüä");
+    }
+
+    struct FailingStatusRead;
+
+    impl Read for FailingStatusRead {
+        fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+            Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "status pipe closed",
+            ))
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_status_pipe_read_error_reaps_the_git_child() {
+        let mut child = Command::new("sleep")
+            .arg("30")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn a stand-in Git child");
+        let pid = child.id();
+        let _ = child.stdout.take();
+        let error = consume_status_records(
+            BufReader::new(FailingStatusRead),
+            &mut child,
+            &HashSet::new(),
+        )
+        .expect_err("status pipe read error");
+        assert!(
+            matches!(error, Error::Io(ref io) if io.kind() == io::ErrorKind::BrokenPipe),
+            "{error}"
+        );
+        assert_eq!(
+            unsafe { libc::kill(pid as i32, 0) },
+            -1,
+            "owned Git child was not reaped"
+        );
     }
 }
