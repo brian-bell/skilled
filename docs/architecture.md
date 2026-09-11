@@ -81,14 +81,20 @@ current behavior; [AGENTS.md](../AGENTS.md) is the entry point for agent workflo
 ## Build and verification
 
 Use stable Rust 1.97 or newer, as declared in [Cargo.toml](../Cargo.toml).
-The [CI workflow](../.github/workflows/ci.yml) runs these four checks on Ubuntu:
+The [CI workflow](../.github/workflows/ci.yml) runs these five checks on Ubuntu:
 
 ```bash
 cargo test --all-targets
 cargo fmt --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo build --release
+RUSTDOCFLAGS='-D warnings' cargo doc --no-deps
 ```
+
+The documentation gate checks public API documentation, including link validity,
+without documenting private items. References to private implementation details
+use plain code text or prose; public links must resolve to public items. This
+gate does not publish documentation or promise API stability.
 
 The release-package gate runs on Ubuntu 24.04 and macOS 15 with Rust 1.97.
 Windows is not a release gate. Tests inject temporary homes, application-data directories,

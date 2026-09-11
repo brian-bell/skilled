@@ -201,7 +201,7 @@ pub enum CandidateSelection {
 /// confirmed for it — a set that, for a catalog laid out under another agent's
 /// root, includes every agent that merely reads that root. Where the catalog's
 /// path names an owner, that owner is what "exact" means and the stored set
-/// narrows no further; see [`VariantRef::usable_by`], which is what this
+/// narrows no further; `VariantRef::usable_by` is the internal check this
 /// applies. A user who ticks a second agent on such a catalog will find it
 /// selects nothing for them, and Skilled states no reason for it: telling a
 /// path-derived tick from a hand-set one would need the two recorded apart,

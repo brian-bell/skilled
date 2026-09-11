@@ -36,6 +36,7 @@ cargo test --all-targets
 cargo fmt --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo build --release
+RUSTDOCFLAGS='-D warnings' cargo doc --no-deps
 ```
 
 Release packaging requires a clean checkout; see the additional
