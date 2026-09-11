@@ -142,6 +142,12 @@ impl Store {
     /// home remains supported. `SQLITE_OPEN_NOFOLLOW` is defense in depth for
     /// the database leaf; one pathname window remains between the filesystem
     /// classification and SQLite's open.
+    ///
+    /// Supported schemas migrate before semantic validation in
+    /// `app::open_metadata`. Validators use the current schema; invalid stored
+    /// values can therefore leave a successfully migrated database in degraded
+    /// mode. Additive migrations preserve those values, and destructive steps
+    /// require a backup. Semantic failure does not undo a successful migration.
     pub(crate) fn open(data_dir: &Path) -> Result<Self> {
         let new_data_dir = match fs::symlink_metadata(data_dir) {
             Ok(metadata) => {
@@ -235,8 +241,7 @@ impl Store {
         // destructive one has already taken its backup. Validating first would
         // mean a semantic validator per historical schema version, and
         // undoing a migration that succeeded because an unrelated field is
-        // malformed is the worse of the two. Recorded rather than reopened;
-        // the decision itself is `skilled-2k3.23`. It runs whether or not this
+        // malformed is the worse of the two. Migration runs whether or not this
         // session can write, which is what a blocked store one schema version
         // behind runs into: the pending migration fails and the open fails
         // with it, degrading the session without the values it could still

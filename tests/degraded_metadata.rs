@@ -220,6 +220,78 @@ fn a_write_protected_database_is_read_whole_and_written_to_never() {
 }
 
 #[test]
+fn an_older_schema_migrates_before_invalid_values_degrade_the_session() {
+    let temporary = tempfile::tempdir().expect("temporary application directory");
+    let home = temporary.path().join("home");
+    let data = temporary.path().join("data");
+    complete_setup(&home, &data);
+    let backup_names = || {
+        let mut names: Vec<_> = fs::read_dir(&data)
+            .expect("data directory")
+            .map(|entry| entry.expect("entry").file_name())
+            .filter(|name| {
+                name.to_string_lossy()
+                    .starts_with("skilled.sqlite3.backup-")
+            })
+            .collect();
+        names.sort();
+        names
+    };
+    let original_backups = backup_names();
+    let database = data.join("skilled.sqlite3");
+    let connection = rusqlite::Connection::open(&database).expect("open metadata");
+    let current_version: i64 = connection
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .expect("current version");
+    // Schema 11 predates origin_baselines. Reconstruct it so the pending
+    // additive migration must create real schema, not just advance a version.
+    connection
+        .execute_batch(
+            "DROP TABLE origin_baselines;
+         PRAGMA user_version = 11;
+         UPDATE settings SET value = 'sometimes' WHERE key = 'setup_complete';",
+        )
+        .expect("restore older schema with an invalid value");
+    drop(connection);
+
+    let app =
+        SkilledApp::open(AppEnvironment::new(&home, &data, "")).expect("open degraded application");
+    assert_eq!(app.view(), View::Inventory);
+    assert!(!app.can_add_source());
+    assert!(
+        app.metadata_failure()
+            .expect("degraded")
+            .cause()
+            .contains("setup_complete")
+    );
+    let connection = rusqlite::Connection::open(&database).expect("inspect migrated metadata");
+    assert_eq!(
+        connection
+            .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+            .expect("migrated version"),
+        current_version
+    );
+    assert_eq!(
+        connection
+            .query_row("SELECT count(*) FROM origin_baselines", [], |row| row
+                .get::<_, i64>(0))
+            .expect("additive table exists"),
+        0
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT value FROM settings WHERE key = 'setup_complete'",
+                [],
+                |row| row.get::<_, String>(0)
+            )
+            .expect("invalid value preserved"),
+        "sometimes"
+    );
+    assert_eq!(backup_names(), original_backups, "no additive backup");
+}
+
+#[test]
 fn malformed_setup_completion_forces_degraded_mode() {
     let temporary = tempfile::tempdir().expect("temporary application directory");
     let home = temporary.path().join("home");
