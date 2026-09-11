@@ -80,6 +80,16 @@ and shows the selected subtree's file changes and proposed baseline.
 `j` / `k` scroll the complete preview; Esc cancels a running check or
 closes its result. Nothing fetches merely because Sources is opened.
 
+On Linux and macOS, the fetched object database is reclaimed after the check;
+the preview keeps the content it needs in memory. Only one origin check can run
+per application-data directory at a time. If another check or a surviving Git
+child still uses the cache, wait for it to finish and retry. If Skilled reports
+an unproven, legacy, or interrupted cache at an absolute path, it preserves that
+directory and refuses new allocation. Inspect the reported directory before
+manually removing anything; old caches do not carry the evidence needed for
+automatic cleanup. Other platforms currently refuse origin checks because
+the required safe reclamation operations are unavailable.
+
 The preview names absolute destinations, affected installations, and preserved
 notice material. Recognized notice names are `LICENSE`, `LICENCE`, `COPYING`,
 `NOTICE`, and `ATTRIBUTION`, case-insensitively, with optional extensions or

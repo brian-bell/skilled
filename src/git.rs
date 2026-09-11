@@ -123,6 +123,11 @@ use libc::{O_DIRECTORY, O_NONBLOCK, fchdir};
 pub struct RepositoryHandle {
     #[cfg(unix)]
     directory: std::fs::File,
+    /// Origin-cache activity lease. Inherited by Git and its children; ordinary
+    /// checkout handles never carry one. Closing the parent is not an unlock
+    /// while a child still holds the same open file description.
+    #[cfg(unix)]
+    origin_lease: Option<std::fs::File>,
     path: PathBuf,
 }
 
@@ -160,6 +165,7 @@ impl RepositoryHandle {
             }
             Ok(Self {
                 directory,
+                origin_lease: None,
                 path: path.to_path_buf(),
             })
         }
@@ -293,6 +299,7 @@ fn bind_to_handle(command: &mut Command, handle: &RepositoryHandle) {
     use std::os::fd::AsRawFd;
     use std::os::unix::process::CommandExt;
     let descriptor = handle.directory.as_raw_fd();
+    let lease = handle.origin_lease.as_ref().map(AsRawFd::as_raw_fd);
     // SAFETY: `fchdir` is async-signal-safe, so it may run between `fork` and
     // `exec`. The raw descriptor is read while the borrowed handle is alive —
     // every command in this module is spawned within the call that built it —
@@ -300,6 +307,11 @@ fn bind_to_handle(command: &mut Command, handle: &RepositoryHandle) {
     // applies at `exec`, after `pre_exec` closures have finished.
     unsafe {
         command.pre_exec(move || {
+            if let Some(lease) = lease
+                && libc::fcntl(lease, libc::F_SETFD, 0) < 0
+            {
+                return Err(io::Error::last_os_error());
+            }
             if fchdir(descriptor) == 0 {
                 Ok(())
             } else {
