@@ -167,6 +167,63 @@ impl Fixture {
             ],
         )
     }
+
+    fn single_bundle_ref(&self, repository: &Path) -> String {
+        let refs = self.git(
+            repository,
+            &["for-each-ref", "--format=%(refname)", "refs/bundles/"],
+        );
+        assert_eq!(
+            refs.lines().count(),
+            1,
+            "expected one bundle branch: {refs}"
+        );
+        assert_eq!(
+            self.git(repository, &["rev-parse", &refs]),
+            self.git(&self.seed, &["rev-parse", "refs/heads/main"]),
+            "bundle ref must point at the incoming commit"
+        );
+        refs
+    }
+
+    fn discover_bundle_ref(&self) -> String {
+        // Git 2.43 emits refs/bundles/main; newer Git emits
+        // refs/bundles/heads/main. Observe the installed Git in a separate
+        // repository so discovery cannot preload the checkout under test.
+        let control = tempfile::tempdir_in(self.temporary.path()).unwrap();
+        self.git(control.path(), &["init", "--bare"]);
+        let fetch = [
+            "-c",
+            &format!("fetch.bundleURI={}", self.bundle.display()),
+            "fetch",
+            "--dry-run",
+            "--no-auto-maintenance",
+            "--no-write-fetch-head",
+            "--",
+            self.seed.to_str().unwrap(),
+            "refs/heads/main",
+        ];
+        self.git(control.path(), &fetch);
+        let reference = self.single_bundle_ref(control.path());
+
+        // Prove that this exact name reaches the protected branch in an
+        // unsuppressed fetch; a harmless unused symref would weaken the test.
+        let old = self.git(&self.checkout, &["rev-parse", "HEAD"]);
+        self.git(
+            control.path(),
+            &["update-ref", "refs/heads/protected", &old],
+        );
+        self.git(
+            control.path(),
+            &["symbolic-ref", &reference, "refs/heads/protected"],
+        );
+        self.git(control.path(), &fetch);
+        assert_eq!(
+            self.git(control.path(), &["rev-parse", "refs/heads/protected"]),
+            self.git(&self.seed, &["rev-parse", "refs/heads/main"])
+        );
+        reference
+    }
 }
 
 impl Drop for Fixture {
@@ -180,6 +237,7 @@ fn explicit_checks_suppress_bundle_refs_and_creation_token_writes() {
     for cancellable in [false, true] {
         for list in [false, true] {
             let fixture = Fixture::new();
+            let bundle_ref = fixture.discover_bundle_ref();
             let mut app = SkilledApp::open(AppEnvironment::new(
                 fixture.temporary.path().join("home"),
                 fixture.temporary.path().join("data"),
@@ -196,11 +254,7 @@ fn explicit_checks_suppress_bundle_refs_and_creation_token_writes() {
             );
             fixture.git(
                 &fixture.checkout,
-                &[
-                    "symbolic-ref",
-                    "refs/bundles/heads/main",
-                    "refs/heads/protected",
-                ],
+                &["symbolic-ref", &bundle_ref, "refs/heads/protected"],
             );
             fixture.configure_bundle(list);
             let hook_marker = fixture.temporary.path().join("traditional-hook-ran");
@@ -320,7 +374,7 @@ fn unsuppressed_creation_token_bundle_list_is_a_live_positive_control() {
             "origin",
         ],
     );
-    assert!(fixture.refs().contains("refs/bundles/heads/main"));
+    fixture.single_bundle_ref(&fixture.checkout);
     assert_eq!(
         fixture.git(
             &fixture.checkout,
