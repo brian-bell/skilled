@@ -1975,7 +1975,7 @@ mod tests {
         });
 
         assert_eq!(code, ExitCodeKind::Blocked, "{output}");
-        assert!(input.registered, "confirmation did not run");
+        assert!(input.registered, "confirmation did not run: {output}");
         assert_eq!(
             fs::read(fixture.checkout.join("skills/demo/SKILL.md")).expect("skill"),
             before

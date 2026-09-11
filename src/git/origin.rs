@@ -1,10 +1,10 @@
 //! A one-shot, object-database-only view of an adopted origin.
 //!
-//! This deliberately creates a new bare repository for every check and keeps
-//! it after the read.  Retaining it is conservative: removing a pathname after
-//! a network operation would need another descriptor-pinned recursive delete
-//! boundary.  Callers place `cache_root` under Skilled's private data directory
-//! and may apply a separately reviewed cache-retention policy.
+//! Each check owns one managed bare repository until its object reads finish.
+//! The cache manager serializes checks, proves identity and process inactivity,
+//! and reclaims idle objects. Legacy/unproven directories are preserved.
+
+mod cache;
 
 use super::{
     GitTarget, REPOSITORY_ROUTING_ENVIRONMENT, RepositoryHandle, bind_to_handle,
@@ -16,7 +16,6 @@ use super::{
 use crate::provenance::{Origin, validate_update_ref};
 use std::{
     collections::HashSet,
-    fs,
     path::{Component, Path, PathBuf},
     process::{Child, Command, Output, Stdio},
     sync::{
@@ -93,21 +92,42 @@ fn fetch_snapshot_from_url(
     if cancelled.load(Ordering::Acquire) {
         return Ok(None);
     }
-    let cache = create_cache(cache_root)?;
-    let handle = RepositoryHandle::open(&cache).map_err(|error| error.to_string())?;
-    let template = cache.join("empty-template");
-    fs::create_dir(&template)
-        .map_err(|error| format!("cannot create origin cache template: {error}"))?;
+    let cache = cache::Cache::acquire(cache_root)?;
+    let result = (|| {
+        let handle = cache.repository()?;
+        fetch_in_cache(
+            &handle,
+            origin_url,
+            subdirectory,
+            update_ref,
+            cancelled,
+            child_slot,
+        )
+    })();
+    let cleanup = cache.finish();
+    match (result, cleanup) {
+        (result, Ok(())) => result,
+        (Err(error), Err(cleanup)) => Err(format!("{error}; {cleanup}")),
+        (Ok(_), Err(cleanup)) => Err(cleanup),
+    }
+}
+
+fn fetch_in_cache(
+    handle: &RepositoryHandle,
+    origin_url: &str,
+    subdirectory: &str,
+    update_ref: &str,
+    cancelled: &AtomicBool,
+    child_slot: &Mutex<Option<Child>>,
+) -> std::result::Result<Option<OriginSnapshot>, String> {
+    // An empty in-cache template is passed relatively: every Git invocation
+    // enters the held directory, so no template pathname is re-resolved.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    cache::create_template(handle)?;
+    let template = "empty-template";
     run_required(
-        &handle,
-        [
-            "init",
-            "--bare",
-            "--quiet",
-            "--template",
-            template.to_string_lossy().as_ref(),
-            ".",
-        ],
+        handle,
+        ["init", "--bare", "--quiet", "--template", template, "."],
         cancelled,
         child_slot,
     )?;
@@ -115,7 +135,7 @@ fn fetch_snapshot_from_url(
         return Ok(None);
     }
     let Some(configured) = run(
-        &handle,
+        handle,
         ["config", "remote.origin.url", origin_url],
         cancelled,
         child_slot,
@@ -130,7 +150,7 @@ fn fetch_snapshot_from_url(
         return Err("cannot configure origin cache remote".into());
     }
     let Some(code) =
-        repository_transport_code_cancellable(GitTarget::bare(&handle), cancelled, child_slot)
+        repository_transport_code_cancellable(GitTarget::bare(handle), cancelled, child_slot)
             .map_err(|error| error.to_string())?
     else {
         return Ok(None);
@@ -139,7 +159,7 @@ fn fetch_snapshot_from_url(
         return Err("origin cache names an unsupported transport program".into());
     }
     let Some(code) = super::repository_windows_unsetenvvars_code_cancellable(
-        GitTarget::bare(&handle),
+        GitTarget::bare(handle),
         cancelled,
         child_slot,
     )
@@ -151,7 +171,7 @@ fn fetch_snapshot_from_url(
         return Err("origin cache removes required child-process guards".into());
     }
     let Some(effective) =
-        effective_remote_url_cancellable(GitTarget::bare(&handle), "origin", cancelled, child_slot)
+        effective_remote_url_cancellable(GitTarget::bare(handle), "origin", cancelled, child_slot)
             .map_err(|error| error.to_string())?
     else {
         return Ok(None);
@@ -160,7 +180,7 @@ fn fetch_snapshot_from_url(
         return Err("origin URL selects an unsupported transport helper".into());
     }
     let Some(allowed_protocols) =
-        permitted_transports_cancellable(GitTarget::bare(&handle), cancelled, child_slot)
+        permitted_transports_cancellable(GitTarget::bare(handle), cancelled, child_slot)
             .map_err(|error| error.to_string())?
     else {
         return Ok(None);
@@ -169,7 +189,7 @@ fn fetch_snapshot_from_url(
         std::env::var("GIT_SSH_COMMAND").ok()
     } else {
         let Some(value) =
-            user_ssh_command_cancellable(GitTarget::bare(&handle), cancelled, child_slot)
+            user_ssh_command_cancellable(GitTarget::bare(handle), cancelled, child_slot)
                 .map_err(|error| error.to_string())?
         else {
             return Ok(None);
@@ -185,7 +205,7 @@ fn fetch_snapshot_from_url(
     // ref publication. The real-origin tests verify that a fresh cache can
     // read the reported commit without a second fetch.
     let fetch = run(
-        &handle,
+        handle,
         [
             "fetch",
             "--porcelain",
@@ -216,7 +236,7 @@ fn fetch_snapshot_from_url(
     // Ask before every object read as well as after the transfer: older Git
     // versions need not honour `GIT_NO_LAZY_FETCH` for all plumbing reads.
     let Some(partial) =
-        repository_is_partial_clone_cancellable(GitTarget::bare(&handle), cancelled, child_slot)
+        repository_is_partial_clone_cancellable(GitTarget::bare(handle), cancelled, child_slot)
             .map_err(|error| error.to_string())?
     else {
         return Ok(None);
@@ -225,7 +245,7 @@ fn fetch_snapshot_from_url(
         return Err("origin cache became a partial clone".into());
     }
     let Some(exists) = run(
-        &handle,
+        handle,
         ["cat-file", "-e", &format!("{revision}^{{commit}}")],
         cancelled,
         child_slot,
@@ -242,7 +262,7 @@ fn fetch_snapshot_from_url(
     // A fresh cache must never become a partial clone: every subsequent object
     // read is local and `GIT_NO_LAZY_FETCH` below is a second boundary.
     let Some(partial) =
-        repository_is_partial_clone_cancellable(GitTarget::bare(&handle), cancelled, child_slot)
+        repository_is_partial_clone_cancellable(GitTarget::bare(handle), cancelled, child_slot)
             .map_err(|error| error.to_string())?
     else {
         return Ok(None);
@@ -252,7 +272,7 @@ fn fetch_snapshot_from_url(
     }
     let mut tree_budget = MAX_TREE_OUTPUT_BYTES;
     let mut snapshot = snapshot_tree(
-        &handle,
+        handle,
         &revision,
         subdirectory,
         cancelled,
@@ -261,7 +281,7 @@ fn fetch_snapshot_from_url(
         &mut tree_budget,
     )?;
     snapshot.notices = ancestor_notices(
-        &handle,
+        handle,
         &revision,
         subdirectory,
         &snapshot.entries,
@@ -666,7 +686,7 @@ fn run<const N: usize>(
         .spawn()
         .map_err(|error| format!("cannot start Git origin check: {error}"))?;
     let output = if arguments.first() == Some(&"fetch") {
-        collect_fetch_with_cache_budget(child, handle.path(), cancelled, child_slot)?
+        collect_fetch_with_cache_budget(child, handle, cancelled, child_slot)?
     } else {
         // Structured origin input stops the child on overflow; never drain a
         // decompression bomb or accept a complete-looking truncated prefix.
@@ -710,7 +730,7 @@ fn limit_fetch_file_size(_command: &mut Command) -> std::result::Result<(), Stri
 
 fn collect_fetch_with_cache_budget(
     child: Child,
-    cache: &Path,
+    cache: &RepositoryHandle,
     cancelled: &AtomicBool,
     child_slot: &Mutex<Option<Child>>,
 ) -> std::result::Result<Option<Output>, String> {
@@ -761,91 +781,15 @@ fn collect_fetch_with_cache_budget(
     result
 }
 
-fn cache_size(path: &Path) -> std::result::Result<usize, String> {
-    let mut total = 0usize;
-    let root = path;
-    let mut pending = vec![path.to_path_buf()];
-    let mut entries = 0usize;
-    while let Some(path) = pending.pop() {
-        entries += 1;
-        if entries > MAX_ENTRIES {
-            return Err("origin cache has too many entries".into());
-        }
-        let metadata = match fs::symlink_metadata(&path) {
-            Ok(metadata) => metadata,
-            // Git renames temporary packs during a successful fetch. Losing
-            // the cache root itself is different and must stop the child.
-            Err(error) if path != root && error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(format!("cannot inspect origin cache: {error}")),
-        };
-        if metadata.file_type().is_symlink() {
-            return Err("origin cache became redirected".into());
-        }
-        if metadata.is_dir() {
-            for entry in
-                fs::read_dir(&path).map_err(|error| format!("cannot read origin cache: {error}"))?
-            {
-                pending.push(
-                    entry
-                        .map_err(|error| format!("cannot read origin cache: {error}"))?
-                        .path(),
-                );
-            }
-        } else {
-            total = total
-                .checked_add(metadata.len() as usize)
-                .ok_or("origin cache size overflow")?;
-        }
-    }
-    Ok(total)
-}
-
-fn create_cache(root: &Path) -> std::result::Result<PathBuf, String> {
-    // The established data directory is the parent supplied by the caller.
-    // Canonicalising that existing directory accommodates platform aliases
-    // such as macOS `/var` while creation proceeds from the actual object.
-    let parent = root
-        .parent()
-        .ok_or("origin cache root has no established data-directory parent")?
-        .canonicalize()
-        .map_err(|error| format!("cannot inspect origin cache data directory: {error}"))?;
-    let name = root
-        .file_name()
-        .filter(|name| !name.is_empty())
-        .ok_or("origin cache root has an unsafe name")?;
-    let root = parent.join(name);
-    match fs::symlink_metadata(&root) {
-        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
-            return Err("origin cache root is not a private directory".into());
-        }
-        Ok(_) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            create_private_directory(&root)
-                .map_err(|error| format!("cannot create origin cache root: {error}"))?
-        }
-        Err(error) => return Err(format!("cannot inspect origin cache root: {error}")),
-    }
-    for _ in 0..128 {
-        let candidate = root.join(format!("origin-{}", unique_suffix()));
-        match create_private_directory(&candidate) {
-            Ok(()) => return Ok(candidate),
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(error) => return Err(format!("cannot create origin cache: {error}")),
-        }
-    }
-    Err("cannot allocate a unique origin cache".into())
-}
-
-fn create_private_directory(path: &Path) -> std::io::Result<()> {
-    #[cfg(unix)]
+fn cache_size(handle: &RepositoryHandle) -> std::result::Result<usize, String> {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
-        use std::os::unix::fs::DirBuilderExt;
-        let mut builder = fs::DirBuilder::new();
-        builder.mode(0o700).create(path)
+        cache::size(handle)
     }
-    #[cfg(not(unix))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
-        fs::create_dir(path)
+        let _ = handle;
+        Err("origin cache inspection is unsupported".into())
     }
 }
 
@@ -870,6 +814,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn monitored_fetch_drains_both_pipes_without_waiting_for_exit() {
         let temporary = TempDir::new().unwrap();
         let child = Command::new("sh")
@@ -883,7 +828,7 @@ mod tests {
             .unwrap();
         let result = collect_fetch_with_cache_budget(
             child,
-            temporary.path(),
+            &RepositoryHandle::open(temporary.path()).unwrap(),
             &AtomicBool::new(false),
             &Mutex::new(None),
         )
@@ -896,6 +841,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn monitored_fetch_terminates_child_when_cache_exceeds_budget() {
         let temporary = TempDir::new().unwrap();
         fs::File::create(temporary.path().join("pack"))
@@ -911,7 +857,7 @@ mod tests {
         let started = std::time::Instant::now();
         let result = collect_fetch_with_cache_budget(
             child,
-            temporary.path(),
+            &RepositoryHandle::open(temporary.path()).unwrap(),
             &AtomicBool::new(false),
             &Mutex::new(None),
         );
@@ -998,6 +944,7 @@ mod tests {
         (temporary, remote)
     }
 
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn rewritten_snapshot(
         temporary: &TempDir,
         remote: &Path,
@@ -1035,10 +982,80 @@ mod tests {
             &Mutex::new(None),
         );
         super::super::TEST_GIT_CONFIG_GLOBAL.with(|value| *value.borrow_mut() = None);
+        // Both accepted and refused real fetches retire their object database.
+        assert_idle_cache(&temporary.path().join("cache"));
         result
     }
 
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn assert_idle_cache(path: &Path) {
+        let mut entries = fs::read_dir(path)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        entries.sort();
+        assert_eq!(
+            entries,
+            ["activity.lock", "manager.lock", "owner.json"].map(std::ffi::OsString::from)
+        );
+    }
+
     #[test]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn repeated_real_checks_keep_snapshots_usable_after_reclamation() {
+        let (temporary, remote) = fixture();
+        let first = rewritten_snapshot(&temporary, &remote, false)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            rewritten_snapshot(&temporary, &remote, true).unwrap_err(),
+            "origin fetch failed"
+        );
+        let second = rewritten_snapshot(&temporary, &remote, false)
+            .unwrap()
+            .unwrap();
+        assert_eq!(first, second);
+        assert!(!first.entries[0].bytes.is_empty());
+    }
+
+    #[test]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn cancellation_after_allocation_reclaims_the_cache() {
+        use std::sync::Arc;
+        let (temporary, remote) = fixture();
+        let cache = temporary.path().join("cache");
+        let config = temporary.path().join("empty.gitconfig");
+        fs::write(&config, "").unwrap();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let worker_cancelled = cancelled.clone();
+        let worker_cache = cache.clone();
+        let worker = std::thread::spawn(move || {
+            super::super::TEST_GIT_CONFIG_GLOBAL
+                .with(|value| *value.borrow_mut() = Some(config.into_os_string()));
+            fetch_snapshot_from_url(
+                &worker_cache,
+                &format!("file://{}", remote.display()),
+                "skills/demo",
+                "refs/heads/main",
+                &worker_cancelled,
+                &Mutex::new(None),
+            )
+        });
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !cache.join("repository").exists() && !worker.is_finished() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "cache was not allocated"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        cancelled.store(true, Ordering::Release);
+        assert!(!matches!(worker.join().unwrap(), Ok(Some(_))));
+        assert_idle_cache(&cache);
+    }
+
+    #[test]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn fetches_a_relative_regular_file_snapshot_from_an_https_origin() {
         let (temporary, remote) = fixture();
         let snapshot = rewritten_snapshot(&temporary, &remote, false)
@@ -1055,6 +1072,7 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn rejects_a_symbolic_link_in_the_selected_tree() {
         let (temporary, remote) = fixture();
         let source = temporary.path().join("source");
@@ -1083,6 +1101,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn rejects_conflicting_notices_from_nested_ancestors() {
         let (temporary, remote) = fixture();
         let source = temporary.path().join("source");
@@ -1099,6 +1118,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn identical_selected_and_ancestor_license_is_kept_once() {
         let (temporary, remote) = fixture();
         let source = temporary.path().join("source");
@@ -1123,6 +1143,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn differing_selected_and_ancestor_license_blocks_the_snapshot() {
         let (temporary, remote) = fixture();
         let source = temporary.path().join("source");
@@ -1144,6 +1165,7 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn rejects_a_symbolic_link_notice() {
         let (temporary, remote) = fixture();
         let source = temporary.path().join("source");
@@ -1159,6 +1181,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn user_transport_policy_bounds_a_rewritten_origin_fetch() {
         let (temporary, remote) = fixture();
         let error = rewritten_snapshot(&temporary, &remote, true)
@@ -1375,6 +1398,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn rejects_an_incompressible_origin_transfer_before_snapshotting() {
         let (temporary, remote) = fixture();
         let source = temporary.path().join("source");

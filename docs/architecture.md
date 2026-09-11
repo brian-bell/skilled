@@ -16,6 +16,10 @@ current behavior; [AGENTS.md](../AGENTS.md) is the entry point for agent workflo
   and the sole fast-forward write.
 - `src/git/origin.rs`: explicit cancellable origin fetch into a fresh private
   cache, with bounded object-database subtree reads and no checkout.
+  `git/origin/cache.rs` owns the Linux/macOS cache lease, versioned identity
+  evidence, descriptor-bound accounting, and zero-idle-retention reclamation.
+  One origin check can use a data directory at a time; incomplete or unproven
+  cleanup blocks allocation rather than accumulating more repositories.
 - `src/vendored.rs`: adopted-baseline checks and immutable previews for one
   selected skill, including proposed content, notices, and installations.
   `vendored/apply.rs` holds the metadata mutation guard across replacement and

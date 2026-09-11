@@ -211,8 +211,69 @@ file destinations, the pinned revision, baseline comparison, notice decisions,
 and installations that resolve to the selected variant, including aliases.
 
 Esc cancels a check, and a cancelled worker's result cannot replace a newer
-dialog. Cache directories are retained after the read; automatic reclamation is
-outside the update operation. A preview is not a lock on concurrent edits.
+dialog. A preview owns its candidate bytes in memory and does not depend on
+retaining the bare repository. A preview is not a lock on concurrent edits.
+
+### Origin cache retention
+
+Linux and macOS keep one managed origin repository per application-data
+directory and retain no idle object database. Only an explicit origin check
+allocates or reclaims it; startup and navigation do neither. Successful,
+refused, and cancelled checks run the same explicit cleanup path. A proven
+inactive crash residual is reclaimed before another repository is allocated.
+If cleanup cannot establish safety, the residual is retained and further
+allocation refuses with its absolute cache path. The existing 32 MiB observed
+transfer threshold and its temporary overshoot still apply. This is a bound
+on Skilled's managed cache growth, not a disk quota on legacy or externally
+created files. Only three small manager files remain after successful cleanup.
+
+The private cache root has versioned ownership evidence for its directory and
+two persistent lock files. A separate receipt binds the current repository's
+filesystem identity and generation-marker identity and contents. The marker
+prevents a recycled directory inode alone from establishing ownership. An
+unmarked legacy `origin-*` directory, missing or malformed evidence, an
+unsupported version, or replaced root/lock identity never authorizes deletion.
+Legacy and unproven managers block checks and require inspection by the user;
+Skilled neither adopts them nor recursively deletes them. Interrupted initial
+allocation without a complete receipt and an interrupted final disposal with
+insufficient remaining evidence also stay preserved and block new allocation.
+
+The manager lock serializes checks across processes. A separate activity lock
+is held through every origin Git invocation and inherited through exec by its
+children. Cleanup opens that lock independently and must acquire it exclusively
+after releasing the worker's own description. A surviving child therefore
+prevents collection even after parent death; a PID, age, cancelled dialog, or
+exited direct child never proves inactivity. Lock attempts use nonblocking
+operations with at most a 100 ms grace period for unrelated concurrent forks
+to close their close-on-exec duplicates. They do not wait for a network check.
+The lease protects cooperating Skilled/Git processes; it does not constrain a
+same-user program deliberately closing inherited descriptors or rewriting the
+private manager. No SQLite transaction is held over the fetch.
+
+Creation and accounting are descriptor-bound, and reclamation first moves a
+proven repository without overwrite into a reserved private quarantine name.
+The moved identity and generation are checked before walking it. Reclamation
+walks have entry and depth limits, open without following links, and refuse observed
+symbolic links, hard links, special files, and device crossings. Linux also
+checks descriptor-bound mount IDs to refuse same-device bind mounts; a kernel
+that cannot supply those IDs refuses. Live size accounting permits Git's
+temporary hard links while it publishes a pack; inactive reclamation still
+refuses them. Each file or emptied directory is moved
+without overwrite into a private disposal slot and its held identity is
+checked again before unlinking. A substituted object stays in that slot; it
+is never automatically adopted on retry. Generation evidence stays until
+the rest of the repository is empty, allowing ordinary partial cleanup to
+resume. The manager root and its locks are never removed.
+
+The remaining race boundary is inside private quarantine: the exclusive lease
+excludes cooperating writers, but cannot prevent a same-user process with
+write access there from racing the final identity check and unlink. The code
+does not claim that `unlinkat` supplies an atomic identity comparison. Platforms
+without the required descriptor and no-overwrite rename operations refuse
+origin checks rather than using a pathname-based recursive deletion fallback.
+Cleanup failures prevent publishing a candidate and preserve any primary check
+failure in the diagnostic. A cancelled TUI worker still cannot publish stale
+results; a retained cache is checked again by the next explicit request.
 
 ### Confirmed vendored replacement
 
