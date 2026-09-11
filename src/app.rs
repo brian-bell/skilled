@@ -1,6 +1,5 @@
 use std::{
     path::{Path, PathBuf},
-    process::Child,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicI64, AtomicU8, Ordering},
@@ -62,7 +61,7 @@ struct VendoredCheckRun {
     >,
     handle: JoinHandle<()>,
     cancelled: Arc<AtomicBool>,
-    child: Arc<Mutex<Option<Child>>>,
+    child: Arc<Mutex<Option<crate::git::CancellableChild>>>,
 }
 
 struct VendoredApplyRun {
@@ -364,7 +363,7 @@ struct UpdateCheckRun {
     handle: JoinHandle<()>,
     cancelled: Arc<AtomicBool>,
     terminal_state: Arc<AtomicU8>,
-    child: Arc<Mutex<Option<Child>>>,
+    child: Arc<Mutex<Option<crate::git::CancellableChild>>>,
 }
 
 const UPDATE_CHECK_RUNNING: u8 = 0;
@@ -1465,13 +1464,13 @@ impl SkilledApp {
     fn cancel_vendored_check(&mut self) {
         if let Some(run) = self.vendored_check_run.take() {
             run.cancelled.store(true, Ordering::Release);
-            if let Some(mut child) = run
+            if let Some(child) = run
                 .child
                 .lock()
                 .unwrap_or_else(|poison| poison.into_inner())
-                .take()
+                .as_mut()
             {
-                crate::git::terminate_child(&mut child);
+                child.cancel();
             }
             self.retire_update_worker(run.handle);
         }
@@ -2864,18 +2863,17 @@ impl SkilledApp {
                 .is_ok()
             {
                 run.cancelled.store(true, Ordering::Release);
-                if let Some(mut child) = run
+                if let Some(child) = run
                     .child
                     .lock()
                     .unwrap_or_else(|poison| poison.into_inner())
-                    .take()
+                    .as_mut()
                 {
-                    crate::git::terminate_child(&mut child);
+                    child.cancel();
                 }
             }
-            // Non-fetch inspection children are not yet published through the
-            // cancellable child slot. Keep ownership of the run until its
-            // thread actually exits so another check cannot overlap it.
+            // The collector owns reaping and pipe cleanup. Keep the run until
+            // its thread exits so another repository check cannot overlap it.
             self.update_check_run = Some(run);
         }
     }
@@ -4363,13 +4361,13 @@ impl Drop for SkilledApp {
         {
             run.cancelled.store(true, Ordering::Release);
         }
-        if let Some(mut child) = run
+        if let Some(child) = run
             .child
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
-            .take()
+            .as_mut()
         {
-            crate::git::terminate_child(&mut child);
+            child.cancel();
         }
         let _ = run.handle.join();
     }

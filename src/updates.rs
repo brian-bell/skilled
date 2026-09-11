@@ -2,7 +2,6 @@
 
 use std::{
     path::{Path, PathBuf},
-    process::Child,
     sync::{Mutex, atomic::AtomicBool},
 };
 
@@ -596,7 +595,7 @@ pub fn probe_repository_update(source: &RegisteredSource, fetch: bool) -> Reposi
 pub(crate) fn probe_repository_update_cancellable(
     source: &RegisteredSource,
     cancelled: &AtomicBool,
-    child_slot: &Mutex<Option<Child>>,
+    child_slot: &Mutex<Option<crate::git::CancellableChild>>,
 ) -> Option<RepositoryUpdateProbe> {
     let path = source.git_top_level().to_path_buf();
     if let Some(error) = source.source_error() {
@@ -638,7 +637,7 @@ pub(crate) fn probe_repository_update_cancellable(
 fn probe_existing_cancellable(
     handle: &git::RepositoryHandle,
     cancelled: &AtomicBool,
-    child_slot: &Mutex<Option<Child>>,
+    child_slot: &Mutex<Option<crate::git::CancellableChild>>,
 ) -> std::result::Result<Option<RepositoryUpdateProbe>, ProbeFailure> {
     let path = handle.path();
     let target: git::GitTarget = handle.into();
@@ -1022,7 +1021,7 @@ fn registered_checkout_path_is_current_cancellable(
     source: &RegisteredSource,
     handle: &git::RepositoryHandle,
     cancelled: &AtomicBool,
-    child_slot: &Mutex<Option<Child>>,
+    child_slot: &Mutex<Option<crate::git::CancellableChild>>,
 ) -> Option<bool> {
     if cancelled.load(std::sync::atomic::Ordering::Acquire) {
         return None;

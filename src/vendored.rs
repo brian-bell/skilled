@@ -12,7 +12,6 @@ pub(crate) use apply::{apply, plan_apply};
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
-    process::Child,
     sync::{
         Mutex,
         atomic::{AtomicBool, Ordering},
@@ -323,7 +322,7 @@ pub(crate) fn check(
     request: CheckRequest,
     data_dir: &Path,
     cancelled: &AtomicBool,
-    child_slot: &Mutex<Option<Child>>,
+    child_slot: &Mutex<Option<crate::git::CancellableChild>>,
 ) -> Result<Option<Preview>, AdoptionFailure> {
     recheck_request(&request, data_dir)?;
     if cancelled.load(Ordering::Acquire) {

@@ -7,7 +7,7 @@
 mod cache;
 
 use super::{
-    GitTarget, REPOSITORY_ROUTING_ENVIRONMENT, RepositoryHandle, bind_to_handle,
+    CancellableChild, GitTarget, REPOSITORY_ROUTING_ENVIRONMENT, RepositoryHandle, bind_to_handle,
     collect_cancellable_child_strict, effective_remote_url_cancellable, force_ssh_batch_mode,
     permitted_transports_cancellable, remote_url_runs_a_helper, reported_revision,
     repository_is_partial_clone_cancellable, repository_transport_code_cancellable,
@@ -17,7 +17,7 @@ use crate::provenance::{Origin, validate_update_ref};
 use std::{
     collections::HashSet,
     path::{Component, Path, PathBuf},
-    process::{Child, Command, Output, Stdio},
+    process::{Command, Output, Stdio},
     sync::{
         Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -63,7 +63,7 @@ pub(crate) fn fetch_snapshot(
     origin: &Origin,
     update_ref: &str,
     cancelled: &AtomicBool,
-    child_slot: &Mutex<Option<Child>>,
+    child_slot: &Mutex<Option<CancellableChild>>,
 ) -> std::result::Result<Option<OriginSnapshot>, String> {
     validate_update_ref(update_ref)?;
     fetch_snapshot_from_url(
@@ -82,7 +82,7 @@ fn fetch_snapshot_from_url(
     subdirectory: &str,
     update_ref: &str,
     cancelled: &AtomicBool,
-    child_slot: &Mutex<Option<Child>>,
+    child_slot: &Mutex<Option<CancellableChild>>,
 ) -> std::result::Result<Option<OriginSnapshot>, String> {
     if subdirectory != "." && subdirectory.split('/').count() > MAX_DEPTH {
         return Err(format!(
@@ -118,7 +118,7 @@ fn fetch_in_cache(
     subdirectory: &str,
     update_ref: &str,
     cancelled: &AtomicBool,
-    child_slot: &Mutex<Option<Child>>,
+    child_slot: &Mutex<Option<CancellableChild>>,
 ) -> std::result::Result<Option<OriginSnapshot>, String> {
     // An empty in-cache template is passed relatively: every Git invocation
     // enters the held directory, so no template pathname is re-resolved.
@@ -298,7 +298,7 @@ fn snapshot_tree(
     revision: &str,
     subdirectory: &str,
     cancelled: &AtomicBool,
-    child_slot: &Mutex<Option<Child>>,
+    child_slot: &Mutex<Option<CancellableChild>>,
     allowed_protocols: &str,
     tree_budget: &mut usize,
 ) -> std::result::Result<OriginSnapshot, String> {
@@ -403,7 +403,7 @@ fn ancestor_notices(
     subdirectory: &str,
     selected: &[OriginEntry],
     cancelled: &AtomicBool,
-    child_slot: &Mutex<Option<Child>>,
+    child_slot: &Mutex<Option<CancellableChild>>,
     allowed_protocols: &str,
     tree_budget: &mut usize,
 ) -> std::result::Result<Vec<OriginEntry>, String> {
@@ -620,7 +620,7 @@ fn run_required<const N: usize>(
     handle: &RepositoryHandle,
     arguments: [&str; N],
     cancelled: &AtomicBool,
-    child_slot: &Mutex<Option<Child>>,
+    child_slot: &Mutex<Option<CancellableChild>>,
 ) -> std::result::Result<(), String> {
     let Some(output) = run(
         handle,
@@ -645,7 +645,7 @@ fn run<const N: usize>(
     handle: &RepositoryHandle,
     arguments: [&str; N],
     cancelled: &AtomicBool,
-    child_slot: &Mutex<Option<Child>>,
+    child_slot: &Mutex<Option<CancellableChild>>,
     allowed_protocols: &str,
     output_limit: usize,
     ssh_command: Option<&str>,
@@ -683,8 +683,7 @@ fn run<const N: usize>(
         command.arg("-c").arg("fetch.unpackLimit=0");
     }
     command.args(arguments);
-    let child = command
-        .spawn()
+    let child = CancellableChild::spawn(&mut command)
         .map_err(|error| format!("cannot start Git origin check: {error}"))?;
     let output = if arguments.first() == Some(&"fetch") {
         collect_fetch_with_cache_budget(child, handle, cancelled, child_slot)?
@@ -730,10 +729,10 @@ fn limit_fetch_file_size(_command: &mut Command) -> std::result::Result<(), Stri
 }
 
 fn collect_fetch_with_cache_budget(
-    child: Child,
+    child: CancellableChild,
     cache: &RepositoryHandle,
     cancelled: &AtomicBool,
-    child_slot: &Mutex<Option<Child>>,
+    child_slot: &Mutex<Option<CancellableChild>>,
 ) -> std::result::Result<Option<Output>, String> {
     // Drain pipes through the shared collector while monitoring the complete
     // private cache. The threshold can overshoot between 10ms observations;
@@ -818,15 +817,16 @@ mod tests {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn monitored_fetch_drains_both_pipes_without_waiting_for_exit() {
         let temporary = TempDir::new().unwrap();
-        let child = Command::new("sh")
-            .args([
-                "-c",
-                "head -c 262144 /dev/zero; head -c 262144 /dev/zero >&2",
-            ])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
+        let child = CancellableChild::spawn(
+            Command::new("sh")
+                .args([
+                    "-c",
+                    "head -c 262144 /dev/zero; head -c 262144 /dev/zero >&2",
+                ])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped()),
+        )
+        .unwrap();
         let result = collect_fetch_with_cache_budget(
             child,
             &RepositoryHandle::open(temporary.path()).unwrap(),
@@ -849,12 +849,13 @@ mod tests {
             .unwrap()
             .set_len(MAX_PACK_BYTES as u64 + 1)
             .unwrap();
-        let child = Command::new("sleep")
-            .arg("30")
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
+        let child = CancellableChild::spawn(
+            Command::new("sleep")
+                .arg("30")
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped()),
+        )
+        .unwrap();
         let started = std::time::Instant::now();
         let result = collect_fetch_with_cache_budget(
             child,

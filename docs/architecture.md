@@ -14,6 +14,8 @@ current behavior; [AGENTS.md](../AGENTS.md) is the entry point for agent workflo
   candidate validation.
 - `src/git.rs`: typed no-shell Git boundary for repository inspection, fetch,
   and the sole fast-forward write.
+- `src/git/cancellable.rs`: process-group ownership and nonblocking Unix pipe
+  collection for cancellable checks; confirmed writes use the ordinary boundary.
 - `src/git/origin.rs`: explicit cancellable origin fetch into a fresh private
   cache, with bounded object-database subtree reads and no checkout.
   `git/origin/cache.rs` owns the Linux/macOS cache lease, versioned identity

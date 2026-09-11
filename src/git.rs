@@ -18,14 +18,20 @@ use std::{
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
     thread::{self, JoinHandle},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 #[cfg(test)]
 use std::cell::RefCell;
+#[cfg(any(not(unix), test))]
+use std::time::Duration;
 
 use crate::{Error, Result};
 
+mod cancellable;
+pub(crate) use cancellable::CancellableChild;
+#[cfg(unix)]
+use cancellable::collect_child_output;
 pub(crate) mod origin;
 
 #[cfg(all(test, unix))]
@@ -1183,47 +1189,44 @@ fn run_cancellable(
     repository: GitTarget<'_>,
     op: &UpdateOp,
     cancelled: &AtomicBool,
-    child_slot: &Mutex<Option<Child>>,
+    child_slot: &Mutex<Option<CancellableChild>>,
 ) -> Result<Option<Output>> {
-    let child = command(repository, op)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(Error::GitUnavailable)?;
+    let child =
+        CancellableChild::spawn(&mut command(repository, op)).map_err(Error::GitUnavailable)?;
     collect_cancellable_child(child, cancelled, child_slot, None)
 }
 
 fn collect_cancellable_child(
-    child: Child,
+    child: CancellableChild,
     cancelled: &AtomicBool,
-    child_slot: &Mutex<Option<Child>>,
+    child_slot: &Mutex<Option<CancellableChild>>,
     output_limit: Option<usize>,
 ) -> Result<Option<Output>> {
     collect_child_output(child, cancelled, child_slot, output_limit, false)
 }
 
 fn collect_cancellable_child_strict(
-    child: Child,
+    child: CancellableChild,
     cancelled: &AtomicBool,
-    child_slot: &Mutex<Option<Child>>,
+    child_slot: &Mutex<Option<CancellableChild>>,
     output_limit: usize,
 ) -> Result<Option<Output>> {
     collect_child_output(child, cancelled, child_slot, Some(output_limit), true)
 }
 
+#[cfg(not(unix))]
 fn collect_child_output(
-    mut child: Child,
+    mut child: CancellableChild,
     cancelled: &AtomicBool,
-    child_slot: &Mutex<Option<Child>>,
+    child_slot: &Mutex<Option<CancellableChild>>,
     output_limit: Option<usize>,
     strict: bool,
 ) -> Result<Option<Output>> {
     let overflow = Arc::new(AtomicBool::new(false));
     let stdout_overflow = overflow.clone();
     let stderr_overflow = overflow.clone();
-    let mut stdout = child.stdout.take().ok_or(Error::InvalidGitOutput)?;
-    let mut stderr = child.stderr.take().ok_or(Error::InvalidGitOutput)?;
+    let mut stdout = child.child.stdout.take().ok_or(Error::InvalidGitOutput)?;
+    let mut stderr = child.child.stderr.take().ok_or(Error::InvalidGitOutput)?;
     let stdout_reader = std::thread::spawn(move || match output_limit {
         Some(limit) if strict => read_strictly_bounded(&mut stdout, limit, &stdout_overflow),
         Some(limit) => read_bounded(&mut stdout, limit),
@@ -1250,7 +1253,7 @@ fn collect_child_output(
                 .unwrap_or_else(|poison| poison.into_inner())
                 .take()
             {
-                terminate_child(&mut child);
+                child.cancel();
             }
             return Err(io::Error::other("Git output exceeds its read budget").into());
         }
@@ -1260,7 +1263,7 @@ fn collect_child_output(
                 .unwrap_or_else(|poison| poison.into_inner())
                 .take()
             {
-                terminate_child(&mut child);
+                child.cancel();
             }
             drop(stdout_reader);
             drop(stderr_reader);
@@ -1278,7 +1281,7 @@ fn collect_child_output(
                 }
                 return Err(Error::InvalidGitOutput);
             };
-            child.try_wait().map_err(Error::GitUnavailable)?
+            child.child.try_wait().map_err(Error::GitUnavailable)?
         };
         if let Some(status) = status {
             break status;
@@ -1317,7 +1320,7 @@ fn required_cancellable(
     repository: GitTarget<'_>,
     op: UpdateOp,
     cancelled: &AtomicBool,
-    child_slot: &Mutex<Option<Child>>,
+    child_slot: &Mutex<Option<CancellableChild>>,
 ) -> Result<Option<Vec<u8>>> {
     let arguments = op.arguments();
     let Some(output) = run_cancellable(repository, &op, cancelled, child_slot)? else {
@@ -1334,7 +1337,7 @@ fn optional_cancellable(
     repository: GitTarget<'_>,
     op: UpdateOp,
     cancelled: &AtomicBool,
-    child_slot: &Mutex<Option<Child>>,
+    child_slot: &Mutex<Option<CancellableChild>>,
 ) -> Result<Option<Option<Vec<u8>>>> {
     Ok(run_cancellable(repository, &op, cancelled, child_slot)?
         .map(|output| output.status.success().then_some(output.stdout)))
@@ -1395,7 +1398,7 @@ pub(crate) fn previous_revision_of(
 pub(crate) fn head_state_cancellable(
     repository: GitTarget<'_>,
     cancelled: &AtomicBool,
-    child_slot: &Mutex<Option<Child>>,
+    child_slot: &Mutex<Option<CancellableChild>>,
 ) -> Result<Option<HeadState>> {
     let Some(revision) = required_cancellable(
         repository,
@@ -1433,7 +1436,7 @@ pub(crate) fn repository_git_dir(repository: GitTarget<'_>) -> Result<PathBuf> {
 pub(crate) fn repository_git_dir_cancellable(
     repository: GitTarget<'_>,
     cancelled: &AtomicBool,
-    child_slot: &Mutex<Option<Child>>,
+    child_slot: &Mutex<Option<CancellableChild>>,
 ) -> Result<Option<PathBuf>> {
     let Some(bytes) =
         required_cancellable(repository, UpdateOp::AbsoluteGitDir, cancelled, child_slot)?
@@ -1494,7 +1497,7 @@ pub(crate) fn upstream_of_cancellable(
     repository: GitTarget<'_>,
     head: &HeadState,
     cancelled: &AtomicBool,
-    child_slot: &Mutex<Option<Child>>,
+    child_slot: &Mutex<Option<CancellableChild>>,
 ) -> Result<Option<Option<Upstream>>> {
     let Some(reference) = head.reference() else {
         return Ok(Some(None));
@@ -1685,7 +1688,7 @@ pub(crate) fn repository_transport_code(repository: GitTarget<'_>) -> Result<Opt
 pub(crate) fn repository_transport_code_cancellable(
     repository: GitTarget<'_>,
     cancelled: &AtomicBool,
-    child_slot: &Mutex<Option<Child>>,
+    child_slot: &Mutex<Option<CancellableChild>>,
 ) -> Result<Option<Option<String>>> {
     let op = UpdateOp::TransportSettings;
     let arguments = op.arguments();
@@ -1738,7 +1741,7 @@ pub(crate) fn repository_windows_unsetenvvars_code(
 pub(crate) fn repository_windows_unsetenvvars_code_cancellable(
     repository: GitTarget<'_>,
     cancelled: &AtomicBool,
-    child_slot: &Mutex<Option<Child>>,
+    child_slot: &Mutex<Option<CancellableChild>>,
 ) -> Result<Option<Option<String>>> {
     let op = UpdateOp::WindowsUnsetenvvars;
     let arguments = op.arguments();
@@ -1758,7 +1761,7 @@ pub(crate) fn repository_windows_unsetenvvars_code_cancellable(
 pub(crate) fn repository_windows_unsetenvvars_code_cancellable(
     _repository: GitTarget<'_>,
     _cancelled: &AtomicBool,
-    _child_slot: &Mutex<Option<Child>>,
+    _child_slot: &Mutex<Option<CancellableChild>>,
 ) -> Result<Option<Option<String>>> {
     Ok(Some(None))
 }
@@ -1782,7 +1785,7 @@ fn permitted_transports(repository: GitTarget<'_>) -> Result<String> {
 fn permitted_transports_cancellable(
     repository: GitTarget<'_>,
     cancelled: &AtomicBool,
-    child_slot: &Mutex<Option<Child>>,
+    child_slot: &Mutex<Option<CancellableChild>>,
 ) -> Result<Option<String>> {
     let Some(policy) = transport_policy_cancellable(repository, cancelled, child_slot)? else {
         return Ok(None);
@@ -1811,7 +1814,7 @@ fn transport_policy(repository: GitTarget<'_>) -> Result<TransportPolicy> {
 fn transport_policy_cancellable(
     repository: GitTarget<'_>,
     cancelled: &AtomicBool,
-    child_slot: &Mutex<Option<Child>>,
+    child_slot: &Mutex<Option<CancellableChild>>,
 ) -> Result<Option<TransportPolicy>> {
     let op = UpdateOp::TransportPolicy;
     let arguments = op.arguments();
@@ -2007,7 +2010,7 @@ fn user_ssh_command(repository: GitTarget<'_>) -> Result<Option<String>> {
 fn user_ssh_command_cancellable(
     repository: GitTarget<'_>,
     cancelled: &AtomicBool,
-    child_slot: &Mutex<Option<Child>>,
+    child_slot: &Mutex<Option<CancellableChild>>,
 ) -> Result<Option<Option<String>>> {
     let op = UpdateOp::UserSshCommand;
     let arguments = op.arguments();
@@ -2295,7 +2298,7 @@ pub(crate) fn effective_remote_url_cancellable(
     repository: GitTarget<'_>,
     remote: &str,
     cancelled: &AtomicBool,
-    child_slot: &Mutex<Option<Child>>,
+    child_slot: &Mutex<Option<CancellableChild>>,
 ) -> Result<Option<Option<String>>> {
     let op = UpdateOp::RemoteUrl(remote.to_owned());
     let arguments = op.arguments();
@@ -2350,7 +2353,7 @@ pub(crate) fn remote_url_runs_a_helper(url: &str) -> bool {
 pub(crate) fn repository_is_partial_clone_cancellable(
     repository: GitTarget<'_>,
     cancelled: &AtomicBool,
-    child_slot: &Mutex<Option<Child>>,
+    child_slot: &Mutex<Option<CancellableChild>>,
 ) -> Result<Option<bool>> {
     let op = UpdateOp::PromisorSettings;
     let arguments = op.arguments();
@@ -2400,7 +2403,7 @@ pub(crate) fn config_get_cancellable(
     repository: GitTarget<'_>,
     key: &str,
     cancelled: &AtomicBool,
-    child_slot: &Mutex<Option<Child>>,
+    child_slot: &Mutex<Option<CancellableChild>>,
 ) -> Result<Option<Option<String>>> {
     Ok(optional_cancellable(
         repository,
@@ -2430,7 +2433,7 @@ fn reject_symbolic_tracking_ref_cancellable(
     repository: GitTarget<'_>,
     upstream: &Upstream,
     cancelled: &AtomicBool,
-    child_slot: &Mutex<Option<Child>>,
+    child_slot: &Mutex<Option<CancellableChild>>,
 ) -> Result<Option<()>> {
     let op = UpdateOp::SymbolicRef(upstream.tracking_ref.clone());
     let arguments = op.arguments();
@@ -2568,7 +2571,7 @@ fn direct_ref_object_cancellable(
     repository: GitTarget<'_>,
     reference: &str,
     cancelled: &AtomicBool,
-    child_slot: &Mutex<Option<Child>>,
+    child_slot: &Mutex<Option<CancellableChild>>,
 ) -> Result<Option<Option<String>>> {
     let op = UpdateOp::RefState(reference.to_owned());
     let Some(output) = run_cancellable(repository, &op, cancelled, child_slot)? else {
@@ -2653,7 +2656,7 @@ fn publish_ref_cancellable(
     revision: &str,
     expected: Option<&str>,
     cancelled: &AtomicBool,
-    child_slot: &Mutex<Option<Child>>,
+    child_slot: &Mutex<Option<CancellableChild>>,
 ) -> Result<Option<std::result::Result<(), Error>>> {
     let op = publish_ref_op(reference, revision, expected);
     let arguments = op.arguments();
@@ -2778,7 +2781,7 @@ pub(crate) fn fetch_upstream_cancellable(
     repository: GitTarget<'_>,
     upstream: &Upstream,
     cancelled: &AtomicBool,
-    child_slot: &Mutex<Option<Child>>,
+    child_slot: &Mutex<Option<CancellableChild>>,
 ) -> Result<Option<String>> {
     if reject_symbolic_tracking_ref_cancellable(repository, upstream, cancelled, child_slot)?
         .is_none()
@@ -2856,17 +2859,13 @@ fn fetch_reported_revision_cancellable(
     upstream: &Upstream,
     transport: FetchTransport,
     cancelled: &AtomicBool,
-    child_slot: &Mutex<Option<Child>>,
+    child_slot: &Mutex<Option<CancellableChild>>,
 ) -> Result<Option<String>> {
     let destination = fetch_destination();
     let op = fetch_op(upstream, transport, &destination);
     let arguments = op.arguments();
-    let child = command(repository, &op)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(Error::GitUnavailable)?;
+    let child =
+        CancellableChild::spawn(&mut command(repository, &op)).map_err(Error::GitUnavailable)?;
     let Some(output) =
         collect_cancellable_child(child, cancelled, child_slot, Some(MAX_FETCH_OUTPUT_BYTES))?
     else {
@@ -2934,6 +2933,7 @@ fn run_bounded(repository: GitTarget<'_>, op: &UpdateOp, limit: usize) -> Result
 /// Stop at the first overflow byte instead of allowing compressed remote
 /// objects to generate unlimited discarded output. The owning collector kills
 /// the child when this flag is set; dropping this pipe also stops its writer.
+#[cfg(any(not(unix), test))]
 fn read_strictly_bounded(
     reader: &mut impl Read,
     limit: usize,
@@ -2990,7 +2990,7 @@ pub(crate) fn merge_base_cancellable(
     left: &str,
     right: &str,
     cancelled: &AtomicBool,
-    child_slot: &Mutex<Option<Child>>,
+    child_slot: &Mutex<Option<CancellableChild>>,
 ) -> Result<Option<Option<String>>> {
     let op = UpdateOp::MergeBase(left.into(), right.into());
     let arguments = op.arguments();
@@ -3031,7 +3031,7 @@ pub(crate) fn ahead_behind_cancellable(
     left: &str,
     right: &str,
     cancelled: &AtomicBool,
-    child_slot: &Mutex<Option<Child>>,
+    child_slot: &Mutex<Option<CancellableChild>>,
 ) -> Result<Option<AheadBehind>> {
     let Some(value) = required_cancellable(
         repository,
@@ -3078,7 +3078,7 @@ pub(crate) fn changed_paths_cancellable(
     left: &str,
     right: &str,
     cancelled: &AtomicBool,
-    child_slot: &Mutex<Option<Child>>,
+    child_slot: &Mutex<Option<CancellableChild>>,
 ) -> Result<Option<Vec<ChangedPath>>> {
     let Some(bytes) = required_cancellable(
         repository,
@@ -3450,7 +3450,7 @@ fn parse_worktree_status(
 pub(crate) fn worktree_state_cancellable(
     repository: GitTarget<'_>,
     cancelled: &AtomicBool,
-    child_slot: &Mutex<Option<Child>>,
+    child_slot: &Mutex<Option<CancellableChild>>,
 ) -> Result<Option<WorktreeState>> {
     let op = UpdateOp::FilterSettings;
     let arguments = op.arguments();
@@ -3483,7 +3483,7 @@ pub(crate) fn worktree_state_cancellable(
             .env(format!("GIT_CONFIG_KEY_{offset}"), key)
             .env(format!("GIT_CONFIG_VALUE_{offset}"), value);
     }
-    let child = status_command.spawn().map_err(Error::GitUnavailable)?;
+    let child = CancellableChild::spawn(&mut status_command).map_err(Error::GitUnavailable)?;
     let Some(output) = collect_cancellable_child(child, cancelled, child_slot, None)? else {
         return Ok(None);
     };
@@ -3904,11 +3904,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn strict_output_collector_terminates_an_unending_writer() {
-        let child = Command::new("yes")
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
+        let child = CancellableChild::spawn(&mut Command::new("yes")).unwrap();
         let slot = Mutex::new(None);
         let started = std::time::Instant::now();
         let result = collect_cancellable_child_strict(child, &AtomicBool::new(false), &slot, 1024);

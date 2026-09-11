@@ -130,6 +130,9 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
+      - name: Verify cancellable Git process groups
+        run: cargo test --lib process_group
+
       - name: Package the clean checkout
         run: cargo package --locked
 
