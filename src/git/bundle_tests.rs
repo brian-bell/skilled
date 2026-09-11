@@ -623,17 +623,17 @@ fn origin_caches_ignore_global_bundles_and_still_read_the_fetched_tree() {
         );
         assert_eq!(server.requests.load(Ordering::Acquire), 0);
         assert_eq!(fs::read(&fixture.global).unwrap(), global);
-        let caches: Vec<_> = fs::read_dir(cache_root)
+        // Successful origin checks reclaim the repository. The snapshot is
+        // still usable above; no retained refs, FETCH_HEAD, or local bundle
+        // configuration can be inspected after the activity lease is released.
+        let mut entries = fs::read_dir(cache_root)
             .unwrap()
-            .map(|entry| entry.unwrap().path())
-            .collect();
-        assert_eq!(caches.len(), 1);
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        entries.sort();
         assert_eq!(
-            fixture.git(&caches[0], &["for-each-ref", "--format=%(refname)"]),
-            ""
+            entries,
+            ["activity.lock", "manager.lock", "owner.json"].map(std::ffi::OsString::from)
         );
-        assert!(!caches[0].join("FETCH_HEAD").exists());
-        let config = fs::read_to_string(caches[0].join("config")).unwrap();
-        assert!(!config.to_ascii_lowercase().contains("bundlecreationtoken"));
     }
 }

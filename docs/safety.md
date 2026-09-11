@@ -362,6 +362,31 @@ afterwards, as the observation it always was. On platforms without
 `fchdir` the handle spawns by pathname as before, and the guard-order
 narrowing is what remains.
 
+### Cancellable check processes
+
+On Unix, every cancellable repository/origin Git query (including fetch and
+status) owns a new session and process group. Standard input is null, output is
+piped, and the session has no controlling terminal. Cancellation sends SIGKILL
+to the whole group; the UI signals but leaves reaping to the collector. There
+is no grace period for these checks. Confirmed fast-forwards and vendored
+replacements remain non-cancellable and do not use this process boundary.
+
+The collector observes leader exit with `waitid(WNOWAIT)` and kills the group
+before reaping, even on successful completion. Holding the unreaped leader
+reserves the group ID across cancellation/completion races. Setup errors,
+output-limit failures, and unwinding also clean up the owned child. Unix pipe
+reads are nonblocking on the check worker itself, with bounded work per poll;
+no pipe reader threads are detached. After leader completion, pipes that remain
+open beyond 250 ms fail the read rather than accepting incomplete output.
+
+This covers ordinary transport descendants on macOS/Linux, not programs that
+intentionally escape the group or reopen a terminal by pathname. Reaping still
+requires the kernel to finish a killed process; indefinite uninterruptible
+kernel I/O is outside the cleanup bound. Non-Unix targets retain direct-child
+cancellation and their existing threaded pipe collection; group containment is
+not claimed there. Final terminal restoration ordering is a separate event-loop
+lifecycle contract.
+
 ### Inspection and transport policy
 
 The explicit check suppresses hooks and monitors and refuses observed

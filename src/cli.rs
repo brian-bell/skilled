@@ -13,7 +13,6 @@
 use std::{
     io::{BufRead, Write},
     path::{Path, PathBuf},
-    process::Child,
     sync::{Mutex, atomic::AtomicBool},
 };
 
@@ -930,7 +929,7 @@ fn execute_vendored_update(
         Err(failure) => return vendored_refusal(output, failure),
     };
     let cancelled = AtomicBool::new(false);
-    let child = Mutex::<Option<Child>>::new(None);
+    let child = Mutex::<Option<crate::git::CancellableChild>>::new(None);
     let preview = match vendored::check(
         request.requiring_unique_name(),
         &data_dir,
