@@ -499,7 +499,7 @@ pub enum SourceRow<'a> {
     /// so no site that builds one of these can omit it: a renderer that had to
     /// ask for it a second time would need something to draw when the answer
     /// came back `None`, and an `unavailable` badge beside an empty message
-    /// states a failure while withholding what it was. [`catalog_rows`] is the
+    /// states a failure while withholding what it was. `catalog_rows` is the
     /// only place in the crate that builds this row, and it takes both from
     /// the same catalog.
     CatalogError {

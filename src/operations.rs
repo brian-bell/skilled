@@ -247,7 +247,7 @@ impl TargetProbe {
 /// Taken in a single pass so the plan a user confirms describes one moment
 /// rather than a sequence of reads that drifted apart. That moment is earlier
 /// than the write, so the target, its root, and the variant directory are each
-/// read once more before the link is created; see [`apply_install`]. Nothing
+/// read once more by `apply_install` before the link is created. Nothing
 /// else is — the narrowing and the OpenCode prediction stand as the plan the
 /// user agreed to, and the scan taken afterwards is what checks them.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -690,7 +690,7 @@ impl InstallTarget {
         &self.disposition
     }
 
-    /// Whether this target is one [`apply_install`] would write.
+    /// Whether applying the plan would write this target.
     pub fn is_work(&self) -> bool {
         matches!(
             self.disposition,
@@ -1917,7 +1917,7 @@ fn uninstall_sightings(
 ///
 /// Pure: every fact about the machine arrives in `probe`, and every fact about
 /// the registry in `sources`. `requested` is the agent set the request named,
-/// indexed like [`AgentKind::index`] — the Sources flow requests every
+/// in [`AgentKind::ALL`] order — the Sources flow requests every
 /// configured agent, and `skilled install --agents` requests exactly what it
 /// was given.
 pub fn plan_install(
@@ -2643,7 +2643,7 @@ impl VerifyReport {
     /// precludes — the ordinary state for anyone running fewer than three
     /// agents, where the user asked Skilled to leave those roots alone. The
     /// installation inventory draws the same line: a deselected root does not
-    /// make [`crate::InventorySnapshot::counts_are_complete`] false, while an
+    /// make [`crate::inventory::InventorySnapshot::counts_are_complete`] false, while an
     /// unreadable one does.
     pub fn is_complete_for_selection(&self) -> bool {
         self.failures.is_empty()

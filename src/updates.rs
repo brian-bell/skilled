@@ -2832,7 +2832,7 @@ impl PostWriteRepositoryReads {
     /// this has answered. That residual is the same check-to-spawn window the
     /// re-asked pre-write guards carry, narrowed the same way — asked as late
     /// as anything can be asked and still be asked before the reads.
-    /// [`git::UpdateOp::environment`] backstops it for every read that goes
+    /// The Git command environment backstops it for every read that goes
     /// through the Git boundary, which sets `GIT_NO_LAZY_FETCH` on all of them
     /// but the merge; the source refresh in `source.rs` runs its own Git
     /// commands and does not, which is the part this gate is the only cover
@@ -3206,7 +3206,7 @@ fn verify_repository_state(
 
 /// Check a fast-forward against the plan that was confirmed.
 ///
-/// `reads` is the gate [`apply_repository_update_attempt`] decided between the
+/// `reads` is the gate `apply_repository_update_attempt` decided between the
 /// write and the first read after it. When it is withheld, the repository is
 /// not read at all and its postconditions are recorded as unestablished with
 /// the reason stated — the report is then incomplete, which no surface may
