@@ -1,7 +1,10 @@
 use std::{
-    cell::Cell,
-    io::{self, stdout},
+    cell::{Cell, RefCell},
+    io::{self, Write, stdout},
 };
+
+mod interrupt;
+pub(crate) use interrupt::InterruptHandler;
 
 use crossterm::{
     cursor::{Hide, Show},
@@ -35,6 +38,43 @@ impl<C: TerminalControl> TerminalSession<C> {
             .expect("active terminal session")
             .restore()
     }
+
+    /// Run terminal-owned work, dropping its workers before restoring the
+    /// screen on success, error, or unwind. Install the panic restore hook
+    /// before starting the session. The closure must own the work it retires.
+    /// Panics retain their payload and are reported after terminal restoration.
+    pub fn run<T, E: From<io::Error>>(
+        self,
+        operation: impl FnOnce() -> Result<T, E>,
+    ) -> Result<T, E> {
+        struct DeferredPanic(bool);
+        impl Drop for DeferredPanic {
+            fn drop(&mut self) {
+                DEFER_TERMINAL_PANIC.with(|deferred| deferred.set(self.0));
+            }
+        }
+        let deferred = DeferredPanic(DEFER_TERMINAL_PANIC.with(|flag| flag.replace(true)));
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(operation));
+        drop(deferred);
+        let restored = self.finish().map_err(E::from);
+        match outcome {
+            Ok(result) => result.and_then(|value| restored.map(|()| value)),
+            Err(payload) => {
+                DEFERRED_PANIC_MESSAGE.with(|message| {
+                    if let Some(message) = message.borrow_mut().take() {
+                        for line in message.lines() {
+                            let _ = writeln!(
+                                io::stderr(),
+                                "{}",
+                                crate::components::terminal_safe(line)
+                            );
+                        }
+                    }
+                });
+                std::panic::resume_unwind(payload)
+            }
+        }
+    }
 }
 
 impl<C: TerminalControl> Drop for TerminalSession<C> {
@@ -49,6 +89,8 @@ pub struct CrosstermControl;
 
 thread_local! {
     static CAUGHT_WORKER_PANIC: Cell<bool> = const { Cell::new(false) };
+    static DEFER_TERMINAL_PANIC: Cell<bool> = const { Cell::new(false) };
+    static DEFERRED_PANIC_MESSAGE: RefCell<Option<String>> = const { RefCell::new(None) };
 }
 
 /// Catch a worker panic without letting the process-global default hook print
@@ -84,13 +126,39 @@ impl TerminalControl for CrosstermControl {
 ///
 /// Panic hooks are process-global and run before unwinding, so a worker panic
 /// must not tear down raw mode and the alternate screen under the still-live
-/// event loop. The prior process hook still receives every panic except a
-/// background-worker panic that its effect boundary catches and reports in-app.
+/// event loop. Inside [`TerminalSession::run`], terminal-thread diagnostics are
+/// deferred until worker teardown and restoration finish, then the original
+/// panic payload resumes unwinding. This boundary captures the diagnostic and
+/// requested backtrace itself; it does not invoke a prior custom panic hook
+/// into the live terminal. Outside that boundary, terminal-thread
+/// panics restore immediately and chain to the prior hook. Caught worker
+/// panics are reported in-app; other worker panics chain to the prior hook.
 pub fn install_panic_restore_hook() {
     let terminal_thread = std::thread::current().id();
     let previous_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic_info| {
         let owns_terminal = std::thread::current().id() == terminal_thread;
+        // The runner catches this unwind so the application can retire its
+        // workers first. Printing or restoring here would hand the terminal
+        // back while those workers still own it. Outside that boundary the
+        // original immediate-restoration fallback remains in place.
+        if owns_terminal && DEFER_TERMINAL_PANIC.with(Cell::get) {
+            DEFERRED_PANIC_MESSAGE.with(|message| {
+                // PanicHookInfo borrows the original panic and cannot be
+                // retained until after unwind. Capture equivalent diagnostics
+                // on this stack rather than invoking an arbitrary prior hook
+                // while workers and the alternate screen are still active.
+                let backtrace = std::backtrace::Backtrace::capture();
+                let diagnostic = if backtrace.status() == std::backtrace::BacktraceStatus::Captured
+                {
+                    format!("{panic_info}\nstack backtrace:\n{backtrace}")
+                } else {
+                    panic_info.to_string()
+                };
+                *message.borrow_mut() = Some(diagnostic);
+            });
+            return;
+        }
         if owns_terminal {
             let mut terminal = CrosstermControl;
             let _ = terminal.restore();

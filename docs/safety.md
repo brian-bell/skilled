@@ -648,6 +648,26 @@ and leaving the repository unable to update until the user fetched by hand.
 
 ## Terminal output and verification
 
+- The runner owns the application inside `TerminalSession::run`. On success,
+  error, or panic, application teardown cancels checks and joins workers before
+  restoring the cursor, alternate screen, and raw mode. Confirmed writes finish
+  their existing verification boundary rather than being cancelled. A caught
+  event-loop panic captures its diagnostic and requested backtrace on the
+  original stack, prints escaped lines after teardown and restoration, then
+  resumes unwinding with its original payload. This boundary supplies its own
+  diagnostic rather than invoking a prior custom hook into the live terminal.
+  The panic hook retains an
+  immediate-restoration fallback outside this boundary.
+
+- On Unix, external SIGINT sets an atomic shutdown flag. The event loop checks
+  it at most every 100 ms while waiting for input and dispatches the same Quit
+  action as Ctrl-C. Synchronous work already in progress returns to that loop
+  before the interrupt is handled. The signal callback does no I/O or cleanup;
+  the prior signal disposition is restored after terminal release. This does
+  not promise recovery from SIGKILL, process abort, or a second panic during
+  unwinding. Real pseudo-terminal tests cover restoration and output ordering;
+  application-worker tests cover cancellation and joining at that boundary.
+
 - Text from the filesystem — names, paths, link targets, operating-system error
   messages — is escaped through `components::terminal_safe` before it reaches a
   terminal, on every surface. The screens and CLI commands write to the same

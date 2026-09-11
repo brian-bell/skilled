@@ -4912,6 +4912,70 @@ mod tests {
     }
 
     #[test]
+    fn terminal_boundary_retires_the_app_worker_before_restoration() {
+        use crate::terminal::{TerminalControl, TerminalSession};
+        struct RecordingTerminal(Arc<AtomicBool>);
+        impl TerminalControl for RecordingTerminal {
+            fn enter(&mut self) -> std::io::Result<()> {
+                self.0.store(true, Ordering::Release);
+                Ok(())
+            }
+            fn restore(&mut self) -> std::io::Result<()> {
+                self.0.store(false, Ordering::Release);
+                Ok(())
+            }
+        }
+        for ending in ["success", "error", "panic"] {
+            let (_temporary, mut app) = test_app();
+            let active = Arc::new(AtomicBool::new(false));
+            let observed = Arc::new(AtomicBool::new(false));
+            let cancelled = Arc::new(AtomicBool::new(false));
+            let (sender, receiver) = mpsc::channel();
+            let worker_active = active.clone();
+            let worker_observed = observed.clone();
+            let worker_cancelled = cancelled.clone();
+            let handle = std::thread::spawn(move || {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                while !worker_cancelled.load(Ordering::Acquire)
+                    && std::time::Instant::now() < deadline
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                worker_observed.store(worker_active.load(Ordering::Acquire), Ordering::Release);
+                let _ = sender.send(UpdateCheckMessage::Cancelled);
+            });
+            app.update_check_run = Some(UpdateCheckRun {
+                receiver,
+                handle,
+                cancelled: cancelled.clone(),
+                terminal_state: Arc::new(AtomicU8::new(UPDATE_CHECK_RUNNING)),
+                child: Arc::new(Mutex::new(None)),
+            });
+            let session = TerminalSession::start(RecordingTerminal(active.clone())).unwrap();
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                session.run(move || -> std::io::Result<()> {
+                    let _app = app;
+                    match ending {
+                        "panic" => panic!("injected event loop panic"),
+                        "error" => Err(std::io::Error::other("injected event loop error")),
+                        _ => Ok(()),
+                    }
+                })
+            }));
+            assert_eq!(outcome.is_err(), ending == "panic");
+            if let Ok(result) = outcome {
+                assert_eq!(result.is_err(), ending == "error");
+            }
+            assert!(cancelled.load(Ordering::Acquire), "{ending}");
+            assert!(
+                observed.load(Ordering::Acquire),
+                "worker outlived terminal on {ending}"
+            );
+            assert!(!active.load(Ordering::Acquire));
+        }
+    }
+
+    #[test]
     fn update_check_persistence_failures_have_a_dedicated_terminal_error() {
         let (_temporary, mut app) = test_app();
         let check = CachedUpdateCheck {
