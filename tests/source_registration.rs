@@ -234,9 +234,19 @@ fn reopening_reads_current_source_state_without_writing_a_startup_refresh() {
     assert_ne!(reopened.sources()[0].head(), registered_head);
     assert_eq!(reopened.sources()[0].dirty(), Some(false));
     assert!(reopened.sources()[0].source_error().is_none());
+    // The UI's "Last saved scan" deliberately retains this stored time even
+    // though HEAD and status describe the current startup observation.
     assert_eq!(reopened.sources()[0].last_scan_at(), 1);
     let connection = rusqlite::Connection::open(data.join("skilled.sqlite3"))
         .expect("reopen application database");
+    assert_eq!(
+        connection
+            .query_row("SELECT last_scan_at FROM source_repositories", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .expect("stored scan time"),
+        1
+    );
     let persisted_head: String = connection
         .query_row("SELECT head_revision FROM source_repositories", [], |row| {
             row.get(0)

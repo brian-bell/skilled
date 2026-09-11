@@ -1,6 +1,5 @@
 ---
 source: tests/tui_snapshots.rs
-assertion_line: 512
 expression: screen
 ---
  ◆ skilled  global
@@ -14,7 +13,7 @@ expression: screen
                                  │                                              │ HEAD: [SHORT]
                                  │                                              │ Remote: not configured
                                  │                                              │ Status: ✓ clean
-                                 │                                              │ Last scan: [SCAN]
+                                 │                                              │ Last saved scan: [SCAN]
                                  │                                              │ CATALOG
                                  │                                              │ ─────────────────────────────────────
                                  │                                              │ Path: skills · Classification: Common

@@ -366,6 +366,10 @@ impl RegisteredSource {
         &self.catalogs
     }
 
+    /// Time of the last successfully persisted scan, not the current checkout
+    /// observation. Startup inspects without saving; a failed inspection also
+    /// retains this timestamp. Sources labels it "Last saved scan" so current
+    /// status and repository details do not imply that they share this time.
     pub fn last_scan_at(&self) -> i64 {
         self.last_scan_at
     }
