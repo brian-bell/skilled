@@ -691,7 +691,7 @@ pub(crate) fn repository_identity_from_git_dir(git_dir: PathBuf) -> Result<Repos
             .open(&git_dir)?;
         let mut information: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
         if unsafe { GetFileInformationByHandle(directory.as_raw_handle(), &mut information) } == 0 {
-            return Err(io::Error::last_os_error().into());
+            return Err(std::io::Error::last_os_error().into());
         }
         Ok(RepositoryIdentity {
             git_dir,

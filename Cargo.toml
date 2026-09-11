@@ -25,7 +25,7 @@ path = "src/main.rs"
 crossterm = "0.29.0"
 directories = "6.0.0"
 ratatui = { version = "0.30.2", features = ["unstable-rendered-line-info"] }
-rusqlite = { version = "0.40.1", features = ["bundled"] }
+rusqlite = { version = "0.40.1", features = ["bundled", "backup", "serialize"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10.9"

@@ -16,8 +16,16 @@ it never deletes a checkout or skill content.
 
 Before a pending destructive metadata migration, the store creates one
 consistent, uniquely named SQLite backup beside the database. An occupied
-backup path is never overwritten. Unknown newer schemas and read-only stores
-cannot be used as writable metadata. Interactive startup degrades to read-only
+backup path is never overwritten. SQLite copies into a private in-memory
+connection, then Skilled writes its serialized image through the create-new
+file handle and syncs that handle before proceeding. Unix also syncs the
+parent directory to persist the new backup name; Windows flushes file metadata
+with the file handle. Replacing the reserved
+pathname cannot redirect those writes. After syncing, the pathname must still
+identify the held file or migration refuses. Failed writes leave their file in place;
+backup code never unlinks a pathname. This temporarily holds the database and
+its serialized image in memory, and allocation or copy failure blocks migration.
+Unknown newer schemas and read-only stores cannot be used as writable metadata. Interactive startup degrades to read-only
 inventory when metadata is unavailable, retaining independently recovered
 selection and registry data and stating what remains unknown.
 

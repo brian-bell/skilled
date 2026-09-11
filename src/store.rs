@@ -2701,8 +2701,8 @@ fn migrate_with(
         if pending.is_empty() {
             return Ok(backup);
         }
-        // `VACUUM INTO` cannot run inside a transaction, so the lock is
-        // released for the backup and taken again afterwards. Re-reading the
+        // SQLite's backup API refuses a source write transaction, so the lock
+        // is released for the backup and taken again afterwards. Re-reading the
         // version is the point of taking it again: another process may have
         // migrated in the gap, which leaves a backup of a database that no
         // longer needed one — never a migration applied over an unknown state.
@@ -2769,9 +2769,8 @@ static PROBE_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU6
 /// the worse answer.
 ///
 /// The removal unlinks a pathname this call created and no longer holds open,
-/// which is the window `backup_database` documents — bounded the same way, by
-/// the fact that anything able to write this directory can already delete the
-/// database itself.
+/// leaving a probe-specific pathname window, bounded by the fact that anything
+/// able to write this directory can already delete the database itself.
 fn journal_creation_permitted(data_dir: &Path) -> bool {
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -2832,33 +2831,23 @@ fn valid_backup_component(name: &str) -> bool {
     )
 }
 
-/// Create a consistent database backup at a unique final pathname.
+/// Create a consistent backup without reopening its reserved destination.
 ///
-/// The filename generator is constrained to one normal component and the
-/// physical data-directory leaf is rechecked immediately before `VACUUM
-/// INTO`. The destination is then reserved with create-new semantics, which
-/// is the check: SQLite accepts an *empty* file for `VACUUM INTO`, so a bare
-/// absence test would let a zero-byte file that appeared after it be written
-/// into rather than refused. `O_CREAT | O_EXCL` also refuses a symbolic link,
-/// so the reserved object is the pathname's own regular file, created for the
-/// owner alone. No file is ever replaced or removed.
+/// SQLite first copies into a private in-memory connection. Its backup API
+/// reports source read errors (direct serialization of an on-disk database can
+/// instead zero unreadable pages). Serializing that memory-only copy needs no
+/// filesystem reads. The bytes are written and synced through the create-new
+/// handle, so replacing its pathname cannot redirect the write to a stranger's
+/// file. Occupied names are refused, files are created owner-only on Unix, and
+/// no pathname is ever unlinked, including after a failed or partial write.
+/// After syncing the file and its directory entry, a no-follow open must
+/// identify the same held file before
+/// the pathname can be reported as a recoverable backup.
 ///
-/// One pathname window survives it, and it survives on purpose. The
-/// reservation is closed before `VACUUM INTO` reopens the name, so anything
-/// able to write the application-data directory could unlink the reservation
-/// and leave another empty file for SQLite to populate — losing both the
-/// no-overwrite rule and the owner-only mode. Holding the reservation open
-/// does not close it: SQLite has no open-by-descriptor, so every mechanism
-/// that could write this backup opens by pathname, `sqlite3_backup` included
-/// — its destination is a `Connection`, and a `Connection` is opened by name.
-/// The window is a property of the API rather than of this call.
-///
-/// What actually bounds it is the directory. An attacker who can write the
-/// application-data directory can already read, replace, or delete the
-/// database this backup is a copy of, so there is no privacy here left for
-/// the backup to lose that they do not already have. It is the same class of
-/// window as `skilled-cb2`, and narrowing it further is tracked as
-/// `skilled-2k3.24`.
+/// This holds an in-memory database plus its serialized image until the write
+/// finishes. Allocation or backup failure aborts migration. External writers
+/// can still remove a completed backup, as they can the original metadata;
+/// this is not protection against later changes by the directory's owner.
 fn backup_database(
     connection: &Connection,
     database_path: &Path,
@@ -2891,6 +2880,32 @@ fn backup_database_with(
         ));
     }
 
+    let mut snapshot = Connection::open_in_memory()?;
+    // SQLite cannot resize an in-memory backup destination's pages. Preserve
+    // the source size before its first page is allocated, including metadata
+    // created with a non-default SQLite page_size.
+    let page_size: i64 = connection.pragma_query_value(None, "page_size", |row| row.get(0))?;
+    snapshot.pragma_update(None, "page_size", page_size)?;
+    {
+        let backup = rusqlite::backup::Backup::new(connection, &mut snapshot)?;
+        match backup.step(-1)? {
+            rusqlite::backup::StepResult::Done => {}
+            _ => {
+                return Err(Error::Io(std::io::Error::other(
+                    "metadata backup could not acquire a complete SQLite snapshot",
+                )));
+            }
+        }
+    }
+    // A successful backup populated the data pages in SQLite's non-purgeable
+    // :memory: cache (sqlite3PcacheOpen with !memDb == false; pcacheUnpin is a
+    // no-op). In the bundled pager, getPageNormal then takes its initialized
+    // cache-hit branch without per-page allocation or I/O. Serialization's
+    // statement/output-buffer allocation failures return an error. Do not
+    // substitute a disk-backed temporary here: its page-read failure path can
+    // silently serialize zero-filled pages instead.
+    let image = snapshot.serialize(rusqlite::MAIN_DB)?;
+
     for _ in 0..128 {
         let name = name_for(original_version);
         if !valid_backup_component(&name) {
@@ -2900,36 +2915,140 @@ fn backup_database_with(
             ));
         }
         let candidate = data_dir.join(name);
-        let candidate_text = candidate
-            .to_str()
-            .ok_or_else(|| Error::UnrepresentablePath(candidate.clone()))?
-            .to_owned();
         let mut options = fs::OpenOptions::new();
         options.write(true).create_new(true);
-        // A backup holds every registered repository path and ownership
-        // receipt the database holds. `VACUUM INTO` does not narrow the mode
-        // of a file it finds, so the reservation is where the mode is set, and
-        // it is set to the owner alone rather than to whatever the umask
-        // happens to leave.
+        // Set privacy at creation, independently of the caller's umask.
         #[cfg(unix)]
         std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-        match options.open(&candidate) {
-            Ok(reserved) => drop(reserved),
+        let mut reserved = match options.open(&candidate) {
+            Ok(reserved) => reserved,
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(error) => return Err(error.into()),
-        }
-        // A failed population leaves the reservation where it is. Removing it
-        // would mean unlinking a pathname this call no longer holds open — and
-        // so, if anything replaced it in between, unlinking something Skilled
-        // did not create. An unused empty file is the cheaper of the two, and
-        // the only one consistent with never unlinking.
-        connection.execute("VACUUM INTO ?1", params![candidate_text])?;
+        };
+        write_backup_image(&mut reserved, &candidate, &image)?;
         return Ok(candidate);
     }
     Err(Error::Io(std::io::Error::new(
         std::io::ErrorKind::AlreadyExists,
         "could not choose an unused metadata backup path",
     )))
+}
+
+fn write_backup_image(reserved: &mut fs::File, candidate: &Path, image: &[u8]) -> Result<()> {
+    use std::io::Write;
+    if image.len() < 100 || !image.starts_with(b"SQLite format 3\0") {
+        return Err(Error::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "invalid SQLite backup image",
+        )));
+    }
+    // The complete snapshot includes WAL pages, but its header can still say
+    // WAL. Publish rollback-mode read/write version bytes so recovery needs
+    // only this file, including from a read-only directory. SQLite documents
+    // this normalization for serialized images at:
+    // https://www.sqlite.org/c3ref/deserialize.html
+    reserved.write_all(&image[..18])?;
+    reserved.write_all(&[1, 1])?;
+    reserved.write_all(&image[20..])?;
+    reserved.sync_all()?;
+    sync_backup_parent(candidate)?;
+    verify_backup_destination(reserved, candidate)
+}
+
+/// Unix requires a directory fsync to persist a newly created name separately
+/// from its file contents. Failure blocks migration rather than treating a
+/// potentially volatile recovery pathname as a completed backup.
+fn sync_backup_parent(candidate: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let parent = candidate.parent().ok_or_else(|| {
+            unsafe_metadata_leaf(candidate, "backup path has no parent directory")
+        })?;
+        fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+            .open(parent)?
+            .sync_all()?;
+    }
+    // On Windows File::sync_all calls FlushFileBuffers, which flushes file
+    // metadata as well as data; no Unix-style directory fsync is needed.
+    // https://learn.microsoft.com/en-us/windows/win32/fileio/file-caching
+    #[cfg(not(unix))]
+    let _ = candidate;
+    Ok(())
+}
+
+/// Reopen only to compare identity, never to populate or remove the pathname.
+/// A substitution observed here refuses migration; later external removal is
+/// outside the backup transaction just as it is for the original database.
+fn verify_backup_destination(reserved: &fs::File, candidate: &Path) -> Result<()> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::custom_flags(
+        &mut options,
+        libc::O_NOFOLLOW | libc::O_NONBLOCK,
+    );
+    #[cfg(windows)]
+    std::os::windows::fs::OpenOptionsExt::custom_flags(
+        &mut options,
+        windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT,
+    );
+    let current = options.open(candidate).map_err(|_| {
+        unsafe_metadata_leaf(
+            candidate,
+            "cannot verify the populated backup at its reserved pathname",
+        )
+    })?;
+    if !current.metadata()?.is_file() || !same_backup_file(reserved, &current)? {
+        return Err(unsafe_metadata_leaf(
+            candidate,
+            "backup pathname no longer identifies the populated file; migration refused",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn same_backup_file(first: &fs::File, second: &fs::File) -> std::io::Result<bool> {
+    use std::os::unix::fs::MetadataExt;
+    let first = first.metadata()?;
+    let second = second.metadata()?;
+    Ok(first.dev() == second.dev() && first.ino() == second.ino())
+}
+
+#[cfg(windows)]
+fn same_backup_file(first: &fs::File, second: &fs::File) -> std::io::Result<bool> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
+    };
+    let identity = |file: &fs::File| {
+        let mut information = std::mem::MaybeUninit::<BY_HANDLE_FILE_INFORMATION>::uninit();
+        // SAFETY: the borrowed File retains a valid handle throughout the call;
+        // the output is initialized only when the Windows API reports success.
+        if unsafe { GetFileInformationByHandle(file.as_raw_handle(), information.as_mut_ptr()) }
+            == 0
+        {
+            return Err(std::io::Error::last_os_error());
+        }
+        let information = unsafe { information.assume_init() };
+        Ok((
+            information.dwVolumeSerialNumber,
+            information.nFileIndexHigh,
+            information.nFileIndexLow,
+        ))
+    };
+    Ok(identity(first)? == identity(second)?)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn same_backup_file(_: &fs::File, _: &fs::File) -> std::io::Result<bool> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "backup file identity is unsupported on this platform",
+    ))
 }
 
 #[cfg(test)]
@@ -3302,6 +3421,135 @@ mod migration_tests {
             .permissions()
             .mode();
         assert_eq!(mode & 0o777, 0o600, "backup mode {:o}", mode & 0o777);
+    }
+
+    /// A rename and replacement after create-new must not redirect population.
+    #[cfg(unix)]
+    #[test]
+    fn backup_population_stays_on_the_reserved_file_after_path_substitution() {
+        use std::io::{Read, Seek, SeekFrom};
+        use std::os::unix::fs::OpenOptionsExt;
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let snapshot = Connection::open_in_memory().expect("snapshot");
+        snapshot
+            .execute_batch(
+                "CREATE TABLE original(value TEXT);
+            INSERT INTO original VALUES ('held');",
+            )
+            .expect("snapshot contents");
+        let image = snapshot
+            .serialize(rusqlite::MAIN_DB)
+            .expect("serialize fixture");
+        for hard_link in [false, true] {
+            let candidate = temporary.path().join(format!("candidate-{hard_link}"));
+            let held = temporary.path().join(format!("held-{hard_link}"));
+            let stranger = temporary.path().join(format!("stranger-{hard_link}"));
+            let mut reserved = fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&candidate)
+                .expect("reserve");
+            fs::rename(&candidate, &held).expect("move reserved object");
+            fs::write(&stranger, b"").expect("empty stranger");
+            if hard_link {
+                fs::hard_link(&stranger, &candidate).expect("substitute hard link");
+            } else {
+                fs::write(&candidate, b"").expect("substitute empty file");
+            }
+            assert!(
+                write_backup_image(&mut reserved, &candidate, &image).is_err(),
+                "a substituted recovery pathname must refuse migration"
+            );
+            assert!(
+                fs::read(&candidate)
+                    .expect("replacement preserved")
+                    .is_empty()
+            );
+            assert!(fs::read(&stranger).expect("stranger preserved").is_empty());
+            reserved.seek(SeekFrom::Start(0)).expect("rewind");
+            let mut bytes = Vec::new();
+            reserved.read_to_end(&mut bytes).expect("read held object");
+            assert_eq!(bytes, &*image);
+            assert_eq!(fs::read(&held).expect("retained original"), bytes);
+        }
+    }
+
+    #[test]
+    fn destructive_migrations_preserve_nondefault_page_sizes_in_the_backup() {
+        for page_size in [1024, 8192, 65536] {
+            let temporary = tempfile::tempdir().expect("temporary directory");
+            let database = temporary.path().join("skilled.sqlite3");
+            let mut connection = Connection::open(&database).expect("database");
+            connection
+                .pragma_update(None, "page_size", page_size)
+                .expect("page size");
+            connection
+                .execute_batch(
+                    "CREATE TABLE original(value TEXT);
+                INSERT INTO original VALUES ('preserved');",
+                )
+                .expect("original contents");
+            let steps = [Migration {
+                version: 1,
+                destructive: true,
+                sql: "DROP TABLE original;",
+            }];
+            let backup = migrate_with(&mut connection, &database, &steps)
+                .expect("migrate nondefault page size")
+                .expect("backup");
+            let copy = Connection::open_with_flags(&backup, OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .expect("read backup");
+            assert_eq!(
+                copy.pragma_query_value(None, "page_size", |row| row.get::<_, i64>(0))
+                    .expect("backup page size"),
+                page_size
+            );
+            assert_eq!(
+                copy.query_row("SELECT value FROM original", [], |row| row
+                    .get::<_, String>(0))
+                    .expect("original row"),
+                "preserved"
+            );
+            assert!(connection.prepare("SELECT * FROM original").is_err());
+        }
+    }
+
+    #[test]
+    fn backup_includes_uncheckpointed_wal_and_is_readable_without_sidecars() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let database = temporary.path().join("skilled.sqlite3");
+        let connection = Connection::open(&database).expect("database");
+        connection
+            .execute_batch(
+                "PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0;
+            CREATE TABLE original(value TEXT); INSERT INTO original VALUES ('in WAL');",
+            )
+            .expect("uncheckpointed contents");
+        assert!(database.with_extension("sqlite3-wal").exists());
+        let backup = backup_database(&connection, &database, 0).expect("backup");
+        let bytes = fs::read(&backup).expect("backup bytes");
+        assert_eq!(
+            &bytes[18..20],
+            &[1, 1],
+            "standalone rollback-journal header"
+        );
+        let standalone = temporary.path().join("standalone.sqlite3");
+        fs::copy(backup, &standalone).expect("copy only database");
+        let copy = Connection::open_with_flags(&standalone, OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .expect("open standalone backup read-only");
+        assert_eq!(
+            copy.query_row("SELECT value FROM original", [], |row| row
+                .get::<_, String>(0))
+                .expect("read WAL content"),
+            "in WAL"
+        );
+        assert_eq!(
+            copy.query_row("PRAGMA integrity_check", [], |row| row.get::<_, String>(0))
+                .expect("integrity"),
+            "ok"
+        );
     }
 
     fn backup_files(directory: &Path) -> Vec<PathBuf> {
