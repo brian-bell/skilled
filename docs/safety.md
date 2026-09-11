@@ -98,6 +98,17 @@ that writes the checkout's worktree. Opening Updates never fetches.
   deleted, a filesystem that refuses that disposition refuses the repair,
   and what remains is the install-class fail-if-exists window at creation.
 
+- After interruption, the next inventory scan flags names beginning with
+  `.skilled-repair-` as **possible repair residue** and reports their absolute
+  paths with manual recovery guidance. The name and even a matching target
+  cannot prove same-operation ownership. Scanning never cleans these entries
+  or labels them proven artifacts; their observed object, health, provenance,
+  counts, and unknown resolution distinctions remain intact. The user must
+  inspect the entry and intended installation, preserve uncertain or substituted
+  objects, and independently establish whether to unlink an unwanted symbolic
+  link without touching its target. Existing in-operation cleanup remains the
+  only automatic temporary-link cleanup; there is no recovery journal.
+
 - `--yes` removes the confirmation and nothing else. Install requires
   `--source`, `--skill`, and `--agents` explicitly; uninstall and repair each
   require `--skill` and `--agent`; update requires `--source`. Every ownership,

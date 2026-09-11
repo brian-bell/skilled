@@ -1416,8 +1416,41 @@ fn scan_root(
 
     names
         .into_iter()
-        .map(|name| observe(agent.kind(), root, &name, index, budget))
+        .map(|name| {
+            let mut observation = observe(agent.kind(), root, &name, index, budget)?;
+            note_possible_repair_residue(&mut observation);
+            Ok(observation)
+        })
         .collect()
+}
+
+/// The temporary namespace is a clue, never ownership evidence. Keep the
+/// ordinary object, health, provenance and resolution observations: an unknown
+/// entry may still be loadable, and a user may have chosen this name themselves.
+/// Only the running repair holds the evidence needed for its cleanup routine.
+fn note_possible_repair_residue(observation: &mut InstalledSkillObservation) {
+    if !observation.name.starts_with(".skilled-repair-") {
+        return;
+    }
+    observation.findings.insert(
+        0,
+        Finding::new(
+            "install.possible_repair_residue",
+            FindingSeverity::Warning,
+            format!(
+                "Possible repair residue at {}. Ownership is unproven: a matching name or target \
+             does not identify an operation artifact. Left untouched. Manual recovery: stop \
+             concurrent skill changes, inspect this entry without following links, and compare \
+             it with the intended installation and the interrupted repair's report, if available. \
+             Before exchange it may be the new link; after exchange it may hold the displaced \
+             original or a substituted object. If you independently establish that a symbolic \
+             link is unwanted, unlink only this exact entry, never its target. Preserve files, \
+             directories, and uncertain objects; do not recursively delete or blindly move this \
+             entry over an installation. Rescan after manual recovery.",
+                observation.path.display()
+            ),
+        ),
+    );
 }
 
 fn observe(

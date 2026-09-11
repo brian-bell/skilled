@@ -1,0 +1,54 @@
+---
+source: tests/tui_snapshots.rs
+expression: "normalize_inventory(&temporary, render(&app, 90, 50))"
+---
+ ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁
+▕                                                                                        ▏
+▕ ◆ skilled  global                                        ● ready · 1 source registered ▏
+▕▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▏
+▕                │                │                │                │                    ▏
+▕ 1 Inventory ·3 │ 2 Sources ·1   │ 3 Updates      │ 4 Doctor ·5    │                    ▏
+▕▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁│▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁│▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁│▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁│▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▏
+▕                                                                                        ▏
+▕ ▌ Details  .skilled-repair-123-456                                                     ▏
+▕ ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁ ▏
+▕ SKILL                                                                                  ▏
+▕ ────────────────────────────────────────────────────────────────────────────────────── ▏
+▕ .skilled-repair-123-456                                                                ▏
+▕ - not a skill                                                                          ▏
+▕ SOURCE                                                                                 ▏
+▕ ────────────────────────────────────────────────────────────────────────────────────── ▏
+▕ Not a skill installation, so no source applies.                                        ▏
+▕ CLAUDE CODE  - not a skill                                                             ▏
+▕ ────────────────────────────────────────────────────────────────────────────────────── ▏
+▕ Finding: install.possible_repair_residue · warning                                     ▏
+▕   Possible repair residue at                                                           ▏
+▕ [TEMP]         /home/.claude/skills/.skilled-repair-123-456. Ownership is unproven: a  ▏
+▕ matching name or target does not identify an operation artifact. Left untouched.       ▏
+▕ Manual recovery: stop concurrent skill changes, inspect this entry without following   ▏
+▕ links, and compare it with the intended installation and the interrupted repair's      ▏
+▕ report, if available. Before exchange it may be the new link; after exchange it may    ▏
+▕ hold the displaced original or a substituted object. If you independently establish    ▏
+▕ that a symbolic link is unwanted, unlink only this exact entry, never its target.      ▏
+▕ Preserve files, directories, and uncertain objects; do not recursively delete or       ▏
+▕ blindly move this entry over an installation. Rescan after manual recovery.            ▏
+▕ Finding: install.not_a_skill · info                                                    ▏
+▕   this is not a directory, so it cannot hold a SKILL.md                                ▏
+▕ Path: ~/.claude/skills/.skilled-repair-123-456                                         ▏
+▕ Object: not a directory                                                                ▏
+▕ Validation: - not attempted                                                            ▏
+▕ NOT INSTALLED                                                                          ▏
+▕ ────────────────────────────────────────────────────────────────────────────────────── ▏
+▕ - Codex                                                                                ▏
+▕ NO ROOT                                                                                ▏
+▕ ────────────────────────────────────────────────────────────────────────────────────── ▏
+▕ - OpenCode                                                                             ▏
+▕                                                                                        ▏
+▕                                                                                        ▏
+▕                                                                                        ▏
+▕                                                                                        ▏
+▕                                                                                        ▏
+▕                                                                                        ▏
+▕                                                                                        ▏
+▕ Tab/Shift-Tab Region   2 Sources   4 Doctor   s Settings   ? Help   q Quit   Esc Back  ▏
+ ▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔

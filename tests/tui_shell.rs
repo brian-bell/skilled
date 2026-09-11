@@ -6069,6 +6069,44 @@ fn git(repository: &Path, arguments: &[&str]) {
 /// Unix-only.
 #[cfg(unix)]
 mod installed {
+    #[test]
+    fn possible_repair_residue_is_a_readable_warning_with_manual_guidance() {
+        let harness = Harness::new();
+        let mut app = harness.installed_inventory();
+        let path = harness
+            .directory
+            .path()
+            .join("home/.claude/skills/.skilled-repair-123-456");
+        fs::write(&path, b"unproven object").unwrap();
+        app.update(Action::OpenSources);
+        let update = app.update(Action::OpenInventory);
+        app.perform_effects(update.effects()).unwrap();
+        assert_eq!(
+            app.selected_installation().unwrap().name(),
+            ".skilled-repair-123-456"
+        );
+        app.update(Action::AdvanceInventoryPane);
+        let screen = buffer(&app, 90, 60);
+        let rendered = text(&screen);
+        assert!(
+            rendered.contains("install.possible_repair_residue"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("Ownership is unproven"), "{rendered}");
+        assert!(rendered.contains("Manual recovery"), "{rendered}");
+        assert!(
+            rendered.contains("Rescan after manual recovery"),
+            "{rendered}"
+        );
+        let row = row_containing(&screen, "Finding: install.possible_repair_residue");
+        assert!(row_text(&screen, row).contains("warning"));
+        assert_eq!(
+            style_in_row(&screen, row, "install.possible_repair_residue").fg,
+            Some(Color::Rgb(0xe6, 0xbd, 0x6a))
+        );
+        assert_eq!(fs::read(path).unwrap(), b"unproven object");
+    }
+
     use super::*;
 
     #[test]
