@@ -18,7 +18,7 @@ expression: "normalize_install_screen(&temporary, render(&app, 120, 40))"
 ▕  │  ✓ OpenCode: create the skill root, then the link                                                              │  ▏
 ▕  │      [TEMP]                      /home/.config/opencode/skills/portable                                        │  ▏
 ▕  │                                                                                                                │  ▏
-▕  │  Home: [TEMP]                      /home                                                                       │  ▏
+▕  │  Home: [TEMP]                      /home                                                                       │C ▏
 ▕  │                                                                                                                │  ▏
 ▕  │                                                                                                                │─ ▏
 ▕  │                                                                                                                │n ▏

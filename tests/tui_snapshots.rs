@@ -1594,7 +1594,7 @@ fn normalize_sources_screen(
 /// in fixture prose stays in the snapshot where it can be read.
 fn normalize_scan_timestamp(screen: String) -> String {
     const SHAPE: &str = "dddd-dd-dd dd:dd UTC";
-    const LABEL: &str = "Last scan: ";
+    const LABEL: &str = "Last saved scan: ";
     let characters = screen.chars().collect::<Vec<_>>();
     let mut normalized = String::new();
     let mut index = 0;

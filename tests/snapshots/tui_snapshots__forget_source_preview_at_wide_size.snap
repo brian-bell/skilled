@@ -18,7 +18,7 @@ expression: "normalize_install_screen(&temporary, render(&app, 120, 40))"
 ▕  │                                                                                                                │  ▏
 ▕  │                                                                                                                │  ▏
 ▕  │                                                                                                                │  ▏
-▕  │                                                                                                                │  ▏
+▕  │                                                                                                                │C ▏
 ▕  │                                                                                                                │  ▏
 ▕  │                                                                                                                │─ ▏
 ▕  │                                                                                                                │n ▏

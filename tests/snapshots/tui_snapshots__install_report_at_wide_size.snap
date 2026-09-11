@@ -18,7 +18,7 @@ expression: "normalize_install_screen(&temporary, render(&app, 120, 40))"
 ▕  │      [TEMP]                      /home/.config/opencode/skills/portable                                        │  ▏
 ▕  │                                                                                                                │  ▏
 ▕  │  Verification                                                                                                  │  ▏
-▕  │  ✓ every link written was observed again and matches this plan                                                 │  ▏
+▕  │  ✓ every link written was observed again and matches this plan                                                 │C ▏
 ▕  │                                                                                                                │  ▏
 ▕  │                                                                                                                │─ ▏
 ▕  │                                                                                                                │n ▏

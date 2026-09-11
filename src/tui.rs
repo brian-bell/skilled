@@ -5068,7 +5068,9 @@ fn render_source_details(
     let status_label = Span::styled("Status: ", theme::pane_subtitle());
     let status = source_status_badge(source);
     let separator = Span::raw(" · ");
-    let scan_label = Span::styled("Last scan: ", theme::pane_subtitle());
+    // This is the last successful persisted scan. Startup's current checkout
+    // observation deliberately does not change it or write the database.
+    let scan_label = Span::styled("Last saved scan: ", theme::pane_subtitle());
     let scanned = Span::raw(format_scan_timestamp(source.last_scan_at()));
     let shared = status_label.width()
         + status.width()

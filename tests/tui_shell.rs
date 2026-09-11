@@ -3878,7 +3878,7 @@ fn sources_details_render_stored_repository_catalog_and_variant_metadata() {
         "Branch: main",
         "Status: ✓ clean",
         "Remote: https://example.test/source.git",
-        "Last scan:",
+        "Last saved scan:",
         "CATALOG",
         "Classification: Common",
         "Registered for: all agents",
@@ -4273,7 +4273,7 @@ fn sources_details_state_the_revision_in_the_abbreviated_form_at_every_width() {
 /// for and names the zone it is in.
 ///
 /// The zone has to reach the reader on the label's own line at every width.
-/// A timestamp wrapped away from `Last scan:` leaves the label saying nothing,
+/// A timestamp wrapped away from `Last saved scan:` leaves the label saying nothing,
 /// which is the bug the abbreviated revision fixed; one wrapped after its last
 /// space is worse than that, because `2026-08-05 04:14` reads as a complete
 /// time and the row that would have said which zone it is in is somewhere
@@ -4298,7 +4298,13 @@ fn sources_details_state_the_last_scan_as_a_date_rather_than_an_epoch() {
     let mut scanned = String::new();
     for width in [80, 100, 120, 150, 151, 160, 200] {
         let terminal = if width > 80 { width + 2 } else { width };
-        let rendered = inner_text(&buffer(&app, terminal, 40));
+        let screen = buffer(&app, terminal, 40);
+        let rendered = inner_text(&screen);
+        let scan_row = row_containing(&screen, "Last saved scan:");
+        assert_eq!(
+            style_in_row(&screen, scan_row, "Last saved scan:").fg,
+            Some(Color::Rgb(0x84, 0x91, 0xa1))
+        );
         assert!(
             !rendered.contains(&stored.to_string()),
             "the raw epoch should not be shown at {width} columns\n{rendered}"
@@ -4307,7 +4313,7 @@ fn sources_details_state_the_last_scan_as_a_date_rather_than_an_epoch() {
         // wrapped onto the row below is a missing one.
         scanned = rendered
             .lines()
-            .find_map(|line| line.split_once("Last scan: "))
+            .find_map(|line| line.split_once("Last saved scan: "))
             .map(|(_, rest)| rest.trim_end().to_owned())
             .unwrap_or_else(|| String::from("<no last scan line>"));
         assert!(
@@ -4317,14 +4323,14 @@ fn sources_details_state_the_last_scan_as_a_date_rather_than_an_epoch() {
         // The drill-in states the scan time beside the status, since the row it
         // would otherwise spend is one the sections below it need; the aside is
         // too narrow for both, so there the scan time takes its own row. The
-        // shared line is 49 cells at its shortest — `Status: `, the briefest
-        // badge, ` · `, `Last scan: `, and the twenty of the timestamp — which
+        // shared line is 55 cells at its shortest — `Status: `, the briefest
+        // badge, ` · `, `Last saved scan: `, and the twenty of the timestamp — which
         // the drill-in has and neither aside tier does at 37 or 47. So 100 here
         // is the width the aside first appears at and not a width of its own:
         // the region asks whether the line fits, never how wide the terminal is.
         let shared = rendered
             .lines()
-            .any(|line| line.contains("Status: ") && line.contains("Last scan: "));
+            .any(|line| line.contains("Status: ") && line.contains("Last saved scan: "));
         assert_eq!(
             shared,
             width < 100,

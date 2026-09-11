@@ -18,7 +18,7 @@ expression: preview
 ▕  │  Write origin association and baseline to: [TEMP]                      /data/skilled.sqlite3                   │  ▏
 ▕  │  Skill files, attribution, lockfiles, and Git state remain unchanged.                                          │  ▏
 ▕  │  Content, evidence, paths, and registration are rechecked before saving.                                       │  ▏
-▕  │                                                                                                                │  ▏
+▕  │                                                                                                                │C ▏
 ▕  │                                                                                                                │  ▏
 ▕  │                                                                                                                │─ ▏
 ▕  │                                                                                                                │n ▏
