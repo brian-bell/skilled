@@ -58,6 +58,24 @@ jobs:
       - name: cargo clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
 
+  docs:
+    name: Documentation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build API documentation
+        run: cargo doc --no-deps
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+
   build:
     name: Build (release)
     runs-on: ubuntu-latest
