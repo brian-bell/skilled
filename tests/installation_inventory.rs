@@ -998,6 +998,122 @@ fn a_root_beyond_the_child_limit_is_reported_unreadable_rather_than_partially_sc
     );
 }
 
+/// A fresh process has no same-operation proof, even when the target is a
+/// registered variant. Both sides of an interrupted exchange remain visible.
+#[test]
+fn possible_repair_residue_is_reported_without_claiming_ownership_or_cleaning() {
+    for after_exchange in [false, true] {
+        let fixture = Fixture::new();
+        let repository = fixture.source("library", &["portable"]);
+        drop(fixture.registered(&repository));
+        let old = fixture.home().join("missing-original");
+        let new = repository.join("skills/portable");
+        let (standing, residue) = if after_exchange {
+            (&new, &old)
+        } else {
+            (&old, &new)
+        };
+        fixture.install_symlink(AgentKind::ClaudeCode, "portable", standing);
+        let name = ".skilled-repair-123-456";
+        fixture.install_symlink(AgentKind::ClaudeCode, name, residue);
+        let path = fixture.root(AgentKind::ClaudeCode).join(name);
+        let app = fixture.app();
+        let observation = app
+            .inventory()
+            .row(name)
+            .unwrap()
+            .observation(AgentKind::ClaudeCode)
+            .unwrap();
+        let finding = &observation.findings()[0];
+        assert_eq!(finding.code(), "install.possible_repair_residue");
+        assert_eq!(finding.severity(), FindingSeverity::Warning);
+        assert!(finding.evidence().contains(&path.display().to_string()));
+        for phrase in [
+            "Ownership is unproven",
+            "Left untouched",
+            "Before exchange",
+            "after exchange",
+            "unlink only this exact entry, never its target",
+            "Rescan",
+        ] {
+            assert!(
+                finding.evidence().contains(phrase),
+                "{}",
+                finding.evidence()
+            );
+        }
+        assert_eq!(observation.resolution().is_some(), !after_exchange);
+        assert_eq!(fs::read_link(&path).unwrap(), *residue);
+        assert_eq!(
+            fs::read_link(fixture.root(AgentKind::ClaudeCode).join("portable")).unwrap(),
+            *standing
+        );
+        assert_eq!(
+            app.inventory().root(AgentKind::ClaudeCode).status(),
+            &RootStatus::Scanned { installed: 2 }
+        );
+    }
+}
+
+#[test]
+fn unknown_matching_names_and_substituted_objects_keep_their_observed_state() {
+    let fixture = Fixture::new();
+    let repository = fixture.source("library", &["portable"]);
+    drop(fixture.registered(&repository));
+    let root = fixture.create_root(AgentKind::ClaudeCode);
+    fs::write(root.join(".skilled-repair-file"), b"user data").unwrap();
+    write_skill(
+        &root.join(".skilled-repair-directory"),
+        ".skilled-repair-directory",
+    );
+    symlink(".skilled-repair-cycle", root.join(".skilled-repair-cycle")).unwrap();
+    let app = fixture.app();
+    for (name, object) in [
+        (".skilled-repair-file", InstallationObject::NotADirectory),
+        (".skilled-repair-directory", InstallationObject::Directory),
+        (
+            ".skilled-repair-cycle",
+            InstallationObject::Symlink {
+                target: PathBuf::from(".skilled-repair-cycle"),
+            },
+        ),
+    ] {
+        let observation = app
+            .inventory()
+            .row(name)
+            .unwrap()
+            .observation(AgentKind::ClaudeCode)
+            .unwrap();
+        assert_eq!(observation.object(), &object);
+        assert_eq!(
+            observation.findings()[0].code(),
+            "install.possible_repair_residue"
+        );
+    }
+    let cycle = app
+        .inventory()
+        .row(".skilled-repair-cycle")
+        .unwrap()
+        .observation(AgentKind::ClaudeCode)
+        .unwrap();
+    assert_eq!(cycle.provenance(), &Provenance::Unverified);
+    assert!(
+        cycle
+            .findings()
+            .iter()
+            .any(|f| f.code() == "install.unresolvable_symlink")
+    );
+    assert_eq!(
+        fs::read(root.join(".skilled-repair-file")).unwrap(),
+        b"user data"
+    );
+    assert!(root.join(".skilled-repair-directory/SKILL.md").is_file());
+    assert_eq!(
+        fs::read_link(root.join(".skilled-repair-cycle")).unwrap(),
+        Path::new(".skilled-repair-cycle")
+    );
+}
+
 struct Fixture {
     directory: tempfile::TempDir,
 }

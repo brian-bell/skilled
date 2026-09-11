@@ -6924,6 +6924,56 @@ mod tests {
         assert_eq!(outcome.status(), RepairStatus::PartiallyApplied);
     }
 
+    /// Model abrupt interruption at each exchange boundary. No unwinding
+    /// cleanup owns the stranded entry; the next scan can only report a clue.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn interruption_before_and_after_exchange_leaves_the_expected_links() {
+        for after_exchange in [false, true] {
+            let fixture = tempfile::tempdir().unwrap();
+            let root = fixture.path().join("skills");
+            fs::create_dir(&root).unwrap();
+            let old = fixture.path().join("old");
+            let new = fixture.path().join("new");
+            let destination = root.join("portable");
+            std::os::unix::fs::symlink(&old, &destination).unwrap();
+            let interrupted = std::panic::catch_unwind(|| {
+                let _ = replace_directory_symlink_with(
+                    &new,
+                    &destination,
+                    &old,
+                    fixture.path(),
+                    |dir, temporary, public| {
+                        if after_exchange {
+                            exchange_in(dir, temporary, public).unwrap();
+                        }
+                        panic!("simulated interruption");
+                    },
+                    remove_proven_temporary,
+                );
+            });
+            assert!(interrupted.is_err());
+            let residue = fs::read_dir(&root)
+                .unwrap()
+                .map(|e| e.unwrap().path())
+                .find(|p| {
+                    p.file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .starts_with(".skilled-repair-")
+                })
+                .unwrap();
+            assert_eq!(
+                fs::read_link(&destination).unwrap(),
+                if after_exchange { &new } else { &old }.as_path()
+            );
+            assert_eq!(
+                fs::read_link(residue).unwrap(),
+                if after_exchange { &old } else { &new }.as_path()
+            );
+        }
+    }
+
     /// Cleaning up a temporary entry must re-prove what it removes, relative
     /// to the pinned parent directory: a link whose raw target matches is
     /// removed, anything else is preserved.

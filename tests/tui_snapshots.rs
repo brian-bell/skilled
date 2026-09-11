@@ -913,6 +913,21 @@ fn setup_catalog_confirmation_reserves_space_for_wrapped_focused_content() {
 
 #[cfg(unix)]
 mod installed {
+    #[test]
+    fn possible_repair_residue_guidance() {
+        let temporary = tempfile::tempdir_in("/tmp").expect("temporary application directory");
+        let mut app = inventory_app(&temporary);
+        let path = temporary
+            .path()
+            .join("home/.claude/skills/.skilled-repair-123-456");
+        fs::write(path, b"unproven object").unwrap();
+        app.update(Action::OpenSources);
+        let update = app.update(Action::OpenInventory);
+        app.perform_effects(update.effects()).unwrap();
+        app.update(Action::AdvanceInventoryPane);
+        insta::assert_snapshot!(normalize_inventory(&temporary, render(&app, 90, 50)));
+    }
+
     use super::*;
     use skilled::InventoryPane;
 

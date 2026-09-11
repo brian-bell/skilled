@@ -3460,10 +3460,17 @@ fn finding_lines(finding: &Finding, width: u16) -> [Line<'static>; 2] {
         ]),
         Line::from(Span::raw(format!(
             "  {}",
-            terminal_safe_bounded_start(
-                finding.evidence(),
-                usize::from(width).saturating_mul(3).saturating_sub(2)
-            )
+            if finding.code() == "install.possible_repair_residue" {
+                // Recovery instructions and the absolute entry path must be
+                // reachable in full through detail scrolling. This evidence
+                // is our fixed guidance plus one observed filesystem path.
+                terminal_safe(finding.evidence())
+            } else {
+                terminal_safe_bounded_start(
+                    finding.evidence(),
+                    usize::from(width).saturating_mul(3).saturating_sub(2),
+                )
+            }
         ))),
     ]
 }
