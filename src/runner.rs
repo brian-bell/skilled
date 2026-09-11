@@ -5,20 +5,34 @@ use crossterm::event::{self, Event};
 use ratatui::{Terminal, backend::CrosstermBackend};
 
 use crate::{
-    AppEnvironment, Result, SkilledApp, UpdateOutcome,
+    Action, AppEnvironment, Result, SkilledApp, UpdateOutcome,
     input::action_for_app_key,
-    terminal::{CrosstermControl, TerminalSession, install_panic_restore_hook},
+    terminal::{CrosstermControl, InterruptHandler, TerminalSession, install_panic_restore_hook},
     tui,
 };
 
 pub fn run(environment: AppEnvironment) -> Result<()> {
-    let mut app = SkilledApp::open(environment)?;
+    let interrupt = InterruptHandler::install()?;
     install_panic_restore_hook();
     let session = TerminalSession::start(CrosstermControl)?;
+    session.run(|| {
+        // Own the app inside the restoration boundary: its Drop cancels and
+        // joins workers on every return and unwind, before the screen leaves.
+        let app = SkilledApp::open(environment)?;
+        run_app(app, &interrupt)
+    })
+}
+
+fn run_app(mut app: SkilledApp, interrupt: &InterruptHandler) -> Result<()> {
     let backend = CrosstermBackend::new(stdout());
     let mut terminal = Terminal::new(backend)?;
 
     loop {
+        if interrupt.requested() {
+            let update = app.update(Action::Quit);
+            app.perform_effects(update.effects())?;
+            break;
+        }
         app.drain_vendored_check();
         app.drain_vendored_apply();
         let effects = app.drain_update_check();
@@ -39,16 +53,13 @@ pub fn run(environment: AppEnvironment) -> Result<()> {
         }
         app.note_detail_max_scroll(feedback.detail_max_scroll());
         app.note_update_preview_fully_seen(feedback.update_preview_fully_seen());
-        let event = if app.update_check_in_flight()
-            || app.vendored_check_in_flight()
-            || app.vendored_apply_in_flight()
-        {
-            event::poll(Duration::from_millis(100))?
-                .then(event::read)
-                .transpose()?
-        } else {
-            Some(event::read()?)
-        };
+        // Bound idle waits too: external SIGINT is a flag, not a key event.
+        let event = event::poll(Duration::from_millis(100))?
+            .then(event::read)
+            .transpose()?;
+        if interrupt.requested() {
+            continue;
+        }
         let Some(Event::Key(key)) = event else {
             continue;
         };
@@ -62,7 +73,5 @@ pub fn run(environment: AppEnvironment) -> Result<()> {
         }
     }
 
-    drop(terminal);
-    session.finish()?;
     Ok(())
 }

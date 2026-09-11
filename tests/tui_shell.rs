@@ -5462,6 +5462,70 @@ fn the_install_report_states_each_step_and_the_verification_behind_it() {
     assert!(!footer.contains("Enter"), "{footer}");
 }
 
+#[test]
+fn a_partial_install_report_preserves_state_and_returns_to_navigation() {
+    let harness = Harness::new();
+    let mut app = harness.installable_source();
+    let update = app.update(Action::BeginInstall);
+    app.perform_effects(update.effects()).expect("preview");
+    app.note_detail_max_scroll(feedback(&app, 102, 40).detail_max_scroll());
+    let home = harness.directory.path().join("home");
+    let codex_root = home.join(".agents/skills");
+    fs::create_dir(&codex_root).expect("concurrent root");
+    let occupied = codex_root.join("portable");
+    fs::write(&occupied, "unowned arrival").expect("concurrent occupant");
+    let update = app.update(Action::ConfirmOperation);
+    app.perform_effects(update.effects())
+        .expect("partial install");
+
+    let screen = buffer(&app, 102, 40);
+    let rendered = text(&screen);
+    insta::assert_snapshot!(
+        "partial_install_recovery_heading",
+        row_text(&screen, row_containing(&screen, "Install result"))
+    );
+    for (label, marker, colour) in [
+        (
+            "Claude Code: link created",
+            "✓",
+            Color::Rgb(0x8b, 0xd4, 0x9c),
+        ),
+        ("Codex: not written", "×", Color::Rgb(0xee, 0x6b, 0x73)),
+        ("OpenCode: not attempted", "U", Color::Rgb(0xc7, 0x9b, 0xf2)),
+    ] {
+        let row = row_containing(&screen, label);
+        assert_eq!(
+            style_in_row(&screen, row, marker).fg,
+            Some(colour),
+            "{rendered}"
+        );
+    }
+    assert!(rendered.contains("does not undo"), "{rendered}");
+    assert!(rendered.contains("uninstall is a separate"), "{rendered}");
+    assert!(rendered.contains("Esc Close"), "{rendered}");
+    assert_eq!(fs::read_to_string(&occupied).unwrap(), "unowned arrival");
+    assert!(home.join(".claude/skills/portable").is_symlink());
+    assert!(!home.join(".config/opencode/skills/portable").exists());
+
+    let action =
+        skilled::input::action_for_app_key(&app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .expect("close report key");
+    let update = app.update(action);
+    app.perform_effects(update.effects()).unwrap();
+    assert!(app.pending_install().is_none());
+    let action = skilled::input::action_for_app_key(
+        &app,
+        KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE),
+    )
+    .expect("inventory navigation key");
+    let update = app.update(action);
+    app.perform_effects(update.effects()).unwrap();
+    assert_eq!(app.view(), skilled::View::Inventory);
+    let screen = buffer(&app, 102, 40);
+    assert!(text(&screen).contains("portable"));
+    assert!(!text(&screen).contains("Install result"));
+}
+
 /// A step that created a skill root and could not write the link into it is a
 /// partial write, and the report carries that in words as well as in tone.
 ///

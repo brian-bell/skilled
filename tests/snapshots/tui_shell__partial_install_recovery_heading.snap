@@ -1,0 +1,5 @@
+---
+source: tests/tui_shell.rs
+expression: "row_text(&screen, row_containing(&screen, \"Install result\"))"
+---
+▕ ◆┌ Install result ───────────────────────────────────────────────────────────── already applied ┐d ▏
