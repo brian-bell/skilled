@@ -181,9 +181,9 @@ fn fetch_snapshot_from_url(
 
     let destination = format!("refs/skilled/origin/{}", unique_suffix());
     let refspec = format!("{update_ref}:{destination}");
-    // Git still transfers missing objects during this dry run; it suppresses
-    // ref publication. The real-origin tests verify that a fresh cache can
-    // read the reported commit without a second fetch.
+    // With auxiliary bundles disabled by `run`, dry-run transfers missing
+    // objects without ref publication. The real-origin tests verify that a
+    // fresh cache can read the reported commit without a second fetch.
     let fetch = run(
         &handle,
         [
@@ -659,6 +659,7 @@ fn run<const N: usize>(
     }
     if arguments.first() == Some(&"fetch") {
         limit_fetch_file_size(&mut command)?;
+        command.args(super::suppressed_bundle_arguments());
         command.arg("-c").arg("fetch.unpackLimit=0");
     }
     command.args(arguments);

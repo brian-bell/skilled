@@ -198,6 +198,9 @@ and the target revision comes from the fetch's reported object, never a later
 reading of a moving branch.
 
 Origin objects are fetched shallowly into a fresh private application cache.
+The fetch disables auxiliary bundle URI transfers with the same command-scope
+overrides as repository checks, so inherited bundle settings cannot create
+bundle refs or start additional downloads inside that cache.
 Fetch retains a pack instead of unpacking loose objects. A 32 MiB cache budget
 is monitored every 10 ms while output is drained; crossing it cancels the
 fetch, and a final size check covers transfers that finish between polls.
@@ -389,10 +392,24 @@ The fetch writes no ref at all. Git dereferences a symbolic ref when it
 updates one, so any ref the fetch wrote — the tracking ref or a staging
 name — could be substituted between a check and Git's own transaction and
 send a forced refspec into whatever it points at, a local branch included.
-The fetch therefore runs with `--dry-run`, which stores the objects and
-skips every ref update, and the fetched object comes back through
+The fetch therefore disables auxiliary bundle transfers and runs with
+`--dry-run`, which stores the objects and skips ordinary fetch ref updates.
+The fetched object comes back through
 `--porcelain`'s report under a per-invocation `refs/skilled/fetch/` name
 that is only ever a name.
+
+Dry-run alone is insufficient: `fetch.bundleURI` can download and unbundle
+before the ordinary fetch, write `refs/bundles/*` through symbolic refs, and
+update `fetch.bundleCreationToken` in the repository configuration. Both
+repository and origin-cache fetches pass `-c fetch.bundleURI=` to disable
+this optional transfer path in every configuration scope. Git recognizes an
+empty URI as disabled on the supported 2.41 floor. The overrides are part of
+the spawned command, so a bundle setting introduced after preflight cannot
+re-enable it, and no stored configuration is changed. They also set
+`transfer.bundleURI=false` to disable server bundle-list discovery, although
+the reviewed Git 2.41 and 2.55 fetch implementations do not request it.
+Normal remote fetching and its narrowed transport policy remain in effect.
+The confirmed merge retains its disclosed configuration.
 
 The tracking ref is then published from the
 reported object with `update-ref --no-deref` and an expected old value, so
