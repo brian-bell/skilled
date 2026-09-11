@@ -5,7 +5,7 @@ Audited Skilled revision: `28771796ac8a961d860b509097ecde2974805e27`.
 
 ## Result
 
-The current guard is not sufficient to establish that an explicit check runs
+The audited guard was not sufficient to establish that an explicit check runs
 no checkout-selected programs. The audit found incorrect upload-pack
 precedence, destructive normalization of configuration keys and values, and
 a missing protection against configuration-based hooks in newer Git. These
@@ -18,10 +18,11 @@ global configuration does execute during local transport, as a positive
 control confirmed. It should not be added indiscriminately to the client's
 repository-setting refusal.
 
-This report records an audit, not fixes. Runtime code and repository tests
-were not changed. `skilled-0z9` remains open because its original scope also
-requires fixes and permanent regressions. The passing existing tests do not
-cover the newly identified counterexamples.
+The original report recorded an audit without changing runtime code or tests.
+The F6 closeout below records the subsequent bundle suppression and regressions.
+At audit time, `skilled-0z9` remained open because its original scope also
+required fixes and permanent regressions. The passing tests at that revision
+did not cover the newly identified counterexamples.
 
 | Finding | Evidence | Follow-up |
 | --- | --- | --- |
@@ -30,7 +31,7 @@ cover the newly identified counterexamples.
 | F3: proxy disabling is byte-sensitive | Git 2.50.1 trace and `connect.c`; parser comparison | `skilled-0z9.1`, P1 |
 | F4: configured hooks survive the hooks-directory override | Marker executed by the publication command on Git 2.55.0 | `skilled-0z9.2`, P1 |
 | F5: Windows can remove inherited guard variables | Source-established mechanism; Windows execution not tested | `skilled-0z9.3`, P2 |
-| F6: bundle fetching is an additional execution/ref-publication path | Local bundle ref created during dry-run fetch on Git 2.50.1 | `skilled-d1i`, P2 |
+| F6: bundle fetching is an additional execution/ref-publication path | Local bundle ref created during dry-run fetch on Git 2.50.1 | `skilled-d1i`: bundle suppression implemented; see F6 closeout below |
 
 ## Scope and method
 
@@ -302,7 +303,7 @@ but the audit must not silently describe this mechanism as platform-neutral.
 
 An isolated Git 2.50.1 repository configured with `fetch.bundleURI` pointing
 to a local bundle made with `git bundle create data.bundle --all` created
-`refs/bundles/heads/master` despite all of Skilled's fetch flags:
+`refs/bundles/heads/master` despite Skilled's fetch flags at audit time:
 
 ```sh
 git -c core.hooksPath=/dev/null -c core.fsmonitor=false -c gc.auto=0 \
@@ -323,11 +324,47 @@ HTTP(S) downloads directly to `git-remote-https`; other URIs are handled as
 file copies after optional `file://` removal. It does not use the ordinary
 transport dispatcher for that download. The audit did not reproduce an HTTP
 policy bypass, and does not claim that arbitrary helper schemes execute here.
-The direct helper path needs a separate inherited-policy test.
+The direct helper path required a separate inherited-policy test, now covered
+by the closeout below.
 
-Required follow-up: decide whether bundle fetching belongs in the check,
-account for its refs and credentials/hooks, and test protocol policy on that
-path. Do not state that `--dry-run` alone means no refs can be written.
+#### F6 closeout — auxiliary bundles disabled during checks
+
+Repository and vendored-origin fetches now share command-scope overrides
+`fetch.bundleURI=` and `transfer.bundleURI=false`. Auxiliary bundles are an
+optional transfer optimization outside the check's permitted ref and download
+scope. Suppression applies to inherited and repository configuration without
+rewriting either; ordinary remote fetching remains available. It is bound to
+the spawned command, including when a setting arrives after preflight.
+The separately confirmed merge retains its disclosed configuration.
+
+Both [Git 2.41](https://github.com/git/git/blob/v2.41.0/bundle-uri.c) and
+[Git 2.55](https://github.com/git/git/blob/v2.55.0/bundle-uri.c) explicitly
+treat an empty URI as disabled. Their `builtin/fetch.c` implementations use
+that override for multi-fetch children. Server bundle discovery is separately
+controlled by `transfer.bundleURI`; the reviewed fetch implementations do
+not call `transport_get_remote_bundle_uri`, so disabling that setting is an
+additional restriction, not a reproduced server-advertisement exploit.
+
+The [bundle regressions](../src/git/bundle_tests.rs) exercise synchronous and
+cancellable checks with direct bundles and creation-token lists, preserve
+the complete ref state except the intended tracking update, and keep HEAD,
+FETCH_HEAD, stored configuration, and hook markers unchanged. An unsuppressed
+symbolic bundle ref advances its protected branch in the original failing
+regression: this is more than an unwanted extra ref. The bundle-list positive
+control also proves that unguarded Git writes its creation token.
+
+Loopback HTTP controls distinguish helper execution from network access:
+on Git 2.50.1, permitting HTTP downloads the bundle and publishes its ref;
+allowing only `file` still launches `git-remote-https` but makes no HTTP
+request. This does not demonstrate an HTTP policy bypass. With suppression,
+neither the helper nor a request occurs, including through a bundle list
+and inherited command-scope settings. Fresh origin-cache tests also cover
+global local-file and HTTP bundle settings while proving fetched tree content
+remains readable. Runtime version coverage is recorded in `skilled-d1i`;
+the pinned source checks do not certify every Git release or platform.
+
+The no-ref-write argument now depends on bundle suppression together with
+dry-run fetching and separately guarded tracking-ref publication.
 
 ## Decision: remote upload-pack pack-objects hook
 

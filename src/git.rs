@@ -28,6 +28,9 @@ use crate::{Error, Result};
 
 pub(crate) mod origin;
 
+#[cfg(all(test, unix))]
+mod bundle_tests;
+
 // A test-only scoped user configuration inherited by every Git child on the
 // current test thread. It avoids mutating the process environment while
 // exercising Git's ordinary user-configuration semantics.
@@ -731,9 +734,9 @@ impl UpdateOp {
     }
 
     fn operation_arguments(&self) -> Vec<OsString> {
-        // `--dry-run` is what makes the fetch a read: Git transfers and
-        // stores the objects and then skips every ref update, so no ref
-        // transaction ever starts and a symbolic ref substituted for the
+        // Bundle suppression and `--dry-run` together keep the transfer from
+        // writing refs: dry-run alone still permits auxiliary bundle writes.
+        // With bundles disabled, a symbolic ref substituted for the fetch
         // destination has nothing to redirect. `--porcelain` is how the
         // result comes back without a ref to read it from — one
         // machine-readable line per refspec naming the object the transport
@@ -750,7 +753,8 @@ impl UpdateOp {
         {
             let mut hooks_setting = OsString::from("core.hooksPath=");
             hooks_setting.push(hooks_path);
-            return vec![
+            let mut arguments = suppressed_bundle_arguments();
+            arguments.extend([
                 "-c".into(),
                 "gc.auto=0".into(),
                 "-c".into(),
@@ -771,7 +775,8 @@ impl UpdateOp {
                 "--".into(),
                 remote.into(),
                 refspec.into(),
-            ];
+            ]);
+            return arguments;
         }
         // A ref update runs the repository's `reference-transaction` hook, so
         // both of these point the hook search away for the same reason the
@@ -1042,6 +1047,27 @@ impl UpdateOp {
             ],
         }
     }
+}
+
+/// Disable auxiliary bundle transfers for both kinds of explicit check.
+///
+/// `fetch.bundleURI` runs before ordinary fetching, even with `--dry-run`:
+/// unbundling publishes `refs/bundles/*` (dereferencing symbolic refs) and
+/// creation-token lists can write configuration. HTTP bundles also start a
+/// helper outside the ordinary transport dispatcher. An empty URI disables
+/// this optimization in Git 2.41 and later; Git uses the same override for
+/// its multi-fetch children. Command scope wins over inherited and repository
+/// values without depending on a preflight read or changing stored config.
+///
+/// `transfer.bundleURI=false` also disables server bundle-list discovery.
+/// The reviewed Git 2.41/2.55 fetch does not request that discovery, but keep
+/// the policy explicit at both fetch boundaries. This does not apply to the
+/// separately confirmed merge, which retains its disclosed configuration.
+fn suppressed_bundle_arguments() -> Vec<OsString> {
+    ["-c", "fetch.bundleURI=", "-c", "transfer.bundleURI=false"]
+        .into_iter()
+        .map(OsString::from)
+        .collect()
 }
 
 /// Shared noninteractive fetch guards for checkout updates and origin caches.
@@ -2460,9 +2486,10 @@ const FETCH_DESTINATION_NAMESPACE: &str = "refs/skilled/fetch";
 /// check narrowed that race by fetching into a per-invocation staging ref,
 /// deleted before and after and re-checked in between; `skilled-q59` records
 /// why a name that is checked and then written stays reachable. The
-/// destination is now never written at all: the fetch runs with `--dry-run`,
-/// which stores the objects and then skips every ref update, and the object
-/// it obtained comes back through `--porcelain`'s report instead of a ref.
+/// destination is now never written at all: the fetch disables auxiliary
+/// bundles and runs with `--dry-run`, which stores the objects and skips the
+/// ordinary fetch's ref updates. The object it obtained comes back through
+/// `--porcelain`'s report instead of a ref.
 /// A name no process writes cannot be redirected, whatever is standing at
 /// it — a direct ref, a symbolic ref, or a ref occupying the namespace
 /// itself, each observed inert under a dry run on Git 2.50. That last case is
@@ -4991,6 +5018,8 @@ mod tests {
             .expect("fetch fixture");
 
         for expected in [
+            "fetch.bundleURI=",
+            "transfer.bundleURI=false",
             "--porcelain",
             "--dry-run",
             "--no-write-fetch-head",
